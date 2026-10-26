@@ -2,7 +2,7 @@
 
 Knowledge bases give agents access to your own documents.
 Point a knowledge base at a folder or Git repository and assign it to agents.
-In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector database, and assigned agents get a `search_knowledge_base` tool.
+In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector index, and assigned agents get a `search_knowledge_base` tool.
 In `files` mode, MindRoom skips embeddings and agents inspect the files directly with their file and shell tools.
 
 ## Quick Start
@@ -452,14 +452,12 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
-They use Chroma, whose `chromadb` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[chromadb]`.
+Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
+Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases build no vector index, but refreshing them still loads the `chromadb` extra.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
-## Search Limits
-
-A search times out after 30 seconds, and at most four searches run at once; a search that finds no free slot can fail with `Knowledge reader is busy; try again shortly`.
+Indexes that earlier MindRoom versions stored in Chroma are rebuilt once after upgrading, which embeds every file again; the base's old `chroma.sqlite3` and segment directories are then removed.
 
 ## Dashboard and API
 

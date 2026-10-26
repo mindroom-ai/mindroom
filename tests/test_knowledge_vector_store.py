@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.knowledge.vector_store import (
-    CollectionNotFoundError,
     KnowledgeCollection,
     StoredRow,
+    _CollectionNotFoundError,
     list_collection_names,
 )
 
@@ -157,9 +157,9 @@ def test_missing_collection_raises_not_found(tmp_path: Path) -> None:
     """Operations on a missing collection raise, and deleting it is a no-op."""
     missing = KnowledgeCollection(path=tmp_path, name="gone")
     assert not missing.exists()
-    with pytest.raises(CollectionNotFoundError):
+    with pytest.raises(_CollectionNotFoundError):
         missing.search([1.0], limit=1)
-    with pytest.raises(CollectionNotFoundError):
+    with pytest.raises(_CollectionNotFoundError):
         missing.write_source_rows("a.md", [])
     missing.delete()
 

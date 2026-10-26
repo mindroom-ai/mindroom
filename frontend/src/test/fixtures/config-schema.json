@@ -2284,6 +2284,19 @@
           "title": "Chunk Overlap",
           "type": "integer"
         },
+        "chunk_context_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model that writes a short context for each chunk of a multi-chunk file before it is indexed (contextual retrieval); costs one model call per chunk of each changed file",
+          "title": "Chunk Context Model"
+        },
         "include_extensions": {
           "anyOf": [
             {
@@ -2550,6 +2563,74 @@
         }
       },
       "title": "KnowledgeGraphIngestConfig",
+      "type": "object"
+    },
+    "KnowledgeRerankerConfig": {
+      "additionalProperties": false,
+      "description": "Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query.",
+      "properties": {
+        "provider": {
+          "description": "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); 'sentence_transformers' runs a cross-encoder locally",
+          "enum": [
+            "cohere",
+            "sentence_transformers"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "description": "Rerank model, such as 'rerank-v3.5' or 'BAAI/bge-reranker-v2-m3'",
+          "title": "Model",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rerank endpoint for the 'cohere' provider; defaults to https://api.cohere.com/v2/rerank",
+          "title": "Url"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "API key for the 'cohere' provider; above credentials_service",
+          "title": "Api Key",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
+          "title": "Credentials Service"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "title": "KnowledgeRerankerConfig",
       "type": "object"
     },
     "LLMJudgmentConfig": {
@@ -5375,6 +5456,18 @@
       "description": "Knowledge base configurations keyed by base ID",
       "title": "Knowledge Bases",
       "type": "object"
+    },
+    "knowledge_reranker": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KnowledgeRerankerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one"
     },
     "mcp_servers": {
       "additionalProperties": {

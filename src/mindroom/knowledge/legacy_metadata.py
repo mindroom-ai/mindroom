@@ -32,6 +32,19 @@ if TYPE_CHECKING:
 # Coverage: tests/test_knowledge_indexing_config.py::test_content_publication_gate_round_trips_and_changes_corpus_key.
 
 
+# LEGACY_COMPAT: Knowledge metadata from the Chroma-backed store.
+# Legacy format: Knowledge-index metadata omitted vector_store; its semantic vectors lived in Chroma.
+# Last legacy release: v2026.10.552; replacement: v2026.10.553 stored semantic indexes in owned SQLite files.
+# Handling: Keep absence empty so the query key no longer matches and every semantic index rebuilds once.
+# Coverage: tests/test_knowledge_indexing_config.py::test_chroma_era_metadata_rebuilds_in_the_owned_store.
+
+# LEGACY_COMPAT: Knowledge metadata without contextual chunk headers.
+# Legacy format: Knowledge-index metadata omitted chunk_context_model.
+# Last legacy release: v2026.10.552; replacement: v2026.10.553 persisted the chunk context model.
+# Handling: Keep absence empty, which is the identity of indexes whose chunks were indexed as read.
+# Coverage: tests/test_knowledge_indexing_config.py::test_chroma_era_metadata_rebuilds_in_the_owned_store.
+
+
 def normalize_legacy_indexing_settings(
     settings: Mapping[str, str],
     *,
@@ -55,6 +68,8 @@ def normalize_legacy_indexing_settings(
     )
     normalized.setdefault("skip_hidden", "")
     normalized.setdefault("require_content_before_publish", "")
+    normalized.setdefault("vector_store", "")
+    normalized.setdefault("chunk_context_model", "")
     return normalized
 
 

@@ -24,7 +24,8 @@ if TYPE_CHECKING:
 
     import numpy as np
 
-SCHEMA_VERSION = 1
+#: Bump together with ``indexing_config._VECTOR_STORE_FORMAT``, which makes every semantic index rebuild.
+_SCHEMA_VERSION = 1
 _FILE_SUFFIX = ".sqlite3"
 #: The file Chroma kept in a base's storage directory before MindRoom owned this store.
 LEGACY_CHROMA_FILE = "chroma.sqlite3"
@@ -57,7 +58,7 @@ END;
 """
 
 
-class CollectionNotFoundError(LookupError):
+class _CollectionNotFoundError(LookupError):
     """The collection's file does not exist."""
 
 
@@ -94,7 +95,7 @@ class KnowledgeCollection:
         building.unlink(missing_ok=True)
         with closing(sqlite3.connect(building)) as connection:
             connection.executescript(_SCHEMA)
-            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         self.delete()
         building.replace(self.file)
 
@@ -188,7 +189,7 @@ class KnowledgeCollection:
         """Open the existing collection file, read-write or read-only, after checking its schema version."""
         if not self.file.is_file():
             message = f"Knowledge collection {self.name!r} does not exist"
-            raise CollectionNotFoundError(message)
+            raise _CollectionNotFoundError(message)
         connection = sqlite3.connect(
             f"{self.file.resolve().as_uri()}?mode={'rw' if write else 'ro'}",
             uri=True,
@@ -204,8 +205,8 @@ class KnowledgeCollection:
 
 def _check_schema_version(connection: sqlite3.Connection, name: str) -> None:
     version = connection.execute("PRAGMA user_version").fetchone()[0]
-    if version != SCHEMA_VERSION:
-        message = f"Knowledge collection {name!r} has schema version {version}, expected {SCHEMA_VERSION}"
+    if version != _SCHEMA_VERSION:
+        message = f"Knowledge collection {name!r} has schema version {version}, expected {_SCHEMA_VERSION}"
         raise sqlite3.DatabaseError(message)
 
 

@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.knowledge.indexing_config import IndexingSettings, storage_key_for_base
+from mindroom.knowledge.indexing_config import _VECTOR_STORE_FORMAT, IndexingSettings, storage_key_for_base
 
 if TYPE_CHECKING:
     import pytest
@@ -175,6 +175,20 @@ def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
     current = replace(legacy, skip_hidden="True")
     assert legacy._corpus_compatibility_key() != current._corpus_compatibility_key()
     assert legacy._query_compatibility_key() == current._query_compatibility_key()
+
+
+def test_chroma_era_metadata_rebuilds_in_the_owned_store() -> None:
+    """Metadata written while Chroma held the vectors parses, but no longer matches the owned store's query key."""
+    chroma_era = IndexingSettings.from_metadata(_legacy_metadata())
+    assert chroma_era is not None
+    assert (chroma_era.vector_store, chroma_era.chunk_context_model) == ("", "")
+    owned = replace(chroma_era, vector_store=_VECTOR_STORE_FORMAT)
+    contextual = replace(owned, chunk_context_model="fast")
+
+    assert IndexingSettings.from_metadata(contextual.to_metadata()) == contextual
+    assert chroma_era._query_compatibility_key() != owned._query_compatibility_key()
+    assert owned._query_compatibility_key() == contextual._query_compatibility_key()
+    assert owned != contextual
 
 
 def test_content_publication_gate_round_trips_and_changes_corpus_key() -> None:

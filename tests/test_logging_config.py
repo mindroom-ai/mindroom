@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from typing import TextIO
 
 
-
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
@@ -54,11 +54,8 @@ class _CohereReranker:
         return scores
 
 
-class _CrossEncoder(Protocol):
-    def predict(self, sentences: list[tuple[str, str]]) -> Sequence[float]: ...
-
-
-_cross_encoders: dict[str, _CrossEncoder] = {}
+#: Loaded ``sentence_transformers.CrossEncoder`` models by name.
+_cross_encoders: dict[str, Any] = {}
 _cross_encoder_lock = threading.Lock()
 
 

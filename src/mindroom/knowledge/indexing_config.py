@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _INDEXING_MODES: set[str] = {"semantic", "files"}
+#: Storage format semantic indexes are written in; a change rebuilds every semantic index.
+_VECTOR_STORE_FORMAT = "sqlite-1"
 
 
 class _QueryCompatibilityKey(NamedTuple):
@@ -37,6 +39,7 @@ class _QueryCompatibilityKey(NamedTuple):
     embedder_model: str
     embedder_host: str
     embedder_dimensions: str
+    vector_store: str
 
 
 class _CorpusCompatibilityKey(NamedTuple):
@@ -95,6 +98,10 @@ class IndexingSettings:
     #: created before content-aware publication existed. False stays empty so
     #: ordinary authored knowledge indexes retain their existing identity.
     require_content_before_publish: str = ""
+    #: Storage format of a semantic index's vectors; "" for indexes Chroma held, which the owned store cannot read.
+    vector_store: str = ""
+    #: Model that writes each chunk's context before indexing; "" when chunks are indexed as read.
+    chunk_context_model: str = ""
 
     @classmethod
     def from_metadata(cls, settings: Mapping[str, str]) -> IndexingSettings | None:
@@ -125,6 +132,8 @@ class IndexingSettings:
             "extra_extensions",
             "skip_hidden",
             "require_content_before_publish",
+            "vector_store",
+            "chunk_context_model",
         }
         if not required_keys.issubset(settings) or set(settings) - required_keys - optional_keys:
             return None
@@ -157,6 +166,8 @@ class IndexingSettings:
             extra_extensions=settings["extra_extensions"],
             skip_hidden=settings["skip_hidden"],
             require_content_before_publish=settings["require_content_before_publish"],
+            vector_store=settings["vector_store"],
+            chunk_context_model=settings["chunk_context_model"],
         )
 
     def to_metadata(self) -> dict[str, str]:
@@ -185,6 +196,8 @@ class IndexingSettings:
             "extra_extensions": self.extra_extensions,
             "skip_hidden": self.skip_hidden,
             "require_content_before_publish": self.require_content_before_publish,
+            "vector_store": self.vector_store,
+            "chunk_context_model": self.chunk_context_model,
         }
 
     def _query_compatibility_key(self) -> _QueryCompatibilityKey:
@@ -198,6 +211,7 @@ class IndexingSettings:
             embedder_model=self.embedder_model,
             embedder_host=self.embedder_host,
             embedder_dimensions=self.embedder_dimensions,
+            vector_store=self.vector_store,
         )
 
     def _corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
@@ -299,6 +313,8 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         )
         exclude_extensions = _filter_settings_key(base_config.exclude_extensions)
         extra_extensions = _filter_settings_key(base_config.extra_extensions)
+        vector_store = _VECTOR_STORE_FORMAT
+        chunk_context_model = base_config.chunk_context_model or ""
     else:
         embedder_provider = ""
         embedder_model = ""
@@ -309,6 +325,8 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         include_extensions = ""
         exclude_extensions = ""
         extra_extensions = ""
+        vector_store = ""
+        chunk_context_model = ""
     return IndexingSettings(
         base_id=base_id,
         storage_root=str(storage_path.resolve()),
@@ -333,4 +351,6 @@ def indexing_settings_key(config: Config, storage_path: Path, base_id: str, know
         extra_extensions=extra_extensions,
         skip_hidden=str(base_config.skip_hidden) if git_config is None else "",
         require_content_before_publish="True" if base_config.require_content_before_publish else "",
+        vector_store=vector_store,
+        chunk_context_model=chunk_context_model,
     )
