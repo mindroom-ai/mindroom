@@ -447,30 +447,6 @@ async def _run_before_hooks(
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
 
 
-async def _collect_environment(
-    *,
-    hook_registry: HookRegistry,
-    resolved_context: _ResolvedToolContext,
-    arguments: dict[str, Any],
-    tool_name: str,
-    registered_toolkit: str | None,
-) -> ToolEnvironment:
-    """Run the environment hooks once for the call and return the environment its shell commands get."""
-    context = ToolEnvironmentContext(
-        function_name=tool_name,
-        registered_toolkit=registered_toolkit,
-        arguments=arguments,
-        agent_name=resolved_context.agent_name,
-        room_id=resolved_context.room_id,
-        requester_id=resolved_context.requester_id,
-        config=resolved_context.config,
-        runtime_paths=resolved_context.runtime_paths,
-        correlation_id=resolved_context.correlation_id,
-        _hook_registry_state=resolved_context.hook_registry_state,
-    )
-    return await emit_collect_environment(hook_registry, context)
-
-
 @dataclass(slots=True)
 class _ToolBridgeTiming:
     started_at: float
@@ -646,12 +622,20 @@ async def _execute_bridge(  # noqa: C901
 
     # Collected only once the call may run, so a hook computes values such as short-lived tokens just before the body.
     environment = (
-        await _collect_environment(
-            hook_registry=hook_registry,
-            resolved_context=resolved_context,
-            arguments=hook_arguments,
-            tool_name=tool_name,
-            registered_toolkit=registered_toolkit,
+        await emit_collect_environment(
+            hook_registry,
+            ToolEnvironmentContext(
+                function_name=tool_name,
+                registered_toolkit=registered_toolkit,
+                arguments=hook_arguments,
+                agent_name=resolved_context.agent_name,
+                room_id=resolved_context.room_id,
+                requester_id=resolved_context.requester_id,
+                config=resolved_context.config,
+                runtime_paths=resolved_context.runtime_paths,
+                correlation_id=resolved_context.correlation_id,
+                _hook_registry_state=resolved_context.hook_registry_state,
+            ),
         )
         if has_environment_hooks
         else ToolEnvironment()

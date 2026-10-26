@@ -30,6 +30,7 @@ from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import reload_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import _bind_runtime_paths, _preserved_plugin_loader_state
@@ -345,6 +346,18 @@ async def test_the_cli_grant_reaches_the_command_over_a_hook_s_variables(shell: 
     assert output == "http://primary.test:8765|response-grant|bash-1|from-hook"
     if shell.sent:
         assert shell.sent[-1]["execution_env"]["MINDROOM_AGENT_CLI_TOKEN"] == "response-grant"  # noqa: S105
+
+
+def test_a_later_environment_applies_over_an_earlier_one() -> None:
+    """Later values and removals win, pass-throughs add up, and a later launcher directory comes first on `PATH`."""
+    earlier = ToolEnvironment(values={"A": "1", "B": "1"}, pass_through=("X_*",), path_prepend=("/earlier",))
+    later = ToolEnvironment(values={"B": None, "C": "3"}, pass_through=("Y_*",), path_prepend=("/later",))
+
+    assert earlier.then(later) == ToolEnvironment(
+        values={"A": "1", "B": None, "C": "3"},
+        pass_through=("X_*", "Y_*"),
+        path_prepend=("/later", "/earlier"),
+    )
 
 
 @pytest.mark.asyncio
