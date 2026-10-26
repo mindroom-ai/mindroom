@@ -1504,7 +1504,10 @@ async def test_a_completed_team_reply_in_which_only_members_spoke_ends_with_the_
     *,
     stream: bool,
 ) -> None:
-    """A streamed reply's live chunks show no note and its last chunk, the finished reply, adds it, as a blocking one shows it."""
+    """A streamed reply's live chunks show no note and its last chunk, the finished reply, adds it, as a blocking one shows it.
+
+    Either turn records the reply it ends with, note included.
+    """
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -1522,6 +1525,7 @@ async def test_a_completed_team_reply_in_which_only_members_spoke_ends_with_the_
         text = await team.respond(show_tool_calls=False)
 
     assert text == f"{HEADER}**Writer**: Written.\n\n\n{_NO_CONSENSUS}"
+    assert team.recorder.assistant_text == text
 
 
 async def _pause_after_the_checker_wrote(
