@@ -520,15 +520,18 @@ async def test_invite_router_reports_matrix_invite_failure(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("router_attested", [False, True])
+@pytest.mark.parametrize("owner", ["code", "helper"])
+@pytest.mark.parametrize("router_admitted_by", [None, "router_user_id", "additional_user_ids"])
 async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admit_the_router(
     tmp_path: Path,
-    router_attested: bool,
+    owner: str,
+    router_admitted_by: str | None,
 ) -> None:
     """The room's guest check would remove the router again, so inviting it would only start a loop."""
     context, client = _tool_context(tmp_path)
+    router_id = "@mindroom_router:localhost"
     write_personal_room(
-        personal_room_record_path(context.runtime_paths, "code", "@alice:localhost"),
+        personal_room_record_path(context.runtime_paths, owner, "@alice:localhost"),
         PersonalRoomRecord(
             user_id="@alice:localhost",
             alias="#personal:localhost",
@@ -536,8 +539,13 @@ async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admi
             room_id="!project:localhost",
             adoption=PersonalRoomAdoption(
                 creator_user_id="@alice:localhost",
-                agent_user_id="@mindroom_code:localhost",
-                router_user_id="@mindroom_router:localhost" if router_attested else None,
+                agent_user_id=f"@mindroom_{owner}:localhost",
+                router_user_id=router_id if router_admitted_by == "router_user_id" else None,
+                # Another agent's room admits the calling agent explicitly.
+                additional_user_ids=[
+                    *(["@mindroom_code:localhost"] if owner != "code" else []),
+                    *([router_id] if router_admitted_by == "additional_user_ids" else []),
+                ],
             ),
         ),
     )
@@ -546,7 +554,7 @@ async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admi
         nio.RoomGetStateEventResponse(
             content={"membership": "join"},
             event_type="m.room.member",
-            state_key="@mindroom_router:localhost",
+            state_key=router_id,
             room_id="!project:localhost",
         ),
     ]
@@ -555,8 +563,8 @@ async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admi
     with tool_runtime_context(context):
         result = await InviteRouterTools().invite_router()
 
-    if router_attested:
-        assert result == "Router joined."
-    else:
+    if router_admitted_by is None:
         assert result.startswith("Error: This adopted personal room does not admit the router")
         client.room_invite.assert_not_awaited()
+    else:
+        assert result == "Router joined."

@@ -113,29 +113,36 @@ def _personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list
     return [record for path in directory.glob("*.json") if (record := read_personal_room(path)) is not None]
 
 
+def _every_agents_personal_room_records(runtime_paths: RuntimePaths) -> list[PersonalRoomRecord]:
+    """Read the room lifecycle records of every agent."""
+    directory = primary_records_dir(
+        agent_state_root_path(runtime_paths.storage_root, ROUTER_AGENT_NAME),
+        runtime_paths,
+    ).parent
+    return [
+        record for path in directory.glob("*/personal_rooms/*.json") if (record := read_personal_room(path)) is not None
+    ]
+
+
 def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, user_id: str | None = None) -> set[str]:
     """Protect existing rooms even when onboarding has subsequently been disabled."""
     records = _personal_room_records(runtime_paths, agent_name)
     if agent_name == ROUTER_AGENT_NAME and user_id is not None:
-        directory = primary_records_dir(
-            agent_state_root_path(runtime_paths.storage_root, agent_name),
-            runtime_paths,
-        ).parent
         records.extend(
             record
-            for path in directory.glob("*/personal_rooms/*.json")
-            if (record := read_personal_room(path)) is not None
-            and record.adoption is not None
-            and record.adoption.router_user_id == user_id
+            for record in _every_agents_personal_room_records(runtime_paths)
+            if record.adoption is not None and record.adoption.router_user_id == user_id
         )
     return {record.room_id for record in records if record.room_id is not None}
 
 
-def personal_room_excludes_router(runtime_paths: RuntimePaths, agent_name: str, room_id: str) -> bool:
-    """Return whether one of an agent's adopted personal rooms leaves the router out of its attested members."""
+def personal_room_excludes_router(runtime_paths: RuntimePaths, room_id: str, router_user_id: str) -> bool:
+    """Return whether an adopted personal room leaves the router out of its attested members, so its check removes it."""
     return any(
-        record.room_id == room_id and record.adoption is not None and record.adoption.router_user_id is None
-        for record in _personal_room_records(runtime_paths, agent_name)
+        record.room_id == room_id
+        and record.adoption is not None
+        and router_user_id not in {record.adoption.router_user_id, *record.adoption.additional_user_ids}
+        for record in _every_agents_personal_room_records(runtime_paths)
     )
 
 
