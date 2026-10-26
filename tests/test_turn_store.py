@@ -5,11 +5,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
-import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,8 +46,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.codec import run_kind
-from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_record import (
@@ -71,6 +68,7 @@ from tests.conftest import (
 from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
+from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -265,62 +263,11 @@ def _seeded_storage(
     Opening it converts that layout, as a restart onto this release would.
     """
     if session is not None:
-        _write_as_older_release(tmp_path / name, name, session)
+        write_agno_database(AgnoTableNames(name).database_path(tmp_path / name), session, usage=False)
     return create_state_storage(name, tmp_path / name)
 
 
 _EPOCH = datetime.fromtimestamp(0, UTC)
-
-
-def _write_as_older_release(state_root: Path, name: str, session: ConversationSession) -> None:
-    """Write ``session`` as the one session of a new database ``name`` in the layout an older release kept.
-
-    That release kept Agno's sessions and runs tables and no summary rows: a replayed summary lived in the session
-    row's ``summary`` column, and each run, a member run too, in a runs-table row placed by its ``run_index``.
-    """
-    names = AgnoTableNames(name)
-    database = names.database_path(state_root)
-    database.parent.mkdir(parents=True, exist_ok=True)
-    owner_column = "team_id" if session.kind == "team" else "agent_id"
-    summary = None if session.summary is None else json.dumps({"summary": session.summary.text})
-    with closing(sqlite3.connect(database)) as connection, connection:
-        for statement in agno_runs_sql(names):
-            connection.execute(statement)
-        connection.execute(
-            f'INSERT INTO "{names.sessions}" (session_id, session_type, {owner_column}, session_data, metadata, '  # noqa: S608
-            "summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                session.session_id,
-                session.kind,
-                session.owner_id,
-                json.dumps({"session_state": session.session_state}),
-                json.dumps(session.metadata),
-                summary,
-                session.created_at,
-                session.created_at,
-            ),
-        )
-        for run_index, run in enumerate(session.runs):
-            data = run.to_dict()
-            connection.execute(
-                f'INSERT INTO "{names.runs}" (run_id, session_id, run_type, agent_id, team_id, user_id, '  # noqa: S608
-                "parent_run_id, status, run_index, run_data, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    data["run_id"],
-                    session.session_id,
-                    run_kind(run),
-                    data.get("agent_id"),
-                    data.get("team_id"),
-                    data.get("user_id"),
-                    data.get("parent_run_id"),
-                    data["status"],
-                    run_index,
-                    json.dumps(data),
-                    data.get("created_at") or session.created_at,
-                    session.created_at,
-                ),
-            )
 
 
 def _stored(storage: ConversationStore, session: ConversationSession) -> ConversationSession:
@@ -2697,7 +2644,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         )
         session.summary = ScopeSummary(text="DELETED_EDIT_MARKER", updated_at=_EPOCH)
         session.runs = session.runs[1:]
-    _write_as_older_release(tmp_path, "agent", session)
+    write_agno_database(AgnoTableNames("agent").database_path(tmp_path), session, usage=False)
     storage = storage_factory()
     initial_persisted = storage.load_session(target.session_id, "agent")
     assert initial_persisted is not None
@@ -3061,7 +3008,7 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
         runs=[later_run] if later_run_names_revision else [],
     )
     session.metadata = _with_scope_seen_event_ids(session.metadata, scope=scope, event_ids={"$user_msg"})
-    _write_as_older_release(tmp_path, "agent", session)
+    write_agno_database(AgnoTableNames("agent").database_path(tmp_path), session, usage=False)
     if later_run_names_revision:
         # A modern compaction folds the later run on top of the legacy summary.
         storage = storage_factory()

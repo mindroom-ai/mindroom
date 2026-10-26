@@ -22,7 +22,8 @@ def write_agno_database(path: Path, *sessions: ConversationSession, usage: bool 
 
     The file holds Agno 3's sessions and runs tables and, unless ``usage`` is false, the usage ledger, empty. Each
     session's row holds its state, its metadata, and its replayed summary in Agno's ``summary`` column; each of its
-    runs is a row placed by ``run_index`` in list order, holding the run's stored dict.
+    runs is a row placed by ``run_index`` in list order, holding the run's stored dict, and dated by the run or, when it
+    has no time, by its session.
     """
     names = AgnoTableNames.of_database(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,8 +63,8 @@ def write_agno_database(path: Path, *sessions: ConversationSession, usage: bool 
                         run.status.value,
                         run_index,
                         json.dumps(run.to_dict()),
-                        run.created_at,
-                        run.created_at,
+                        run.created_at or session.created_at,
+                        run.created_at or session.created_at,
                     )
                     for run_index, run in enumerate(session.runs)
                 ],
