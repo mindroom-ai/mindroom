@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import runtime_env_path
 from mindroom.startup_errors import PermanentStartupError
@@ -71,7 +71,15 @@ def _load_google_application_credentials(credentials_path: str) -> GoogleCredent
         raise _GoogleApplicationCredentialsError(msg) from exc
 
 
-def runtime_application_credentials(runtime_paths: RuntimePaths) -> GoogleCredentials | None:
-    """Return the credentials ``GOOGLE_APPLICATION_CREDENTIALS`` names in the runtime env, or None when it is unset."""
+def with_runtime_application_credentials(kwargs: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return a Vertex model's settings with the runtime ``GOOGLE_APPLICATION_CREDENTIALS`` in their ``client_params``.
+
+    Credentials ``client_params`` already set win, and without the variable the settings come back unchanged, so the
+    SDK runs its own Application Default Credentials discovery.
+    """
+    client_params = kwargs.get("client_params") or {}
     credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
-    return None if credentials_path is None else _load_google_application_credentials(str(credentials_path))
+    if "credentials" in client_params or credentials_path is None:
+        return kwargs
+    credentials = _load_google_application_credentials(str(credentials_path))
+    return {**kwargs, "client_params": {**client_params, "credentials": credentials}}

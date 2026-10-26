@@ -84,7 +84,7 @@ from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as
 from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
-from mindroom.providers.google_adc import load_ambient_google_credentials, runtime_application_credentials
+from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -610,10 +610,7 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
         kwargs["region"] = region
     if "base_url" not in kwargs and (base_url := runtime_paths.env_value(ENDPOINT_VARIABLES["vertexai_claude"])):
         kwargs["base_url"] = base_url
-    client_params = kwargs.get("client_params") or {}
-    if "credentials" not in client_params and (credentials := runtime_application_credentials(runtime_paths)):
-        kwargs["client_params"] = {**client_params, "credentials": credentials}
-    return kwargs
+    return with_runtime_application_credentials(kwargs, runtime_paths)
 
 
 def _bedrock_static_credentials(kwargs: dict[str, Any], runtime_paths: RuntimePaths) -> None:

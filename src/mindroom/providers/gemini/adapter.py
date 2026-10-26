@@ -41,7 +41,7 @@ from mindroom.providers.gemini.wire import (
     tool_config,
     without_tool_selection,
 )
-from mindroom.providers.google_adc import runtime_application_credentials
+from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -238,10 +238,7 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
     for key, variable in (("project_id", "GOOGLE_CLOUD_PROJECT"), ("location", "GOOGLE_CLOUD_LOCATION")):
         if not kwargs.get(key) and (value := runtime_paths.env_value(variable)):
             kwargs[key] = value
-    client_params = kwargs.get("client_params") or {}
-    if "credentials" not in client_params and (credentials := runtime_application_credentials(runtime_paths)):
-        kwargs["client_params"] = {**client_params, "credentials": credentials}
-    return kwargs
+    return with_runtime_application_credentials(kwargs, runtime_paths)
 
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
