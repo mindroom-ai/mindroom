@@ -39,9 +39,11 @@ if TYPE_CHECKING:
 # Handling: ``adopt_summary_rows`` runs in a database's conversion to storage v2, before any response uses it,
 # when the summary-row tables are absent. The scope owning the summary gets a content-free legacy summary row
 # before every run, holding the summary and its preserved seen ids, which move out of session metadata; stored
-# copies of tombstoned runs are dropped. The retired keys are stripped. Runs deleted by those releases stay lost;
+# copies of tombstoned runs are dropped, with their member rows but for one whose run id is not text, which the
+# conversion leaves out. The retired keys are stripped. Runs deleted by those releases stay lost;
 # ``history/storage.py`` owns redaction of the summary.
-# Coverage: tests/test_legacy_compaction_state.py.
+# Coverage: tests/test_legacy_compaction_state.py, including
+# ::test_a_member_row_whose_id_is_not_text_below_a_tombstoned_run_does_not_stop_the_conversion.
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},
 )
@@ -127,15 +129,17 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
 # match what the archive gave after its pre-reply reconcile, and so do seen ids, except that metadata seen ids
 # reconcile dropped when the cached summary differed from the newest generation (an interrupted summary
 # write) stay; tombstones are not carried over. Worker code can write the archive, so an archived run that is not a JSON
-# object does not return, a row naming no stored session or a run by an id that is not text stays out, and event ids
-# count only as text entries of valid JSON; none fails the conversion.
+# object does not return, a row naming no stored session or a run by an id that is not text stays out, as does a
+# stale copy's member row whose run id is not text, and event ids count only as text entries of valid JSON; none fails
+# the conversion.
 # Coverage: tests/test_archive_migration.py::test_ordinary_generations_become_summary_rows_after_their_runs,
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
 # ::test_redaction_candidates_keep_what_the_archive_matched, ::test_an_archived_run_that_does_not_decode_stays_out,
 # ::test_an_archived_run_with_unusable_values_returns_without_them,
-# ::test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text, and
-# ::test_archive_rows_naming_no_stored_session_or_a_run_by_an_id_that_is_not_text_stay_out.
+# ::test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text,
+# ::test_archive_rows_naming_no_stored_session_or_a_run_by_an_id_that_is_not_text_stay_out, and
+# ::test_a_member_row_whose_id_is_not_text_below_an_archived_run_does_not_stop_the_conversion.
 def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
