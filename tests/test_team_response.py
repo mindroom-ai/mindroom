@@ -350,25 +350,14 @@ async def test_a_member_pause_shows_the_member_s_text_and_pending_call_beside_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stream", "member_slot"),
-    [
-        # A blocking pause renders the member's run, whose text is Agno's paused notice.
-        pytest.param(
-            False,
-            "**GeneralAgent**: I have tools to execute, but I need confirmation.\n\n🔧 `touch` [1] ⏳",
-            id="blocking",
-        ),
-        pytest.param(True, "**GeneralAgent**:\n\n🔧 `touch` [1] ⏳", id="streamed"),
-    ],
-)
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_member_s_pending_call_gets_its_own_line_under_the_member_s_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
-    member_slot: str,
 ) -> None:
+    """A member that paused without text shows its pending call alone, without the paused notice its run holds."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -379,7 +368,7 @@ async def test_a_member_s_pending_call_gets_its_own_line_under_the_member_s_name
 
     paused = await _paused(team, stream=stream)
 
-    assert member_slot in paused.response_text
+    assert "**GeneralAgent**:\n\n🔧 `touch` [1] ⏳" in paused.response_text
     require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 

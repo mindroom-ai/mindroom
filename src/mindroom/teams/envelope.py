@@ -84,7 +84,7 @@ from mindroom.teams.presentation import (
     format_team_header,
     format_team_response,
 )
-from mindroom.teams.resume import TeamResume, blocking_team_pause, continued_team_pause, drive_team_delegations
+from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -614,7 +614,10 @@ class _TeamTurn:
             self.sync_live_turn_recorder(run, attempt)
         record = attempt.terminal_record()
         if record.status is RunStatus.paused:
-            return self.resolve_paused(attempt, record, blocking=True)
+            # The pause shows the document the run's events built, as a streamed pause does, with each failed member
+            # run's reason, which its deltas never show.
+            attempt.show_failure_reasons(record)
+            return self.resolve_paused(attempt, record)
         return await self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
 
     async def run_streaming_attempt(
@@ -647,7 +650,7 @@ class _TeamTurn:
         if shown_reasons:
             self.sync_live_turn_recorder(run, attempt)
         if record.status is RunStatus.paused:
-            paused = self.resolve_paused(attempt, record, blocking=False)
+            paused = self.resolve_paused(attempt, record)
             if paused.response_text:
                 yield StructuredStreamChunk(
                     content=paused.response_text,
@@ -694,10 +697,11 @@ class _TeamTurn:
             interrupted_tools=snapshot.interrupted_tools,
         )
 
-    def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
-        """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
+    def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
+        """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        A blocking pause renders its runs' records; a streamed one freezes the document its events built.
+        A blocking pause and a streamed one freeze the same document, so neither shows the paused notices its runs
+        hold as their content (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(
             record,
@@ -705,19 +709,8 @@ class _TeamTurn:
         )
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
-        presented = (
-            blocking_team_pause(
-                paused,
-                record,
-                config_names=attempt.members.requested_agent_names,
-                display_names=attempt.members.display_names,
-                show_tool_calls=attempt.presentation.show_tool_calls,
-            )
-            if blocking
-            else continued_team_pause(attempt.presentation, paused)
-        )
         return replace(
-            presented,
+            continued_team_pause(attempt.presentation, paused),
             runtime_model_name=attempt.runtime_model_name,
             team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )

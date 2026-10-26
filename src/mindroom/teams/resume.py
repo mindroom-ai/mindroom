@@ -20,7 +20,7 @@ from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
+from mindroom.delegation.state import member_call_id, member_delegation_card
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
@@ -222,25 +222,23 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str]:
-    """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
-    member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
-    if member_id is None:
-        return "team", call_id
-    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_display_name)}", call_id
-
-
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
-    The approval card of a member's own delegation call adds no marker: the member's slot already shows that call
-    pending under its own id, and the resume finishes it there.
+    A member's call waits in its member's slot, and the leader's own calls and a child's calls its parent holds in
+    the team's. The approval card of a member's own delegation call adds no marker: the member's slot already shows
+    that call pending under its own id, and the resume finishes it there.
     """
     member_names = presentation.config_names_by_id.values()
     for requirement in paused.requirements:
         if member_delegation_card(requirement, member_names):
             continue
-        scope, _ = _waiting_slot(presentation, requirement)
+        member_id = requirement.member_agent_id
+        scope = (
+            "team"
+            if member_id is None
+            else f"agent:{presentation.resolve_member_id(member_id, requirement.member_display_name)}"
+        )
         presentation.start_tool(scope, requirement.tool_execution.call)
     return replace(
         paused,
@@ -248,36 +246,6 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
     )
-
-
-def blocking_team_pause(
-    paused: PausedAttempt,
-    record: TeamRunRecord,
-    *,
-    config_names: Sequence[str],
-    display_names: Sequence[str],
-    show_tool_calls: bool,
-) -> PausedAttempt:
-    """Render a blocking team pause from its runs' records into the document the resume continues.
-
-    Each run's text fills its slot first, paused notices included: the leader's is the consensus, and each
-    member run that ended (``ended_member_runs``) adds its own to its member's slot. Every run's tool calls follow
-    in their slots, still pending where the pause waits on them; a member's own delegation card waits on that
-    member's call.
-    """
-    presentation = TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
-    waiting = {_waiting_slot(presentation, requirement) for requirement in paused.requirements}
-    presentation.append_consensus(finished_run_text(record))
-    calls = [("team", tool) for tool in record.tools or ()]
-    for member in record.ended_member_runs:
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
-        presentation.append_member(member_id, finished_run_text(member))
-        calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
-    for scope, tool in calls:
-        presentation.start_tool(scope, tool.call)
-        if (scope, tool.tool_call_id) not in waiting:
-            presentation.complete_tool(scope, tool.call)
-    return continued_team_pause(presentation, paused)
 
 
 async def _finished(record: TeamRunRecord) -> AsyncIterator[TeamRunEvent]:
@@ -491,7 +459,6 @@ async def continue_paused_team_run(
 
 __all__ = [
     "TeamResume",
-    "blocking_team_pause",
     "continue_paused_team_run",
     "continued_team_pause",
     "drive_team_delegations",

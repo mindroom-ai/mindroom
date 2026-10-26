@@ -696,6 +696,9 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
 async def _pause_on_the_checker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool = True,
+    show_tool_calls: bool = False,
 ) -> tuple[TeamTurn, ResponsePausedForApproval]:
     team = squad_turn(
         tmp_path,
@@ -705,7 +708,7 @@ async def _pause_on_the_checker(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.stream(show_tool_calls=False)
+        await team.reply(stream=stream, show_tool_calls=show_tool_calls)
     return team, raised.value
 
 
@@ -748,54 +751,39 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 @pytest.mark.parametrize(
-    ("show_tool_calls", "text", "checker_slot", "consensus_slot", "separators"),
+    ("show_tool_calls", "text", "checker_slot", "consensus_slot"),
     [
         pytest.param(
             True,
-            f"{HEADER}**Checker**: {_MEMBER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n\n"
-            f"**Team Consensus**:\n\n{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]",
-            f"{_MEMBER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n",
-            f"{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]\n\n",
-            None,
+            f"{HEADER}**Checker**:\n\n🔧 `touch` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]",
+            "\n\n🔧 `touch` [1] ⏳\n\n",
+            "\n\n🔧 `delegate_task_to_member` [2]\n\n",
             id="tool-calls-shown",
         ),
-        pytest.param(
-            False,
-            f"{HEADER}**Checker**: {_MEMBER_PAUSED}\n\n\n**Team Consensus**:\n\n{_TEAM_PAUSED}",
-            _MEMBER_PAUSED,
-            _TEAM_PAUSED,
-            ["agent:checker", "team"],
-            id="tool-calls-hidden",
-        ),
+        # With tool calls hidden and no text yet, the pause shows no document of its own.
+        pytest.param(False, "", "", "", id="tool-calls-hidden"),
     ],
 )
-async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_notices(
+async def test_a_team_pause_shows_the_document_its_events_built_without_paused_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
     show_tool_calls: bool,
     text: str,
     checker_slot: str,
     consensus_slot: str,
-    separators: list[str] | None,
 ) -> None:
-    """A blocking pause renders its runs' records, not its events' document.
+    """A blocking pause shows the document its run's events built, as a streamed pause does.
 
-    Each slot holds its run's text first, the member's and the leader's paused notices included, and then the run's
-    tool calls, the member's gated call still pending. The snapshot the resume continues holds the same slots.
+    The member and the leader paused without text of their own, so their runs hold the paused notices, which the
+    pause does not show. The snapshot the resume continues holds the same slots.
     """
-    team = squad_turn(
-        tmp_path,
-        monkeypatch,
-        leader=[delegate("call-team", "checker", "Touch it")],
-        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
-    )
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
 
-    with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.respond(show_tool_calls=show_tool_calls)
-
-    paused = raised.value.paused
+    paused = raised.paused
     assert paused.response_text == text
     assert [(entry.tool_name, entry.scope_key, entry.type) for entry in paused.tool_trace] == [
         ("touch", "agent:checker", "tool_call_started"),
@@ -804,16 +792,43 @@ async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_no
     state = paused.response_presentation_state
     assert [member["content"] for member in state["members"]] == ["", checker_slot]
     assert state["consensus"] == consensus_slot
-    assert state.get("separate_next_scopes") == separators
+    record, [member] = team.stored_runs()
+    assert (record.content, member.content) == (_TEAM_PAUSED, _MEMBER_PAUSED)
     assert team.recorder.outcome == "suspended"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+@pytest.mark.parametrize(
+    ("show_tool_calls", "body"),
+    [
+        pytest.param(
+            True,
+            "**Checker**:\n\n🔧 `touch` [1]\n\nTouched.\n\n\n"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nThe checker touched it.",
+            id="tool-calls-shown",
+        ),
+        pytest.param(
+            False,
+            "**Checker**: Touched.\n\n\n**Team Consensus**:\n\nThe checker touched it.",
+            id="tool-calls-hidden",
+        ),
+    ],
+)
 async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_the_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+    show_tool_calls: bool,
+    body: str,
 ) -> None:
-    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    """A blocking reply and a streamed one end alike: each run's text after its approval, and no paused notice.
+
+    The member and the leader paused without text of their own, so their runs held the paused notices, which no
+    longer hold once the approved call ran.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
@@ -821,11 +836,12 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
         raised.paused,
         approved=True,
         approvals=(member_approval("call-touch", "dangerous"),),
+        show_tool_calls=show_tool_calls,
     )
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
-    assert result.response_text == f"{HEADER}**Checker**: Touched.\n\n\n**Team Consensus**:\n\nThe checker touched it."
+    assert result.response_text == HEADER + body
     assert result.metadata_content["io.mindroom.ai_run"]["status"] == "completed"
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
@@ -1386,13 +1402,17 @@ async def test_a_streamed_team_reply_shows_a_failed_member_run_s_reason_after_th
 
 
 @pytest.mark.asyncio
-async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
 ) -> None:
-    """The document a live streamed pause shows, and its resume continues, holds a failed member run's reason.
+    """The document a live pause shows, and its resume continues, holds a failed member run's reason.
 
-    The checker fails after writing; the writer the leader then hands a task pauses on its gated call.
+    The checker fails after writing; the writer the leader then hands a task pauses on its gated call. A blocking
+    pause shows the same document as a streamed one.
     """
     team = squad_turn(
         tmp_path,
@@ -1404,7 +1424,7 @@ async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_th
     )
 
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.stream(show_tool_calls=False)
+        await team.reply(stream=stream, show_tool_calls=False)
 
     paused = raised.value.paused
     slot = "Checking it\n\nChecker unavailable: api_key=***redacted***"

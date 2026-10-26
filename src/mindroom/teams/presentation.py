@@ -5,7 +5,7 @@
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
 run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
-instead, as a blocking reply shows it.
+instead, as a blocking reply that never paused shows it.
 """
 
 from __future__ import annotations

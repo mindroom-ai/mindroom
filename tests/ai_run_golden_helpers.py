@@ -29,7 +29,8 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
-from mindroom.teams.resume import blocking_team_pause
+from mindroom.teams.presentation import TeamStreamPresentation
+from mindroom.teams.resume import continued_team_pause
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.approval_resume_helpers import AGENT_RESUMES, resume_case, setup_case
@@ -294,15 +295,11 @@ async def _team_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[
         toolkit_owners={("checker", "multiply"): "calculator"},
     )
     assert attempt is not None
-    # The pause the blocking reply showed, whose document the resume continues; the member runs that ended in that
-    # reply are the paused ones the stored row keeps.
-    paused.ended_member_runs = list(paused.member_responses)
-    shown = blocking_team_pause(
+    # The pause the reply showed, whose document the resume continues. The turn's events built that document and the
+    # stored row does not keep it; the published metadata never reads it, so its pending calls alone stand for it.
+    shown = continued_team_pause(
+        TeamStreamPresentation.new(team.member_names, ["Writer", "Checker"], show_tool_calls=False),
         attempt,
-        paused,
-        config_names=team.member_names,
-        display_names=["Writer", "Checker"],
-        show_tool_calls=False,
     )
     [requirement] = paused.requirements or []
     call = requirement.tool_execution
