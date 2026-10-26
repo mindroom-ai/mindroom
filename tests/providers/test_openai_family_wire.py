@@ -1175,8 +1175,16 @@ async def test_a_temperature_override_is_sent_as_the_models_temperature(
 
 
 @pytest.mark.asyncio
-async def test_temperature_override_is_left_to_default_sampling_models(tmp_path: Path) -> None:
-    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+@pytest.mark.parametrize(
+    "model_config",
+    [_OPENAI_CHAT, {"provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "api_key": "test-key"}],
+    ids=["gpt-6", "claude-5.5-through-openrouter"],
+)
+async def test_temperature_override_is_left_to_default_sampling_models(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
 
     await _turn(built, ModelRequest(messages=[_user()], overrides=RequestOverrides(temperature=0.2)))
 

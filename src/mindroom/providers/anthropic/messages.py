@@ -34,7 +34,7 @@ from anthropic.types.beta import (
 )
 
 from mindroom.constants import runtime_env_path
-from mindroom.credentials.sync import get_api_key_for_provider, get_secret_from_env
+from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
     Capabilities,
@@ -51,7 +51,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.anthropic.native_compaction import (
     COMPACTION_BETA,
@@ -83,7 +83,7 @@ from mindroom.providers.anthropic.wire import (
 )
 from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
-from mindroom.providers.credentials import uses_alternative_auth
+from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
@@ -349,7 +349,7 @@ class ClaudeProvider:
         """Move sampling controls into ``extra_body`` and drop them for the generations that reject them."""
         moved = {name: params.pop(name) for name in _SAMPLING_CONTROL_NAMES if name in params}
         extra_body: dict[str, Any] = {**moved, **(params.get("extra_body") or {})}
-        if self.identity.id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
+        if claude_rejects_sampling_controls(self.identity.id):
             for name in _SAMPLING_CONTROL_NAMES:
                 extra_body.pop(name, None)
         if extra_body:
@@ -589,8 +589,7 @@ def _claude_capabilities(
         ),
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
-        provider_default_sampling=route == "vertexai_claude"
-        or model_id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES),
+        provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
         claude_family=True,
     )
 
@@ -683,10 +682,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     route = cast("ClaudeRouteKind", provider_route(model_config.provider))
     authored = dict(model_config.extra_kwargs or {})
     if route == "anthropic":
-        api_key = model_config.configured_api_key()
-        if api_key is None and not uses_alternative_auth(model_config):
-            api_key = get_api_key_for_provider("anthropic", runtime_paths=runtime_paths)
-        if api_key:
+        if api_key := model_api_key(model_config, runtime_paths):
             authored["api_key"] = api_key
     elif route == "vertexai_claude":
         authored = _vertex_kwargs(authored, runtime_paths)

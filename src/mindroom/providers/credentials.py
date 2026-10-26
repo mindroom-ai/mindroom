@@ -18,7 +18,13 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
 
-__all__ = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential", "uses_alternative_auth"]
+__all__ = [
+    "dashboard_api_key",
+    "missing_model_api_key_provider",
+    "model_api_key",
+    "model_uses_own_credential",
+    "uses_alternative_auth",
+]
 
 # Settings the provider adapters accept in place of ``api_key``; Gemini with ``vertexai: true``
 # authenticates with Google Cloud credentials instead.
@@ -43,6 +49,17 @@ def uses_alternative_auth(model_config: ModelConfig) -> bool:
     extra_kwargs = model_config.extra_kwargs or {}
     alternative_kwargs = _ALTERNATIVE_AUTH_KWARGS.get(provider_route(model_config.provider), ())
     return any(extra_kwargs.get(name) for name in alternative_kwargs)
+
+
+def model_api_key(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+    """Return the key a model authenticates with: its configured key, else its provider's shared key.
+
+    A model that authenticates another way (``uses_alternative_auth``) never receives the shared key.
+    """
+    configured = model_config.configured_api_key()
+    if configured is not None or uses_alternative_auth(model_config):
+        return configured
+    return get_api_key_for_provider(model_config.provider, runtime_paths=runtime_paths)
 
 
 def model_uses_own_credential(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:

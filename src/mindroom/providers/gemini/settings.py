@@ -19,8 +19,6 @@ class GeminiSettings:
     vertexai: bool = False
     project_id: str | None = None
     location: str | None = None
-    # A google.auth credentials object; only programmatic callers can supply one.
-    credentials: object | None = field(default=None, metadata=SECRET)
     client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     timeout: float | None = None
     generation_config: Mapping[str, Any] | None = None

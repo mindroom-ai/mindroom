@@ -137,7 +137,7 @@ _ROUTE_SETTINGS: list[tuple[type[Any], dict[str, Any], frozenset[str]]] = [
             },
         ),
     ),
-    (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params", "credentials"})),
+    (GeminiSettings, {"temperature": 0.3}, frozenset({"api_key", "client_params"})),
     (OllamaSettings, {"options": {"num_ctx": 8192}}, frozenset({"api_key", "client_params"})),
     (SyntheticSettings, {"seed": 7}, frozenset({"api_key"})),
 ]
@@ -327,6 +327,24 @@ def test_a_request_already_at_the_marker_limit_passes_through() -> None:
     }
 
     assert _prepared(body) == body
+
+
+def test_message_rungs_that_reach_the_limit_leave_the_last_tool_unmarked() -> None:
+    """The tools marker comes last, so two authored system markers and two new rungs leave it no budget."""
+    body = {
+        "system": [
+            {"type": "text", "text": "S1", "cache_control": _FIVE_MINUTES},
+            {"type": "text", "text": "S2", "cache_control": _FIVE_MINUTES},
+        ],
+        "tools": [_tool("demo_tool")],
+        "messages": [{"role": "user", "content": [_text("m1")]}, {"role": "user", "content": [_text("m2")]}],
+    }
+
+    prepared = _prepared(body)
+
+    assert [message["content"][0]["cache_control"] for message in prepared["messages"]] == [_FIVE_MINUTES] * 2
+    assert prepared["tools"] == body["tools"]
+    assert _marker_count(prepared) == MAX_CACHE_MARKERS
 
 
 def test_thinking_and_empty_text_never_carry_a_marker() -> None:

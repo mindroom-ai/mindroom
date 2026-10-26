@@ -36,6 +36,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
+from mindroom.providers import credentials as provider_credentials
 from mindroom.providers import remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
@@ -164,7 +165,7 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
         requested.append(provider)
         return "shared-key"
 
-    monkeypatch.setattr(gemini_adapter, "get_api_key_for_provider", shared_key)
+    monkeypatch.setattr(provider_credentials, "get_api_key_for_provider", shared_key)
     runtime_paths = runtime_paths_for(tmp_path)
 
     api = gemini_adapter.build_provider(ModelConfig(provider="gemini", id="gemini-3.1-pro-preview"), runtime_paths)
@@ -175,7 +176,7 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
     assert vertex.settings.api_key is None
     assert vertex.vertexai
     assert own.settings.api_key == "test-key"
-    assert requested == ["google"]
+    assert requested == ["gemini"]
 
 
 def test_gemini_passes_the_environment_key_project_and_location_as_explicit_client_arguments(
@@ -212,7 +213,7 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, mo
         {"provider": "google", "id": "gemini-3.8-flash"},
         project_id="test-project",
         location="us-central1",
-        credentials=Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+        client_params={"credentials": Credentials(token="test-token")},  # noqa: S106 - synthetic SDK credential
     )
     adapter = build_adapter(config, tmp_path, respond)
     _completed([event async for event in adapter.stream(_request())])

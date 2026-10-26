@@ -6450,7 +6450,13 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential", "uses_alternative_auth"]
+expose = [
+    "dashboard_api_key",
+    "missing_model_api_key_provider",
+    "model_api_key",
+    "model_uses_own_credential",
+    "uses_alternative_auth",
+]
 from = ["mindroom.providers.credentials"]
 
 [[interfaces]]
@@ -7999,7 +8005,6 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
-    "mindroom.credentials.sync",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",

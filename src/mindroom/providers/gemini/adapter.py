@@ -21,12 +21,11 @@ from google.genai.errors import APIError
 from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
-from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
-from mindroom.providers.credentials import uses_alternative_auth
+from mindroom.providers.credentials import model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -208,7 +207,6 @@ class GeminiProvider:
                 "vertexai": True,
                 "project": settings.project_id or os.getenv("GOOGLE_CLOUD_PROJECT"),
                 "location": settings.location or os.getenv("GOOGLE_CLOUD_LOCATION"),
-                "credentials": settings.credentials,
             }
         else:
             params = {"api_key": settings.api_key or os.getenv("GOOGLE_API_KEY")}
@@ -235,11 +233,8 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
     """Build the adapter for a ``google`` or ``gemini`` model config."""
-    api_key = model_config.configured_api_key()
     # Vertex AI authenticates with Google Cloud credentials, so it never takes the shared key.
-    if api_key is None and not uses_alternative_auth(model_config):
-        api_key = get_api_key_for_provider("google", runtime_paths=runtime_paths)
-    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
+    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": model_api_key(model_config, runtime_paths)}
     settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
     return GeminiProvider(
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),

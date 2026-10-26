@@ -560,6 +560,22 @@ async def test_a_configured_key_beats_the_shared_key_on_routes_with_their_own_ke
 
 
 @pytest.mark.asyncio
+async def test_a_llama_cpp_model_without_its_own_key_never_sends_a_shared_one(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """A local llama.cpp server gets the keyless placeholder, even with a key saved under its provider name."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("llama_cpp", {"api_key": "sk-shared"})
+    config = Config(models={"target": ModelConfig(provider="llama_cpp", id="qwen")})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers["authorization"] == "Bearer not-provided"
+
+
+@pytest.mark.asyncio
 async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_paths: RuntimePaths, wire: Wire) -> None:
     get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
     model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs={"auth_token": "tok"})
@@ -666,7 +682,7 @@ def _golden_model_config(golden: dict[str, Any], root: Path, wire: Wire) -> Mode
             "http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)},
         }
         if extra_kwargs.get("vertexai"):
-            extra_kwargs["credentials"] = Credentials(token=_GOOGLE_TOKEN)
+            extra_kwargs["client_params"]["credentials"] = Credentials(token=_GOOGLE_TOKEN)
     if fields["provider"] == "ollama":
         extra_kwargs["client_params"] = {"transport": wire.transport}
     return ModelConfig(**fields)
