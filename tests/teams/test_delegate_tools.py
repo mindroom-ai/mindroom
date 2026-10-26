@@ -96,6 +96,26 @@ def test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_n
     assert answer_delegation(tools, writer, RunRecord(run_id="w", content="Wrote."), stream=True) is tools[0]
 
 
+def test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume() -> None:
+    """Calls stored without their member runs cannot be told apart, so the first run to resume answers the first."""
+    checker = member("checker", "Checker", scripted("checker-model"))
+    notice = MEMBER_PAUSED_RESULT.format(name="Checker")
+    tools = [
+        ToolExecution(
+            tool_call_id=call_id,
+            tool_name="delegate_task_to_member",
+            tool_args={"member_id": "checker"},
+            result=notice,
+        )
+        for call_id in ("call-1", "call-2")
+    ]
+
+    answer_delegation(tools, checker, RunRecord(run_id="first", content="First."), stream=True)
+    answer_delegation(tools, checker, RunRecord(run_id="second", content="Second."), stream=True)
+
+    assert [tool.result for tool in tools] == ["First.", "Second."]
+
+
 def test_each_of_two_paused_pieces_under_one_name_is_answered_by_its_own_member() -> None:
     """Two members that share a display name and both paused hold two equal pieces; each answer takes one of them."""
     writer, checker = (member(agent_id, "Twin", scripted(f"{agent_id}-model")) for agent_id in ("writer", "checker"))

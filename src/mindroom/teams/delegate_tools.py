@@ -221,42 +221,72 @@ def answer_delegation(
 ) -> ToolExecution | None:
     """Answer the leader's delegation call that waited on ``member``'s paused run, which ended as ``run``.
 
-    A coordinate call names the member run it waits on (``child_run_id``) and reads the member's result as a call
-    whose member never paused reads it (``member_result_text``). A collaborate call holds one piece per member:
-    the member's pause notice becomes its result under the same label, and every other piece stays as it was, so the
-    leader keeps the result of a member that finished before the pause or in an earlier resume. ``stream`` selects
-    the result rules. Return the answered call, or None when no call waits on the run.
+    The call still holds the pause notice it gave, under the display name ``run`` stored when it started, so a member
+    renamed since is still found. A coordinate call names the member and reads the member's result as a call whose
+    member never paused reads it (``member_result_text``). A collaborate call holds one piece per member: the member's
+    pause notice becomes its result under the same label, and every other piece stays as it was, so the leader keeps
+    the result of a member that finished before the pause or in an earlier resume. ``stream`` selects the result
+    rules. Return the answered call, or None when no call waits on the run.
     """
     # TODO(simplify): A resumed member that wrote nothing hands over its carried pause notice ("I have tools to
     # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
     # (``new_handover_content``) or a completion note. The leader model would notice.
     result = member_result_text(run, stream=stream)
-    notice = _labeled_piece(member.spec.name, _COLLABORATE_PAUSED_NOTICE)
+    name = run.agent_display_name or member.spec.name
+    coordinate = _waiting_coordinate_call(tools, member.spec.id, run, MEMBER_PAUSED_RESULT.format(name=name))
+    if coordinate is not None:
+        coordinate.result = result
+        return coordinate
+    notice = _labeled_piece(name, _COLLABORATE_PAUSED_NOTICE)
     for tool in tools:
-        if tool.tool_name == DELEGATION_TOOLS[TeamMode.COORDINATE].name and _waits_on(tool, member, run):
-            tool.result = result
-            return tool
         if tool.tool_name == DELEGATION_TOOLS[TeamMode.COLLABORATE].name and tool.result and notice in tool.result:
-            tool.result = tool.result.replace(notice, _labeled_piece(member.spec.name, result), 1)
+            tool.result = tool.result.replace(notice, _labeled_piece(name, result), 1)
             return tool
     return None
 
 
-def _waits_on(tool: ToolExecution, member: TeamMember, run: RunRecord) -> bool:
-    """Return whether the coordinate call ``tool`` waits on ``member``'s paused run ``run``."""
-    if tool.child_run_id is not None:
-        return tool.child_run_id == run.run_id
-    # LEGACY_COMPAT: Coordinate delegation calls that wait on a paused member without naming the member's run.
-    # Legacy format: a paused team row's ``delegate_task_to_member`` entry whose ``child_run_id`` is null, whose
-    # ``member_id`` argument names the member, and whose result is that member's pause notice.
-    # Last legacy release: v2026.10.569, whose team runs stored every delegation call without ``child_run_id``;
-    # replacement: the next release names the paused member's run in ``child_run_id`` of the call that waits on it.
-    # Handling: such a call waits on the member's paused run, so an approval saved before the upgrade still answers
-    # it with the member's result; two such calls to one member are answered in the order the member's runs resume.
+def _waiting_coordinate_call(
+    tools: Sequence[ToolExecution],
+    member_id: str,
+    run: RunRecord,
+    notice: str,
+) -> ToolExecution | None:
+    """Return the coordinate call that waits on ``run``, a paused run of the member ``member_id``, or None.
+
+    A waiting call names the member and still holds ``notice``, its pause notice; it names the run it started in
+    ``child_run_id``, which tells two calls to one member apart.
+    """
+    waiting = [
+        tool
+        for tool in tools
+        if tool.tool_name == DELEGATION_TOOLS[TeamMode.COORDINATE].name
+        and (tool.tool_args or {}).get("member_id") == member_id
+        and tool.result == notice
+    ]
+    # LEGACY_COMPAT: Coordinate calls of a streamed Agno-runtime turn that all name the member run that ended last.
+    # Legacy format: in a team row a streamed turn paused on the Agno runtime, every ``delegate_task_to_member``
+    # entry holds in ``child_run_id`` the run of the member whose delegation ended last, so a waiting call may name a
+    # sibling's run, and a call whose member finished may name the paused member's run. Blocking turns stored null.
+    # Last legacy release: v2026.10.498, the last release on the Agno runtime; replacement: v2026.10.499, whose team
+    # runs stored ``child_run_id`` null (the rule below).
+    # Handling: a link counts only on a call that still waits on the member, so a finished sibling's call keeps its
+    # answer; a run no waiting call links reads as the null-link rows below do.
+    # Coverage: tests/teams/test_continue_team.py::test_a_row_a_streamed_agno_turn_paused_answers_each_call_with_its_own_member_s_result
+    linked = next((tool for tool in waiting if tool.child_run_id == run.run_id), None)
+    if linked is not None:
+        return linked
+    # LEGACY_COMPAT: Coordinate calls that wait on a paused member without naming the member's run.
+    # Legacy format: a paused team row's waiting ``delegate_task_to_member`` entry whose ``child_run_id`` is null.
+    # Last legacy release: v2026.10.569, whose team runs stored ``child_run_id`` null on every delegation call, as
+    # blocking turns on the Agno runtime did; replacement: the next release names the paused member's run in
+    # ``child_run_id`` of the call that waits on it.
+    # Handling: the first call that waits on the member answers its paused run, so an approval saved before the
+    # upgrade still answers it with the member's result; two such calls to one member are answered in the order the
+    # member's runs resume.
     # Coverage: tests/teams/test_continue_team.py::test_an_approved_member_call_resumes_into_the_team_approved_rows,
-    #   tests/teams/test_delegate_tools.py::test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_names
-    named = (tool.tool_args or {}).get("member_id") == member.spec.id
-    return named and tool.result == MEMBER_PAUSED_RESULT.format(name=member.spec.name)
+    #   tests/teams/test_delegate_tools.py::test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_names,
+    #   tests/teams/test_delegate_tools.py::test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume
+    return next(iter(waiting), None)
 
 
 def _running_call(record: TeamRunRecord) -> ToolExecution:

@@ -877,6 +877,109 @@ async def test_a_waiting_delegation_under_a_call_id_an_earlier_request_used_is_a
     ]
 
 
+@pytest.mark.parametrize(
+    "linked",
+    ["paused", "finished"],
+    ids=["link-names-the-paused-run", "link-names-the-finished-run"],
+)
+@pytest.mark.parametrize("first", ["writer", "checker"], ids=["writer-then-checker", "checker-twice"])
+async def test_a_row_a_streamed_agno_turn_paused_answers_each_call_with_its_own_member_s_result(
+    first: str,
+    linked: str,
+) -> None:
+    """A streamed turn on the Agno runtime stored one member run on every coordinate call: the run that ended last.
+
+    The first call's member finished and the checker paused on the second, and both calls name the same run, the
+    paused one or the finished one. Once approved, the first call keeps its answer and the second reads the
+    checker's result, also when both calls went to the checker.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-1", member_id=first, task="Draft it."),
+            tool_call("delegate_task_to_member", "call-2", member_id="checker", task="Multiply 6 by 7."),
+            metrics=usage(10, 2),
+        ),
+        answer("Drafted and checked.", usage(10, 2)),
+    )
+    pause = calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1))
+    if first == "writer":
+        writer = scripted("writer-model", answer("Drafted.", usage(5, 1)))
+        checker = scripted("checker-model", pause, answer("42", usage(5, 1)))
+    else:
+        writer = scripted("writer-model")
+        checker = scripted("checker-model", answer("Drafted.", usage(5, 1)), pause, answer("42", usage(5, 1)))
+    team = squad(leader, writer, checker)
+    _, live = await collect(
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    [paused_run] = live.member_responses
+    [finished_run] = [run for run in live.ended_member_runs if run.run_id != paused_run.run_id]
+    paused = TeamRunRecord.from_dict(live.to_dict())
+    assert paused.tools is not None
+    for tool in paused.tools:
+        tool.child_run_id = (paused_run if linked == "paused" else finished_run).run_id
+
+    _, record = await collect(
+        resume_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "Drafted and checked.")
+    assert record.tools is not None
+    assert [(tool.tool_call_id, tool.result) for tool in record.tools] == [("call-1", "Drafted."), ("call-2", "42")]
+    assert [message.content for message in leader.requests[-1].messages if message.role == "tool"] == [
+        "Drafted.",
+        "42",
+    ]
+
+
+@pytest.mark.parametrize("mode", [TeamMode.COORDINATE, TeamMode.COLLABORATE])
+async def test_a_member_renamed_while_its_approval_waits_still_answers_the_call_that_waited_on_it(
+    mode: TeamMode,
+) -> None:
+    """The waiting call holds the pause notice under the name the member's run paused with, which a rename keeps.
+
+    The checker is renamed between the pause and the approval; its call is answered all the same, and a collaborate
+    piece keeps the label it paused under.
+    """
+    if mode is TeamMode.COORDINATE:
+        delegation = tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Multiply 6 by 7.")
+    else:
+        delegation = tool_call("delegate_task_to_members", "call-all", task="Multiply 6 by 7.")
+    leader = scripted("leader-model", calls(delegation, metrics=usage(10, 2)), answer("Done.", usage(10, 2)))
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("42", usage(5, 1)),
+    )
+    team = squad(leader, scripted("writer-model", answer("Six times seven is 42.")), checker, mode=mode)
+    _, paused = await collect(
+        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+    )
+    writer_member, checker_member = team.members
+    inspector = replace(checker_member, spec=replace(checker_member.spec, name="Inspector"))
+
+    _, record = await collect(
+        resume_team(
+            replace(team, members=(writer_member, inspector)),
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    answered = "42" if mode is TeamMode.COORDINATE else "Six times seven is 42.Agent Checker: 42"
+    assert leader.requests[-1].messages[-1].content == answered
+
+
 async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_the_member() -> None:
     """A member's paused call with the id of the leader's completed delegation resumes, and that delegation stays.
 
