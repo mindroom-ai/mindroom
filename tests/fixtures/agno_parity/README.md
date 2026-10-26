@@ -293,7 +293,7 @@ The `run-error` record holds the previous turn's answer followed by `(turn faile
 
 `knowledge/embedders.json`, `knowledge/rows.json`, and `knowledge/search.json` were first captured from the Agno-backed knowledge path, and the owned knowledge code's parity tests in `tests/test_knowledge_goldens.py` read them.
 All three are pretty JSON with sorted keys and are compared by value.
-`embedders.json` and `search.json` regenerate from owned code (`tests/agno_parity/knowledge_goldens.py`); `rows.json` holds the Chroma rows Agno wrote, which owned refreshes must still write and the owned read path must still search, beside the authored `input` the refreshes and searches run on.
+`embedders.json` and `search.json` regenerate from owned code (`tests/agno_parity/knowledge_goldens.py`); `rows.json` holds the rows Agno wrote to Chroma, which owned refreshes must still write and the owned read path must still search, beside the authored `input` the refreshes and searches run on.
 
 ### `knowledge/embedders.json`
 
@@ -304,7 +304,9 @@ Each embedder is built by `create_configured_embedder`; mock transports answer e
 ### `knowledge/rows.json`
 
 `input` holds the authored config, every source file, the fixed mtime they get, and the embedding rule: each chunk's vector is `tests.agno_parity.knowledge_vectors.parity_vector` of its text.
-Each base is refreshed through the production refresh path into a real Chroma store, and `bases.<base_id>` records the published collection's `metadata`, its `configuration_json`, and every row's id, document, metadata, and embedding.
+`bases.<base_id>` records every row Agno wrote, with its id, document, metadata, and embedding, and the `metadata` and `configuration_json` of the Chroma collection that held them.
+The parity test refreshes each base through the production refresh path into the owned SQLite store and compares the rows it published; the owned store has no collection metadata or configuration.
+Chroma returned some embeddings up to one float32 ulp from the values it was given, and the owned store keeps the given values, so embeddings compare within float32 precision.
 Rows are sorted by source path, page, row number, chunk, and document.
 
 Normalization:
@@ -319,7 +321,7 @@ Each search sends one query through the `search_knowledge_base` tool as its agen
 A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
 The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`.
 `content_hash` in each document's `meta_data` becomes `<sha256>`.
-Chroma sums each cosine distance in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distances` or `similarity_score` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
+Each cosine distance is summed in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distances` or `similarity_score` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
 
 ## Codec goldens (`codecs.json`)
 
