@@ -23,6 +23,7 @@ from mindroom.agent_loop.model_loop import (
     SendRequest,
     run_model_loop,
 )
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
@@ -237,6 +238,43 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_in_call_order() 
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
     # The run's agent is named on the warning for the tool it was not offered.
     assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
+
+
+async def test_a_cut_off_response_records_and_announces_its_calls_without_running_them() -> None:
+    """Calls of a response the output limit cut off are answered, recorded as failed, and announced, in call order."""
+    cut_off = calls(tool_call("add", "c1", a=1, b=1), tool_call("echo", "c2", text="huge"))
+    cut_off[-1] = replace(cut_off[-1], stop_reason="output_limit")
+    model = ScriptedModel([cut_off, answer("Split it.")])
+    messages = _prompt()
+
+    events, record = await _run(
+        spec(model, toolkit(add, echo)),
+        messages,
+        hooks=LoopHooks(answer_tool_calls=output_limit_policy()),
+    )
+
+    tool_messages = [message for message in messages if message.role == "tool"]
+    assert [(m.tool_call_id, m.content, m.tool_call_error) for m in tool_messages] == [
+        ("c1", CUT_OFF_TOOL_CALL_RESULT, True),
+        ("c2", CUT_OFF_TOOL_CALL_RESULT, True),
+    ]
+    assert record.tools is not None
+    assert [(tool.tool_call_id, tool.tool_name, tool.is_error, tool.result) for tool in record.tools] == [
+        ("c1", "add", True, CUT_OFF_TOOL_CALL_RESULT),
+        ("c2", "echo", True, CUT_OFF_TOOL_CALL_RESULT),
+    ]
+    tool_events = [
+        (type(event).__name__, event.call.tool_call_id)
+        for event in events
+        if isinstance(event, ToolStarted | ToolCompleted)
+    ]
+    assert tool_events == [
+        ("ToolStarted", "c1"),
+        ("ToolStarted", "c2"),
+        ("ToolCompleted", "c1"),
+        ("ToolCompleted", "c2"),
+    ]
+    assert events[-1] == LoopEnded(paused=False)
 
 
 async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests() -> None:

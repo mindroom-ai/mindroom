@@ -176,6 +176,29 @@ def plan_tool_batch(
     return ToolBatch(calls=tuple(calls))
 
 
+def answered_tool_batch(answers: Sequence[Message]) -> ToolBatch:
+    """Return the batch of calls a loop hook answered with ``answers``, one per call in call order, instead of running.
+
+    Each call gets a failed run-record entry holding its answer, as a refused call does. Its arguments, which a cut-off
+    response may hold only in part, are not recorded, and none counts toward the call limit.
+    """
+    return ToolBatch(
+        calls=tuple(
+            RefusedCall(
+                execution=ToolExecution(
+                    tool_call_id=answer.tool_call_id or "",
+                    tool_name=answer.tool_name or "",
+                    is_error=True,
+                    result=answer.get_content_string(),
+                ),
+                answer=answer,
+                counts=False,
+            )
+            for answer in answers
+        ),
+    )
+
+
 def _refused(call_id: str, name: str, text: str, arguments: dict[str, Any] | None, *, counts: bool) -> RefusedCall:
     execution = ToolExecution(tool_call_id=call_id, tool_name=name, tool_args=arguments, is_error=True, result=text)
     return RefusedCall(
@@ -302,6 +325,7 @@ __all__ = [
     "PreparedTools",
     "RefusedCall",
     "ToolBatch",
+    "answered_tool_batch",
     "dispatch_tool_calls",
     "failed_answer",
     "is_media_follow_up",

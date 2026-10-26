@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_loop.tools import (
     PlannedCall,
     RefusedCall,
+    answered_tool_batch,
     dispatch_tool_calls,
     failed_answer,
     media_follow_up,
@@ -103,7 +104,8 @@ class LoopHooks:
       ``state.messages`` in place (mid-turn compaction), end the loop (participation, the skill review's budget),
       or send a projected message list for this request only (the approval receipt); the last projection wins.
     - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
-      when it returns result messages, they answer the batch in place of running it (the output-limit policy).
+      when it returns result messages, one per call in call order, they answer the batch in place of running it, and
+      each call is recorded and announced as a failed call (the output-limit policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
@@ -286,21 +288,24 @@ async def _run_tool_batch(
     hooks: LoopHooks,
     max_tool_calls_per_turn: int | None,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
-    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them."""
+    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them.
+
+    Either way every call is recorded and announced in call order, and its answer reaches the model in that order.
+    """
     assert message.tool_calls
     answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
     if answers is not None:
-        progress.stopped = await _answer_batch(state.messages, answers, hooks.after_tool_batch)
-        return
-    if hooks.rewrite_tool_calls is not None:
-        message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, state.offered.functions)
-    batch = plan_tool_batch(
-        message.tool_calls,
-        state.offered.functions,
-        calls_so_far=progress.calls_so_far,
-        max_tool_calls_per_turn=max_tool_calls_per_turn,
-        entity=_entity(state.record),
-    )
+        batch = answered_tool_batch(answers)
+    else:
+        if hooks.rewrite_tool_calls is not None:
+            message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, state.offered.functions)
+        batch = plan_tool_batch(
+            message.tool_calls,
+            state.offered.functions,
+            calls_so_far=progress.calls_so_far,
+            max_tool_calls_per_turn=max_tool_calls_per_turn,
+            entity=_entity(state.record),
+        )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)

@@ -118,6 +118,31 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
 
 
 @pytest.mark.asyncio
+async def test_a_checkpoint_keeps_the_batch_s_calls_in_call_order(tmp_path: Path) -> None:
+    """A refused call between two Bash calls keeps its place in the saved record, as the loop recorded the batch."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    record = _record()
+    record.tools = [
+        ToolExecution(tool_call_id="bash-1", tool_name="bash", tool_args={"command": "work"}),
+        ToolExecution(tool_call_id="bad-1", tool_name="missing", is_error=True, result="not offered"),
+        ToolExecution(tool_call_id="bash-2", tool_name="bash", tool_args={"command": "work"}),
+    ]
+    await _capture(checkpoint, record, [Message(role="user", content="do work"), _assistant("bash-1", "bash-2")])
+
+    await checkpoint.persist("bash-1")
+
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert isinstance(saved, RunRecord)
+    assert [(tool.tool_call_id, tool.is_error) for tool in saved.tools or ()] == [
+        ("bash-1", None),
+        ("bad-1", True),
+        ("bash-2", None),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_the_turns_session_holds_the_checkpoint_as_stored(tmp_path: Path) -> None:
     """A checkpoint saves through the turn's own session, which then holds the saved run as a load would."""
     catalog = await _stored_catalog(tmp_path)
