@@ -16,7 +16,7 @@ from mindroom.teams.spec import TeamMode
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import golden_path, load_golden, record_scenario, regenerated_golden
 from tests.fakes.scripted_model import ScriptedModel
-from tests.team_runtime.squad import squad
+from tests.teams.squad import squad
 
 if TYPE_CHECKING:
     from pathlib import Path

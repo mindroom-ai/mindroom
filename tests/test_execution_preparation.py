@@ -341,7 +341,7 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
         make_turn_context("test_agent"),
         scope_context=None,
         member_names=["test_agent"],
-        leader_system_message=Message(role="system", content="You lead the team."),
+        leader_system_messages=(Message(role="system", content="You lead the team."),),
         leader_tools=(),
         model=ScriptedModel([]),
         prompt="Current request",
