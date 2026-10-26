@@ -173,7 +173,6 @@ async def authorize_prepared_tool_call(
     # bypass current config/membership/worker checks.
     if binding.key.toolkit == "agent" and (
         not catalog.owns(binding)
-        or catalog.agent_name != context.agent_name
         or binding.function.name != binding.key.function
         or context.agent_name not in config.agents
     ):

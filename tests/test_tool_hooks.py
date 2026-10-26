@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import threading
 import time
@@ -46,6 +47,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
+from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -504,6 +506,7 @@ async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_pa
     assert records[0]["error_type"] == "ValueError"
     assert isinstance(records[0]["timing"]["result_ready_ms"], float)
     assert isinstance(records[0]["timing"]["tool_body_ms"], float)
+    assert records[0]["duration_ms"] == records[0]["timing"]["result_ready_ms"]
     assert records[0]["arguments"] == {
         "api_key": "***redacted***",
         "nested": [{"refresh_token": "***redacted***"}],
@@ -832,6 +835,49 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
     assert records[0]["reply_to_event_id"] is None
     assert records[0]["correlation_id"] == "corr-runtime"
     assert records[0]["result"] == {"echo": "notes.txt"}
+
+
+@pytest.mark.asyncio
+async def test_a_call_s_record_and_after_hooks_read_one_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored row's duration and ready time and the after-call hooks' duration are the time the result was ready."""
+    durations: list[float] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def allow(_ctx: ToolBeforeCallContext) -> None:
+        return None
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def observe(ctx: ToolAfterCallContext) -> None:
+        durations.append(ctx.duration_ms)
+
+    # Each clock reading is one second after the last, so every measured phase is a whole number of seconds.
+    ticks = itertools.count()
+    monkeypatch.setattr(tool_hooks, "time", SimpleNamespace(perf_counter=lambda: float(next(ticks))))
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    bridge = tool_policy(
+        HookRegistry.from_plugins([_plugin("tool-policy", [allow, observe])]),
+        agent_name="code",
+        dispatch_context=_dispatch_context(_execution_identity()),
+        config=runtime_context.config,
+        runtime_paths=runtime_context.runtime_paths,
+    )
+
+    async def next_func(**kwargs: object) -> str:
+        return str(kwargs["path"])
+
+    with tool_runtime_context(runtime_context), tool_execution_identity(_execution_identity()):
+        assert await bridge("read_file", next_func, {"path": "notes.txt"}) == "notes.txt"
+
+    log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    timing = record["timing"]
+    assert set(timing) == {"before_hooks_ms", "tool_body_ms", "result_ready_ms"}
+    assert 0 < timing["before_hooks_ms"] < timing["result_ready_ms"]
+    assert 0 < timing["tool_body_ms"] < timing["result_ready_ms"]
+    assert durations == [record["duration_ms"]] == [timing["result_ready_ms"]]
 
 
 @pytest.mark.asyncio

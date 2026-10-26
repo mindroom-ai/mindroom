@@ -2,6 +2,7 @@
 
 The storage goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
 failed), ``team-paused`` (a member's call waits for approval), and the streamed collaborate run ``panel-completed``.
+Member rows leave out the team run's metadata, which the storage goldens copy into them (``stored_as_owned``).
 """
 # ruff: noqa: D103
 
@@ -9,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 import pytest
@@ -41,6 +42,7 @@ from tests.teams.squad import (
     scripted,
     squad,
     start_team,
+    stored_as_owned,
 )
 
 if TYPE_CHECKING:
@@ -121,10 +123,12 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_complete
         noting_the_store(start_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store)),
     )
 
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(writer_row)
-    assert member.metadata is record.metadata is ctx.metadata  # The member shares the team's metadata dict.
+    assert comparable(member.to_dict()) == comparable(stored_as_owned(writer_row))
+    # The team's metadata stays on the team's record; the member's record stores none of it.
+    assert record.metadata is ctx.metadata
+    assert member.metadata is None
     assert store.records == [member.to_dict(), record.to_dict()]
     assert checker.requests == []
     # The member's input is the leader's task alone: no history, no conversation.
@@ -146,6 +150,41 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_complete
     assert isinstance(events[-1], RunFinished)
 
 
+class _RunMetadata(Protocol):
+    """The part of the run context a tool receives that ``room_of_the_turn`` reads."""
+
+    metadata: dict[str, Any] | None
+
+
+def room_of_the_turn(run_context: _RunMetadata) -> str:
+    """Return the room the turn's run metadata names.
+
+    Args:
+        run_context: The run's context, which the loop injects.
+
+    """
+    return str((run_context.metadata or {}).get("room_id"))
+
+
+async def test_a_member_s_tools_read_the_team_s_metadata_which_only_the_team_s_record_stores() -> None:
+    leader = scripted(
+        "leader-model",
+        _delegate("call-team-writer", "writer", "Name the room", metrics=usage(10, 1)),
+        answer("The writer named it.", usage(10, 1)),
+    )
+    writer = scripted("writer-model", calls(tool_call("room_of_the_turn", "call-room")), answer("Named."))
+    team = squad(leader, writer, scripted("checker-model"), writer_toolkits=[toolkit(room_of_the_turn)])
+    ctx = run_context("team-run", SQUAD, {"room_id": "!room:example.org"})
+    store = Store()
+
+    _, record = await collect(start_team(team, [Message(role="user", content="Which room?")], ctx=ctx, persist=store))
+
+    [member] = store.members
+    assert [tool.result for tool in member.tools or ()] == ["!room:example.org"]
+    assert member.metadata is None
+    assert record.metadata == {"room_id": "!room:example.org"}
+
+
 async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_an_error_row() -> None:
     team_row = golden_run("team_squad", SQUAD, "team-member-error")
     checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-000000000054")
@@ -164,9 +203,9 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
             start_team(squad(leader, scripted("writer-model"), checker), prompt(team_row), ctx=ctx, persist=store),
         )
 
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(checker_row)
+    assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
     assert (member.status, member.content) == (RunStatus.error, "Checker overloaded")
     assert record.tools is not None
     assert (record.tools[0].result, record.tools[0].is_error) == ("Checker overloaded", False)
@@ -205,9 +244,9 @@ async def test_a_member_approval_pauses_the_team_with_the_team_paused_rows() -> 
     )
 
     assert record.status is RunStatus.paused
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(checker_row)
+    assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
     assert record.member_responses == [member]
     assert record.requirements is not None
     [requirement] = record.requirements
@@ -245,9 +284,12 @@ async def test_a_streamed_collaborate_run_stores_the_panel_rows_and_joins_member
         ),
     )
 
-    assert comparable(record.to_dict()) == comparable(team_row)
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     members = store.members
-    assert [comparable(member.to_dict()) for member in members] == [comparable(writer_row), comparable(checker_row)]
+    assert [comparable(member.to_dict()) for member in members] == [
+        comparable(stored_as_owned(writer_row)),
+        comparable(stored_as_owned(checker_row)),
+    ]
     assert record.tools is not None
     assert record.tools[0].result == "Five is prime.Five is odd."
     streamed = {

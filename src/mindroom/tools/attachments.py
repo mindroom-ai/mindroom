@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     name="attachments",
     display_name="Attachments",
     description="Find files attached to a conversation and make workspace files available as attachments",
+    docs_url="https://docs.mindroom.chat/attachments/#the-attachments-tool",
     category=ToolCategory.PRODUCTIVITY,
     file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,

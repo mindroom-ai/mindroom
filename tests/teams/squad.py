@@ -177,6 +177,20 @@ def run_context(run_id: str, session_id: str, metadata: dict[str, Any] | None = 
     return RunContext(run_id=run_id, session=UnstoredSession(session_id), user_id=REQUESTER, metadata=metadata)
 
 
+def stored_as_owned(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a run row Agno stored as the owned runtime stores it: a member run holds none of the team's metadata.
+
+    Agno stored the team run's metadata on every member run; the owned runtime stores it on the team's row alone. A
+    team row's paused member runs ride along in ``member_responses`` and drop it too.
+    """
+    result = dict(row)
+    if row.get("parent_run_id") is not None:
+        result.pop("metadata", None)
+    if "member_responses" in row:
+        result["member_responses"] = [stored_as_owned(member) for member in row["member_responses"]]
+    return result
+
+
 def golden_metadata(team_row: dict[str, Any]) -> dict[str, Any]:
     """Return the run metadata the turn started with: the stored metadata minus what MindRoom added afterwards."""
     return {key: value for key, value in team_row["metadata"].items() if key != "io.mindroom.ai_run"}
@@ -279,8 +293,8 @@ def comparable(run: dict[str, Any]) -> dict[str, Any]:
 
     Prompt-role messages leave completed rows, as the store strips them; random ids become ``<id-n>`` in
     first-appearance order; every timestamp and duration becomes a sentinel, so its presence is compared but not its
-    value; a tool's timing keeps only which keys it recorded; the run metadata MindRoom adds after the turn
-    (``io.mindroom.ai_run``) goes, the rest of the metadata is compared.
+    value; the run metadata MindRoom adds after the turn (``io.mindroom.ai_run``) goes, the rest of the metadata is
+    compared.
     """
     text = json.dumps(_stored_shape(expected_run_dict(run)), sort_keys=True)
     ids: dict[str, str] = {}
@@ -319,22 +333,6 @@ def _with_clock_sentinels(run: dict[str, Any]) -> dict[str, Any]:
         # provider reported, so even its presence differs.
         metrics = _clocked(result["metrics"], frozenset({"duration"}))
         result["metrics"] = {key: value for key, value in metrics.items() if key != "time_to_first_token"}
-    if "tools" in result and result["tools"] is not None:
-        result["tools"] = [_tool_with_clock_sentinels(tool) for tool in result["tools"]]
-    if "requirements" in result and result["requirements"] is not None:
-        result["requirements"] = [
-            {
-                **_clocked(item, frozenset({"created_at"})),
-                "tool_execution": _tool_with_clock_sentinels(item["tool_execution"]),
-            }
-            for item in result["requirements"]
-        ]
     if "member_responses" in result:
         result["member_responses"] = [_with_clock_sentinels(item) for item in result["member_responses"]]
-    return result
-
-
-def _tool_with_clock_sentinels(tool: dict[str, Any]) -> dict[str, Any]:
-    result = _clocked(tool, frozenset({"created_at"}))
-    result["metrics"] = None if tool["metrics"] is None else sorted(tool["metrics"])
     return result

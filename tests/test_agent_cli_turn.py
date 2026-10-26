@@ -273,8 +273,8 @@ async def _call_receipt(owner: LiveTurnTools, function: str) -> dict:
     return await settled_receipt(owner, queued["call_id"])
 
 
-async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> None:
-    await owner.operation(
+async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> dict[str, object]:
+    return await owner.operation(
         window=cli_window(),
         operation=ToolCallOperation(
             operation="tools.call",
@@ -314,11 +314,16 @@ async def test_a_command_waits_for_the_cli_calls_it_left_running(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_path: Path) -> None:
-    """A person's approval is never cut short by the timeout of the command that asked for the call."""
+    """A person's approval is never cut short by the timeout of the command that asked for the call.
+
+    The call's receipt reads as waiting while the person decides.
+    """
     effects: list[str] = []
+    call_ids: list[str] = []
 
     async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
-        await _start_call(owner, "actions", "action", value="sent")
+        receipt = await _start_call(owner, "actions", "action", value="sent")
+        call_ids.append(str(receipt["call_id"]))
         # The CLI client reports the call as waiting and exits, well before the command's timeout.
         return "waiting"
 
@@ -333,6 +338,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
     catalog.store = create_state_storage("helper", tmp_path)
 
     async def decide_later(paused):
+        assert (await owner.get_call(call_ids[0]))["status"] == "waiting"
         # The person decides after the command's timeout has passed.
         await asyncio.sleep(0.6)
         requirement = paused.requirements[0]
@@ -357,6 +363,7 @@ async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_pat
             )
     assert result.content == "waiting"
     assert effects == ["sent"]
+    assert (await owner.get_call(call_ids[0]))["status"] == "completed"
     await owner.close()
 
 
@@ -1489,9 +1496,10 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             loaded.append(index)
 
             async def selected() -> str:
+                """Return the selected item."""
                 return "selected"
 
-            return _toolkit(f"tool{index}", selected)
+            return _toolkit(f"tool{index}", selected, instructions=f"Select with tool {index}.")
 
         catalog.add_deferred(DeferredAgentToolkit(f"tool{index}", f"Metadata {index}", factory))
     owner = live_turn_tools_for_test(
@@ -1524,7 +1532,13 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert loaded == []
     async with owner._window("describe-bash"):
         descriptor = await owner.operation(window="describe-bash", operation=operation)
-        assert descriptor["input_schema"]["properties"] == {}
+        assert descriptor == {
+            "toolkit": "tool12",
+            "function": "selected",
+            "description": "Return the selected item.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "instructions": ["Select with tool 12."],
+        }
         with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
             await owner.operation(
                 window="describe-bash",

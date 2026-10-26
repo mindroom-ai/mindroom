@@ -62,7 +62,7 @@ class TestResponderCandidateSelection:
                 },
                 teams={},
                 room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
 
@@ -270,7 +270,7 @@ class TestResponderCandidateSelection:
                     ),
                 },
                 room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
         runtime_paths = runtime_paths_for(config)
@@ -403,7 +403,7 @@ class TestResponderCandidateSelection:
                         access=ResponderAccessConfig(members_of_rooms=["project"]),
                     ),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
         runtime_paths = runtime_paths_for(config)
@@ -450,7 +450,7 @@ class TestResponderCandidateSelection:
                 },
                 teams={},
                 room_models={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
 

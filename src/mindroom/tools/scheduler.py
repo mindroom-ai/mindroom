@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     icon="Calendar",
     icon_color="text-emerald-500",
     dependencies=["agno"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/scheduling/#scheduler",
     function_names=(
         "cancel_schedule",
         "edit_schedule",

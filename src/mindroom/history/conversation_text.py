@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.agent_loop.tools import is_media_follow_up
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
@@ -92,7 +93,12 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
         content = message.content if isinstance(message.content, str) else ""
         if message.from_history:
             continue
-        mindroom_wrote = runtime_prompt or is_queued_notice_message(message) or is_compaction_summary(message)
+        mindroom_wrote = (
+            runtime_prompt
+            or is_queued_notice_message(message)
+            or is_compaction_summary(message)
+            or is_media_follow_up(message)
+        )
         if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(_prompt_utterances(message, content, requester, mindroom_wrote=mindroom_wrote))
         elif message.role == "assistant" and keeps_reply and (content.strip() or (agent_work and message.tool_calls)):

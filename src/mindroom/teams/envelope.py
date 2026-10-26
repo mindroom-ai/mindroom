@@ -2,8 +2,8 @@
 
 ``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
 turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply, its
-pause, and the text a stopped or failed blocking turn records render from the finished run's records, kept as main
-behaves: each member run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
+pause, and the text a stopped or failed blocking turn records render from the finished run's records: each member
+run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
 A streamed reply shows its trace through its chunks, keeps the configured member order, and adds each failed member
 run's reason when the team run ends, as a resumed reply does. ``run_prepared_team`` runs an OpenAI-compatible API
 team turn under the same leader hooks and storage.
@@ -737,8 +737,7 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord, *, blocking: bool) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, rendered into the document it shows.
 
-        A blocking pause renders its runs' records, kept as main behaves; a streamed one freezes the document its
-        events built.
+        A blocking pause renders its runs' records; a streamed one freezes the document its events built.
         """
         paused = paused_attempt_from_response(
             record,
@@ -784,9 +783,9 @@ class _TeamTurn:
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs, kept as main behaves; a streamed
-        # one records the document its events built and its failed member runs' reasons, in the configured order.
-        # The "No team response generated." fallback is display chrome, not replayable assistant text.
+        # its trace through its chunks. A blocking reply renders the finished runs (``format_team_response``); a
+        # streamed one records the document its events built and its failed member runs' reasons, in the configured
+        # order. The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
             body_text = format_team_response(record)
             leader_text = finished_run_text(record)

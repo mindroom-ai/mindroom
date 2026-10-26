@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Financial Datasets API",
     description="Comprehensive financial data API for stocks, financial statements, SEC filings, and cryptocurrency",
-    category=ToolCategory.DEVELOPMENT,  # From /tools/toolkits/others/ path
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses API key authentication
     icon="TrendingUp",  # Financial/trending icon
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # Only standard dependency needed
-    docs_url="https://docs.agno.com/tools/toolkits/others/financial_datasets",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#financial_datasets_api",
     function_names=(
         "get_balance_sheets",
         "get_cash_flow_statements",

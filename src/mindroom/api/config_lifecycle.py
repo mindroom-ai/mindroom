@@ -23,7 +23,7 @@ from mindroom.config.main import (
     Config,
     ConfigLoadUserError,
     ConfigRuntimeValidationError,
-    iter_config_validation_messages,
+    config_validation_issues,
     validate_loaded_config_source,
 )
 from mindroom.config.personal_agents import (
@@ -184,14 +184,9 @@ def require_api_state(api_app: FastAPI) -> ApiState:
 def _config_error_detail(
     exc: ConfigLoadUserError,
 ) -> list[dict[str, object]]:
-    """Return one shared API error payload for invalid current config."""
+    """Return the API error payload for an invalid config, with the messages every config surface shows."""
     return [
-        {
-            "loc": tuple(location.split(" → ")) if " → " in location else (location,),
-            "msg": message,
-            "type": "value_error",
-        }
-        for location, message in iter_config_validation_messages(exc)
+        {"loc": location, "msg": message, "type": "value_error"} for location, message in config_validation_issues(exc)
     ]
 
 
@@ -621,12 +616,10 @@ def _structured_write_errors(error_prefix: str) -> Iterator[None]:
         yield
     except HTTPException:
         raise
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors(include_context=False, include_input=False)) from e
     except _ConfigComposedFromIncludesError as e:
         raise _composed_from_includes_http_error(e) from e
-    except ConfigRuntimeValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors()) from e
+    except (ValidationError, ConfigRuntimeValidationError) as e:
+        raise HTTPException(status_code=422, detail=_config_error_detail(e)) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"{error_prefix}: {e!s}") from e
 

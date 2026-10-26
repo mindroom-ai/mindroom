@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="ModelsLabs",
     description="AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
-    category=ToolCategory.DEVELOPMENT,  # From docs URL: /tools/toolkits/others/
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses api_key parameter
     icon="Video",  # React icon for video generation
@@ -99,7 +99,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # Already in pyproject.toml
-    docs_url="https://docs.agno.com/tools/toolkits/others/models_labs",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#modelslabs",
     function_names=("generate_media",),
 )
 def modelslabs_tools() -> type[ModelsLabTools]:

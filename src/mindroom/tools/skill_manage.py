@@ -21,6 +21,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Skill Manage",
         description="Create and change the agent's workspace skills",
+        docs_url="https://docs.mindroom.chat/skills/#the-skill_manage-tool",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

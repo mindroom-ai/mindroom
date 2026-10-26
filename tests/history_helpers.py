@@ -90,10 +90,25 @@ if TYPE_CHECKING:
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
 
-_ALL_HISTORY_SETTINGS = ResolvedHistorySettings(
-    policy=HistoryPolicy(mode="all"),
-    max_tool_calls_from_history=None,
-)
+
+def replay_settings(
+    policy: HistoryPolicy | None = None,
+    *,
+    max_tool_calls_from_history: int | None = None,
+) -> ResolvedHistorySettings:
+    """Return the history settings of an entity that replays under ``policy`` (all history by default).
+
+    The compaction config is the built-in one, as for an entity whose config and defaults author none.
+    """
+    return ResolvedHistorySettings(
+        policy=policy or HistoryPolicy(mode="all"),
+        max_tool_calls_from_history=max_tool_calls_from_history,
+        compaction_config=CompactionConfig(),
+        has_authored_compaction_config=False,
+    )
+
+
+_ALL_HISTORY_SETTINGS = replay_settings()
 
 
 def checkpointed_answer(item: dict[str, object], basis: str, *, from_history: bool = False) -> Message:

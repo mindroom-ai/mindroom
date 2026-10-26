@@ -14,13 +14,14 @@ from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.request_messages import build_resume_request, scope_history_messages
 from mindroom.history.summary_input import build_summary_input, messages_for_runs
-from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.codec import run_from_row
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.history_helpers import replay_settings
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
@@ -145,7 +146,7 @@ def _compacted_run() -> RunRecord:
 
 
 def test_compaction_reads_stored_calls_as_a_request_replays_them() -> None:
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=2)
+    settings = replay_settings(max_tool_calls_from_history=2)
     run = _compacted_run()
     stored = copy.deepcopy(run.messages)
 
@@ -157,7 +158,7 @@ def test_compaction_reads_stored_calls_as_a_request_replays_them() -> None:
 
 
 def test_the_summary_input_leaves_out_placeholders_and_their_results() -> None:
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    settings = replay_settings()
 
     text, included = build_summary_input(
         previous_summary=None,

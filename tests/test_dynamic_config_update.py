@@ -91,7 +91,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
 
         # Create orchestrator and set initial config
@@ -119,7 +119,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         persist_entity_accounts(initial_config, orchestrator.runtime_paths)
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
@@ -169,7 +169,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/tool-policy-v1"],
         )
         updated_config = Config(
@@ -181,7 +181,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             plugins=["./plugins/tool-policy-v2"],
         )
 
@@ -243,7 +243,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
 
         # Test that parse_workflow_schedule correctly recognizes the new agent
@@ -295,7 +295,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             defaults={"enable_streaming": True},
         )
         updated_config = Config(
@@ -307,7 +307,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             defaults={"enable_streaming": False},
         )
 
@@ -347,7 +347,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             defaults={
                 "thread_summary_first_threshold": 5,
                 "thread_summary_subsequent_interval": 10,
@@ -362,7 +362,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             defaults={
                 "thread_summary_first_threshold": 1,
                 "thread_summary_subsequent_interval": 3,
@@ -406,7 +406,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             room_defaults={"join_policy": "invite", "listed": False},
         )
         updated_config = Config(
@@ -418,7 +418,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             room_defaults={"join_policy": "public", "listed": True},
         )
 
@@ -457,7 +457,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             room_defaults={"invite_users": []},
         )
         updated_config = Config(
@@ -470,7 +470,7 @@ class TestDynamicConfigUpdate:
                     "access": {"members_of_rooms": ["lobby"]},
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             room_defaults={"invite_users": ["@alice:example.com"]},
         )
 
@@ -512,13 +512,13 @@ class TestDynamicConfigUpdate:
         initial_config = Config(
             agents={"general": agent},
             rooms={"lobby": {"display_name": "Lobby"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             matrix_space={"enabled": False},
         )
         updated_config = Config(
             agents={"general": agent},
             rooms={"lobby": {"display_name": "Lobby"}},
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             matrix_space={"enabled": True},
         )
         orchestrator = orchestrator_factory()
@@ -580,7 +580,7 @@ class TestDynamicConfigUpdate:
                     "access": {"members_of_rooms": ["lobby"]},
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         updated_config = Config(
             agents={
@@ -592,7 +592,7 @@ class TestDynamicConfigUpdate:
                     "access": {"members_of_rooms": ["lobby"]},
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         orchestrator = orchestrator_factory()
         orchestrator.config = initial_config
@@ -657,7 +657,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         updated_config = Config(
             agents={
@@ -668,7 +668,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             mindroom_user={"username": "mindroom_user", "display_name": "Alice Internal"},
         )
 
@@ -711,7 +711,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
         )
         updated_config = Config(
             agents={
@@ -722,7 +722,7 @@ class TestDynamicConfigUpdate:
                     "rooms": ["lobby"],
                 },
             },
-            models={"default": {"provider": "test", "id": "test-model"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
             mindroom_user={"username": "alice_internal", "display_name": "Alice Internal"},
         )
 

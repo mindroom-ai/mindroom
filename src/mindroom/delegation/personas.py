@@ -273,8 +273,7 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
         delegation_depth=delegation_depth,
         include_matrix_room_runtime_tools=True,
     )
-    # A preset has no functions of its own; its member toolkits are listed by their own names.
-    return [entry.name for entry in surface.runtime_tool_configs if not config.is_tool_preset(entry.name)]
+    return surface.toolkit_names(config)
 
 
 def caller_skill_names(

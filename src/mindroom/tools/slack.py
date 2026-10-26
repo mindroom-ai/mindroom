@@ -166,7 +166,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["slack-sdk"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/slack",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#slack",
     function_names=(
         "download_file",
         "get_channel_history",

@@ -52,7 +52,7 @@ def _agent_config(tmp_path: Path) -> Config:
     config = bind_runtime_paths(
         Config(
             agents={"research": AgentConfig(display_name="Research")},
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
         test_runtime_paths(tmp_path),
     )

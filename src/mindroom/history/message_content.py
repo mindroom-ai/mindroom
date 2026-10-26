@@ -111,11 +111,9 @@ def render_message_content(message: Message) -> str:
     content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        return "\n".join(stable_serialize(part) for part in content)
     if content is None:
         return ""
-    return stable_serialize(content)
+    return "\n".join(stable_serialize(part) for part in content)
 
 
 def with_tool_calls(message: Message, calls: list[dict[str, Any]]) -> Message | None:

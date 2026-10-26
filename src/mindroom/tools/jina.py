@@ -87,7 +87,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx", "pydantic"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/jina_reader",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#jina",
     function_names=("read_url", "search_query"),
 )
 def jina_tools() -> type[JinaReaderTools]:

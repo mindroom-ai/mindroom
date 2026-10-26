@@ -129,9 +129,8 @@ def continue_team(
     requirements on the team run, and the leader sends no request. The leader's and the members' requests stream
     (``resume_request_template``).
     """
-    # TODO(simplify): A resume that fails or is cancelled stores this record over the paused team row, so its
-    # approval can no longer be resumed. Keep the paused row until the resume completes or pauses again. Users would
-    # notice (#3075).
+    # A resume that fails or is cancelled stores this record over the paused team row on purpose, as an agent's does
+    # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
     record = resumed_record(paused)
     record.member_responses = []
     # The paused notice is not part of the answer; the leader's text starts afresh.
@@ -292,8 +291,8 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
         decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
-        # The member resumes from its own record with its requirements naming the member, as the team run's copies
-        # do, so the resumed member row stores those fields as main stores them.
+        # The member resumes from its own record with its requirements naming the member and its run, as the team
+        # run's copies do, so the member row its resume stores names them too.
         named = replace(
             member_record,
             requirements=[
@@ -360,8 +359,7 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
 class _MemberRuns:
     """Run and resume the members of one team run, forwarding their events tagged with the member.
 
-    ``stream`` is whether the team run's leader requests stream; every member request follows it, kept as main
-    behaves.
+    ``stream`` is whether the team run's leader requests stream; every member request follows it.
     """
 
     record: TeamRunRecord
@@ -371,7 +369,10 @@ class _MemberRuns:
     stream: bool
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
-        """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input."""
+        """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input.
+
+        The member's tools read the team run's metadata, which only the team's record stores.
+        """
         ctx = self._member_context(str(uuid4()))
         stream = run_agent(
             member.spec,

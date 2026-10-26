@@ -128,6 +128,28 @@ async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     assert not running_api._owners
 
 
+@pytest.mark.asyncio
+async def test_a_shell_a_preset_brings_in_calls_the_preset_s_tools_through_mindroom_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running_api: TurnToolRegistry,  # noqa: F811 - pytest fixture
+) -> None:
+    """The shell `openclaw_compat` brings in gets the CLI, which reaches the preset's tools under their own names."""
+    runtime = _helper_runtime(tmp_path, running_api)
+    runtime.config.agents["helper"].tools = ["openclaw_compat"]
+    provider = ScriptedProvider()
+    provider.install(monkeypatch)
+    command = _call_and_wait("00000000-0000-4000-8000-000000000002", "attachments", "list_attachments", {})
+    provider.steps = [[("run_shell_command", {"args": command})], "done"]
+
+    assert "done" in await _respond(runtime)
+
+    assert STANDARD_CLI_NOTE in str(provider.requests[0].messages)
+    output = _tool_output(provider)
+    assert '"status":"completed"' in output.replace(" ", ""), output
+    assert "missing_attachment_ids" in output, output
+
+
 def _call_and_wait(call_id: str, toolkit: str, function: str, arguments: dict[str, object]) -> str:
     return (
         f"mindroom-agent tools call {toolkit} {function} --call-id {call_id} --json '{json.dumps(arguments)}'; "

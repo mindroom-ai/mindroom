@@ -70,7 +70,14 @@ async def test_a_completed_run_is_stored_once_before_it_is_announced() -> None:
     )
 
     events, record = await collect(
-        run_agent(spec(model, toolkit(add)), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST),
+        run_agent(
+            spec(model, toolkit(add)),
+            _prompt(),
+            ctx=context(),
+            persist=store,
+            request_template=EMPTY_REQUEST,
+            metadata={"room_id": "!r"},
+        ),
     )
 
     assert isinstance(events[-1], RunFinished)

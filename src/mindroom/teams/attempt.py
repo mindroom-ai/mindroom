@@ -136,7 +136,7 @@ class TeamAttempt:
         """Return the text the turn records when this attempt is stopped or fails.
 
         A streamed attempt records its reply's text (``TeamReplyText``); a blocking one its stored runs' document,
-        stripped, or nothing before the run stored a record, kept as main behaves. A stopped leader that wrote nothing
+        stripped, or nothing before the run stored a record. A stopped leader that wrote nothing
         contributes nothing; a failed one contributes the reason its run recorded, credentials redacted.
         """
         if self.stream:

@@ -141,7 +141,7 @@ def mock_config() -> Config:
             teams={
                 "ops": TeamConfig(display_name="Ops Team", role="Operations team", agents=["research", "analyst"]),
             },
-            models={"default": ModelConfig(provider="test", id="test-model")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
         ),
     )
     persist_entity_accounts(
@@ -603,7 +603,7 @@ class TestExecuteScheduledWorkflow:
                     "research": AgentConfig(display_name="Research"),
                     "analyst": AgentConfig(display_name="Analyst"),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
         persist_entity_accounts(
@@ -664,7 +664,7 @@ class TestExecuteScheduledWorkflow:
                     "research": AgentConfig(display_name="Research"),
                     "analyst": AgentConfig(display_name="Analyst"),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         )
         persist_entity_accounts(

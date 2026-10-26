@@ -50,7 +50,6 @@ from mindroom.history.types import (
     HistoryPolicy,
     HistoryScope,
     PreparedHistoryState,
-    ResolvedHistorySettings,
     ResolvedReplayPlan,
 )
 from mindroom.llm.messages import Message
@@ -67,6 +66,7 @@ from tests.conftest import (
     make_visible_message,
 )
 from tests.fakes.scripted_model import ScriptedModel
+from tests.history_helpers import replay_settings
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -180,11 +180,11 @@ def _tool_trace_content() -> dict[str, object]:
 
 
 def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="runs", limit=1),
-        max_tool_calls_from_history=None,
-    )
     compaction_config = CompactionConfig(enabled=False, reserve_tokens=100)
+    history_settings = replace(
+        replay_settings(HistoryPolicy(mode="runs", limit=1)),
+        compaction_config=compaction_config,
+    )
     execution_plan = resolve_history_execution_plan(
         config=_config(),
         compaction_config=compaction_config,
@@ -216,8 +216,6 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
         session=session,
         resolved_inputs=HistoryPreparationInputs(
             history_settings=history_settings,
-            compaction_config=compaction_config,
-            has_authored_compaction_config=False,
             active_model_name="test-model",
             active_context_window=10_000,
             execution_plan=execution_plan,
@@ -316,6 +314,47 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
     )
 
     assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 4_000
+
+
+@pytest.mark.asyncio
+async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team thread with no session of its own fills at most the team's replay window, less its reserve."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = Config.model_validate(
+        {
+            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "defaults": {
+                "tools": [],
+                "compaction": {"enabled": False, "reserve_tokens": 500, "replay_window_tokens": 4_000},
+            },
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 6_000}},
+        },
+    )
+    config = bind_runtime_paths(config, runtime_paths)
+    prepare_common = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
+
+    await _prepare_bound_team_execution_context(
+        make_turn_context("test_agent"),
+        scope_context=None,
+        member_names=["test_agent"],
+        leader_system_message=Message(role="system", content="You lead the team."),
+        leader_tools=(),
+        model=ScriptedModel([]),
+        prompt="Current request",
+        thread_history=None,
+        runtime_paths=runtime_paths,
+        config=config,
+        team_name=None,
+        history_settings=config.resolve_entity(None).history_settings,
+        active_model_name="default",
+        active_context_window=6_000,
+    )
+
+    assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 3_500
 
 
 @pytest.mark.asyncio

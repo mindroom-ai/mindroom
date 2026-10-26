@@ -357,7 +357,8 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  #
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
     """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
-    # A tool without a description sends an empty one, kept as main behaves.
+    # TODO(simplify): a tool without a description sends an empty one. Leave it out, as Chat, Responses, and Ollama do
+    # (#3113). Models would notice: Gemini tool declarations change for tools without a description.
     declarations = [
         _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
@@ -546,7 +547,7 @@ def convert_schema(  # noqa: C901, PLR0911, PLR0912
 
 def _property_schema(value: Mapping[str, Any], root: Mapping[str, Any], visited: frozenset[str]) -> dict[str, Any]:
     value_type = value.get("type", "")
-    # A ["<type>", "null"] list type is sent as its first entry, kept as main behaves.
+    # A ["<type>", "null"] list type is sent as its first entry, marked nullable.
     nullable = isinstance(value_type, list) and "null" in value_type
     converted = convert_schema({**value, "type": value_type[0]} if nullable else value, root, visited)
     if converted is None:

@@ -107,7 +107,10 @@ class OllamaProvider:
                 response = await client.chat(model=model, messages=messages, **chat_kwargs)
                 first_output_at = time.monotonic()
                 _read_chunk(reply, cast("ChatResponse", response))
-                # Only a whole reply with an opening ``<think>`` tag has its reasoning split out, kept as main behaves.
+                # TODO(simplify): only a blocking reply with an opening ``<think>`` tag has its reasoning split out; a
+                # streamed reply keeps the tag in its text. Read Ollama's native ``thinking`` field into reasoning in
+                # both modes (#3113). Users would notice: streamed Ollama replies would stop showing their ``<think>``
+                # text, and stored runs would record it as reasoning.
                 if "<think>" in reply.content:
                     reply.reasoning, reply.content = split_thinking(reply.content)
         except Exception as error:

@@ -146,7 +146,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     # Legacy format: a stored Responses reply, an assistant message whose ``provider_data`` records a ``response_id``
     # but no ``mindroom_system_sha256`` and whose ``mindroom_response_stored`` is not false. An unstored reply records
     # no digest by design and is not legacy.
-    # Last legacy release: v2026.10.523; replacement: unreleased, which records the digest on every stored response.
+    # Last legacy release: v2026.10.525; replacement: v2026.10.526, which records the digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once, with the current system text, and continues the response it stores from then on.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
@@ -519,8 +519,8 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. ``text_as_reasoning`` also records the output text in the stored reasoning, in
-    event order with any summary text, kept as main behaves. ``provider`` is the metrics provider name a failed
-    response's error carries.
+    event order with any summary text (see the TODO in ``responses.py``). ``provider`` is the metrics provider name a
+    failed response's error carries.
     """
 
     provider: str
@@ -647,8 +647,8 @@ def parse_response(
 ) -> ResponsesTurnParts:
     """Read one non-streamed response into a finished turn; ``provider`` is the metrics provider name of its error.
 
-    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary, kept as
-    main behaves.
+    ``text_as_reasoning`` stores the output text as the reasoning of a response without a reasoning summary (see the
+    TODO in ``responses.py``).
     """
     if response.error:
         raise _response_error(response.error.code, response.error.message, provider=provider)
