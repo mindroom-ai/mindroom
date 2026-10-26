@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import time
 from bisect import bisect_right
 from contextlib import ExitStack, closing
 from dataclasses import dataclass, field
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
 
 logger = get_logger(__name__)
 
@@ -200,7 +201,7 @@ class _SummaryRow:
 
     id: int
     scope_key: str
-    after_run_index: int
+    after_run_index: float
     summary: str | None
     legacy: int
     event_ids: str
@@ -239,7 +240,7 @@ class _Places:
         self.seqs.append(seq)
         self.run_ids.add(run.record.run_id)
 
-    def through(self, after_run_index: int) -> int:
+    def through(self, after_run_index: float) -> int:
         """Return the largest ``seq`` of a run sorted at or before ``after_run_index``, else 0."""
         position = bisect_right(self.indexes, after_run_index)
         return self.seqs[position - 1] if position else 0
@@ -251,16 +252,40 @@ def _summary_rows(
     session_id: str,
     condition: str = "",
 ) -> Iterator[_SummaryRow]:
-    """Read session ``session_id``'s summary rows that meet ``condition`` in ``id`` order, one segment at a time."""
+    """Read session ``session_id``'s summary rows that meet ``condition`` in ``id`` order, one segment at a time.
+
+    Worker code can write the table, so a value no reader of the converted row could use is replaced: a position that
+    is not a number sorts after every run, where SQLite sorted it for a load; event ids keep only their text entries;
+    and a creation time that is not whole seconds a datetime holds becomes the conversion's.
+    """
     rows = connection.execute(
         "SELECT id, scope_key, after_run_index, summary, legacy, event_ids, seen_event_ids, created_at, "  # noqa: S608
         f"segment_run_id, CAST(segment AS TEXT) FROM {quote_identifier(names.summaries)} WHERE session_id = ? "
         f"{condition} ORDER BY id",
         (session_id,),
     )
-    for *columns, segment in rows:
+    now = int(time.time())
+    for row_id, scope_key, after_run_index, summary, legacy, event_ids, seen, created_at, run_id, segment in rows:
         decoded = _decoded(json.loads, segment) if segment is not None else None
-        yield _SummaryRow(*columns, segment=cast("dict[str, Any]", decoded) if isinstance(decoded, dict) else None)
+        yield _SummaryRow(
+            row_id,
+            scope_key,
+            after_run_index if isinstance(after_run_index, int | float) else math.inf,
+            summary,
+            legacy,
+            _text_event_ids(event_ids),
+            _text_event_ids(seen),
+            stored_timestamp(created_at, now),
+            run_id,
+            cast("dict[str, Any]", decoded) if isinstance(decoded, dict) else None,
+        )
+
+
+def _text_event_ids(raw: object) -> str:
+    """Return a summary row's stored event ids as a JSON array of their text entries, the only ones MindRoom wrote."""
+    decoded = _decoded(json.loads, raw) if isinstance(raw, str) else None
+    event_ids = decoded if isinstance(decoded, list) else []
+    return json.dumps([event_id for event_id in event_ids if isinstance(event_id, str)])
 
 
 def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str) -> bool:
@@ -279,14 +304,16 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row and
 # was not removed gets a cancelled one right after its latest summary row, with the fold's metadata and members. Workflow
 # rows and rows that do not decode are left out, the latter logged by id; the backup keeps both. Worker code can write
-# the run data, so an embedded or folded member whose run id is not text is left out too, and a member's creation time
-# that is not positive whole seconds becomes its team run row's or its fold's.
+# the run data, so an embedded or folded member whose run id is not text is left out too, a member's creation time
+# that is not whole seconds a datetime holds becomes its team run row's or its fold's, and each message and tool keeps
+# its call ids only as text or none (`_use_text_call_ids`).
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
 # ::test_fold_runs_without_a_row_sort_by_their_latest_fold,
 # ::test_workflow_rows_and_rows_that_do_not_decode_are_left_out,
 # ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, ::test_members_with_unusable_values_convert_alone,
+# ::test_converted_call_ids_are_text_or_none_so_folded_calls_read,
 # tests/storage_oracle/test_migrated.py::test_a_converted_input_shows_its_recording_but_for_named_masks, and
 # tests/storage_oracle/test_migrated.py::test_a_fold_run_a_retirement_removed_converts_without_a_row.
 def _convert_runs(
@@ -439,6 +466,7 @@ def _write_run(
     seq: int,
     path: Path,
 ) -> None:
+    _use_text_call_ids(run.record.messages, run.record.tools or ())
     data = run.record.to_dict()
     if isinstance(metadata := data.get("metadata"), dict):
         data["metadata"] = _current_delegation_snapshot(path, run.record.run_id, metadata)
@@ -502,9 +530,14 @@ def _current_delegation_snapshot(path: Path, run_id: str, metadata: dict[str, An
 # Handling: Each row keeps its id, text, legacy flag, event sets, and time; `through` is the largest `seq` of a run
 # sorted at or before its `after_run_index`, else 0, which keeps every run-to-row and row-to-row order; a fold's row
 # names its run in `fold_run_id` and keeps the answered and seen ids of the segment's metadata as its provenance.
-# Inserting the ids sets the id sequence past the largest; `summary_model` is dropped.
+# Inserting the ids sets the id sequence past the largest; `summary_model` is dropped. Worker code can write the table,
+# so a position that is not a number sorts after every run, as SQLite sorted it for a load, event ids keep only their
+# text entries, and a creation time that is not whole seconds a datetime holds becomes the conversion's.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_summary_rows_keep_their_order_against_the_runs,
-# ::test_summary_ids_are_never_handed_out_again, and ::test_a_fold_row_keeps_its_runs_provenance.
+# ::test_summary_ids_are_never_handed_out_again, ::test_a_fold_row_keeps_its_runs_provenance,
+# ::test_a_summary_row_whose_position_is_not_a_number_covers_every_run_as_a_load_read_it,
+# ::test_summary_event_ids_keep_only_their_text_entries, and
+# ::test_a_summary_rows_unusable_creation_time_becomes_the_conversions.
 def _convert_summary(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -546,11 +579,12 @@ def _convert_summary(
 # Handling: In row order, each segment message the run's row lacks becomes a message row folded by that row, and one it
 # holds gains the flag; a tool execution no folded message names becomes a folded tool-result message with its call
 # id; the segment's members gain the flag on their rows, so the run's folded tool calls stay what they were. A segment
-# whose run is not this session's converted row, or that does not decode, flags nothing, and a call id that is not text
-# names no call.
+# whose run is not this session's converted row, or that does not decode, flags nothing; its messages keep call ids
+# only as text or none, as run messages do.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_segment_flags_what_its_fold_took,
 # ::test_a_segment_tool_no_folded_message_names_stays_folded, ::test_a_segment_whose_run_is_not_converted_flags_nothing,
-# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, and ::test_segment_messages_name_only_text_call_ids.
+# ::test_rows_worker_code_wrote_in_odd_shapes_convert_alone, ::test_segment_messages_name_only_text_call_ids, and
+# ::test_converted_call_ids_are_text_or_none_so_folded_calls_read.
 def _convert_segment(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -562,8 +596,11 @@ def _convert_segment(
     if run_id is None or run_id not in places.run_ids:
         return
     decoded = (_decoded(Message.from_dict, message) for message in row.segment_list("messages"))
-    messages = [message.to_dict() for message in decoded if message is not None]
-    named = _named_call_ids(messages)
+    folded = [message for message in decoded if message is not None]
+    _use_text_call_ids(folded)
+    named = {call.get("id") for message in folded for call in message.tool_calls or ()}
+    named |= {message.tool_call_id for message in folded}
+    messages = [message.to_dict() for message in folded]
     for tool in row.segment_list("tools"):
         call_id = tool.get("tool_call_id")
         if isinstance(call_id, str) and call_id not in named:
@@ -580,14 +617,22 @@ def _convert_segment(
     flag_folded(connection, names, session_id, run_id, messages, member_ids, row.id)
 
 
-def _named_call_ids(messages: Iterable[Mapping[str, Any]]) -> set[str]:
-    """Return the tool call ids message dicts name, as calls or as results; ids that are not text name none."""
-    named: list[object] = []
+def _use_text_call_ids(messages: Iterable[Message], tools: Iterable[ToolExecution] = ()) -> None:
+    """Keep the decoded messages' and tools' call ids only as text or None, as MindRoom wrote them.
+
+    Worker code can write run data, so a message's tool calls keep only their objects, and a call id of another type
+    becomes None; every reader can then hash and compare the ids.
+    """
     for message in messages:
-        calls = message.get("tool_calls")
-        named += [call.get("id") for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
-        named.append(message.get("tool_call_id"))
-    return {call_id for call_id in named if isinstance(call_id, str)}
+        calls = message.tool_calls if isinstance(message.tool_calls, list) else []
+        message.tool_calls = [_with_text_id(call) for call in calls if isinstance(call, dict)]
+        message.tool_call_id = message.tool_call_id if isinstance(message.tool_call_id, str) else None
+    for tool in tools:
+        tool.tool_call_id = tool.tool_call_id if isinstance(tool.tool_call_id, str) else None
+
+
+def _with_text_id(call: dict[str, Any]) -> dict[str, Any]:
+    return call if isinstance(call.get("id"), str | None) else {**call, "id": None}
 
 
 def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> Record | None:

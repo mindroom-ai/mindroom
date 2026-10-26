@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.usage.storage import quote_identifier
@@ -43,8 +44,8 @@ def decode_session_json(raw_value: object) -> object:
 # that has no row yet becomes a run row, the session's rows are renumbered in the order Agno's merge read them, and the
 # blob is cleared, in the conversion's write transaction, so the runs convert in the order a read gave them.
 # Entries without a string run id are dropped, as no read could address them. Worker code can write the blob, so a
-# column value Agno never wrote, one that is not text or a creation time that is not positive whole seconds, is left
-# out of the row (the creation time becomes the conversion's), and no entry fails the conversion.
+# column value Agno never wrote, one that is not text or a creation time that is not whole seconds a datetime holds, is
+# left out of the row (the creation time becomes the conversion's), and no entry fails the conversion.
 # Coverage: tests/session_storage/test_legacy_agno2_runs.py,
 # tests/session_storage/test_factories.py::test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order, and
 # tests/test_legacy_usage_storage.py::test_a_blob_run_with_an_unusable_timestamp_keeps_its_usage.
@@ -141,13 +142,18 @@ def insert_run_entry(
     )
 
 
+# The last second a datetime can hold, at the end of year 9999 UTC.
+_LAST_SECOND = int(datetime.max.replace(microsecond=0, tzinfo=UTC).timestamp())
+
+
 def stored_timestamp(value: object, default: int) -> int:
-    """Return ``value``, a creation time read from stored run data, or ``default`` when it is none MindRoom wrote.
+    """Return ``value``, a creation time read from stored data, or ``default`` when it is none MindRoom wrote.
 
     MindRoom wrote whole seconds since the epoch. Worker code can write session data, so the value can be anything JSON
-    holds: text, NaN, a fraction, or a number SQLite cannot store gives ``default``.
+    or SQLite holds: text, NaN, a fraction, or a number past what a datetime holds, which no reader could use, gives
+    ``default``.
     """
-    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value < 2**63 else default
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= _LAST_SECOND else default
 
 
 def _text(value: object) -> str | None:

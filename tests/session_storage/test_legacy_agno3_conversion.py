@@ -22,7 +22,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
-from mindroom.history.summary_rows import folded_tool_call_ids
+from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage import legacy_agno3_conversion
@@ -183,6 +183,12 @@ def _insert_summary(
                 raw_segment if segment is None else json.dumps(segment),
             ),
         )
+
+
+def _set_summary_column(database: Path, row_id: int, column: str, value: object) -> None:
+    """Store ``value`` in summary row ``row_id``'s ``column`` as worker code could, whatever its type."""
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute(f'UPDATE "code_sessions_summaries" SET {column} = ? WHERE id = ?', (value, row_id))  # noqa: S608
 
 
 def _segment(
@@ -574,6 +580,124 @@ def test_segment_messages_name_only_text_call_ids(tmp_path: Path, calls: object)
     assert ("live:1:call", 1) in rows
     assert ("live:1:c0", 1) not in rows
     assert {("live.odd", 1), ("live.t0", 1)} <= set(rows)
+
+
+_ODD_CALLS = {
+    "nan": (math.nan, None),
+    "number": (5, None),
+    "text": ("call", None),
+    "object": ({"id": "call"}, None),
+    "list-of-non-objects": ([1, "call"], None),
+    "object-id": ([{"id": {"nested": 1}}], [{"id": None}]),
+    "list-id": ([{"id": ["call"], "type": "function"}], [{"id": None, "type": "function"}]),
+}
+
+
+@pytest.mark.parametrize("odd_id", [math.nan, 5, {"id": "c9"}, ["c9"]], ids=["nan", "number", "object", "list"])
+@pytest.mark.parametrize(("odd", "usable"), list(_ODD_CALLS.values()), ids=list(_ODD_CALLS))
+def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
+    tmp_path: Path,
+    odd: object,
+    usable: object,
+    odd_id: object,
+) -> None:
+    """Call ids worker code wrote in other shapes convert as text or none in run, folded, and member rows alike.
+
+    So the run's folded calls read; tool calls keep only their objects, and well-formed messages are stored as written.
+    """
+    database = _agno_database(tmp_path)
+    odd_message = {"id": "live.odd", "role": "assistant", "content": "x", "tool_calls": odd, "tool_call_id": odd_id}
+    live = _run("live", status=RunStatus.paused).to_dict()
+    live["messages"].append(odd_message)
+    _insert_run(database, live, run_index=0)
+    tools = [{"tool_call_id": odd_id}, {"tool_call_id": "m.c0"}]
+    member = _run("member", parent_run_id="live").to_dict() | {"tools": tools}
+    _insert_run(database, member, run_index=1)
+    result = Message(role="tool", content="result", id="live.t0", tool_call_id="c0", created_at=100)
+    segment = {
+        "metadata": {},
+        "messages": [{**odd_message, "id": "live.f0"}, result.to_dict()],
+        "member_responses": [{"run_id": "member"}],
+    }
+    _insert_summary(database, 1, -1, segment_run_id="live", segment=segment)
+
+    store = _converted(database)
+
+    assert folded_tool_call_ids(store, session_id=_SESSION, run_id="live") == {"c0", "m.c0"}
+    stored = dict(_query(database, "SELECT message_id, data FROM \"code_sessions_log_messages\" WHERE run_id = 'live'"))
+    for message_id in ("live.odd", "live.f0"):
+        message = json.loads(stored[message_id])
+        assert (message.get("tool_calls"), message.get("tool_call_id")) == (usable, None)
+    assert stored["live.t0"] == json.dumps(result.to_dict())
+    [(member_tools,)] = _query(database, "SELECT tools FROM \"code_sessions_log_runs\" WHERE run_id = 'member'")
+    assert [tool["tool_call_id"] for tool in json.loads(member_tools)] == [None, "m.c0"]
+
+
+@pytest.mark.parametrize("position", ["later", b"\x01"], ids=["text", "blob"])
+def test_a_summary_row_whose_position_is_not_a_number_covers_every_run_as_a_load_read_it(
+    tmp_path: Path,
+    position: object,
+) -> None:
+    """SQLite sorts text and blobs after every number, so a load read such a row after every run; it converts so."""
+    database = _agno_database(tmp_path)
+    for index in range(2):
+        _insert_run(database, _run(f"r{index}"), run_index=index)
+    _insert_summary(database, 1, 0)
+    _insert_summary(database, 2, 0)
+    _set_summary_column(database, 2, "after_run_index", position)
+
+    store = _converted(database)
+
+    assert _query(database, 'SELECT id, through FROM "code_sessions_log_summaries" ORDER BY id') == [(1, 1), (2, 2)]
+    assert _loaded_ids(store) == []
+
+
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [("{not json", []), ('{"$e": "$e"}', []), ("5", []), ('[1, "$e", {"id": "$f"}, ["$g"]]', ["$e"])],
+    ids=["not-json", "object", "number", "mixed-list"],
+)
+def test_summary_event_ids_keep_only_their_text_entries(tmp_path: Path, raw: str, kept: list[str]) -> None:
+    """Event ids worker code wrote as anything but a JSON array of text keep only their text entries, so the scope reads.
+
+    A redaction's and a seen-id read's event sets, the rows a cut reads, and a reply linked to a covered run all work.
+    """
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    _insert_summary(database, 1, 0)
+    for column in ("event_ids", "seen_event_ids"):
+        _set_summary_column(database, 1, column, raw)
+
+    store = _converted(database)
+
+    assert _query(database, 'SELECT event_ids, seen_event_ids FROM "code_sessions_log_summaries"') == [
+        (json.dumps(kept), json.dumps(kept)),
+    ]
+    for kind in ("all", "seen"):
+        assert history_event_ids(store, session_id=_SESSION, scope_key="agent:code", kind=kind) == set(kept)
+    assert legacy_event_ids(store, session_id=_SESSION, scope_key="agent:code") is None
+    assert store.patch_run_metadata(_SESSION, "r0", {constants.MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: "$reply"})
+    assert "$reply" in history_event_ids(store, session_id=_SESSION, scope_key="agent:code", kind="all")
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    ["yesterday", math.inf, 1.5, 10**12],
+    ids=["text", "infinity", "fraction", "after-year-9999"],
+)
+def test_a_summary_rows_unusable_creation_time_becomes_the_conversions(tmp_path: Path, created_at: object) -> None:
+    """A summary row's time that is not whole seconds a datetime holds becomes the conversion's, so its session loads."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    _insert_summary(database, 1, 0)
+    _set_summary_column(database, 1, "created_at", created_at)
+    started = int(time.time())
+
+    store = _converted(database)
+
+    [(stored,)] = _query(database, 'SELECT created_at FROM "code_sessions_log_summaries"')
+    assert started <= stored <= time.time()
+    assert _loaded_ids(store) == []
 
 
 def test_workflow_rows_and_rows_that_do_not_decode_are_left_out(tmp_path: Path) -> None:
