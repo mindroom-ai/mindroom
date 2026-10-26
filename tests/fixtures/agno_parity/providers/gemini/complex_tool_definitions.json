@@ -268,6 +268,11 @@
   "parsed": {
     "message": {
       "provider_data": {
+        "gemini_parts": [
+          {
+            "function_call_id": "parity_event"
+          }
+        ],
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"

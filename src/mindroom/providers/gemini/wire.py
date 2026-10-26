@@ -53,6 +53,8 @@ logger = get_logger(__name__)
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
+# ``Message.provider_data`` key of a Gemini reply's parts in arrival order (``reply_provider_data``).
+_GEMINI_PARTS_KEY = "gemini_parts"
 _FORMAT_TO_MIME = {
     "png": "image/png",
     "jpeg": "image/jpeg",
@@ -169,8 +171,15 @@ def _is_tool_result(message: Message) -> bool:
 
 
 def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
-    """Return the text, function call, and function response parts of one message."""
+    """Return the text, function call, and function response parts of one message.
+
+    A model message that stored its parts (``reply_provider_data``) replays them in their order, each text part with
+    its own signature.
+    """
     content = message.content
+    stored = (message.provider_data or {}).get(_GEMINI_PARTS_KEY) if role == "model" else None
+    if isinstance(stored, list):
+        return _stored_parts(stored, message.tool_calls or [])
     if role == "model" and message.tool_calls:
         parts = [] if content is None else [_text_part(str(content), message.provider_data)]
         parts.extend(_function_call_part(call) for call in message.tool_calls)
@@ -202,6 +211,24 @@ def _provider_id(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return a stored reply's parts in order; a call the parts do not name follows them."""
+    calls = {call.get("id"): call for call in tool_calls}
+    parts: list[dict[str, Any]] = []
+    for entry in stored:
+        if isinstance(entry, dict) and isinstance(entry.get("text"), str):
+            parts.append(_text_part(entry["text"], entry))
+        elif isinstance(entry, dict) and (call := calls.pop(entry.get("function_call_id"), None)) is not None:
+            parts.append(_function_call_part(call))
+    return [*parts, *(_function_call_part(call) for call in calls.values())]
+
+
+# LEGACY_COMPAT: Gemini replies stored with one message-level thought signature.
+# Legacy format: a stored Gemini assistant message whose ``provider_data`` holds ``thought_signature`` and no
+# ``gemini_parts``: the reply's text parts joined into ``content`` and the last signed text part's signature.
+# Last legacy release: v2026.10.552 wrote this shape; the release after it stores ``gemini_parts``.
+# Handling: such a message replays as one text part carrying that signature, then its calls, as it did.
+# Coverage: tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_replays_a_reply_in_the_order_its_parts_arrived
 def _text_part(text: str, provider_data: Mapping[str, Any] | None) -> dict[str, Any]:
     part: dict[str, Any] = {"text": text}
     if provider_data and "thought_signature" in provider_data:
@@ -428,12 +455,17 @@ def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
 
 @dataclass(slots=True)
 class GeminiReply:
-    """What one streamed Gemini reply produced so far."""
+    """What one streamed Gemini reply produced so far.
+
+    ``parts`` holds the reply's text and function calls in the order they arrived: a text part as ``{"text"}`` with
+    the ``thought_signature`` Gemini signed it with, a function call as ``{"function_call_id"}``. Streamed text joins
+    the open text part until a signature or a call closes it.
+    """
 
     content: str = ""
     reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    thought_signature: str | None = None
+    parts: list[dict[str, str]] = field(default_factory=list)
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
     prompt_blocked: bool = False
@@ -502,8 +534,9 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
         elif part.text:
             reply.content += part.text
             events.append(TextDelta(part.text))
-        if signature is not None:
-            reply.thought_signature = signature
+            _add_text(reply, part.text)
+        if signature is not None and not part.thought and reply.parts and "text" in reply.parts[-1]:
+            reply.parts[-1]["thought_signature"] = signature
     if part.function_call is not None:
         call: dict[str, Any] = {
             "id": part.function_call.id or str(uuid4()),
@@ -516,8 +549,28 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
         if signature is not None:
             call["thought_signature"] = signature
         reply.tool_calls.append(call)
+        reply.parts.append({"function_call_id": call["id"]})
         events.append(ToolCallReady(call))
     return events
+
+
+def _add_text(reply: GeminiReply, text: str) -> None:
+    """Join ``text`` to the open text part, or start one after a signed part or a function call."""
+    last = reply.parts[-1] if reply.parts else None
+    if last is not None and "text" in last and "thought_signature" not in last:
+        last["text"] += text
+    else:
+        reply.parts.append({"text": text})
+
+
+def reply_provider_data(reply: GeminiReply) -> dict[str, Any]:
+    """Return the replay state a finished reply stores: its parts, when their order or signatures matter.
+
+    A reply that is only unsigned text replays the same from its content, so it stores none.
+    """
+    if reply.tool_calls or any("thought_signature" in part for part in reply.parts):
+        return {_GEMINI_PARTS_KEY: reply.parts}
+    return {}
 
 
 def _usage_metrics(usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
@@ -556,6 +609,7 @@ __all__ = [
     "function_declarations",
     "malformed_tool_call_error",
     "read_chunk",
+    "reply_provider_data",
     "stop_reason",
     "tool_config",
     "without_tool_selection",

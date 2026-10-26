@@ -809,7 +809,47 @@ async def test_gemini_empty_text_parts_add_no_deltas_but_keep_their_signature(tm
     ]
     assert (message.content, message.reasoning_content) == ("Hi", None)
     assert message.provider_data is not None
-    assert message.provider_data["thought_signature"] == "c2ln"
+    assert message.provider_data["gemini_parts"] == [{"text": "Hi", "thought_signature": "c2ln"}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replays_a_reply_in_the_order_its_parts_arrived(tmp_path: Path) -> None:
+    """Text before and after a call replays as two parts around it, each with its own signature; a legacy row merges."""
+    call = {"functionCall": {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}}
+    response = gemini_sse(
+        _gemini_chunk({"text": "Look"}, finish=None, usage=False),
+        _gemini_chunk({"text": "ing.", "thoughtSignature": "c2lnMQ=="}, finish=None, usage=False),
+        _gemini_chunk(call, finish=None, usage=False),
+        _gemini_chunk({"text": "Found it.", "thoughtSignature": "c2lnMg=="}),
+    )
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, response)
+    reply = _completed(events).message
+    assert reply.provider_data is not None
+    assert reply.provider_data["gemini_parts"] == [
+        {"text": "Looking.", "thought_signature": "c2lnMQ=="},
+        {"function_call_id": "call-1"},
+        {"text": "Found it.", "thought_signature": "c2lnMg=="},
+    ]
+    legacy = Message(
+        role="assistant",
+        content="Looking.Found it.",
+        tool_calls=reply.tool_calls,
+        provider_data={"thought_signature": "c2lnMg=="},
+    )
+
+    sent = []
+    for stored in (reply, legacy):
+        messages = (Message(role="user", content="Weather?"), stored, Message(role="user", content="Thanks."))
+        body, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+        sent.append(body["body"]["contents"][1]["parts"])
+
+    function_call = {"functionCall": {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}}
+    assert sent[0] == [
+        {"text": "Looking.", "thoughtSignature": "c2lnMQ=="},
+        function_call,
+        {"text": "Found it.", "thoughtSignature": "c2lnMg=="},
+    ]
+    assert sent[1] == [{"text": "Looking.Found it.", "thoughtSignature": "c2lnMg=="}, function_call]
 
 
 @pytest.mark.asyncio

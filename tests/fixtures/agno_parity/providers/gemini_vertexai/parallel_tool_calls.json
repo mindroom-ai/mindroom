@@ -76,6 +76,14 @@
   "parsed": {
     "message": {
       "provider_data": {
+        "gemini_parts": [
+          {
+            "function_call_id": "parity_weather"
+          },
+          {
+            "function_call_id": "parity_notes"
+          }
+        ],
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"

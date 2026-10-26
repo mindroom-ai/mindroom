@@ -117,11 +117,16 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
+        "gemini_parts": [
+          {
+            "text": "Pack a light rain jacket and comfortable shoes.",
+            "thought_signature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
+          }
+        ],
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"
-        },
-        "thought_signature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
+        }
       },
       "reasoning_content": "The forecast says light rain.",
       "role": "assistant"
