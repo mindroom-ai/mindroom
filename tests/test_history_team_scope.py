@@ -163,7 +163,6 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
         ) as mock_finalize,
     ):
         prepared_scope_history = await prepare_bound_scope_history(
-            member_names=["zeta", "alpha"],
             model=built.spec.leader.model,
             runtime_paths=runtime_paths,
             config=config,
@@ -446,7 +445,6 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         new=AsyncMock(return_value=MagicMock()),
     ) as mock_prepare:
         await prepare_bound_scope_history(
-            member_names=["private_worker", "shared"],
             model=estimate_only_model(),
             runtime_paths=runtime_paths,
             config=config,

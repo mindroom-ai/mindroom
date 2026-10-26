@@ -189,7 +189,6 @@ async def prepare_materialized_team_execution(
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
-        member_names=[member.spec.id for member in spec.members],
         leader_system_message=leader.system_message,
         leader_tools=leader_tool_specs(spec),
         model=leader.model,

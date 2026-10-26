@@ -342,7 +342,6 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
     await _prepare_bound_team_execution_context(
         make_turn_context("test_agent"),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
-        member_names=["test_agent"],
         leader_system_message=Message(role="system", content="You lead the team."),
         leader_tools=(),
         model=ScriptedModel([]),
@@ -855,7 +854,6 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     await _prepare_bound_team_execution_context(
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
-        member_names=["test_agent"],
         leader_system_message=leader_system_message,
         leader_tools=leader_tools,
         model=ScriptedModel([]),
@@ -904,7 +902,6 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
             active_event_ids=frozenset(),
         ),
         scope_context=unstored_team_scope_context(config, ["test_agent"], team_name=None),
-        member_names=["test_agent"],
         leader_system_message=leader_system_message,
         leader_tools=(),
         model=ScriptedModel([]),

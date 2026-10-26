@@ -2897,7 +2897,6 @@ depends_on = [
     "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.replay",
-    "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
     "mindroom.history.types",

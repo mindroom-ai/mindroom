@@ -624,7 +624,6 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     seed_session(db, session)
 
     prepared = await prepare_bound_scope_history(
-        member_names=["test_agent"],
         model=leader,
         team_name="team",
         history_settings=config.resolve_entity("team").history_settings,

@@ -64,11 +64,6 @@ class ScopeSessionContext:
         return replace(self, session=self.stored_or_first_session())
 
 
-def has_named_member(member_names: Sequence[str]) -> bool:
-    """Return whether a team run names a member; a team run that names none has no history."""
-    return any(member_names)
-
-
 def resolve_bound_team_scope(
     *,
     member_names: Sequence[str],

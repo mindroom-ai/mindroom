@@ -34,10 +34,6 @@ from mindroom.history.replay import (
     plan_replay_that_fits,
     scope_visible_runs,
 )
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    has_named_member,
-)
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
     read_scope_state,
@@ -71,6 +67,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
     from mindroom.history.summary_rows import Segment
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
@@ -750,7 +747,6 @@ def finalize_history_preparation(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_bound_scope_history(
     *,
-    member_names: Sequence[str],
     model: ModelProvider,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -771,8 +767,6 @@ async def prepare_bound_scope_history(
     team's, whose replay policy and compaction config the scope follows. ``team_name`` is the configured team, or None
     for an ad hoc one.
     """
-    # A team without a named member has no history, whether or not its scope is open.
-    has_scope = has_named_member(member_names)
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name,
@@ -781,8 +775,6 @@ async def prepare_bound_scope_history(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    if not has_scope:
-        return PreparedScopeHistory(scope=None, session=None, resolved_inputs=resolved_inputs)
     return await prepare_scope_history(
         model=model,
         resolved_inputs=resolved_inputs,
