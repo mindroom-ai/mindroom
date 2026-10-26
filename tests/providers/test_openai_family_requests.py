@@ -32,6 +32,7 @@ from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
+from mindroom.providers.openai.media import chat_file_part, responses_file_part
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
@@ -942,6 +943,26 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
             "file_data": f"data:{expected_mime};base64,{base64.b64encode(payload).decode()}",
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("file", "expected_mime"),
+    [
+        (File(content=b"a,b", filename="report.csv.gz"), "application/octet-stream"),
+        (File(content=b"notes", filename="notes.txt", mime_type="application/octet-stream"), "text/plain"),
+        (File(content=b"%PDF", filename="report.pdf"), "application/pdf"),
+    ],
+)
+def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: str) -> None:
+    """Both wires name a file by its original filename and type it by the same rule; a compressed name has no type."""
+    chat = chat_file_part(file)
+    responses = responses_file_part(file)
+
+    assert chat is not None
+    assert responses is not None
+    assert chat["file"]["filename"] == responses["filename"] == file.filename
+    assert chat["file"]["file_data"].startswith(f"data:{expected_mime};base64,")
+    assert responses["file_data"] == chat["file"]["file_data"]
 
 
 def test_an_attachment_without_a_filename_is_named_by_its_stored_file(tmp_path: Path) -> None:
