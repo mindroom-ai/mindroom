@@ -5153,7 +5153,7 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
     would never get its turn.
     """
     # One file at a time, in name order, so "good.md" succeeds after the rejection is recorded.
-    monkeypatch.setenv("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY", "1")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "aaa-broken.md").write_text("cannot embed", encoding="utf-8")
@@ -5171,6 +5171,7 @@ async def test_partial_refresh_error_includes_first_classified_file_error(
         lambda *_a, **_k: _RejectingEmbedder(),
     )
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    assert manager._max_concurrent_file_indexes == 1
 
     assert await manager.reindex_all() == RefreshOutcome(
         indexed_count=1,
