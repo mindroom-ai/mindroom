@@ -315,6 +315,25 @@ async def test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones(t
 
 
 @pytest.mark.asyncio
+async def test_gemini_and_ollama_send_every_system_message_as_one_system_prompt(tmp_path: Path) -> None:
+    """The stable and turn system messages reach each route as one system text, a blank line apart."""
+    messages = (
+        Message(role="system", content="Stable instructions."),
+        Message(role="system", content="Today is Monday."),
+        Message(role="user", content="Hi"),
+    )
+
+    gemini, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+    ollama, _ = await run_adapter(OLLAMA, _request(*messages), tmp_path, ollama_ndjson(_ollama_done()))
+
+    assert gemini["body"]["systemInstruction"]["parts"] == [{"text": "Stable instructions.\n\nToday is Monday."}]
+    assert ollama["body"]["messages"][:2] == [
+        {"role": "system", "content": "Stable instructions.\n\nToday is Monday."},
+        {"role": "user", "content": "Hi"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gemini_leaves_out_a_stored_turn_without_text_or_calls(tmp_path: Path) -> None:
     """An assistant turn that kept only its reasoning sends no content, so the user turns around it merge."""
     messages = (
