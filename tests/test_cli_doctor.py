@@ -696,8 +696,16 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "memory.llm.config.api_key",
             "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
         ),
-        # The exported OPENROUTER_API_KEY alone takes an openai memory LLM to OpenRouter.
+        # The exported OPENROUTER_API_KEY alone takes an openai memory LLM to OpenRouter, and it replaces a configured
+        # openrouter key.
         ("openai", {"model": "m"}, {"OPENROUTER_API_KEY": "or-key"}, "OPENAI_API_KEY", "OPENROUTER_API_KEY"),
+        (
+            "openrouter",
+            {"model": "m", "api_key": "sk-or-config"},
+            {"OPENROUTER_API_KEY": "or-key"},
+            "memory.llm.config.api_key",
+            "OPENROUTER_API_KEY",
+        ),
     ],
 )
 def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_may_send_it_elsewhere(

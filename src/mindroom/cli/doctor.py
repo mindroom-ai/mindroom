@@ -575,8 +575,11 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
     # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
-    configured_key = config.memory.llm.config.get("api_key")
-    api_key = configured_key or (get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None)
+    if configured_key := config.memory.llm.config.get("api_key"):
+        api_key, key_name = configured_key, "memory.llm.config.api_key"
+    else:
+        api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+        key_name = env_key or ""
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
@@ -586,7 +589,6 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     # OPENROUTER_API_KEY, which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of
     # any other key.
     if env_key:
-        key_name = "memory.llm.config.api_key" if configured_key else env_key
         reasons = _endpoint_settings(config.memory.llm.config, "memory.llm.config")
         reasons += _endpoint_variables(env_key, runtime_paths)
         if (
