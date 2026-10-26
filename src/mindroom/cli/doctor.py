@@ -16,7 +16,7 @@ from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider
-from mindroom.credentials.sync import get_ollama_api_key, get_secret_from_env, sync_env_to_credentials
+from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
@@ -441,8 +441,7 @@ def _check_single_provider(
     if provider == "ollama":
         host = _get_ollama_host(config, runtime_paths=runtime_paths)
         url = f"{host.rstrip('/')}/api/tags"
-        api_key = get_ollama_api_key(runtime_paths)
-        valid, detail = _http_check(url, {"Authorization": f"Bearer {api_key}"} if api_key else None)
+        valid, detail = _http_check(url)
         return _print_validation(
             valid,
             detail,
