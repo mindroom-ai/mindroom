@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -357,11 +357,12 @@ def _run_metadata_seen_event_ids(run_metadata: dict[str, Any] | None) -> list[st
 class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks.
 
-    ``team_members`` holds the members the turn built until its first attempt takes them.
+    ``members`` are the members the turn's latest attempt runs with: the ones the turn built, which its first attempt
+    takes (``first_members_taken``), then each later attempt's rebuild.
     """
 
-    team_members: ResolvedExactTeamMembers | None = None
-    member_model_names: dict[str, str] = field(default_factory=dict)
+    members: ResolvedExactTeamMembers
+    first_members_taken: bool = False
     attempt_started: bool = False
 
 
@@ -430,25 +431,32 @@ class _TeamTurn:
         )
 
     async def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
-        """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one."""
+        """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one.
+
+        A rebuild keeps the latest members' models unless a continuation applies a new model to the members.
+        """
         holder = self.holder
-        if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
-            holder.member_model_names = dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name)
-        members, holder.team_members = holder.team_members, None
-        if members is None:
-            # TODO(simplify): an empty-reply retry or a continuation that keeps the members' models rebuilds them too.
-            # Rebuild only when a continuation applies a new model to the members. Plugin authors would notice:
-            # member toolkit factories and MCP servers start fewer times.
-            members = await asyncio.to_thread(
-                materialize_team_members,
-                self.requested_agent_names,
-                self.orchestrator,
-                self.execution_identity,
-                reason_prefix=self.reason_prefix,
-                configured_team_name=self.configured_team_name,
-                active_model_names=holder.member_model_names,
-            )
-        return members
+        if not holder.first_members_taken:
+            holder.first_members_taken = True
+            return holder.members
+        # TODO(simplify): an empty-reply retry or a continuation that keeps the members' models rebuilds them too.
+        # Rebuild only when a continuation applies a new model to the members. Plugin authors would notice:
+        # member toolkit factories and MCP servers start fewer times.
+        model_names = (
+            dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name)
+            if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None
+            else holder.members.model_names
+        )
+        holder.members = await asyncio.to_thread(
+            materialize_team_members,
+            self.requested_agent_names,
+            self.orchestrator,
+            self.execution_identity,
+            reason_prefix=self.reason_prefix,
+            configured_team_name=self.configured_team_name,
+            active_model_names=model_names,
+        )
+        return holder.members
 
     async def start_attempt(
         self,
@@ -703,7 +711,7 @@ class _TeamTurn:
         return replace(
             presented,
             runtime_model_name=attempt.runtime_model_name,
-            team_member_model_names=tuple(sorted(self.holder.member_model_names.items())),
+            team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
 
     async def resolve_completed(
@@ -898,7 +906,7 @@ def _team_turn(
         pipeline_timing=pipeline_timing,
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
-        holder=_TeamTurnHolder(team_members=team_members, member_model_names=team_members.model_names),
+        holder=_TeamTurnHolder(members=team_members),
     )
 
 
