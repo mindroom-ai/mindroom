@@ -26,6 +26,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.legacy_compaction_state import adopt_summary_rows
+from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -458,6 +459,18 @@ def _fold_owners_without_rows(connection: sqlite3.Connection, names: AgnoTableNa
     return sorted(runs, key=lambda run: run.index)
 
 
+# LEGACY_COMPAT: Agno 3 run dicts carry keys the owned run records dropped.
+# Legacy format: `run_data` rows, a paused team run's embedded `member_responses`, and a fold segment's
+# `member_responses` written by the Agno-backed runtime may hold `input`, `content_type`, `session_state`, `events`,
+# `images`/`videos`/`audio`/`files`, `response_audio`, `citations`, `references`, `reasoning_*`, `followups`,
+# `model_provider_data`, fork and queue lineage fields, and per-tool `requires_user_input`, `user_input_schema`,
+# `user_feedback_schema`, `answered`, `approval_id`.
+# Last legacy release: v2026.10.498; replacement: v2026.10.499 (#3022) writes only the keys the owned records model.
+# Handling: Every run the conversion writes is stored as its decoded record's `to_dict`, so the keys are dropped and
+# every key MindRoom reads survives; no runtime reader decodes an Agno-written run dict.
+# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_converted_runs_keep_only_the_keys_records_model,
+# tests/llm/test_codecs.py::test_run_record_round_trips_agno_dict_minus_dropped_keys, and
+# tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys.
 def _write_run(
     connection: sqlite3.Connection,
     names: TableNames,
@@ -466,7 +479,9 @@ def _write_run(
     seq: int,
     path: Path,
 ) -> None:
+    # The repair reads call ids, so it runs on messages whose ids are text or None.
     _use_text_call_ids(run.record.messages, run.record.tools or ())
+    run.record.messages = repair_legacy_tool_calls(run.record.messages)
     data = run.record.to_dict()
     if isinstance(metadata := data.get("metadata"), dict):
         data["metadata"] = _current_delegation_snapshot(path, run.record.run_id, metadata)

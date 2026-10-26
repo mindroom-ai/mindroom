@@ -34,6 +34,7 @@ from mindroom.session_storage.legacy_agno3_conversion import (
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore
+from tests.llm.agno_dict_helpers import DROPPED_RUN_KEYS, DROPPED_TOOL_EXECUTION_KEYS, expected_run_dict
 from tests.storage_oracle.determinism import deterministic
 from tests.storage_oracle.record import FIXTURES, GOLDEN_DUMPS, storage_name_of
 
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 _NAMES = TableNames("code")
+_AGNO_PARITY = Path(__file__).resolve().parents[1] / "fixtures" / "agno_parity"
 _SESSION = "s1"
 _DUMPS = {
     **{f"goldens/{dump.stem}": dump for dump in GOLDEN_DUMPS},
@@ -604,6 +606,8 @@ def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
     """Call ids worker code wrote in other shapes convert as text or none in run, folded, and member rows alike.
 
     So the run's folded calls read; tool calls keep only their objects, and well-formed messages are stored as written.
+    The run's own messages are then repaired like any legacy call, so a call without a function, which cannot replay,
+    leaves its message; a fold's folded messages are stored as the fold took them.
     """
     database = _agno_database(tmp_path)
     odd_message = {"id": "live.odd", "role": "assistant", "content": "x", "tool_calls": odd, "tool_call_id": odd_id}
@@ -625,9 +629,9 @@ def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
 
     assert folded_tool_call_ids(store, session_id=_SESSION, run_id="live") == {"c0", "m.c0"}
     stored = dict(_query(database, "SELECT message_id, data FROM \"code_sessions_log_messages\" WHERE run_id = 'live'"))
-    for message_id in ("live.odd", "live.f0"):
-        message = json.loads(stored[message_id])
-        assert (message.get("tool_calls"), message.get("tool_call_id")) == (usable, None)
+    run_message, folded = (json.loads(stored[message_id]) for message_id in ("live.odd", "live.f0"))
+    assert (run_message.get("tool_calls"), run_message.get("tool_call_id")) == (None, None)
+    assert (folded.get("tool_calls"), folded.get("tool_call_id")) == (usable, None)
     assert stored["live.t0"] == json.dumps(result.to_dict())
     [(member_tools,)] = _query(database, "SELECT tools FROM \"code_sessions_log_runs\" WHERE run_id = 'member'")
     assert [tool["tool_call_id"] for tool in json.loads(member_tools)] == [None, "m.c0"]
@@ -761,6 +765,31 @@ def test_converted_runs_drop_their_stored_tool_schemas(tmp_path: Path) -> None:
     assert [run.metadata for run in paused.member_responses] == [{"room_id": "!r"}]
     assert stored_member is not None
     assert stored_member.metadata == {"room_id": "!r"}
+
+
+def test_converted_runs_keep_only_the_keys_records_model(tmp_path: Path) -> None:
+    """A run Agno wrote converts without the keys the owned records drop, and keeps every key they read."""
+    stored = json.loads((_AGNO_PARITY / "codecs.json").read_text(encoding="utf-8"))["paused_agent_run"]
+    assert {"input", "session_state", "content_type"} <= set(stored)
+    assert any(DROPPED_TOOL_EXECUTION_KEYS & set(tool) for tool in stored["tools"])
+    database = _agno_database(tmp_path, (stored["session_id"], "agent", stored["agent_id"]))
+    _insert_run(database, stored, run_index=0, session_id=stored["session_id"])
+
+    store = _converted(database)
+
+    [(record, tools, requirements)] = _query(
+        database,
+        'SELECT record, tools, requirements FROM "code_sessions_log_runs"',
+    )
+    assert DROPPED_RUN_KEYS.isdisjoint(json.loads(record))
+    executions = [*json.loads(tools), *(item["tool_execution"] for item in json.loads(requirements))]
+    assert all(DROPPED_TOOL_EXECUTION_KEYS.isdisjoint(execution) for execution in executions)
+    converted = store.get_run(stored["run_id"])
+    assert converted is not None
+    expected = expected_run_dict(stored)
+    # The run holds a history copy, which no converted run keeps.
+    expected["messages"] = [message for message in expected["messages"] if not message["from_history"]]
+    assert converted.to_dict() == expected
 
 
 def test_a_repeated_message_id_gets_a_derived_one(tmp_path: Path) -> None:

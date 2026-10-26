@@ -1,11 +1,14 @@
-"""Stored tool calls in earlier releases' shapes read in the current shape in replays, compactions, and resumes."""
+"""Tool calls earlier releases stored in other shapes convert to the current shape, which every reader then reads.
+
+Each run here is an Agno-layout row converted to storage v2 and read back, as replay, compaction, a resume, and the
+skill review transcript read it.
+"""
 # ruff: noqa: D103
 
 from __future__ import annotations
 
 import copy
-import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -17,9 +20,16 @@ from mindroom.history.summary_input import build_summary_input, messages_for_run
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.legacy_agno3_schema import run_from_row
+from mindroom.session_storage.schema import TableNames
+from mindroom.skill_learning.transcript import conversation_messages
 from tests.agent_loop.helpers import collect, context, gated, spec
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.session_storage.agno_layout import SESSION_ID, converted_store
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.session_storage.store import ConversationStore
 
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
@@ -29,9 +39,13 @@ _PLACEHOLDER = {"id": "call_0"}
 _BARE_CALL = {"id": "call-0", "type": "function", "function": {"name": "list_rooms"}}
 
 
-def _stored_run(*messages: dict[str, Any]) -> RunRecord:
-    row = {"run_id": "run-1", "agent_id": "code", "status": "COMPLETED", "messages": list(messages)}
-    run = run_from_row("agent", json.dumps(row))
+def _converted(tmp_path: Path, *messages: dict[str, Any], status: str = "COMPLETED") -> ConversationStore:
+    row = {"run_id": "run-1", "agent_id": "code", "status": status, "messages": list(messages)}
+    return converted_store(TableNames("code").database_path(tmp_path), row)
+
+
+def _stored_run(tmp_path: Path, *messages: dict[str, Any]) -> RunRecord:
+    run = _converted(tmp_path, *messages).get_run("run-1")
     assert isinstance(run, RunRecord)
     return run
 
@@ -56,8 +70,9 @@ def _calls_and_results(messages: list[Message]) -> tuple[list[dict[str, Any]], l
     return calls, [message.tool_call_id for message in messages if message.role == "tool"]
 
 
-def test_a_stored_call_without_arguments_replays_with_empty_arguments() -> None:
+def test_a_stored_call_without_arguments_replays_with_empty_arguments(tmp_path: Path) -> None:
     run = _stored_run(
+        tmp_path,
         {"role": "user", "content": "Rooms?"},
         {"role": "assistant", "tool_calls": [_BARE_CALL]},
         {"role": "tool", "tool_call_id": "call-0", "content": "[]"},
@@ -71,8 +86,9 @@ def test_a_stored_call_without_arguments_replays_with_empty_arguments() -> None:
     assert run.messages == stored
 
 
-def test_placeholders_and_their_results_never_replay() -> None:
+def test_placeholders_and_their_results_never_replay(tmp_path: Path) -> None:
     run = _stored_run(
+        tmp_path,
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "tool_calls": [_PLACEHOLDER, _CALL]},
         {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
@@ -82,8 +98,9 @@ def test_placeholders_and_their_results_never_replay() -> None:
     assert _calls_and_results(_history(run)) == ([_CALL], ["call_1"])
 
 
-def test_the_tool_call_window_counts_only_calls_that_replay() -> None:
+def test_the_tool_call_window_counts_only_calls_that_replay(tmp_path: Path) -> None:
     run = _stored_run(
+        tmp_path,
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "tool_calls": [_CALL, _PLACEHOLDER]},
         {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
@@ -93,8 +110,9 @@ def test_the_tool_call_window_counts_only_calls_that_replay() -> None:
     assert _calls_and_results(_history(run, max_tool_calls=1)) == ([_CALL], ["call_1"])
 
 
-def test_the_message_window_counts_only_messages_that_replay() -> None:
+def test_the_message_window_counts_only_messages_that_replay(tmp_path: Path) -> None:
     run = _stored_run(
+        tmp_path,
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "tool_calls": [_PLACEHOLDER, _CALL]},
         {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
@@ -105,8 +123,9 @@ def test_the_message_window_counts_only_messages_that_replay() -> None:
     assert [message.role for message in _history(run, max_messages=4)] == ["user", "assistant", "tool", "assistant"]
 
 
-def test_a_message_left_without_calls_or_content_takes_no_message_slot() -> None:
+def test_a_message_left_without_calls_or_content_takes_no_message_slot(tmp_path: Path) -> None:
     run = _stored_run(
+        tmp_path,
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "tool_calls": [_PLACEHOLDER]},
         {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
@@ -121,8 +140,9 @@ def test_a_message_left_without_calls_or_content_takes_no_message_slot() -> None
     ]
 
 
-def test_a_message_left_with_content_but_no_calls_holds_none() -> None:
+def test_a_message_left_with_content_but_no_calls_holds_none(tmp_path: Path) -> None:
     run = _stored_run(
+        tmp_path,
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "content": "Checking.", "tool_calls": [_PLACEHOLDER]},
         {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
@@ -133,8 +153,9 @@ def test_a_message_left_with_content_but_no_calls_holds_none() -> None:
     assert (assistant.content, assistant.tool_calls) == ("Checking.", None)
 
 
-def _compacted_run() -> RunRecord:
+def _compacted_run(tmp_path: Path) -> RunRecord:
     return _stored_run(
+        tmp_path,
         {"role": "user", "content": "Weather?"},
         {"role": "assistant", "tool_calls": [_BARE_CALL, _PLACEHOLDER, _CALL]},
         {"role": "tool", "tool_call_id": "call-0", "content": "[]"},
@@ -143,9 +164,9 @@ def _compacted_run() -> RunRecord:
     )
 
 
-def test_compaction_reads_stored_calls_as_a_request_replays_them() -> None:
+def test_compaction_reads_stored_calls_as_a_request_replays_them(tmp_path: Path) -> None:
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=2)
-    run = _compacted_run()
+    run = _compacted_run(tmp_path)
     stored = copy.deepcopy(run.messages)
 
     calls, results = _calls_and_results(messages_for_runs([run], settings))
@@ -155,12 +176,12 @@ def test_compaction_reads_stored_calls_as_a_request_replays_them() -> None:
     assert run.messages == stored
 
 
-def test_the_summary_input_leaves_out_placeholders_and_their_results() -> None:
+def test_the_summary_input_leaves_out_placeholders_and_their_results(tmp_path: Path) -> None:
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
 
     text, included = build_summary_input(
         previous_summary=None,
-        compacted_runs=[_compacted_run()],
+        compacted_runs=[_compacted_run(tmp_path)],
         max_input_tokens=100_000,
         history_settings=settings,
     )
@@ -171,25 +192,73 @@ def test_the_summary_input_leaves_out_placeholders_and_their_results() -> None:
     assert "call_0" not in text
 
 
-def test_a_paused_run_resumes_without_its_placeholders() -> None:
-    paused = [
-        Message(role="system", content="You are Code."),
-        Message(role="user", content="Weather?"),
-        Message(role="assistant", tool_calls=[_PLACEHOLDER, _CALL]),
-        Message(role="tool", tool_call_id="call_0", content="orphan"),
-    ]
+def test_a_paused_run_resumes_without_its_placeholders(tmp_path: Path) -> None:
+    store = _converted(
+        tmp_path,
+        {"role": "system", "content": "You are Code."},
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": [_PLACEHOLDER, _CALL]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+        status="PAUSED",
+    )
+    paused = store.get_run("run-1")
+    assert paused is not None
 
-    request = build_resume_request(paused=paused, summary=None, history=[])
+    request = build_resume_request(paused=paused.messages, summary=None, history=[])
 
     assert _calls_and_results(request) == ([_CALL], [])
-    assert request[0] is paused[0]
+    assert request[0] is paused.messages[0]
+    assert request[0].role == "system"
+
+
+def test_a_paused_team_runs_embedded_members_are_repaired(tmp_path: Path) -> None:
+    """The members a paused team run embedded, which its resume reads, convert repaired like every other run."""
+    member = {
+        "run_id": "member-1",
+        "agent_id": "code",
+        "status": "PAUSED",
+        "messages": [
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "tool_calls": [_PLACEHOLDER, _BARE_CALL]},
+            {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+            {"role": "tool", "tool_call_id": "call-0", "content": "[]"},
+        ],
+    }
+    team = {"run_id": "team-1", "team_id": "squad", "status": "PAUSED", "messages": [], "member_responses": [member]}
+
+    store = converted_store(TableNames("squad").database_path(tmp_path), team, kind="team", owner_id="squad")
+
+    stored = store.get_run("member-1")
+    assert stored is not None
+    repaired = {**_BARE_CALL, "function": {"name": "list_rooms", "arguments": "{}"}}
+    assert _calls_and_results(stored.messages) == ([repaired], ["call-0"])
+
+
+def test_a_turns_transcript_reads_converted_calls_as_replay_does(tmp_path: Path) -> None:
+    """The skill review transcript, like the other background readers, reads the calls in the shape replay sends."""
+    store = _converted(
+        tmp_path,
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": [_BARE_CALL, _PLACEHOLDER, _CALL]},
+        {"role": "tool", "tool_call_id": "call-0", "content": "[]"},
+        {"role": "tool", "tool_call_id": "call_0", "content": "orphan"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+    )
+    session = store.load_session(SESSION_ID, "agent")
+    assert session is not None
+
+    said = [utterance for parts in conversation_messages(session) for utterance in parts]
+
+    assert [utterance.unredacted for utterance in said if utterance.kind == "tool_result"] == ["[]", "sunny"]
+    reply = next(utterance.message for utterance in said if utterance.kind == "reply")
+    assert reply.tool_calls == [{**_BARE_CALL, "function": {"name": "list_rooms", "arguments": "{}"}}, _CALL]
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
-    """The resumed run stores the request it sent, so a legacy paused run is stored repaired and its row is not.
+async def test_a_converted_paused_run_resumes_and_is_stored_in_the_current_shape(tmp_path: Path) -> None:
+    """A run paused by a release that stored legacy calls converts repaired, so its resume sends and stores that shape.
 
-    The paused run also holds a completed call that lacked its arguments, which the stored record supplies as ``{}``.
+    The paused run also holds a completed call that lacked its arguments, which the conversion supplies as ``{}``.
     """
 
     def run_shell_command(args: list[str]) -> str:
@@ -221,7 +290,8 @@ async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
             Message(role="tool", tool_call_id="call-0", content="[]"),
         ],
     )
-    stored_paused = copy.deepcopy(paused.messages)
+    converted = converted_store(TableNames("code").database_path(tmp_path), paused.to_dict()).get_run(paused.run_id)
+    assert isinstance(converted, RunRecord)
     approved = ApprovalCall(
         tool_call_id="call-1",
         tool_name="run_shell_command",
@@ -234,8 +304,8 @@ async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
     _events, record = await collect(
         resume_agent(
             agent,
-            paused,
-            build_resume_request(paused=paused.messages, summary=None, history=[]),
+            converted,
+            build_resume_request(paused=converted.messages, summary=None, history=[]),
             approved=[approved],
             denied={},
             external_results={},
@@ -251,4 +321,3 @@ async def test_a_resumed_legacy_run_is_stored_in_the_current_shape() -> None:
     assert [call["id"] for call in stored_calls] == ["call-0", "call-1"]
     assert stored_calls[0]["function"] == {"name": "list_rooms", "arguments": "{}"}
     assert stored_results == ["call-0", "call-1"]
-    assert paused.messages == stored_paused

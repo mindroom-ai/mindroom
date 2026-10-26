@@ -1,8 +1,7 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Assemble model requests from a scope's stored runs, its compaction summary, and the current turn.
 
-The replay limits select what main selected (kept as main behaves), except that a legacy tool message holding several
-results counts against the tool-call limit once per result.
+The replay limits select what main selected (kept as main behaves).
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ from dataclasses import dataclass, replace
 from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
-from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.legacy_summary_system_prompt import system_message_embeds_summary
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
 from mindroom.history.run_visibility import replays_in_scope
@@ -59,11 +57,10 @@ def scope_history_messages(
 
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
-    replay, so a legacy placeholder and its orphan result take no message of it; a tool result whose call the message
-    limit cut off is dropped, since it cannot replay without that call. Each message is a copy marked
-    ``from_history``, so a request never changes a stored run and is never stored again. Prompt messages never replay.
-    Tool calls are read in the shape current releases store before the message and tool-call limits count them, and
-    those beyond ``max_tool_calls_from_history`` are left out, as is every media item except the newest viewed images.
+    replay; a tool result whose call the message limit cut off is dropped, since it cannot replay without that call.
+    Each message is a copy marked ``from_history``, so a request never changes a stored run and is never stored again.
+    Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
+    item except the newest viewed images.
     """
     replayed = [run for run in runs if replays_in_scope(run, scope)]
     if num_history_runs is not None:
@@ -103,16 +100,15 @@ def replayed_history(
 
 
 def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:
-    """Return the stored messages of ``runs`` that can replay, oldest first, in the shape current releases store.
+    """Return the stored messages of ``runs`` that can replay, oldest first.
 
     Prompt messages never replay. Nor do the history copies a stored run holds, since the runs they came from replay
-    or are summarized on their own. The messages are the stored ones, never copies, except those a legacy repair
-    replaces. A request's history and a compaction's input both select their messages here, so each counts the same
-    messages against its limits.
+    or are summarized on their own. The messages are the stored ones, never copies. A request's history and a
+    compaction's input both select their messages here, so each counts the same messages against its limits.
     """
-    return repair_legacy_tool_calls(
-        [message for run in runs for message in run.messages if not message.from_history and message.role != "system"],
-    )
+    return [
+        message for run in runs for message in run.messages if not message.from_history and message.role != "system"
+    ]
 
 
 def _history_copy(message: Message) -> Message:
@@ -184,13 +180,10 @@ def build_resume_request(
 ) -> list[Message]:
     """Return the request that resumes a paused run: its stored system message, the summary, history, then the rest.
 
-    ``paused`` holds the paused run's stored messages, which never include history copies; their tool calls are read in
-    the shape current releases store, as history's are. The resumed run stores this request, so a legacy paused run is
-    stored in that shape too. Its stored system message is reused, so a signed reasoning block in the paused request
-    stays valid against an unchanged prefix. A run paused while Agno rendered the summary inside that system message
-    keeps that single summary.
+    ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system message is
+    reused, so a signed reasoning block in the paused request stays valid against an unchanged prefix. A run paused
+    while Agno rendered the summary inside that system message keeps that single summary.
     """
-    paused = repair_legacy_tool_calls(paused)
     system = next((message for message in paused if message.role == "system"), None)
     messages = [
         *([] if system is None else [system]),

@@ -30,7 +30,7 @@ from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_G
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from mindroom.providers.synthetic_adapter import SHELL_TOOL
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
-from mindroom.session_storage.legacy_agno3_schema import run_from_row
+from mindroom.session_storage.schema import TableNames
 from tests.providers.family_support import (
     CLAUDE_DEPRECATION_FILTER,
     FAMILIES,
@@ -47,6 +47,7 @@ from tests.providers.golden_support import (
     pipeline_provider,
     sse_response,
 )
+from tests.session_storage.agno_layout import converted_store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -185,9 +186,9 @@ _STORED_RUN = {
 }
 
 
-def _stored_tool_turn() -> list[Message]:
-    """The request a new prompt sends after the stored run, assembled from its row as a reply assembles it."""
-    run = run_from_row("agent", json.dumps(_STORED_RUN))
+def _stored_tool_turn(tmp_path: Path) -> list[Message]:
+    """The request a new prompt sends after the stored run, converted from its row and assembled as a reply does."""
+    run = converted_store(TableNames("code").database_path(tmp_path), _STORED_RUN).get_run("run-1")
     assert run is not None
     history = scope_history_messages(
         [run],
@@ -231,7 +232,7 @@ async def test_every_family_replays_the_tool_calls_any_provider_stored(family: s
 
     await complete(
         pipeline_provider(spec.adapter(tmp_path, wire)),
-        ModelRequest(messages=_stored_tool_turn(), tools=[_tool("get_weather")]),
+        ModelRequest(messages=_stored_tool_turn(tmp_path / "store"), tools=[_tool("get_weather")]),
     )
 
     body = wire.body()

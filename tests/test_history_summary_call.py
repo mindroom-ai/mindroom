@@ -398,7 +398,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     assert 'run_id="run-big"' in summary_input
 
 
-def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema() -> None:
+def test_build_summary_input_oversized_run_preserves_messages_before_omitted_metadata() -> None:
     root_request = "Look into how the automatic memory flush in mindroom is supposed to work."
     run = _completed_run(
         "run-big-metadata",
@@ -410,7 +410,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
     run.metadata = {
         "matrix_event_id": "$root",
         "thread_id": "$root",
-        "tools_schema": [{"name": f"tool_{index}", "description": "x" * 2000} for index in range(30)],
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {f"$event_{index}": "x" * 2000 for index in range(30)},
     }
 
     summary_input, included_runs = build_summary_input(
@@ -422,7 +422,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
     assert root_request in summary_input
-    assert "tools_schema" not in summary_input
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
 
 
 def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> None:
@@ -434,7 +434,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         ],
     )
     run.metadata = {
-        "tools_schema": [{"name": "deployment_status", "description": "x" * 2_000}],
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "x" * 2_000},
         "model_params": {"temperature": 0.2},
     }
 
@@ -453,7 +453,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
 def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
     run = _completed_run("run-bulky-metadata")
     run.metadata = {
-        "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "x" * 1_000},
         "model_params": {"temperature": 0.2},
     }
 
@@ -501,7 +501,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
         "matrix_event_id": "$request",
         "started_at": "2026-07-17T20:00:00Z",
         "durable_outcome": {"state": "delivered"},
-        "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
         "model_params": {"temperature": 0.2},
     }
     run.metadata = metadata.copy()
@@ -515,7 +514,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
 
     assert included_runs == [run]
     assert run.metadata == metadata
-    assert "tools_schema" not in summary_input
     assert "model_params" not in summary_input
     assert AI_RUN_METADATA_KEY not in summary_input
     assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
