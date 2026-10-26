@@ -1373,7 +1373,7 @@
           "type": "boolean"
         },
         "knowledge_graph_edits": {
-          "default": false,
+          "default": true,
           "description": "Default knowledge graph edits setting",
           "title": "Knowledge Graph Edits",
           "type": "boolean"
@@ -5288,7 +5288,7 @@
         "show_stop_button": true,
         "max_consecutive_agent_replies": 50,
         "knowledge_graph": false,
-        "knowledge_graph_edits": false,
+        "knowledge_graph_edits": true,
         "cheap_model": null,
         "compaction": {
           "enabled": true,

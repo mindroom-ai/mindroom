@@ -48,22 +48,21 @@ def test_knowledge_graph_is_off_by_default() -> None:
     assert config.knowledge_graph_agents() == []
 
 
-def test_graph_edits_are_off_by_default_and_follow_defaults() -> None:
-    """An agent edits its graph only when it or defaults allow it, and only when it has a graph."""
+def test_graph_edits_are_on_by_default_and_follow_defaults() -> None:
+    """An agent with a graph edits it unless it or defaults turn edits off; an agent without a graph never does."""
     config = Config(
         agents={
             "mind": AgentConfig(display_name="Mind", knowledge_graph=True),
             "careful": AgentConfig(display_name="Careful", knowledge_graph=True, knowledge_graph_edits=False),
             "plain": AgentConfig(display_name="Plain"),
         },
-        defaults=DefaultsConfig(knowledge_graph_edits=True),
         models=_MODELS,
         knowledge_graph={"model": "luna"},
     )
     assert config.agent_edits_knowledge_graph("mind")
     assert not config.agent_edits_knowledge_graph("careful")
     assert not config.agent_edits_knowledge_graph("plain")
-    assert not _config().agent_edits_knowledge_graph("mind")
+    assert not _config(defaults=DefaultsConfig(knowledge_graph_edits=False)).agent_edits_knowledge_graph("mind")
 
 
 def test_graph_edits_need_a_graph() -> None:

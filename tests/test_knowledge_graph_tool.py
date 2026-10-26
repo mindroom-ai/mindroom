@@ -128,7 +128,7 @@ def _config(*, enabled: bool = True, private: bool = False, edits: bool = False)
             "mind": AgentConfig(
                 display_name="Mind",
                 knowledge_graph=enabled,
-                knowledge_graph_edits=edits or None,
+                knowledge_graph_edits=edits,
                 private=AgentPrivateConfig(per="user") if private else None,
             ),
         },

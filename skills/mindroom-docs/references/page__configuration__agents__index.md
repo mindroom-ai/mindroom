@@ -206,7 +206,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `markdown` | `true` |
 | `cheap_model` | `null`; ignored for an agent whose `model` is the same. See [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `knowledge_graph` | `false` |
-| `knowledge_graph_edits` | `false` |
+| `knowledge_graph_edits` | `true` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compaction` | enabled; see [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | `1000` |

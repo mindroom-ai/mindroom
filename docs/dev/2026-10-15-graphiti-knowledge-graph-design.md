@@ -54,7 +54,7 @@ An agent reading its graph found many mistakes and had no way to fix them; the s
 With `knowledge_graph_edits`, the `knowledge_graph` tool also deletes a fact, deletes an entity with its facts, merges a duplicate entity into another, which moves its facts with their sources, and rewrites an entity's summary.
 These edits only remove facts or move them between entities, so every remaining fact still comes from an episode and keeps its sources, and the rule above holds.
 A summary has no sources: Graphiti's model writes it from the entity's earlier summary and the facts and episodes that mention it, appending fact text while it is short and condensing it past 2,000 characters, so a deleted fact stays in it, and the agent that deleted the fact rewrites it.
-They are off by default: a shared agent's requesters, or a tool result that steers the agent, can delete what other requesters' conversations added.
+They are on by default, because an agent that reads its graph is the one that notices its mistakes and an operator should not have to clean graphs by hand; a shared agent's requesters, or a tool result that steers the agent, can then delete what other requesters' conversations added, so an operator who does not want that turns them off or requires approval for them.
 Edit calls and their results are never ingested, because they echo the graph's own facts.
 
 Rejected: rewriting a fact's text or dates, and renaming an entity.

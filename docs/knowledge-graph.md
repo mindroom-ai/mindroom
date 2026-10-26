@@ -113,15 +113,9 @@ An agent reaches only its own graph; a [private agent](configuration/agents.md#p
 
 ## Letting the Agent Fix Its Graph
 
-```yaml
-agents:
-  mind:
-    knowledge_graph: true
-    knowledge_graph_edits: true
-```
-
-`agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `false`) lets an agent with a graph correct it; setting it on an agent without `knowledge_graph` is a config error.
-Its lookups then show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains four functions:
+An agent with a graph can correct it.
+`agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `true`) turns this off when `false`, which keeps the agent's lookups read-only; setting it to `true` on an agent without `knowledge_graph` is a config error.
+With edits on, its lookups show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains four functions:
 
 ```python
 delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
@@ -140,7 +134,7 @@ To keep extraction from creating a merged-away name again, list it in [`knowledg
 ## Privacy
 
 A shared agent's graph holds what it learned from every requester's conversations, including tool results, and anyone who can talk to that agent can query it.
-With `knowledge_graph_edits`, anyone who can talk to a shared agent can also have it delete, merge, or rewrite what that graph holds.
+Unless `knowledge_graph_edits` is `false`, anyone who can talk to a shared agent can also have it delete, merge, or rewrite what that graph holds.
 Use a private agent when requesters must not see or change each other's facts.
 
 ## Cost and Health
