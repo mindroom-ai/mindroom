@@ -12,7 +12,6 @@ from typing import cast
 
 from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
     RuntimePaths,
@@ -35,6 +34,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.tool_environment import current_tool_environment
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
@@ -430,19 +430,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
                 return "Error: timeout must be a positive number of seconds; omit it for the default limit."
-            runtime_env = self._runtime_env
-            extra_path_prepend: tuple[str, ...] = ()
-            if (cli_env := current_agent_cli_shell_env()) is not None:
-                runtime_env = {**runtime_env, **cli_env.env()}
-                if cli_env.bin_dir is not None:
-                    # First, so an older `mindroom-agent` on the agent's configured PATH cannot shadow this response's CLI.
-                    # Kept out of the comma-separated setting, whose parsing would split a path containing a comma.
-                    extra_path_prepend = (cli_env.bin_dir,)
+            # The call's own environment: plugin hooks' changes and the response's CLI grant.
+            call_environment = current_tool_environment()
             subprocess_env = _shell_subprocess_env(
-                runtime_env,
+                call_environment.applied(self._runtime_env, self._base_process_env),
                 base_process_env=self._base_process_env,
                 shell_path_prepend=self._shell_path_prepend,
-                extra_path_prepend=extra_path_prepend,
+                extra_path_prepend=call_environment.path_prepend,
                 workspace_dir=self.base_dir,
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)

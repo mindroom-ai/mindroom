@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import httpx
 
-from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
@@ -34,6 +33,7 @@ from mindroom.tool_system.runtime_context import (
     get_worker_progress_pump,
     get_worker_runtime_context,
 )
+from mindroom.tool_system.tool_environment import current_tool_environment
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
@@ -932,9 +932,9 @@ def _call_proxy_sync(
         )
         payload.update(worker_payload)
         payload["config_snapshot"] = runner_config_snapshot(runtime_paths, manager_context.runtime_config)
-        if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
-            # A minimal response's grant travels with each command to the agent's own worker.
-            execution_env = {**(execution_env or {}), **cli_env.env()}
+        if tool_name == "shell":
+            # The call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command.
+            execution_env = current_tool_environment().applied(execution_env or {}, runtime_paths.process_env)
         runtime_config = manager_context.runtime_config
         agent_name = worker_target.routing_agent_name if worker_target is not None else None
         # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.

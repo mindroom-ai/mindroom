@@ -1,8 +1,8 @@
 """MindRoom's tool-call policy around every tool call.
 
-Plugin before and after hooks, the background-script approval gate, job and authority checkpoints, durable call
-recording, timing, and failure records. The agent loop, voice calls, scheduled tool calls, script runs, and the MCP
-gateway run it as a ``ToolMiddleware`` (``build_tool_hook_middleware``).
+Plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority
+checkpoints, durable call recording, timing, and failure records. The agent loop, voice calls, scheduled tool calls,
+script runs, and the MCP gateway run it as a ``ToolMiddleware`` (``build_tool_hook_middleware``).
 """
 
 from __future__ import annotations
@@ -20,9 +20,12 @@ from uuid import uuid4
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
     emit,
+    emit_collect_environment,
     emit_gate,
 )
 from mindroom.llm.request_context import current_llm_request_log_context
@@ -41,6 +44,7 @@ from mindroom.tool_system.runtime_context import (
     resolve_tool_runtime_hook_bindings,
 )
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
+from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
@@ -443,6 +447,30 @@ async def _run_before_hooks(
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
 
 
+async def _collect_environment(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    arguments: dict[str, Any],
+    tool_name: str,
+    registered_toolkit: str | None,
+) -> ToolEnvironment:
+    """Run the environment hooks once for the call and return the environment its shell commands get."""
+    context = ToolEnvironmentContext(
+        function_name=tool_name,
+        registered_toolkit=registered_toolkit,
+        arguments=arguments,
+        agent_name=resolved_context.agent_name,
+        room_id=resolved_context.room_id,
+        requester_id=resolved_context.requester_id,
+        config=resolved_context.config,
+        runtime_paths=resolved_context.runtime_paths,
+        correlation_id=resolved_context.correlation_id,
+        _hook_registry_state=resolved_context.hook_registry_state,
+    )
+    return await emit_collect_environment(hook_registry, context)
+
+
 @dataclass(slots=True)
 class _ToolBridgeTiming:
     started_at: float
@@ -532,6 +560,7 @@ async def _execute_bridge(  # noqa: C901
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
     *,
+    registered_toolkit: str | None,
     hook_registry: HookRegistry,
     agent_name: str | None,
     dispatch_context: ToolDispatchContext | None,
@@ -539,6 +568,7 @@ async def _execute_bridge(  # noqa: C901
     runtime_paths: RuntimePaths | None,
     has_before_hooks: bool,
     has_after_hooks: bool,
+    has_environment_hooks: bool,
     origin: BackgroundScriptToolOrigin | None,
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
@@ -561,7 +591,7 @@ async def _execute_bridge(  # noqa: C901
         has_after_hooks=has_after_hooks,
     )
     # The hooks of one call share one copy of its arguments, made only when a hook runs.
-    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks else {}
+    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks or has_environment_hooks else {}
 
     async def finish(
         outcome: str,
@@ -614,6 +644,19 @@ async def _execute_bridge(  # noqa: C901
             await finish("blocked_approval", timing.result_ready(), result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
 
+    # Collected only once the call may run, so a hook computes values such as short-lived tokens just before the body.
+    environment = (
+        await _collect_environment(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            arguments=hook_arguments,
+            tool_name=tool_name,
+            registered_toolkit=registered_toolkit,
+        )
+        if has_environment_hooks
+        else ToolEnvironment()
+    )
+
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
         job_checkpoint()
@@ -624,7 +667,8 @@ async def _execute_bridge(  # noqa: C901
 
     tool_body_started_at = time.perf_counter()
     try:
-        result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_agent_name)
+        with collected_tool_environment(environment):
+            result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_agent_name)
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await succeed(oauth_connection_required_payload(exc), "oauth_connection_required")
@@ -706,10 +750,12 @@ def build_tool_hook_middleware(
     revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a declined call
     returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its ``origin`` and the
     ``approval_gate`` that asks its requester; a call its requester denied returns ``BackgroundToolApprovalDenied``
-    without running.
+    without running. A call that may run collects its environment hooks once, and the shell commands it runs, locally
+    or in a worker, get what they set.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
+    has_environment_hooks = hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT)
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
         async def run(**arguments: Any) -> object:  # noqa: ANN401 - the hook chain passes arguments as kwargs
@@ -719,6 +765,7 @@ def build_tool_hook_middleware(
             call.function.name,
             run,
             call.arguments,
+            registered_toolkit=call.function.registered_toolkit,
             hook_registry=hook_registry,
             agent_name=agent_name,
             dispatch_context=dispatch_context,
@@ -726,6 +773,7 @@ def build_tool_hook_middleware(
             runtime_paths=runtime_paths,
             has_before_hooks=has_before_hooks,
             has_after_hooks=has_after_hooks,
+            has_environment_hooks=has_environment_hooks,
             origin=origin,
             approval_gate=approval_gate,
         )
