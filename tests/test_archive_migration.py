@@ -333,6 +333,52 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
     assert folded == ["t0"]
 
 
+def test_a_generation_of_several_runs_sorts_after_its_last_top_level_run_with_their_event_ids_once(
+    tmp_path: Path,
+) -> None:
+    """A generation covers all of its runs, members aside, and keeps each event id its runs carry once, sorted.
+
+    A generation that is not legacy keeps no captured ids of its own.
+    """
+    member = RunRecord(run_id="m1", agent_id="helper", session_id="s1", parent_run_id="t1")
+    team_runs = [
+        TeamRunRecord(run_id=f"t{n}", team_id="eng", session_id="s1", status=RunStatus.completed) for n in (0, 1, 2)
+    ]
+    _main_database(
+        tmp_path,
+        live=[team_runs[2]],
+        generations=[
+            _Generation(
+                "team summary",
+                [team_runs[0], team_runs[1], member],
+                legacy_event_ids=("$not-legacy",),
+                scope_key="team:eng",
+            ),
+        ],
+        team=True,
+    )
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        for run_id, event_ids, seen_event_ids in (
+            ("t0", ["$z", "$shared"], ["$shared"]),
+            ("t1", ["$shared", "$a"], ["$a", "$shared"]),
+        ):
+            connection.execute(
+                "UPDATE code_sessions_compacted_runs SET event_ids = ?, seen_event_ids = ? WHERE run_id = ?",
+                (json.dumps(event_ids), json.dumps(seen_event_ids), run_id),
+            )
+
+    session = _open(tmp_path).load_session("s1", "team")
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        rows = connection.execute(
+            "SELECT run.run_id, summary.event_ids, summary.seen_event_ids FROM code_sessions_log_summaries AS summary "
+            "LEFT JOIN code_sessions_log_runs AS run ON run.session_id = summary.session_id AND run.seq = summary.through",
+        ).fetchall()
+
+    assert session is not None
+    assert [run.run_id for run in session.runs or []] == ["t2"]
+    assert rows == [("t1", '["$a", "$shared", "$z"]', '["$a", "$shared"]')]
+
+
 def test_rows_without_an_index_keep_their_place(tmp_path: Path) -> None:
     """Rows an old writer stored without an index keep the place a read gave them: first among the live runs."""
     _main_database(tmp_path, live=[_run("r1"), _run("r2")], generations=[_Generation("summary of r0", [_run("r0")])])
