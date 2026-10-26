@@ -556,9 +556,10 @@ class KnowledgeManager:
             config=self.config,
             runtime_paths=self.runtime_paths,
             source_path=self.knowledge_path,
-            # Not ``self.storage_path``: a private base stores its index under a
-            # state root that its worker container mounts read-write, and the
-            # Git directory decides which commands Git runs here.
+            # Not ``self.storage_path``: Git directories live in their own
+            # primary-only tree keyed by the checkout, so bases sharing a folder
+            # share one repository, and the Git directory decides which commands
+            # Git runs here.
             git_dir=knowledge_git_dir(self.runtime_paths.storage_root, self.knowledge_path),
             lfs_hydrated_head_path=self._base_storage_path / "git_lfs_hydrated_head.txt",
         )

@@ -7813,8 +7813,10 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
 
     assert key_a != key_b
     index_a, index_b = published_index_storage_path(key_a), published_index_storage_path(key_b)
-    assert index_a != index_b
-    assert index_a.parent == index_b.parent == runtime_paths.storage_root.resolve() / "knowledge_db"
+    private_indexes = runtime_paths.storage_root.resolve() / "knowledge_db" / "private"
+    # Each requester gets a namespace of its own, so even a colliding base key cannot share a directory.
+    assert index_a.parents[1] != index_b.parents[1]
+    assert index_a.parents[2] == index_b.parents[2] == private_indexes
     assert knowledge_a is not None
     assert knowledge_b is not None
     assert [document.content for document in await knowledge_a.asearch("private", 5)] == ["alice private note"]

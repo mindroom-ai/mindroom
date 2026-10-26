@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature
@@ -253,15 +252,13 @@ def _safe_identifier(value: str) -> str:
     return sanitized or "default"
 
 
-@lru_cache(maxsize=64)
 def storage_key_for_base(base_id: str, knowledge_path: Path) -> str:
     """Return the persisted storage-directory key for one knowledge base binding.
 
-    Cached because this runs on the event loop for every agent turn while
-    ``Path.resolve`` is a blocking syscall against the knowledge source root,
-    which can be a network mount.
+    ``knowledge_path`` is the binding's already-canonical path and is hashed as given: resolving it again would follow
+    a link swapped onto it since.
     """
-    digest_source = f"{base_id}:{knowledge_path.resolve()}"
+    digest_source = f"{base_id}:{knowledge_path}"
     digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:8]
     return f"{_safe_identifier(base_id)}_{digest}"
 

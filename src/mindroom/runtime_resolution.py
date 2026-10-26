@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -337,6 +338,17 @@ def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
     return resolve_config_relative_path(raw_path, runtime_paths).resolve()
 
 
+def _private_knowledge_index_root(runtime_paths: RuntimePaths, state_root: Path) -> Path:
+    """Return the primary-only directory one requester's private knowledge indexes live under.
+
+    Not the agent's state root, which its static runner can write: indexes sit beside the other bases' in
+    ``knowledge_db``, as knowledge Git directories sit outside worker storage. The canonical state root names the
+    requester's namespace there, so no requester's index can share a directory with another's.
+    """
+    namespace = hashlib.sha256(str(state_root).encode("utf-8")).hexdigest()[:32]
+    return runtime_paths.storage_root.expanduser().resolve() / "knowledge_db" / "private" / namespace
+
+
 def resolve_knowledge_binding(
     base_id: str,
     config: Config,
@@ -384,9 +396,7 @@ def resolve_knowledge_binding(
 
     return ResolvedKnowledgeBinding(
         base_id=base_id,
-        # Indexes live in the primary-only storage root, as knowledge Git directories do: the agent's state root is
-        # writable by its static runner. The workspace path keys the index, so each requester still gets their own.
-        storage_root=runtime_paths.storage_root.expanduser().resolve(),
+        storage_root=_private_knowledge_index_root(runtime_paths, agent_runtime.state_root),
         knowledge_path=resolve_workspace_relative_path(
             agent_runtime.workspace.root,
             base_config.path,
