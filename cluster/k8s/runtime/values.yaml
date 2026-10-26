@@ -255,7 +255,7 @@ sessionStorage:
   mountPath: /app/session_state
 
 knowledgeStorage:
-  # Optional dedicated volume for shared knowledge-base indexes.
+  # Optional dedicated volume for knowledge-base indexes, including private agents' indexes.
   # Mounted at <storage.mountPath>/knowledge_db, where MindRoom stores them.
   # The chart creates a PVC unless existingClaim is set.
   enabled: false

@@ -2935,6 +2935,50 @@ async def test_an_emote_is_answered_like_any_other_user_message(config: Config, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [[], {}, 1], ids=["list", "dict", "number"])
+async def test_a_stream_status_that_is_not_text_does_not_hide_a_message(
+    config: Config,
+    tmp_path: Path,
+    status: object,
+) -> None:
+    """Any room member can write a status, so one that is not text is not one.
+
+    The message is answered like any other. Raising here instead would leave
+    its source pending in the journal, and the room's ordered replay would then
+    retry it forever ahead of every later message.
+    """
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("Summarize the build failure", event_id="$malformed-status:localhost")
+    event.source["content"][constants.STREAM_STATUS_KEY] = status
+
+    await harness.deliver(room, event)
+
+    assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].prompt == "Summarize the build failure"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", sorted(constants.UNFINISHED_REPLY_STATUSES))
+async def test_a_message_still_being_written_is_not_dispatched(
+    config: Config,
+    tmp_path: Path,
+    status: str,
+) -> None:
+    """An unfinished reply waits for the revision that finishes it."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _text_event("Thinking...", event_id="$unfinished:localhost")
+    event.source["content"][constants.STREAM_STATUS_KEY] = status
+
+    outcome = await harness.controller.handle_text_event(room, event)
+
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    assert harness.policy.plan_turn_calls == 0
+    assert harness.runner.requests == []
+
+
+@pytest.mark.asyncio
 async def test_response_waits_for_pending_context_persistence_before_generation(
     config: Config,
     tmp_path: Path,

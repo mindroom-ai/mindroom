@@ -59,7 +59,7 @@ from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
-from mindroom.knowledge.collections import _collection_has_source_path, candidate_collection_name, open_collection
+from mindroom.knowledge.collections import candidate_collection_name, open_collection
 from mindroom.knowledge.file_listing import (
     git_checkout_present,
     knowledge_files_from_relative_paths,
@@ -69,7 +69,10 @@ from mindroom.knowledge.file_listing import (
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.index_metadata import state_for_publication
+from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
+from mindroom.knowledge.legacy_chroma_storage import chroma_era_shared_base_ids
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature, _PreparedFile
 from mindroom.knowledge.redaction import (
     credential_free_repo_url,
@@ -87,10 +90,12 @@ from mindroom.knowledge.registry import (
     load_published_index_state,
     published_index_metadata_path,
     published_index_refresh_state,
+    published_index_storage_path,
     resolve_published_index_key,
     save_published_index_state,
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
+from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from mindroom.knowledge.watch import KnowledgeSourceWatcher, _shared_poll_targets
 from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory import _semantic_file_search as semantic_file_search
@@ -101,12 +106,11 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_wor
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
-    _Client,
-    _Collection,
     _config,
     _FakeEmbedder,
-    _VectorDb,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
+    seed_collection,
+    stored_rows,
 )
 
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
@@ -117,13 +121,14 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.candidate_checkpoint import FileSignature
 
 
 def _source_has_vectors(manager: KnowledgeManager, relative_path: str) -> bool:
     """Return whether the manager's published collection holds a row for one source path."""
     published = manager._published_collection
     assert published is not None
-    return published.exists() and _collection_has_source_path(published.collection(), relative_path)
+    return published.exists() and bool(published.paths_with_vectors([relative_path]))
 
 
 async def _wait_until(condition: Callable[[], bool], failure: str) -> None:
@@ -383,19 +388,14 @@ async def test_file_memory_knowledge_is_cross_agent_isolated(tmp_path: Path) -> 
     assert all(alpha_marker not in document.content for document in beta_cross)
 
 
-def _published_result_index(base_id: str, **_kwargs: object) -> object:
+def _published_result_index(base_id: str, *, runtime_paths: RuntimePaths, **_kwargs: object) -> object:
     """Publish one "result from <base_id>" document, so merged search results name the bases searched."""
-    vector_db = _VectorDb(collection=f"collection_{base_id}")
-    _VectorDb.collections[vector_db.collection_name] = [
-        {
-            "content": f"result from {base_id}",
-            "metadata": {"source_path": f"{base_id}.md"},
-        },
-    ]
+    collection = KnowledgeCollection(path=runtime_paths.storage_root / "published_results", name=base_id)
+    seed_collection(collection, [{"content": f"result from {base_id}", "metadata": {"source_path": f"{base_id}.md"}}])
     return SimpleNamespace(
         key=SimpleNamespace(base_id=base_id),
         index=SimpleNamespace(
-            reader=vector_db,
+            reader=PublishedIndexReader(collection.name, str(collection.path), _FakeEmbedder()),
             state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
         ),
         availability=KnowledgeAvailability.READY,
@@ -743,7 +743,7 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refreshing file-only knowledge should avoid Chroma collections and embedders."""
+    """Refreshing file-only knowledge should avoid vector collections and embedders."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "guide.md").write_text("Use grep for this source.", encoding="utf-8")
@@ -768,7 +768,7 @@ async def test_file_mode_refresh_publishes_source_metadata_without_vector_collec
     assert state.status == "complete"
     assert state.collection is None
     assert state.indexed_count == 0
-    assert _VectorDb.collections == {}
+    assert list_collection_names(published_index_storage_path(key)) == ()
     embedder_factory.assert_not_called()
 
 
@@ -797,9 +797,10 @@ async def test_file_mode_git_refresh_marks_same_source_semantic_alias_stale(
         config=config,
         runtime_paths=runtime_paths,
     )._collections.default_collection
-    _VectorDb.collections[semantic_collection] = [
-        {"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}},
-    ]
+    seed_collection(
+        KnowledgeCollection(path=published_index_storage_path(semantic_key), name=semantic_collection),
+        [{"content": "Use grep for this source.", "metadata": {"source_path": "guide.md"}}],
+    )
     knowledge_registry.save_published_index_state(
         published_index_metadata_path(semantic_key),
         knowledge_registry.PublishedIndexState(
@@ -1048,7 +1049,8 @@ async def test_ready_index_access_does_not_refresh_unchanged_sources(tmp_path: P
     assert second_knowledge is not None
     assert [document.content for document in await knowledge.asearch("index", 5)] == ["ready index"]
     scheduler.schedule_refresh.assert_not_called()
-    assert len(_VectorDb.collections) == 1
+    assert len(list_collection_names(_base_storage_path(config, runtime_paths))) == 1
+    assert list_collection_names(_base_storage_path(config, runtime_paths, "unused")) == ()
 
 
 @pytest.mark.asyncio
@@ -1392,6 +1394,79 @@ def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) 
     """Without poll_interval_seconds a local base gets no poll target, so the watcher starts no poller for it."""
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     assert _shared_poll_targets(config, runtime_paths_for(config)) == {}
+
+
+def test_chroma_era_shared_bases_convert_smallest_first(tmp_path: Path) -> None:
+    """Startup conversions run smallest base first, so most bases are searchable soon; owned bases are not listed."""
+    config = _config(
+        tmp_path,
+        bases={"big": tmp_path / "big", "owned": tmp_path / "owned", "small": tmp_path / "small"},
+        agent_bases=["big", "owned", "small"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    for base_id, indexed_count in (("big", 500), ("owned", 1), ("small", 3)):
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        settings = manager._indexing_settings
+        save_published_index_state(
+            manager._indexing_settings_path,
+            state_for_publication(
+                settings=settings if base_id == "owned" else replace(settings, vector_store=""),
+                collection=manager._collections.default_collection,
+                indexed_count=indexed_count,
+                source_signature="published",
+                published_revision=None,
+            ),
+        )
+
+    assert chroma_era_shared_base_ids(config, runtime_paths) == ["small", "big"]
+
+
+@pytest.mark.asyncio
+async def test_source_watcher_sync_converts_chroma_era_bases_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watcher sync schedules one refresh for a base Chroma published, so its conversion starts at boot; an owned base gets none."""
+    config = _config(
+        tmp_path,
+        bases={"legacy": tmp_path / "legacy", "owned": tmp_path / "owned"},
+        agent_bases=["legacy", "owned"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    for base_id in ("legacy", "owned"):
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        settings = manager._indexing_settings
+        save_published_index_state(
+            manager._indexing_settings_path,
+            state_for_publication(
+                settings=replace(settings, vector_store="") if base_id == "legacy" else settings,
+                collection=manager._collections.default_collection,
+                indexed_count=1,
+                source_signature="published",
+                published_revision=None,
+            ),
+        )
+    refreshed: list[str] = []
+    release = asyncio.Event()
+
+    async def _fake_refresh(base_id: str, **_kwargs: object) -> None:
+        refreshed.append(base_id)
+        await release.wait()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    scheduler = KnowledgeRefreshScheduler()
+    source_watcher = KnowledgeSourceWatcher(scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await _wait_until(lambda: bool(refreshed), "the Chroma-era base was not refreshed")
+    # A config reload syncs again while the conversion runs; that must not queue a second conversion.
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    release.set()
+    await _wait_until(lambda: not scheduler._tasks, "the conversion did not finish")
+    await source_watcher.shutdown()
+    await scheduler.shutdown()
+
+    assert refreshed == ["legacy"]
 
 
 @pytest.mark.asyncio
@@ -2614,9 +2689,8 @@ def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: P
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     default_collection = manager._collections.default_collection
-    _VectorDb.collections[default_collection] = [
-        {"content": "published old", "metadata": {"source_path": "guide.md"}},
-    ]
+    published = open_collection(manager._collections, default_collection)
+    seed_collection(published, [{"content": "published old", "metadata": {"source_path": "guide.md"}}])
     metadata_path = published_index_metadata_path(key)
     knowledge_registry.save_published_index_state(
         metadata_path,
@@ -2638,8 +2712,8 @@ def test_source_changed_updates_refresh_state_without_changing_index(tmp_path: P
     state = load_published_index_state(metadata_path)
 
     assert marked_base_ids == ("docs",)
-    assert _VectorDb.collections[default_collection] == [
-        {"content": "published old", "metadata": {"source_path": "guide.md"}},
+    assert stored_rows(published) == [
+        {"id": "seeded-0", "content": "published old", "metadata": {"source_path": "guide.md"}},
     ]
     assert state is not None
     assert knowledge_registry.published_index_refresh_state(state) == "stale"
@@ -3132,9 +3206,10 @@ def test_raw_git_url_index_metadata_is_config_mismatch(tmp_path: Path) -> None:
     stale_settings = key.indexing_settings.to_metadata()
     stale_settings["repo_identity"] = raw_repo_url
     collection = "raw_git_metadata_collection"
-    _VectorDb.collections[collection] = [
-        {"content": "raw git metadata", "metadata": {"source_path": "doc.md"}},
-    ]
+    seed_collection(
+        KnowledgeCollection(path=published_index_storage_path(key), name=collection),
+        [{"content": "raw git metadata", "metadata": {"source_path": "doc.md"}}],
+    )
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(
@@ -3171,9 +3246,10 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     collection = "ssh_git_user_collection"
-    _VectorDb.collections[collection] = [
-        {"content": "git user index", "metadata": {"source_path": "doc.md"}},
-    ]
+    seed_collection(
+        KnowledgeCollection(path=published_index_storage_path(key), name=collection),
+        [{"content": "git user index", "metadata": {"source_path": "doc.md"}}],
+    )
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(
@@ -3226,9 +3302,10 @@ def test_metadata_state_alone_serves_published_index(tmp_path: Path) -> None:
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     collection = "metadata_collection"
-    _VectorDb.collections[collection] = [
-        {"content": "metadata index", "metadata": {"source_path": "doc.md"}},
-    ]
+    seed_collection(
+        KnowledgeCollection(path=published_index_storage_path(key), name=collection),
+        [{"content": "metadata index", "metadata": {"source_path": "doc.md"}}],
+    )
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(
@@ -3677,7 +3754,8 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    existing_collections = set(_VectorDb.collections)
+    storage_path = _base_storage_path(config, runtime_paths)
+    existing_collections = set(list_collection_names(storage_path))
     doc.write_text("cancel candidate", encoding="utf-8")
     candidate_started = asyncio.Event()
     original_index_file_locked = KnowledgeManager._index_file_locked
@@ -3697,7 +3775,7 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
     monkeypatch.setattr(KnowledgeManager, "_index_file_locked", _block_candidate)
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
     await candidate_started.wait()
-    cancelled_candidate_collections = set(_VectorDb.collections) - existing_collections
+    cancelled_candidate_collections = set(list_collection_names(storage_path)) - existing_collections
     assert any("_candidate_" in collection for collection in cancelled_candidate_collections)
 
     refresh_task.cancel()
@@ -3706,8 +3784,8 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
 
     # The candidate survives so the next refresh continues it instead of
     # restarting from zero, but it is still private: readers keep last-good.
-    assert cancelled_candidate_collections <= set(_VectorDb.collections)
-    checkpoint = load_candidate_checkpoint(_base_storage_path(config, runtime_paths))
+    assert cancelled_candidate_collections <= set(list_collection_names(storage_path))
+    checkpoint = load_candidate_checkpoint(storage_path)
     assert checkpoint is not None
     assert checkpoint.collection in cancelled_candidate_collections
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
@@ -3766,7 +3844,7 @@ async def test_cancelled_publish_metadata_save_keeps_published_candidate_collect
     assert state is not None
     assert state.collection is not None
     assert "_candidate_" in state.collection
-    assert state.collection in _VectorDb.collections
+    assert KnowledgeCollection(path=published_index_storage_path(key), name=state.collection).exists()
     assert knowledge_registry.published_index_refresh_state(state) == "none"
     assert state.refresh_job == "idle"
 
@@ -4247,7 +4325,10 @@ async def test_refresh_generations_keep_latest_index_without_protecting_old_hand
     latest = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert latest.index is not None
     # Two collections take turns: the first one was resumed and rewritten under its old handle, and no third survives.
-    assert set(_VectorDb.collections) == {first_collection, latest.index.reader.collection_name}
+    assert set(list_collection_names(_base_storage_path(config, runtime_paths))) == {
+        first_collection,
+        latest.index.reader.collection_name,
+    }
     assert [document.content for document in await latest.index.reader.asearch("generation", limit=5)] == [
         "generation 6",
     ]
@@ -4269,10 +4350,10 @@ async def test_get_published_index_reopens_when_persisted_collection_changes(tmp
     cached_index = cached_lookup.index
 
     child_collection = "external_child_collection"
-    with _VectorDb.lock:
-        _VectorDb.collections[child_collection] = [
-            {"content": "child published", "metadata": {"path": "doc.md"}},
-        ]
+    seed_collection(
+        KnowledgeCollection(path=published_index_storage_path(cached_lookup.key), name=child_collection),
+        [{"content": "child published", "metadata": {"path": "doc.md"}}],
+    )
     child_state = replace(
         cached_lookup.state,
         collection=child_collection,
@@ -4321,7 +4402,7 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
 
 
 @pytest.mark.asyncio
-async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) -> None:
+async def test_successful_refreshes_keep_the_published_index_and_the_one_it_retired(tmp_path: Path) -> None:
     """Repeated publishes keep the published index and the one it retired, and clean older generations."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
@@ -4337,8 +4418,9 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
-    assert state.collection in _VectorDb.collections
-    assert len(_VectorDb.collections) == 2, "only the published index and the one the next refresh resumes may stay"
+    stored = list_collection_names(published_index_storage_path(key))
+    assert state.collection in stored
+    assert len(stored) == 2, "only the published index and the one the next refresh resumes may stay"
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
     assert [document.content for document in await lookup.index.reader.asearch("generation", limit=5)] == [
@@ -4358,9 +4440,10 @@ async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collectio
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
     default_collection = manager._collections.default_collection
-    _VectorDb.collections[default_collection] = [
-        {"content": "stale list old", "metadata": {"source_path": "doc.md"}},
-    ]
+    seed_collection(
+        open_collection(manager._collections, default_collection),
+        [{"content": "stale list old", "metadata": {"source_path": "doc.md"}}],
+    )
     metadata_path = published_index_metadata_path(key)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.write_text(json.dumps(["malformed"]), encoding="utf-8")
@@ -4368,7 +4451,7 @@ async def test_refresh_rebuilds_malformed_metadata_without_serving_old_collectio
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert default_collection not in _VectorDb.collections
+    assert not open_collection(manager._collections, default_collection).exists()
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
     assert [document.content for document in await lookup.index.reader.asearch("stale", limit=5)] == [
@@ -4391,12 +4474,11 @@ async def test_superseded_collection_listing_failure_is_best_effort(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     doc.write_text("cleanup new", encoding="utf-8")
 
-    def _raise_list_collections(self: _Client) -> NoReturn:
-        _ = self
+    def _raise_list_collections(_storage_path: Path) -> NoReturn:
         msg = "list failed"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(_Client, "list_collections", _raise_list_collections)
+    monkeypatch.setattr("mindroom.knowledge.collections.list_collection_names", _raise_list_collections)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
 
@@ -4979,7 +5061,7 @@ def test_stale_metadata_without_collection_returns_unavailable_index(tmp_path: P
 
     assert lookup.index is None
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert "missing_collection" not in _VectorDb.collections
+    assert not KnowledgeCollection(path=published_index_storage_path(key), name="missing_collection").exists()
 
 
 def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
@@ -5054,12 +5136,10 @@ def test_published_index_handle_open_failure_degrades_and_schedules_repair_refre
         ),
         encoding="utf-8",
     )
-    _VectorDb.collections[collection] = [
-        {
-            "content": "last good content",
-            "metadata": {"path": "guide.md"},
-        },
-    ]
+    seed_collection(
+        KnowledgeCollection(path=published_index_storage_path(key), name=collection),
+        [{"content": "last good content", "metadata": {"path": "guide.md"}}],
+    )
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -7805,7 +7885,7 @@ def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config
 
 @pytest.mark.asyncio
 async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path) -> None:
-    """Requester-local private knowledge must resolve to separate physical index bindings."""
+    """Requester-local private knowledge gets separate indexes, kept in primary-only storage outside private roots."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -7862,6 +7942,11 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
     ).knowledge
 
     assert key_a != key_b
+    index_a, index_b = published_index_storage_path(key_a), published_index_storage_path(key_b)
+    private_indexes = runtime_paths.storage_root.resolve() / "knowledge_db" / "private"
+    # Each requester gets a namespace of its own, so even a colliding base key cannot share a directory.
+    assert index_a.parents[1] != index_b.parents[1]
+    assert index_a.parents[2] == index_b.parents[2] == private_indexes
     assert knowledge_a is not None
     assert knowledge_b is not None
     assert [document.content for document in await knowledge_a.asearch("private", 5)] == ["alice private note"]
@@ -7988,7 +8073,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
         refresh_target = knowledge_registry.refresh_target_for_published_index_key(key)
         knowledge_registry._publish_knowledge_index(
             key,
-            reader=_VectorDb(collection=collection),
+            reader=PublishedIndexReader(collection, str(published_index_storage_path(key)), _FakeEmbedder()),
             state=knowledge_registry.PublishedIndexState(
                 settings=key.indexing_settings,
                 status="complete",
@@ -8056,9 +8141,10 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
             create=True,
         )
         collection = f"private_read_collection_{index}"
-        _VectorDb.collections[collection] = [
-            {"content": f"private read {index}", "metadata": {"source_path": "note.md"}},
-        ]
+        seed_collection(
+            KnowledgeCollection(path=published_index_storage_path(key), name=collection),
+            [{"content": f"private read {index}", "metadata": {"source_path": "note.md"}}],
+        )
         knowledge_registry.save_published_index_state(
             published_index_metadata_path(key),
             knowledge_registry.PublishedIndexState(
@@ -8119,8 +8205,7 @@ def _write_queryable_index_state(
     *,
     collection: str,
 ) -> None:
-    _VectorDb.collections[collection] = []
-    published_index_metadata_path(key).parent.mkdir(parents=True, exist_ok=True)
+    KnowledgeCollection(path=published_index_storage_path(key), name=collection).reset()
     knowledge_registry.save_published_index_state(
         published_index_metadata_path(key),
         knowledge_registry.PublishedIndexState(
@@ -8234,12 +8319,12 @@ async def test_published_indexed_count_uses_persisted_metadata_without_collectio
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
 
-    def _raise_scan(self: _Client, name: str) -> _Collection:
-        _ = (self, name)
+    def _raise_scan(self: KnowledgeCollection, *, write: bool) -> NoReturn:
+        _ = (self, write)
         msg = "collection scan should not be used"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(_Client, "get_collection", _raise_scan)
+    monkeypatch.setattr(KnowledgeCollection, "_connect", _raise_scan)
 
     assert (lookup.index.state.indexed_count or 0) == 1
 
@@ -8491,6 +8576,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         *,
         git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
+        scanned: dict[str, tuple[FileSignature, Path]] | None = None,
     ) -> str:
         counter.calls += 1
         return original_signature(
@@ -8499,6 +8585,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
             knowledge_root,
             git_dir=git_dir,
             tracked_relative_paths=tracked_relative_paths,
+            scanned=scanned,
         )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
@@ -9009,7 +9096,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unchanged Git poll must not recreate a Chroma collection for a missing index."""
+    """An unchanged Git poll must not recreate a collection for a missing index."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("git repaired", encoding="utf-8")
@@ -9045,7 +9132,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert state is not None
     assert state.collection is not None
     missing_collection = state.collection
-    _VectorDb.collections.pop(missing_collection, None)
+    KnowledgeCollection(path=published_index_storage_path(key), name=missing_collection).delete()
     knowledge_registry._published_indexes.clear()
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     repaired_state = load_published_index_state(published_index_metadata_path(key))
@@ -9054,7 +9141,7 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert reindex_count == 2
     assert repaired_state is not None
     assert repaired_state.collection != missing_collection
-    assert missing_collection not in _VectorDb.collections
+    assert not KnowledgeCollection(path=published_index_storage_path(key), name=missing_collection).exists()
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
     assert [document.content for document in await lookup.index.reader.asearch("git", limit=5)] == [
@@ -9745,7 +9832,7 @@ async def test_index_file_locked_runs_off_event_loop_thread(
 ) -> None:
     """Per-file indexing must run on a worker thread so the asyncio loop stays responsive.
 
-    ChromaDB's upsert is synchronous native code, and embedding each chunk is a
+    The store's row writes are synchronous SQLite calls, and embedding each chunk is a
     blocking provider request; on the event loop either would block Matrix
     sync, tool calls, and cache writes for every file's embed and write cycle.
     """

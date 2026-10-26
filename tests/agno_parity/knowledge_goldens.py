@@ -3,8 +3,8 @@
 `tests/fixtures/agno_parity/README.md` (Knowledge goldens) describes the files.
 `tests/test_knowledge_goldens.py` compares what these functions compute with the goldens, and
 `tests.agno_parity.regenerate_goldens` rewrites `embedders.json` and `search.json` through the same functions.
-`rows.json` holds the Chroma rows Agno wrote, so it stays a read-only input: its authored `input` holds the config
-and source files every refresh and search runs on, and its rows are the collection the legacy-read test searches.
+`rows.json` holds the rows Agno wrote, so it stays a read-only input: its authored `input` holds the config and
+source files every refresh and search runs on, and its rows are what owned refreshes must still write.
 """
 
 from __future__ import annotations
@@ -13,11 +13,12 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import chromadb
 import httpx
 import httpx2
 import numpy as np
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import pytest
-    from chromadb.api.models.Collection import Collection
 
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder, EmbeddingPurpose
@@ -62,8 +62,8 @@ SEARCH_PATH = GOLDEN_DIR / "search.json"
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _QUERY_EMBEDDING_ERROR = "embedder request failed (HTTP 503)"
-# Chroma computes each cosine distance in float32 and sums it in an order the CPU's vector width decides, so its last
-# bits differ between machines: an x86_64 run returns 0.604523241519928 where an aarch64 run returns
+# Each cosine distance is computed in float32 and summed in an order the CPU's vector width decides, so its last bits
+# can differ between machines: an x86_64 run returned 0.604523241519928 where an aarch64 run returned
 # 0.6045231819152832, one float32 ulp apart. Comparisons accept up to this relative difference in a search document's
 # distances.
 DISTANCE_KEYS = ("distances", "similarity_score")
@@ -203,19 +203,14 @@ def golden_config(root: Path) -> tuple[Config, RuntimePaths]:
     return bind_runtime_paths(Config.model_validate(golden_input["config"]), runtime_paths), runtime_paths
 
 
-def _normalized_rows(collection: Collection) -> list[dict[str, Any]]:
-    """Read every row, checking and normalizing the values that hash per-version identity."""
-    rows = collection.get(include=["documents", "metadatas", "embeddings"])
+def _normalized_rows(database: Path) -> list[dict[str, Any]]:
+    """Read every row of one collection file, checking and normalizing the values that hash per-version identity."""
+    with closing(sqlite3.connect(database)) as connection:
+        rows = connection.execute("SELECT id, document, metadata, embedding FROM chunks").fetchall()
     normalized: list[dict[str, Any]] = []
-    for row_id, document, metadata, embedding in zip(
-        rows["ids"],
-        cast("list[str]", rows["documents"]),
-        cast("list[dict[str, Any]]", rows["metadatas"]),
-        cast("list[list[float]]", rows["embeddings"]),
-        strict=True,
-    ):
+    for row_id, document, metadata, embedding in rows:
         assert _HEX32.fullmatch(row_id), row_id
-        stored = dict(metadata)
+        stored = json.loads(metadata)
         assert _HEX64.fullmatch(str(stored["content_hash"])), stored
         assert stored["content_id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, str(stored["content_hash"])))
         stored["content_hash"] = "<sha256>"
@@ -225,7 +220,7 @@ def _normalized_rows(collection: Collection) -> list[dict[str, Any]]:
                 "id": "<md5>",
                 "document": document,
                 "metadata": dict(sorted(stored.items())),
-                "embedding": [float(value) for value in embedding],
+                "embedding": [float(value) for value in np.frombuffer(embedding, dtype="<f4")],
             },
         )
     return sorted(
@@ -241,7 +236,7 @@ def _normalized_rows(collection: Collection) -> list[dict[str, Any]]:
 
 
 async def refresh_golden_bases(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
-    """Refresh every golden base through the production refresh path and read back what it published."""
+    """Refresh every golden base through the production refresh path and read back the rows it published."""
     published: dict[str, Any] = {}
     for base_id in load(ROWS_PATH)["bases"]:
         await _refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths)
@@ -250,16 +245,9 @@ async def refresh_golden_bases(config: Config, runtime_paths: RuntimePaths) -> d
         assert state is not None
         assert state.status == "complete"
         assert state.collection is not None
-        client = chromadb.PersistentClient(path=str(published_index_storage_path(key)))
-        try:
-            collection = client.get_collection(state.collection)
-            published[base_id] = {
-                "collection_metadata": collection.metadata,
-                "collection_configuration": collection.configuration_json,
-                "rows": _normalized_rows(collection),
-            }
-        finally:
-            client.close()
+        published[base_id] = {
+            "rows": _normalized_rows(published_index_storage_path(key) / f"{state.collection}.sqlite3"),
+        }
     return published
 
 
@@ -275,12 +263,12 @@ def _normalized_search_documents(output: str) -> list[dict[str, Any]]:
 
 
 def _within_distance_tolerance(found: float, recorded: float) -> bool:
-    """Return whether two distances differ by no more than Chroma's float32 arithmetic makes them differ."""
+    """Return whether two distances differ by no more than float32 arithmetic makes them differ."""
     return abs(found - recorded) <= DISTANCE_RELATIVE_TOLERANCE * abs(recorded)
 
 
 def distances_as_recorded(found: list[dict[str, Any]], recorded: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return the ``found`` documents with each distance ``recorded`` holds kept where only Chroma's arithmetic differs.
+    """Return the ``found`` documents with each distance ``recorded`` holds kept where only float32 arithmetic differs.
 
     A document keeps a recorded distance when it is the recorded document in the same place, apart from its
     distances, and the distance is within ``DISTANCE_RELATIVE_TOLERANCE`` of the recorded one; any other difference,
@@ -321,7 +309,7 @@ async def regenerated_search(root: Path, embedder: ParityEmbedder) -> dict[str, 
     The agents and their bases are ``rows.json``'s authored ``input``, which the refresh also reads. Each search is
     the tool call of its agent: the documents it found, or the text it answered with, as its golden
     records. A search the golden marks ``embedding_fails`` runs with its query embedding failing. Distances that
-    differ from the golden's only by Chroma's arithmetic keep the golden's value, so every machine regenerates the
+    differ from the golden's only by float32 arithmetic keep the golden's value, so every machine regenerates the
     same file.
     """
     golden = load(SEARCH_PATH)

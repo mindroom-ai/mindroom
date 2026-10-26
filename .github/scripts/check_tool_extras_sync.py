@@ -23,6 +23,7 @@ IGNORED_GROUPS: set[str] = {
     "kubernetes",
     "matrix-e2ee",
     "matrix_calls",
+    "numpy",
     "sentence-transformers",
     "supabase",
 }

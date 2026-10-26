@@ -44,7 +44,7 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -479,6 +479,10 @@ class Config(BaseModel):
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
+    )
+    knowledge_reranker: KnowledgeRerankerConfig | None = Field(
+        default=None,
+        description="Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one",
     )
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
@@ -2236,6 +2240,15 @@ class Config(BaseModel):
                 f"at least as large as {agent_model!r}, and both or neither must set one"
             )
             raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_knowledge_chunk_context_models(self) -> Config:
+        """Validate that every knowledge base's chunk context model is a configured model."""
+        for base_id, base in self.knowledge_bases.items():
+            if base.chunk_context_model is not None and base.chunk_context_model not in self.models:
+                msg = f"Unknown chunk_context_model for knowledge base {base_id!r}: {base.chunk_context_model!r}"
+                raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def validate_knowledge_graph(self) -> Config:

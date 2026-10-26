@@ -244,7 +244,7 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
             )
     return replace(
         paused,
-        response_text=presentation.render_body(),
+        response_text=presentation.render_body(finished=False),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
     )
@@ -440,7 +440,7 @@ async def continue_paused_team_run(
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
         # note. The document already holds what each run handed over beyond what it carried over, so rendering the
         # member runs again could add only what they carried over.
-        response_text = presentation.render_body() or (
+        response_text = presentation.render_body(finished=True) or (
             format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
         )
         return CompletedApprovalRun(

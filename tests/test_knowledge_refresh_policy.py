@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.knowledge.read_proxy import ChromaReadProxy
+    from mindroom.knowledge.index_reader import PublishedIndexReader
 
 _WALL_NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -77,7 +77,7 @@ def _resolution(
     )
     index = knowledge_registry._PublishedIndexHandle(
         key=key,
-        reader=cast("ChromaReadProxy", object()),
+        reader=cast("PublishedIndexReader", object()),
         state=state,
         metadata_path=published_index_metadata_path(key),
     )

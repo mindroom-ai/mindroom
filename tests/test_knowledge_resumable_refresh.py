@@ -1,8 +1,9 @@
 """Resumable, bounded semantic knowledge refresh behavior.
 
-These tests drive the candidate-index lifecycle through a fake vector store and
-a recording embedder so every assertion about *which* files were embedded, how
-many provider requests were issued, and what survives an interruption is exact.
+These tests drive the candidate-index lifecycle through the real vector store
+and a recording embedder so every assertion about *which* files were embedded,
+how many provider requests were issued, and what survives an interruption is
+exact.
 
 Against the pre-fix implementation the resume, retry and bounded-work tests
 fail: the candidate collection was deleted on every non-publishing outcome and
@@ -12,25 +13,22 @@ all progress lived in process memory.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import json
 import os
+import sqlite3
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agno.knowledge.document.base import Document
 from agno.knowledge.reader.markdown_reader import MarkdownReader
-from chromadb.errors import InternalError, NotFoundError
 from structlog.testing import capture_logs
 
 import mindroom.knowledge.candidate_checkpoint as knowledge_checkpoint_module
-import mindroom.knowledge.chroma_client as knowledge_chroma_client
 import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
-import mindroom.knowledge.read_proxy as knowledge_read_proxy
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
@@ -57,19 +55,15 @@ from mindroom.knowledge.candidate_checkpoint import (
     load_seals,
     save_candidate_checkpoint,
 )
-from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.collections import (
     CollectionSpace,
     _collection_name_for_base,
-    _collection_paths_with_vectors,
     candidate_collection_name,
-    paths_with_vectors,
 )
 from mindroom.knowledge.index_metadata import write_json_atomic
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager, _PreparedFile
-from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
@@ -83,301 +77,24 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.status import get_knowledge_index_status
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.model_defaults import SENTENCE_TRANSFORMERS_DEFAULT
 from mindroom.providers.errors import classify_provider_error
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
-from tests.knowledge_test_support import chroma_get_result, metadata_matches, validate_where_operands
+from tests.knowledge_test_support import seed_collection, stored_rows
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder
-    from mindroom.knowledge.indexing_config import IndexingSettings
+    from mindroom.knowledge.vector_store import StoredRow
 
 
 # --------------------------------------------------------------------------
-# Fake vector store + recording embedder
+# Recording embedder
 # --------------------------------------------------------------------------
-
-
-@dataclass
-class _Record:
-    identifier: str
-    content: str
-    embedding: list[float]
-    metadata: dict[str, Any]
-
-
-_record_ids = itertools.count()
-
-
-def _next_record_id() -> str:
-    """Return a chunk id unique across every collection in one test."""
-    return f"chunk-{next(_record_ids)}"
-
-
-class _FakeCollection:
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    def get(
-        self,
-        *,
-        include: Sequence[str],
-        limit: int | None = None,
-        offset: int = 0,
-        where: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        validate_where_operands(where)
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.get_calls += 1
-            if self._name in _FakeVectorDb.vanished_on_get:
-                message = f"Collection {self._name!r} does not exist"
-                raise NotFoundError(message)
-            records = list(_FakeVectorDb.store.get(self._name, []))
-        if where:
-            key, condition = next(iter(where.items()))
-            records = [record for record in records if metadata_matches(record.metadata, key, condition)]
-        selected = records[offset:] if limit is None else records[offset : offset + limit]
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.queries.append((len(selected), where))
-            _FakeVectorDb.enforce_row_ceiling(len(selected))
-        return chroma_get_result(
-            ids=[record.identifier for record in selected],
-            metadatas=[dict(record.metadata) for record in selected],
-            documents=[record.content for record in selected],
-            embeddings=[list(record.embedding) for record in selected],
-            include=include,
-        )
-
-    def add(
-        self,
-        *,
-        ids: list[str],
-        embeddings: list[list[float]],
-        documents: list[str],
-        metadatas: list[dict[str, Any]],
-    ) -> None:
-        if not ids:
-            # Chroma rejects an empty write rather than treating it as a no-op.
-            message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
-            raise ValueError(message)
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.writes.append(len(ids))
-            if len(_FakeVectorDb.writes) > _FakeVectorDb.max_writes:
-                message = "vector store refused the write"
-                raise RuntimeError(message)
-            _FakeVectorDb.written[self._name] = _FakeVectorDb.written.get(self._name, 0) + len(ids)
-            _FakeVectorDb.store.setdefault(self._name, []).extend(
-                _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
-                for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
-            )
-
-    def upsert(
-        self,
-        *,
-        ids: list[str],
-        embeddings: list[list[float]],
-        documents: list[str],
-        metadatas: list[dict[str, Any]],
-    ) -> None:
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.upserts.append(len(ids))
-            _FakeVectorDb.written[self._name] = _FakeVectorDb.written.get(self._name, 0) + len(ids)
-            replaced = set(ids)
-            records = [
-                record for record in _FakeVectorDb.store.get(self._name, []) if record.identifier not in replaced
-            ]
-            records.extend(
-                _Record(identifier=identifier, content=document, embedding=list(embedding), metadata=dict(metadata))
-                for identifier, embedding, document, metadata in zip(ids, embeddings, documents, metadatas, strict=True)
-            )
-            _FakeVectorDb.store[self._name] = records
-
-    def count(self) -> int:
-        with _FakeVectorDb.lock:
-            return len(_FakeVectorDb.store.get(self._name, []))
-
-    def delete(self, *, where: dict[str, object]) -> None:
-        validate_where_operands(where)
-        key, condition = next(iter(where.items()))
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.deletes.append(where)
-            _FakeVectorDb.store[self._name] = [
-                record
-                for record in _FakeVectorDb.store.get(self._name, [])
-                if not metadata_matches(record.metadata, key, condition)
-            ]
-
-
-class _FakeClient:
-    """In-memory stand-in for the persistent Chroma client one knowledge base opens."""
-
-    def get_collection(self, name: str) -> _FakeCollection:
-        with _FakeVectorDb.lock:
-            if name not in _FakeVectorDb.store:
-                message = f"Collection {name!r} does not exist"
-                raise NotFoundError(message)
-        return _FakeCollection(name)
-
-    def create_collection(self, name: str, metadata: dict[str, object] | None = None) -> _FakeCollection:
-        _ = metadata
-        with _FakeVectorDb.lock:
-            _FakeVectorDb.store.setdefault(name, [])
-        return _FakeCollection(name)
-
-    def delete_collection(self, name: str) -> None:
-        with _FakeVectorDb.lock:
-            if name not in _FakeVectorDb.store:
-                message = f"Collection {name!r} does not exist"
-                raise NotFoundError(message)
-            del _FakeVectorDb.store[name]
-            _FakeVectorDb.written.pop(name, None)
-
-    def list_collections(self) -> list[_FakeCollection]:
-        with _FakeVectorDb.lock:
-            return [_FakeCollection(name) for name in sorted(_FakeVectorDb.store)]
-
-    def get_max_batch_size(self) -> int:
-        return 5461
-
-    def close(self) -> None:
-        """The in-memory fake has no external resources to release."""
-
-
-class _FakeVectorDb:
-    store: ClassVar[dict[str, list[_Record]]] = {}
-    lock: ClassVar[Lock] = Lock()
-    #: Rows returned by each ``get``, with its filter, so tests can prove a copy
-    #: query was paged and that a verification probe was or was not issued.
-    queries: ClassVar[list[tuple[int, dict[str, object] | None]]] = []
-    #: Copy writes accepted before the store starts refusing them.
-    max_writes: ClassVar[int] = 1_000_000
-    #: Rows handed to each accepted or refused ``add``.
-    writes: ClassVar[list[int]] = []
-    #: Rows handed to each indexing ``upsert``.
-    upserts: ClassVar[list[int]] = []
-    #: ``where`` filter of each row ``delete``.
-    deletes: ClassVar[list[dict[str, object]]] = []
-    #: Rows ever written into each collection since it was created. Chroma's local vector index keeps an entry
-    #: for every one of them, deleted or not, so this minus the live rows is the dead entries it holds.
-    written: ClassVar[dict[str, int]] = {}
-    #: Rows one ``get`` may return before the store rejects the whole query,
-    #: mirroring SQLite's bind-variable ceiling: Chroma binds one variable per
-    #: *returned row*, so the limit is a property of the result, not of the
-    #: ``$in`` list. ``None`` leaves the store unbounded.
-    max_rows_per_get: ClassVar[int | None] = None
-    #: ``get`` calls issued, so a test can prove a query was not needlessly split.
-    get_calls: ClassVar[int] = 0
-    #: Collections that still resolve through ``get_collection`` but are gone by
-    #: the time the query runs, as when a sweep deletes one mid-verification.
-    vanished_on_get: ClassVar[set[str]] = set()
-
-    @classmethod
-    def enforce_row_ceiling(cls, rows: int) -> None:
-        """Reject a query whose result would exceed the store's bind-variable ceiling."""
-        if cls.max_rows_per_get is not None and rows > cls.max_rows_per_get:
-            message = (
-                "Error executing plan: Internal error: error returned from database: (code: 1) too many SQL variables"
-            )
-            raise InternalError(message)
-
-    def __init__(self, *, collection: str, **_: object) -> None:
-        self.collection_name = collection
-
-    def exists(self) -> bool:
-        with self.lock:
-            return self.collection_name in self.store
-
-    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        _ = query
-        with self.lock:
-            records = list(self.store.get(self.collection_name, [])[:limit])
-        return [SearchHit(content=record.content, meta_data=dict(record.metadata)) for record in records]
-
-
-class _FakeReadProxy(_FakeVectorDb):
-    def __init__(
-        self,
-        *,
-        collection_name: str,
-        path: str,
-        embedder: Embedder,
-        published_settings: IndexingSettings,
-    ) -> None:
-        self.published_settings = published_settings
-        super().__init__(collection=collection_name, path=path, embedder=embedder)
-
-
-def test_fake_vector_store_preserves_an_insert_during_concurrent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cleaning one source must not discard another source's completed write."""
-    cleanup_scanned = Event()
-    release_cleanup = Event()
-    insert_reached_store = Event()
-
-    class _SignalingLock:
-        def __init__(self) -> None:
-            self._lock = Lock()
-
-        def __enter__(self) -> None:
-            if self._lock.locked():
-                insert_reached_store.set()
-            self._lock.acquire()
-
-        def __exit__(self, *_args: object) -> None:
-            self._lock.release()
-
-    class _PausingRecordList(list[_Record]):
-        def __iter__(self) -> Iterator[_Record]:
-            yield from super().__iter__()
-            cleanup_scanned.set()
-            assert release_cleanup.wait(timeout=10)
-
-    monkeypatch.setattr(_FakeVectorDb, "lock", _SignalingLock())
-    collection = "concurrent-cleanup"
-    _FakeVectorDb.store[collection] = _PausingRecordList(
-        [
-            _Record(
-                identifier=_next_record_id(),
-                content="stale",
-                embedding=[1.0],
-                metadata={"source_path": "stale.md"},
-            ),
-        ],
-    )
-
-    cleanup_thread = Thread(
-        target=_FakeCollection(collection).delete,
-        kwargs={"where": {"source_path": "stale.md"}},
-    )
-    cleanup_thread.start()
-    assert cleanup_scanned.wait(timeout=5)
-
-    def _insert() -> None:
-        _FakeCollection(collection).upsert(
-            ids=[_next_record_id()],
-            embeddings=[[1.0]],
-            documents=["new content"],
-            metadatas=[{"source_path": "inserted.md"}],
-        )
-
-    insert_thread = Thread(target=_insert)
-    insert_thread.start()
-    reached_store_before_cleanup = insert_reached_store.wait(timeout=5)
-    release_cleanup.set()
-    cleanup_thread.join(timeout=5)
-    insert_thread.join(timeout=5)
-
-    assert reached_store_before_cleanup
-    assert not cleanup_thread.is_alive()
-    assert not insert_thread.is_alive()
-    assert [record.metadata["source_path"] for record in _FakeVectorDb.store[collection]] == ["inserted.md"]
 
 
 class _RecordingNonBatchEmbedder:
@@ -491,29 +208,12 @@ def embedder() -> _RecordingEmbedder:
 
 
 @pytest.fixture(autouse=True)
-def fake_vector_store(
+def recording_embedder_everywhere(
     monkeypatch: pytest.MonkeyPatch,
     embedder: _RecordingEmbedder,
 ) -> Iterator[None]:
-    """Install the in-memory vector store and the recording embedder."""
-    _FakeVectorDb.store = {}
-    _FakeVectorDb.max_rows_per_get = None
-    _FakeVectorDb.get_calls = 0
-    _FakeVectorDb.vanished_on_get = set()
-    _FakeVectorDb.queries = []
-    _FakeVectorDb.max_writes = 1_000_000
-    _FakeVectorDb.writes = []
-    _FakeVectorDb.upserts = []
-    _FakeVectorDb.deletes = []
-    _FakeVectorDb.written = {}
-    monkeypatch.setattr(knowledge_chroma_client, "_persistent_client", lambda _path: _FakeClient())
+    """Index and search with the recording embedder; vectors go to the real store under each test's storage root."""
     monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: embedder)
-    monkeypatch.setattr(knowledge_read_proxy, "ChromaReadProxy", _FakeReadProxy)
-    monkeypatch.setattr(
-        knowledge_read_proxy,
-        "collection_exists",
-        lambda _path, collection: _FakeVectorDb(collection=collection).exists(),
-    )
     monkeypatch.setattr(knowledge_registry, "create_configured_embedder", lambda *_a, **_k: embedder)
 
     async def _no_sleep(_seconds: float) -> None:
@@ -523,9 +223,6 @@ def fake_vector_store(
     knowledge_registry._published_indexes.clear()
     yield
     knowledge_registry._published_indexes.clear()
-    _FakeVectorDb.store = {}
-    _FakeVectorDb.queries = []
-    _FakeVectorDb.writes = []
 
 
 # --------------------------------------------------------------------------
@@ -569,6 +266,19 @@ def _storage_path(config: Config, runtime_paths: RuntimePaths) -> Path:
     )
 
 
+def _collection(config: Config, name: str) -> KnowledgeCollection:
+    """Return one collection in the docs base's storage directory."""
+    return KnowledgeCollection(path=_storage_path(config, runtime_paths_for(config)), name=name)
+
+
+def _collection_names(config: Config) -> tuple[str, ...]:
+    return list_collection_names(_storage_path(config, runtime_paths_for(config)))
+
+
+def _stored_paths(config: Config, collection: str) -> list[str]:
+    return sorted(row["metadata"]["source_path"] for row in stored_rows(_collection(config, collection)))
+
+
 def _write_corpus(docs_path: Path, count: int, *, body: str = "content") -> list[str]:
     docs_path.mkdir(parents=True, exist_ok=True)
     names = [f"doc{index:04d}.md" for index in range(count)]
@@ -582,8 +292,8 @@ def _overlapping_body(tokens: int) -> str:
     return " ".join(f"token{index:04d}" for index in range(tokens))
 
 
-def _candidate_collections() -> list[str]:
-    return sorted(name for name in _FakeVectorDb.store if "_candidate_" in name)
+def _candidate_collections(config: Config) -> list[str]:
+    return [name for name in _collection_names(config) if "_candidate_" in name]
 
 
 def _published_state(config: Config, runtime_paths: RuntimePaths) -> PublishedIndexState | None:
@@ -666,8 +376,7 @@ async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding
     assert state.indexed_count == len(names)
     for body, count in embedded_after_interrupt.items():
         assert embedder.embedded_count(body) == count, "completed files must not be embedded again"
-    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[interrupted_collection])
-    assert stored == sorted(names)
+    assert _stored_paths(config, interrupted_collection) == sorted(names)
 
 
 # --------------------------------------------------------------------------
@@ -853,6 +562,8 @@ async def test_permanent_embedding_failure_never_publishes_and_reports_classifie
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.collection == published_collection
+    # Searching embeds the query with the same embedder, so let it answer again.
+    embedder.fail_everything = None
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
     assert [document.content for document in await lookup.index.reader.asearch("body", limit=5)] == [
@@ -954,7 +665,7 @@ async def test_incompatible_settings_start_a_clean_candidate_and_keep_published_
     # Leave a partial candidate behind under the current settings.
     storage_path = _storage_path(config, runtime_paths)
     stale_candidate = f"{published_collection}_candidate_stalecandidate"
-    _FakeVectorDb.store[stale_candidate] = []
+    _collection(config, stale_candidate).reset()
     save_candidate_checkpoint(
         storage_path,
         CandidateCheckpoint(
@@ -971,8 +682,8 @@ async def test_incompatible_settings_start_a_clean_candidate_and_keep_published_
 
     assert run.resumed is False
     assert run.checkpoint.collection != stale_candidate
-    assert stale_candidate not in _FakeVectorDb.store, "incompatible candidate is discarded"
-    assert published_collection in _FakeVectorDb.store, "published index is not touched"
+    assert stale_candidate not in _collection_names(config), "incompatible candidate is discarded"
+    assert published_collection in _collection_names(config), "published index is not touched"
 
 
 @pytest.mark.asyncio
@@ -987,7 +698,7 @@ async def test_incompatible_candidate_delete_failure_does_not_block_refresh(
     runtime_paths = runtime_paths_for(config)
     manager = _manager(config)
     stale_candidate = f"{manager._collections.default_collection}_candidate_stale"
-    _FakeVectorDb.store[stale_candidate] = []
+    _collection(config, stale_candidate).reset()
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(
@@ -995,23 +706,23 @@ async def test_incompatible_candidate_delete_failure_does_not_block_refresh(
             settings=replace(manager._indexing_settings, embedder_model="old-model"),
         ),
     )
-    original_delete = _FakeClient.delete_collection
+    original_delete = KnowledgeCollection.delete
     attempts = 0
 
-    def _fail_once(self: _FakeClient, name: str) -> None:
+    def _fail_once(self: KnowledgeCollection) -> None:
         nonlocal attempts
-        if name == stale_candidate and attempts == 0:
+        if self.name == stale_candidate and attempts == 0:
             attempts += 1
             message = "collection is locked"
             raise RuntimeError(message)
-        original_delete(self, name)
+        original_delete(self)
 
-    monkeypatch.setattr(_FakeClient, "delete_collection", _fail_once)
+    monkeypatch.setattr(KnowledgeCollection, "delete", _fail_once)
 
     run = await manager._open_candidate_run()
 
     assert run.checkpoint.collection != stale_candidate
-    assert stale_candidate not in _FakeVectorDb.store, "candidate GC did not retry the transient failure"
+    assert stale_candidate not in _collection_names(config), "candidate GC did not retry the transient failure"
 
 
 @pytest.mark.asyncio
@@ -1089,8 +800,9 @@ async def test_source_revision_advancement_reuses_unchanged_candidate_work(
     assert state is not None
     assert state.collection == candidate_collection
     assert state.indexed_count == 3
-    published_paths = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[candidate_collection])
-    assert published_paths == ["added.md", "change.md", "keep.md"], "deleted vectors are removed"
+    assert _stored_paths(config, candidate_collection) == ["added.md", "change.md", "keep.md"], (
+        "deleted vectors are removed"
+    )
 
 
 @pytest.mark.asyncio
@@ -1127,6 +839,55 @@ async def test_source_change_during_final_verification_reconciles_without_losing
     assert state.indexed_count == 4
 
 
+@pytest.mark.asyncio
+async def test_a_changed_local_refresh_signs_each_file_once_before_and_once_after_indexing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciliation adopts the scan that found the source changed instead of reading every file again."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("changed body", encoding="utf-8")
+    signed: list[str] = []
+    original_signature = knowledge_manager_module._file_signature
+
+    def _recording_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
+        if snapshot is None:
+            signed.append(file_path.name)
+        return original_signature(file_path, snapshot)
+
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _recording_signature)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published
+    assert sorted(signed) == sorted(names * 2)
+
+
+@pytest.mark.asyncio
+async def test_a_file_changed_after_the_adopted_scan_is_still_indexed(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A change the adopted scan missed fails the final hash, so the next round indexes it before publishing."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await _manager(config).reindex_all()
+    manager = _manager(config)
+    await manager.source_signature()
+    (docs_path / names[1]).write_text("late body", encoding="utf-8")
+
+    assert (await manager.reindex_all()).published
+    assert embedder.embedded_count("late body") == 1
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.source_signature == await _manager(config).source_signature()
+
+
 # --------------------------------------------------------------------------
 # 9. Concurrency
 # --------------------------------------------------------------------------
@@ -1150,7 +911,7 @@ async def test_concurrent_refreshes_share_one_candidate_and_do_not_rebuild_twice
     )
 
     assert all(result.index_published for result in results)
-    assert len(_candidate_collections()) == 1, "one candidate, not one per request"
+    assert len(_candidate_collections(config)) == 1, "one candidate, not one per request"
     for index in range(4):
         assert embedder.embedded_count(f"content {index}") == 1, "no duplicate full rebuild"
 
@@ -1220,7 +981,7 @@ async def test_checkpoint_pointing_at_the_published_collection_is_never_reused(
     run = await manager._open_candidate_run()
 
     assert run.checkpoint.collection != published_collection
-    assert published_collection in _FakeVectorDb.store, "the published index survives"
+    assert published_collection in _collection_names(config), "the published index survives"
 
 
 # --------------------------------------------------------------------------
@@ -1243,16 +1004,16 @@ async def test_cleanup_preserves_published_active_and_unknown_collections(
 
     abandoned = f"{default_collection}_candidate_abandonedabandoned"
     unknown = "some_other_service_collection"
-    _FakeVectorDb.store[abandoned] = []
-    _FakeVectorDb.store[unknown] = []
+    _collection(config, abandoned).reset()
+    _collection(config, unknown).reset()
 
     manager = _manager(config)
     run = await manager._open_candidate_run()
 
-    assert abandoned not in _FakeVectorDb.store, "abandoned candidates are reclaimed"
-    assert published_collection in _FakeVectorDb.store
-    assert unknown in _FakeVectorDb.store, "unknown collections are preserved"
-    assert run.checkpoint.collection in _FakeVectorDb.store
+    assert abandoned not in _collection_names(config), "abandoned candidates are reclaimed"
+    assert published_collection in _collection_names(config)
+    assert unknown in _collection_names(config), "unknown collections are preserved"
+    assert run.checkpoint.collection in _collection_names(config)
 
 
 @pytest.mark.asyncio
@@ -1276,7 +1037,7 @@ async def test_repeated_interrupted_refreshes_keep_collection_count_bounded(
     finally:
         KnowledgeManager._index_file_locked = original_index  # type: ignore[method-assign]
 
-    assert len(_candidate_collections()) == 1
+    assert len(_candidate_collections(config)) == 1
 
 
 # --------------------------------------------------------------------------
@@ -1540,18 +1301,14 @@ async def test_completed_checkpoint_entry_without_vectors_is_requeued(
     assert {"kept.md", "lost.md"} <= set(checkpoint.completed)
 
     # Simulate vectors lost underneath a still-valid checkpoint claim.
-    records = _FakeVectorDb.store[checkpoint.collection]
-    _FakeVectorDb.store[checkpoint.collection] = [
-        record for record in records if record.metadata["source_path"] != "lost.md"
-    ]
+    _collection(config, checkpoint.collection).delete_source_paths(["lost.md"])
     (docs_path / "blocker.md").unlink()
     embedder.embedded_texts.clear()
 
     assert (await _manager(config).reindex_all()).indexed_count == 1
     assert embedder.embedded_count("lost body") == 1
     assert embedder.embedded_count("kept body") == 0
-    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[checkpoint.collection])
-    assert stored == ["kept.md", "lost.md"]
+    assert _stored_paths(config, checkpoint.collection) == ["kept.md", "lost.md"]
 
 
 @pytest.mark.asyncio
@@ -1627,7 +1384,7 @@ async def test_legacy_published_metadata_without_candidate_fields_stays_queryabl
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     assert result.index_published is True
     assert _published_state(config, runtime_paths).collection == published_collection
-    assert published_collection in _FakeVectorDb.store
+    assert published_collection in _collection_names(config)
 
 
 def test_candidate_checkpoint_replays_journal_and_tolerates_a_torn_tail(tmp_path: Path) -> None:
@@ -1771,7 +1528,7 @@ async def test_scale_refresh_resumes_after_ninety_percent_and_stays_bounded(
     assert embedder.request_count < first_pass_requests / 5, "resume is far cheaper than a rebuild"
     # Exactly one collection survives: the candidate that became the published
     # index. Interrupted refreshes must not accumulate collections.
-    assert list(_FakeVectorDb.store) == [checkpoint.collection]
+    assert _collection_names(config) == (checkpoint.collection,)
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None
     state = _published_state(config, runtime_paths)
     assert state is not None
@@ -1885,7 +1642,7 @@ async def test_batch_failure_never_leaves_stragglers_writing_after_compaction(
     assert slow_finished.is_set(), "siblings must have settled before the batch returned"
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert checkpoint is not None
-    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[checkpoint.collection])
+    stored = _stored_paths(config, checkpoint.collection)
     # Every file whose vectors landed is recorded; nothing was dropped by a
     # compaction racing an in-flight append.
     assert set(checkpoint.completed) == set(stored)
@@ -1943,7 +1700,7 @@ async def test_unreadable_published_metadata_never_costs_the_live_collection(
 
     await _manager(config)._open_candidate_run()
 
-    assert published_collection in _FakeVectorDb.store
+    assert published_collection in _collection_names(config)
 
 
 @pytest.mark.asyncio
@@ -1959,7 +1716,7 @@ async def test_unreadable_published_metadata_never_reuses_live_collection_checkp
     state = _published_state(config, runtime_paths)
     assert state is not None
     published_collection = state.collection
-    published_records = list(_FakeVectorDb.store[published_collection])
+    published_rows = stored_rows(_collection(config, published_collection))
     storage = _storage_path(config, runtime_paths)
     save_candidate_checkpoint(
         storage,
@@ -1974,7 +1731,7 @@ async def test_unreadable_published_metadata_never_reuses_live_collection_checkp
     run = await _manager(config)._open_candidate_run()
 
     assert run.collection.name != published_collection
-    assert _FakeVectorDb.store[published_collection] == published_records
+    assert stored_rows(_collection(config, published_collection)) == published_rows
     checkpoint = load_candidate_checkpoint(storage)
     assert checkpoint is not None
     assert checkpoint.collection == run.collection.name
@@ -2001,7 +1758,7 @@ async def test_an_unfinished_refresh_record_still_protects_the_collection_it_nam
     published_collection = state.collection
     manager = _manager(config)
     abandoned_collection = f"{manager._collections.default_collection}_candidate_abandoned"
-    _FakeVectorDb.store[abandoned_collection] = []
+    _collection(config, abandoned_collection).reset()
 
     # A publication followed by a refresh that is running and has not published
     # again yet: the shape older versions wrote for every in-progress refresh.
@@ -2020,8 +1777,10 @@ async def test_an_unfinished_refresh_record_still_protects_the_collection_it_nam
 
     await manager._open_candidate_run()
 
-    assert published_collection in _FakeVectorDb.store
-    assert abandoned_collection not in _FakeVectorDb.store, "cleanup was skipped instead of sparing the live index"
+    assert published_collection in _collection_names(config)
+    assert abandoned_collection not in _collection_names(config), (
+        "cleanup was skipped instead of sparing the live index"
+    )
 
 
 @pytest.mark.asyncio
@@ -2039,8 +1798,8 @@ async def test_candidate_cleanup_does_not_report_the_bases_own_default_collectio
     config = _config(tmp_path, docs_path)
     manager = _manager(config)
     default_collection = manager._collections.default_collection
-    _FakeVectorDb.store[default_collection] = []
-    _FakeVectorDb.store["some_unrelated_collection"] = []
+    _collection(config, default_collection).reset()
+    _collection(config, "some_unrelated_collection").reset()
 
     with capture_logs() as logs:
         await manager._open_candidate_run()
@@ -2050,7 +1809,7 @@ async def test_candidate_cleanup_does_not_report_the_bases_own_default_collectio
     ]
     assert len(reported) == 1
     assert reported[0]["collections"] == ["some_unrelated_collection"]
-    assert default_collection in _FakeVectorDb.store
+    assert default_collection in _collection_names(config)
 
 
 @pytest.mark.asyncio
@@ -2154,8 +1913,7 @@ async def test_candidate_converges_across_repeated_interruptions_and_source_chan
     assert state.status == "complete"
     assert state.collection == candidate_collection
     assert state.indexed_count == 9
-    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[candidate_collection])
-    assert stored == sorted(
+    assert _stored_paths(config, candidate_collection) == sorted(
         [f"doc{index:04d}.md" for index in range(9) if index != 1] + ["extra.md"],
     )
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None
@@ -2586,7 +2344,7 @@ async def test_checkpoint_naming_a_published_collection_is_rejected_during_a_run
 
     assert run.checkpoint.collection != published_collection
     assert run.resumed is False
-    assert published_collection in _FakeVectorDb.store
+    assert published_collection in _collection_names(config)
 
 
 @pytest.mark.asyncio
@@ -2625,7 +2383,7 @@ async def test_incompatible_checkpoint_never_deletes_a_published_collection(
 
     run = await _manager(config)._open_candidate_run()
 
-    assert published_collection in _FakeVectorDb.store, "the last good collection was deleted"
+    assert published_collection in _collection_names(config), "the last good collection was deleted"
     assert run.checkpoint.collection != published_collection
 
 
@@ -2662,7 +2420,7 @@ async def test_mtime_only_change_keeps_completed_vectors(
     assert checkpoint is not None
     candidate_collection = checkpoint.collection
     assert len(checkpoint.completed) == 4
-    vectors_before = len(_FakeVectorDb.store[candidate_collection])
+    vectors_before = len(stored_rows(_collection(config, candidate_collection)))
 
     # Same bytes, new mtimes: exactly what git checkout does.
     for index in range(5):
@@ -2675,7 +2433,7 @@ async def test_mtime_only_change_keeps_completed_vectors(
 
     for index in range(4):
         assert embedder.embedded_count(f"content {index}") == 0, "an mtime change re-embedded unchanged content"
-    assert len(_FakeVectorDb.store[candidate_collection]) == vectors_before + 1
+    assert len(stored_rows(_collection(config, candidate_collection))) == vectors_before + 1
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.status == "complete"
@@ -2775,7 +2533,7 @@ async def test_a_few_bad_files_do_not_stop_an_otherwise_healthy_refresh(
 
 
 @pytest.mark.asyncio
-async def test_candidate_path_removal_is_batched(tmp_path: Path) -> None:
+async def test_candidate_path_removal_is_batched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Dropping many paths must not cost one vector-store round trip each."""
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 40)
@@ -2798,17 +2556,23 @@ async def test_candidate_path_removal_is_batched(tmp_path: Path) -> None:
     for index in range(39):
         (docs_path / f"doc{index:04d}.md").write_text(f"rewritten {index}", encoding="utf-8")
 
-    # Every row deletion goes through the collection, so a per-path loop is
-    # caught as readily as a per-path $in call.
-    _FakeVectorDb.deletes = []
+    # Dropped paths leave the candidate through ``delete_source_paths``, so a
+    # per-path loop shows up as one call per path.
+    original_delete_paths = KnowledgeCollection.delete_source_paths
+    deletes: list[int] = []
+
+    def _count_deletes(self: KnowledgeCollection, relative_paths: Sequence[str]) -> None:
+        deletes.append(len(relative_paths))
+        original_delete_paths(self, relative_paths)
+
+    monkeypatch.setattr(KnowledgeCollection, "delete_source_paths", _count_deletes)
 
     assert (await _manager(config).reindex_all()).indexed_count == 40
 
-    # 39 dropped paths must not cost 39 round trips; the write path still
-    # clears each file it rewrites, so allow one per re-indexed file plus a
-    # small number of batched deletes.
-    deletes = len(_FakeVectorDb.deletes)
-    assert deletes <= 45, f"one delete per dropped path instead of batched: {deletes}"
+    # 39 dropped paths must not cost 39 round trips. Rewriting a file replaces
+    # its rows in that file's own write, so only the batched drops count here.
+    assert sum(deletes) >= 39, f"the dropped paths never left the candidate: {deletes}"
+    assert len(deletes) <= 5, f"one delete per dropped path instead of batched: {deletes}"
     assert _published_state(config, runtime_paths) is not None
 
 
@@ -2900,7 +2664,7 @@ async def test_unchanged_publish_discards_an_orphaned_candidate(
 
     # An interrupted forced rebuild: candidate state on disk, source unchanged.
     orphan = f"{published_collection}_orphan"
-    _FakeVectorDb.store[orphan] = []
+    _collection(config, orphan).reset()
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(
@@ -2914,8 +2678,8 @@ async def test_unchanged_publish_discards_an_orphaned_candidate(
 
     assert result.index_published is True
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None, "orphan checkpoint survived"
-    assert orphan not in _FakeVectorDb.store, "orphan collection survived"
-    assert published_collection in _FakeVectorDb.store
+    assert orphan not in _collection_names(config), "orphan collection survived"
+    assert published_collection in _collection_names(config)
 
 
 @pytest.mark.asyncio
@@ -2931,7 +2695,7 @@ async def test_unchanged_publish_retries_orphan_cleanup_after_delete_failure(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     published_collection = _published_state(config, runtime_paths).collection
     orphan = f"{published_collection}_orphan"
-    _FakeVectorDb.store[orphan] = []
+    _collection(config, orphan).reset()
     storage = _storage_path(config, runtime_paths)
     save_candidate_checkpoint(
         storage,
@@ -2941,30 +2705,30 @@ async def test_unchanged_publish_retries_orphan_cleanup_after_delete_failure(
             completed={"doc0000.md": (1, 1, "digest")},
         ),
     )
-    original_delete = _FakeClient.delete_collection
+    original_delete = KnowledgeCollection.delete
     attempts = 0
 
-    def _fail_once(self: _FakeClient, name: str) -> None:
+    def _fail_once(self: KnowledgeCollection) -> None:
         nonlocal attempts
-        if name == orphan and attempts == 0:
+        if self.name == orphan and attempts == 0:
             attempts += 1
             message = "collection is locked"
             raise RuntimeError(message)
-        original_delete(self, name)
+        original_delete(self)
 
-    monkeypatch.setattr(_FakeClient, "delete_collection", _fail_once)
+    monkeypatch.setattr(KnowledgeCollection, "delete", _fail_once)
 
     first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert first.index_published is True
     assert load_candidate_checkpoint(storage) is not None
-    assert orphan in _FakeVectorDb.store
+    assert orphan in _collection_names(config)
 
     second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert second.index_published is True
     assert load_candidate_checkpoint(storage) is None
-    assert orphan not in _FakeVectorDb.store
+    assert orphan not in _collection_names(config)
 
 
 @pytest.mark.asyncio
@@ -2981,7 +2745,7 @@ async def test_unchanged_publish_stays_ready_when_checkpoint_cleanup_fails(
     state = _published_state(config, runtime_paths)
     assert state is not None
     orphan = f"{state.collection}_orphan"
-    _FakeVectorDb.store[orphan] = []
+    _collection(config, orphan).reset()
     storage = _storage_path(config, runtime_paths)
     save_candidate_checkpoint(
         storage,
@@ -3164,8 +2928,7 @@ async def test_oversized_file_closes_its_batch_and_still_indexes(
     assert state is not None
     assert state.status == "complete"
     assert state.indexed_count == 4
-    stored = sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[state.collection])
-    assert "huge.md" in stored
+    assert "huge.md" in _stored_paths(config, state.collection)
 
 
 @pytest.mark.asyncio
@@ -3228,20 +2991,6 @@ async def test_overlapping_chunks_are_batch_embedded_and_published(
 # --------------------------------------------------------------------------
 
 
-def _stored_paths(collection: str) -> list[str]:
-    return sorted(record.metadata["source_path"] for record in _FakeVectorDb.store[collection])
-
-
-def _vector_existence_probe_count() -> int:
-    """Return how many ``$in`` source-path existence probes the store was asked."""
-    probes = 0
-    for _rows, where in _FakeVectorDb.queries:
-        condition = where.get("source_path") if isinstance(where, dict) else None
-        if isinstance(condition, dict) and "$in" in condition:
-            probes += 1
-    return probes
-
-
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -3280,7 +3029,7 @@ async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
     assert first_state is not None
     first_collection = first_state.collection
     assert first_collection is not None
-    published_ids = {record.identifier for record in _FakeVectorDb.store[first_collection]}
+    published_ids = {row["id"] for row in stored_rows(_collection(config, first_collection))}
 
     (docs_path / names[1]).write_text("rewritten body", encoding="utf-8")
     embedder.embedded_texts.clear()
@@ -3296,11 +3045,11 @@ async def test_refresh_after_publish_reuses_vectors_for_unchanged_files(
     assert state.indexed_count == 3
     assert state.collection is not None
     assert state.collection != first_collection, "publication must still swap in a separate collection"
-    assert _stored_paths(state.collection) == sorted(names)
+    assert _stored_paths(config, state.collection) == sorted(names)
     reused_ids = {
-        record.identifier
-        for record in _FakeVectorDb.store[state.collection]
-        if record.metadata["source_path"] != names[1]
+        row["id"]
+        for row in stored_rows(_collection(config, state.collection))
+        if row["metadata"]["source_path"] != names[1]
     }
     assert reused_ids <= published_ids, "copied chunks must keep their published ids"
 
@@ -3320,13 +3069,13 @@ async def test_published_vector_reuse_leaves_the_published_collection_untouched(
     assert first_state is not None
     first_collection = first_state.collection
     assert first_collection is not None
-    before = [replace(record) for record in _FakeVectorDb.store[first_collection]]
+    before = stored_rows(_collection(config, first_collection))
 
     (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
     run = await _manager(config)._open_candidate_run()
 
     assert run.checkpoint.collection != first_collection
-    assert _FakeVectorDb.store[first_collection] == before, "the live published collection was mutated"
+    assert stored_rows(_collection(config, first_collection)) == before, "the live published collection was mutated"
 
 
 @pytest.mark.asyncio
@@ -3358,7 +3107,19 @@ async def test_published_vector_reuse_skips_paths_that_left_the_corpus(
     """A published path that is no longer managed must never enter the candidate."""
     # One row per page, so the removed file's row is the only row of its page
     # and the copy has to cope with a page that contributes nothing.
-    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 1)
+    original_copy = KnowledgeCollection.copy_rows
+
+    def _copy_one_row_per_page(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
+        *,
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
+    ) -> None:
+        del page_rows
+        original_copy(self, source, select=select, page_rows=1)
+
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _copy_one_row_per_page)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -3369,7 +3130,7 @@ async def test_published_vector_reuse_skips_paths_that_left_the_corpus(
     run = await _manager(config)._open_candidate_run()
 
     assert sorted(run.completed) == [names[1], names[2]]
-    assert _stored_paths(run.checkpoint.collection) == [names[1], names[2]]
+    assert _stored_paths(config, run.checkpoint.collection) == [names[1], names[2]]
 
 
 @pytest.mark.asyncio
@@ -3428,9 +3189,7 @@ async def test_published_vector_reuse_never_claims_a_path_the_published_index_ca
     first_state = _published_state(config, runtime_paths)
     assert first_state is not None
     assert first_state.collection is not None
-    _FakeVectorDb.store[first_state.collection] = [
-        record for record in _FakeVectorDb.store[first_state.collection] if record.metadata["source_path"] != names[2]
-    ]
+    _collection(config, first_state.collection).delete_source_paths([names[2]])
     embedder.embedded_texts.clear()
 
     assert (await _manager(config).reindex_all()).indexed_count == 1
@@ -3439,35 +3198,33 @@ async def test_published_vector_reuse_never_claims_a_path_the_published_index_ca
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.collection is not None
-    assert _stored_paths(state.collection) == sorted(names)
+    assert _stored_paths(config, state.collection) == sorted(names)
 
 
 @pytest.mark.asyncio
-async def test_published_vector_copy_is_paged_so_no_query_exceeds_the_store_ceiling(
+async def test_copied_paths_skip_the_vector_existence_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    embedder: _RecordingEmbedder,
 ) -> None:
-    """Chroma binds one SQL variable per returned row, so only the page size bounds a copy.
-
-    An unpaged read of a published collection is refused outright once the
-    corpus is large enough, and no bound on files or paths can prevent that.
-    """
-    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 4)
+    """The copy already reported which paths received rows, so none is probed for vectors again."""
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 12)
     config = _config(tmp_path, docs_path)
 
     await _manager(config).reindex_all()
-    _FakeVectorDb.max_rows_per_get = 4
-    _FakeVectorDb.queries = []
+    probed: list[str] = []
+    original_probe = KnowledgeCollection.paths_with_vectors
+
+    def _record_probe(self: KnowledgeCollection, relative_paths: Sequence[str]) -> set[str]:
+        probed.extend(relative_paths)
+        return original_probe(self, relative_paths)
+
+    monkeypatch.setattr(KnowledgeCollection, "paths_with_vectors", _record_probe)
     (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
-    embedder.embedded_texts.clear()
 
     assert (await _manager(config).reindex_all()).indexed_count == 1
 
-    assert max(rows for rows, _where in _FakeVectorDb.queries) <= 4
-    assert _vector_existence_probe_count() == 0, "copied paths were sent back through the vector-existence probe"
+    assert probed == [], "copied paths were sent back through the vector-existence probe"
 
 
 @pytest.mark.asyncio
@@ -3485,7 +3242,7 @@ async def test_published_vector_reuse_falls_back_when_the_published_collection_i
     first_state = _published_state(config, runtime_paths)
     assert first_state is not None
     assert first_state.collection is not None
-    _FakeVectorDb.store.pop(first_state.collection)
+    _collection(config, first_state.collection).delete()
     embedder.embedded_texts.clear()
 
     assert (await _manager(config).reindex_all()).indexed_count == 3
@@ -3507,19 +3264,42 @@ async def test_a_failed_vector_copy_leaves_no_partial_candidate(
     reconciliation, so a later listing that drops that path would publish
     vectors for a file the corpus no longer contains.
     """
-    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 1)
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
 
     await _manager(config).reindex_all()
-    _FakeVectorDb.writes = []
-    _FakeVectorDb.max_writes = 1
+    original_copy = KnowledgeCollection.copy_rows
+    landed: list[dict[str, Any]] = []
+
+    def _refuse_after_first_page(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
+        *,
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
+    ) -> None:
+        del page_rows
+        pages = 0
+
+        def _select(metadata: Mapping[str, Any]) -> bool:
+            nonlocal pages
+            if pages:
+                landed.extend(stored_rows(self))
+                message = "vector store refused the write"
+                raise RuntimeError(message)
+            pages += 1
+            return select(metadata)
+
+        original_copy(self, source, select=_select, page_rows=1)
+
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _refuse_after_first_page)
 
     run = await _manager(config)._open_candidate_run()
 
+    assert landed, "the copy failed before writing a row, so this proves nothing"
     assert run.completed == {}, "a failed copy must claim nothing"
-    assert _FakeVectorDb.store[run.checkpoint.collection] == [], "partially copied rows survived the failure"
+    assert stored_rows(run.collection) == [], "partially copied rows survived the failure"
 
 
 @pytest.mark.asyncio
@@ -3553,7 +3333,7 @@ async def test_published_vector_reuse_survives_a_checkout_that_only_rewrites_mti
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.collection is not None
-    assert _stored_paths(state.collection) == sorted(names)
+    assert _stored_paths(config, state.collection) == sorted(names)
 
 
 @pytest.mark.asyncio
@@ -3580,7 +3360,7 @@ async def test_published_vector_reuse_rescans_an_empty_file_it_cannot_claim(
     assert state.status == "complete"
     assert state.indexed_count == 3
     assert state.collection is not None
-    assert _stored_paths(state.collection) == sorted(names)
+    assert _stored_paths(config, state.collection) == sorted(names)
 
 
 @pytest.mark.asyncio
@@ -3688,7 +3468,7 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
     interrupted = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert interrupted is not None
     assert interrupted.completed == {}, "a cancelled copy must claim nothing"
-    assert _stored_paths(interrupted.collection) == sorted(names), "the copy did write rows before cancelling"
+    assert _stored_paths(config, interrupted.collection) == sorted(names), "the copy did write rows before cancelling"
 
     (docs_path / names[0]).unlink()
     embedder.embedded_texts.clear()
@@ -3699,7 +3479,9 @@ async def test_a_cancelled_vector_copy_never_publishes_rows_it_could_not_claim(
     assert state is not None
     assert state.status == "complete"
     assert state.collection is not None
-    assert _stored_paths(state.collection) == sorted(names[1:]), "a departed path survived in the published index"
+    assert _stored_paths(config, state.collection) == sorted(names[1:]), (
+        "a departed path survived in the published index"
+    )
     # Recovery rebuilds the collection, so it must copy again rather than fall
     # back to embedding: losing a corpus copy is the bug's secondary cost.
     assert indexed == 0, "recovery re-embedded instead of copying the published vectors again"
@@ -3729,7 +3511,7 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
     checkpoint = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert checkpoint is not None
     assert len(checkpoint.completed) == 2, "the candidate should have kept the files it did index"
-    _FakeVectorDb.store.pop(checkpoint.collection)
+    _collection(config, checkpoint.collection).delete()
 
     run = await _manager(config)._open_candidate_run()
 
@@ -3737,20 +3519,26 @@ async def test_a_candidate_whose_collection_vanished_is_rebuilt_rather_than_resu
     assert run.completed == {}, "claims survived a collection that no longer holds their vectors"
 
 
+def _overwrite_with_garbage(file: Path) -> None:
+    """Replace a collection file with bytes SQLite does not recognize as a database."""
+    file.write_bytes(b"not a database" * 100)
+
+
+def _corrupt_schema_page(file: Path) -> None:
+    """Overwrite the first page after its header, so SQLite reports a malformed database image."""
+    data = bytearray(file.read_bytes())
+    page_size = int.from_bytes(data[16:18], "big")
+    data[100:page_size] = b"\xff" * (page_size - 100)
+    file.write_bytes(bytes(data))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "unreadable_error",
-    [
-        "Error constructing hnsw segment reader: EOF while parsing",
-        "Error sending backfill request to compactor: Failed to apply logs to the hnsw segment writer",
-    ],
-)
+@pytest.mark.parametrize("corrupt", [_overwrite_with_garbage, _corrupt_schema_page], ids=["notadb", "corrupt"])
 async def test_an_unreadable_candidate_is_discarded_without_touching_the_published_index(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    unreadable_error: str,
+    corrupt: Callable[[Path], None],
 ) -> None:
-    """A corrupt unpublished vector segment must not permanently block refresh."""
+    """A corrupt unpublished collection file must not permanently block refresh."""
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -3761,10 +3549,10 @@ async def test_an_unreadable_candidate_is_discarded_without_touching_the_publish
     assert state is not None
     assert state.collection is not None
     published_collection = state.collection
-    published_records = list(_FakeVectorDb.store[published_collection])
+    published_rows = stored_rows(_collection(config, published_collection))
 
     unreadable_candidate = candidate_collection_name(manager._collections)
-    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    seed_collection(_collection(config, unreadable_candidate), published_rows)
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(
@@ -3773,22 +3561,15 @@ async def test_an_unreadable_candidate_is_discarded_without_touching_the_publish
             completed={names[0]: (1, 1, "digest")},
         ),
     )
-    original_get = _FakeCollection.get
-
-    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
-        if self._name == unreadable_candidate:
-            raise InternalError(unreadable_error)
-        return original_get(self, **kwargs)
-
-    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
+    corrupt(_collection(config, unreadable_candidate).file)
 
     run = await manager._open_candidate_run()
 
     assert run.resumed is False
     assert run.checkpoint.collection != unreadable_candidate
     assert sorted(run.completed) == names
-    assert unreadable_candidate not in _FakeVectorDb.store
-    assert _FakeVectorDb.store[published_collection] == published_records
+    assert unreadable_candidate not in _collection_names(config)
+    assert stored_rows(_collection(config, published_collection)) == published_rows
 
 
 @pytest.mark.asyncio
@@ -3807,34 +3588,27 @@ async def test_an_unreadable_candidate_is_not_deleted_when_its_checkpoint_cannot
     assert state is not None
     assert state.collection is not None
     published_collection = state.collection
-    published_records = list(_FakeVectorDb.store[published_collection])
+    published_rows = stored_rows(_collection(config, published_collection))
 
     unreadable_candidate = candidate_collection_name(manager._collections)
-    _FakeVectorDb.store[unreadable_candidate] = list(published_records)
+    seed_collection(_collection(config, unreadable_candidate), published_rows)
     save_candidate_checkpoint(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(collection=unreadable_candidate, settings=manager._indexing_settings),
     )
-    original_get = _FakeCollection.get
-
-    def _fail_unreadable_candidate(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
-        if self._name == unreadable_candidate:
-            message = "Error constructing hnsw segment reader: EOF while parsing"
-            raise InternalError(message)
-        return original_get(self, **kwargs)
+    _overwrite_with_garbage(_collection(config, unreadable_candidate).file)
 
     def _fail_checkpoint_cleanup(_base_storage_path: Path) -> None:
         message = "checkpoint directory is read-only"
         raise PermissionError(message)
 
-    monkeypatch.setattr(_FakeCollection, "get", _fail_unreadable_candidate)
     monkeypatch.setattr(knowledge_manager_module, "delete_candidate_checkpoint", _fail_checkpoint_cleanup)
 
     with pytest.raises(RuntimeError, match="Cannot retire unreadable knowledge candidate checkpoint"):
         await manager._open_candidate_run()
 
-    assert unreadable_candidate in _FakeVectorDb.store
-    assert _FakeVectorDb.store[published_collection] == published_records
+    assert unreadable_candidate in _collection_names(config)
+    assert stored_rows(_collection(config, published_collection)) == published_rows
 
 
 @pytest.mark.asyncio
@@ -3853,33 +3627,33 @@ async def test_a_transient_candidate_probe_failure_preserves_resumable_work(
     assert state is not None
     assert state.collection is not None
     published_collection = state.collection
-    published_records = list(_FakeVectorDb.store[published_collection])
+    published_rows = stored_rows(_collection(config, published_collection))
 
     candidate = candidate_collection_name(manager._collections)
-    _FakeVectorDb.store[candidate] = list(published_records)
+    seed_collection(_collection(config, candidate), published_rows)
     storage = _storage_path(config, runtime_paths)
     save_candidate_checkpoint(
         storage,
         CandidateCheckpoint(collection=candidate, settings=manager._indexing_settings),
     )
-    original_get = _FakeCollection.get
+    original_has_rows = KnowledgeCollection.has_rows
 
-    def _fail_transient_probe(self: _FakeCollection, **kwargs: object) -> dict[str, object]:
-        if self._name == candidate:
-            message = "database connection unexpectedly closed"
-            raise InternalError(message)
-        return original_get(self, **kwargs)
+    def _fail_transient_probe(self: KnowledgeCollection) -> bool:
+        if self.name == candidate:
+            message = "database is locked"
+            raise sqlite3.OperationalError(message)
+        return original_has_rows(self)
 
-    monkeypatch.setattr(_FakeCollection, "get", _fail_transient_probe)
+    monkeypatch.setattr(KnowledgeCollection, "has_rows", _fail_transient_probe)
 
-    with pytest.raises(InternalError, match="database connection unexpectedly closed"):
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
         await manager._open_candidate_run()
 
     checkpoint = load_candidate_checkpoint(storage)
     assert checkpoint is not None
     assert checkpoint.collection == candidate
-    assert candidate in _FakeVectorDb.store
-    assert _FakeVectorDb.store[published_collection] == published_records
+    assert candidate in _collection_names(config)
+    assert stored_rows(_collection(config, published_collection)) == published_rows
 
 
 @pytest.mark.asyncio
@@ -3899,7 +3673,7 @@ async def test_unclaimed_row_probe_constructs_no_embedder(
         _storage_path(config, runtime_paths),
         CandidateCheckpoint(collection=collection, settings=manager._indexing_settings),
     )
-    _FakeVectorDb.store[collection] = []
+    _collection(config, collection).reset()
     created: list[Embedder] = []
 
     def _record_factory(*_args: object, **_kwargs: object) -> Embedder:
@@ -3992,7 +3766,7 @@ async def test_a_candidate_with_no_vectors_and_no_claims_is_still_resumed(
     assert first is not None
     assert first.completed == {}
     assert sorted(first.failed) == sorted(names)
-    assert _stored_paths(first.collection) == []
+    assert _stored_paths(config, first.collection) == []
 
     await _manager(config).reindex_all()
 
@@ -4019,7 +3793,6 @@ async def test_a_copy_records_its_claims_only_after_every_row_has_landed(
     stay green, so this is the pin. Chunks are paged one row at a time to give
     a per-page write somewhere to happen.
     """
-    monkeypatch.setattr(knowledge_manager_module, "_PUBLISHED_VECTOR_COPY_PAGE_ROWS", 1)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -4027,25 +3800,27 @@ async def test_a_copy_records_its_claims_only_after_every_row_has_landed(
 
     events: list[str] = []
     original_save = knowledge_manager_module.save_candidate_checkpoint
-    original_add = _FakeCollection.add
+    original_copy = KnowledgeCollection.copy_rows
 
     def _record_save(base_storage_path: Path, checkpoint: CandidateCheckpoint) -> CandidateCheckpoint:
         events.append(f"claims:{len(checkpoint.completed)}")
         return original_save(base_storage_path, checkpoint)
 
-    def _record_add(
-        self: _FakeCollection,
+    def _record_copy(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
         *,
-        ids: list[str],
-        embeddings: list[list[float]],
-        documents: list[str],
-        metadatas: list[dict[str, Any]],
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
     ) -> None:
-        events.append("rows")
-        original_add(self, ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+        del page_rows
+        original_copy(self, source, select=select, page_rows=1)
+        # Every row the copy wrote has landed by now; a claim saved from inside
+        # the copy, or between copies, lands ahead of these.
+        events.extend("rows" for _row in stored_rows(self))
 
     monkeypatch.setattr(knowledge_manager_module, "save_candidate_checkpoint", _record_save)
-    monkeypatch.setattr(_FakeCollection, "add", _record_add)
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _record_copy)
     (docs_path / names[0]).write_text("rewritten body", encoding="utf-8")
 
     await _manager(config).reindex_all()
@@ -4104,15 +3879,15 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
 
     (docs_path / names[0]).unlink()
     die_before_reset = True
-    original_reset = knowledge_manager_module.reset_collection
+    original_reset = KnowledgeCollection.reset
 
-    def _maybe_die(collection: KnowledgeCollection) -> None:
+    def _maybe_die(self: KnowledgeCollection) -> None:
         if die_before_reset:
             message = "host lost power before the collection was emptied"
             raise RuntimeError(message)
-        original_reset(collection)
+        original_reset(self)
 
-    monkeypatch.setattr(knowledge_manager_module, "reset_collection", _maybe_die)
+    monkeypatch.setattr(KnowledgeCollection, "reset", _maybe_die)
     with pytest.raises(RuntimeError):
         await _manager(config).reindex_all()
     die_before_reset = False
@@ -4120,7 +3895,7 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
     interrupted = load_candidate_checkpoint(_storage_path(config, runtime_paths))
     assert interrupted is not None
     assert interrupted.completed == {}
-    assert _stored_paths(interrupted.collection) == sorted(names), "the crash left rows nothing claims"
+    assert _stored_paths(config, interrupted.collection) == sorted(names), "the crash left rows nothing claims"
     embedder.embedded_texts.clear()
 
     indexed = (await _manager(config).reindex_all()).indexed_count
@@ -4128,7 +3903,9 @@ async def test_a_rebuild_that_dies_before_emptying_the_collection_still_recovers
     state = _published_state(config, runtime_paths)
     assert state is not None
     assert state.collection is not None
-    assert _stored_paths(state.collection) == sorted(names[1:]), "a departed path survived in the published index"
+    assert _stored_paths(config, state.collection) == sorted(names[1:]), (
+        "a departed path survived in the published index"
+    )
     assert indexed == 0, "recovery re-embedded instead of copying the published vectors again"
     assert embedder.embedded_texts == []
 
@@ -4250,179 +4027,14 @@ async def test_local_index_built_before_prompted_embedding_is_rebuilt_not_reused
 
 
 # --------------------------------------------------------------------------
-# Vector verification against a store with a bind-variable ceiling
+# Vector verification and collection ownership
 # --------------------------------------------------------------------------
 
 
-def _seed_chunked_paths(collection: str, paths: Sequence[str], chunks_per_path: int) -> None:
-    """Fill one collection with `chunks_per_path` vectors for each of `paths`."""
-    _FakeVectorDb.store[collection] = [
-        _Record(
-            identifier=_next_record_id(),
-            content=f"{relative_path} chunk {index}",
-            embedding=[0.0],
-            metadata={"source_path": relative_path},
-        )
-        for relative_path in paths
-        for index in range(chunks_per_path)
-    ]
-
-
-def _verification_collection() -> KnowledgeCollection:
-    """Return a created, empty candidate collection to verify against."""
-    _FakeVectorDb.store["verification_target"] = []
-    return KnowledgeCollection(path="unused", name="verification_target")
-
-
-def test_vector_verification_splits_a_batch_the_store_cannot_answer() -> None:
-    """A batch matching more rows than the store allows must still be verified.
-
-    Chroma binds one SQL variable per matched chunk row, so a fixed batch of
-    paths is not a bound at all: whether the query fits depends on how many
-    chunks those files produced. A corpus of large files makes every
-    verification query fail, which strands the candidate permanently.
-    """
-    vector_db = _verification_collection()
-    paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.name, paths, chunks_per_path=100)
-    _FakeVectorDb.max_rows_per_get = 250
-
-    assert paths_with_vectors(vector_db, paths) == set(paths)
-
-    # Halving is the property that makes this affordable, and correctness alone
-    # does not pin it: splitting one path off at a time also terminates and also
-    # returns the right answer, while turning O(log n) queries into O(n).
-    # 8 (800 rows, refused) -> 4 (400, refused) -> 2 + 2 (200 each, answered),
-    # then the same on the right half: 7 queries.
-    assert _FakeVectorDb.get_calls == 7
-
-
-def test_vector_verification_confirms_a_file_larger_than_the_store_ceiling() -> None:
-    """One file with more chunks than the ceiling must still be confirmed.
-
-    Splitting alone cannot rescue this: a single path is the smallest batch
-    there is, so the query has to stop asking for every row it matches.
-    """
-    vector_db = _verification_collection()
-    _seed_chunked_paths(vector_db.name, ["huge.md"], chunks_per_path=500)
-    _FakeVectorDb.max_rows_per_get = 250
-
-    assert paths_with_vectors(vector_db, ["huge.md"]) == {"huge.md"}
-
-
-def test_vector_verification_still_reports_paths_without_vectors_after_splitting() -> None:
-    """Splitting must not turn an unverifiable path into a verified one."""
-    vector_db = _verification_collection()
-    present = [f"present{index:02d}.md" for index in range(6)]
-    _seed_chunked_paths(vector_db.name, present, chunks_per_path=100)
-    _FakeVectorDb.max_rows_per_get = 250
-    missing = ["missing0.md", "missing1.md"]
-
-    found = paths_with_vectors(vector_db, [*present, *missing])
-
-    assert found == set(present)
-
-
-def test_vector_verification_uses_one_query_when_the_store_answers() -> None:
-    """A store that can answer the whole batch must be asked exactly once.
-
-    Splitting is a fallback, not the normal path: verifying per file would turn
-    one query per 128 files into 128, which is the cost this batching exists to
-    avoid.
-    """
-    vector_db = _verification_collection()
-    paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.name, paths, chunks_per_path=100)
-
-    assert paths_with_vectors(vector_db, paths) == set(paths)
-    assert _FakeVectorDb.get_calls == 1
-
-
-def test_vector_verification_does_not_split_when_the_collection_is_gone() -> None:
-    """A missing collection must surface at once instead of being re-asked per path.
-
-    Splitting exists to shrink a query the store found too large, and a missing
-    collection is not that: it stays missing however small the query gets.
-    Descending anyway costs ``log2(batch) + 1`` doomed queries before the
-    leftmost leaf raises the identical error, and the caller does not catch, so
-    verification aborts on this batch either way. Failing on the first query is
-    the cheaper of two identical outcomes, which is what the count below pins.
-    """
-    vector_db = _verification_collection()
-    paths = [f"doc{index:02d}.md" for index in range(8)]
-    # No rows are seeded: every ``get`` raises before reading the store, so
-    # seeding would only suggest the contents mattered. ``create()`` in the
-    # helper is what registers the collection for ``get_collection``.
-    _FakeVectorDb.vanished_on_get = {vector_db.name}
-
-    with pytest.raises(NotFoundError):
-        paths_with_vectors(vector_db, paths)
-
-    assert _FakeVectorDb.get_calls == 1
-
-
-def test_vector_verification_does_not_split_unrelated_internal_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only SQLite's bind-variable failure may trigger recursive splitting."""
-    vector_db = _verification_collection()
-    collection = vector_db.collection()
-    paths = [f"doc{index:02d}.md" for index in range(8)]
-    calls = 0
-
-    def refuse_query(**_: object) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        message = "database connection unexpectedly closed"
-        raise InternalError(message)
-
-    monkeypatch.setattr(collection, "get", refuse_query)
-
-    with pytest.raises(InternalError, match="database connection unexpectedly closed"):
-        _collection_paths_with_vectors(collection, paths)
-
-    assert calls == 1
-
-
-def test_vector_verification_records_that_it_had_to_split() -> None:
-    """A store refusing batches must leave a trace, not degrade silently.
-
-    Splitting keeps verification correct but multiplies its queries, and how
-    far it degrades depends on chunk counts nothing here can see. A base whose
-    files grew past the ceiling would otherwise get quietly slower with no
-    signal anywhere, which is the same invisibility that let the original
-    failure go undiagnosed.
-    """
-    vector_db = _verification_collection()
-    paths = [f"doc{index:02d}.md" for index in range(8)]
-    _seed_chunked_paths(vector_db.name, paths, chunks_per_path=100)
-    _FakeVectorDb.max_rows_per_get = 250
-
-    with capture_logs() as logs:
-        assert paths_with_vectors(vector_db, paths) == set(paths)
-
-    split_logs = [entry for entry in logs if entry["event"] == "Split a refused knowledge vector verification query"]
-    assert [entry["paths"] for entry in split_logs] == [8, 4, 4]
-
-
-def test_vector_verification_answers_an_empty_batch_without_asking_the_store() -> None:
-    """No paths has an answer the store cannot give.
-
-    Chroma rejects an empty ``$in`` operand outright, so asking would raise
-    rather than return nothing. Splitting never reaches this case -- both
-    halves of a batch of two or more are non-empty -- but the query is a public
-    entry point and its recursion is documented as total, so the floor has to
-    exist. Resolving the collection handle is skipped too: the answer does not
-    depend on it, and an absent collection would otherwise turn a question with
-    an obvious answer into a ``NotFoundError``.
-    """
-    uncreated = _FakeVectorDb(collection="never_created")
-
-    assert paths_with_vectors(uncreated, []) == set()
-    assert _FakeVectorDb.get_calls == 0
-
-    created = _verification_collection()
-    collection = created.collection()
-    assert _collection_paths_with_vectors(collection, []) == set()
-    assert _FakeVectorDb.get_calls == 0
+def test_vector_verification_answers_an_empty_batch_without_opening_the_collection(tmp_path: Path) -> None:
+    """No paths has an answer the store need not give, even for a collection that does not exist."""
+    assert KnowledgeCollection(path=tmp_path, name="never_created").paths_with_vectors([]) == set()
+    assert list_collection_names(tmp_path) == ()
 
 
 def test_collection_ownership_is_derived_from_identity_not_supplied() -> None:
@@ -4460,9 +4072,65 @@ class _Crash(BaseException):
     """A process death at one chosen point of a refresh: no ``except Exception`` handler may absorb it."""
 
 
-def _served(collection: str) -> list[tuple[str, str]]:
+@dataclass
+class _StoreWrites:
+    """Rows written into the real store, counted by thin wrappers around its write methods."""
+
+    #: Rows copied from another collection since the last ``clear``.
+    copied: int = 0
+    #: Rows written for indexed files since the last ``clear``.
+    file_rows: int = 0
+    lock: Lock = field(default_factory=Lock)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.copied = 0
+            self.file_rows = 0
+
+    def record(self, rows: int, *, copied: bool) -> None:
+        with self.lock:
+            if copied:
+                self.copied += rows
+            else:
+                self.file_rows += rows
+
+
+@pytest.fixture
+def store_writes(monkeypatch: pytest.MonkeyPatch) -> _StoreWrites:
+    """Count the rows refreshes write into the real store, by how they write them."""
+    writes = _StoreWrites()
+    original_write = KnowledgeCollection.write_source_rows
+    original_copy = KnowledgeCollection.copy_rows
+
+    def _write(self: KnowledgeCollection, relative_path: str, rows: Sequence[StoredRow]) -> None:
+        original_write(self, relative_path, rows)
+        writes.record(len(rows), copied=False)
+
+    def _copy(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
+        *,
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
+    ) -> None:
+        def _counting_select(metadata: Mapping[str, Any]) -> bool:
+            selected = select(metadata)
+            if selected:
+                writes.record(1, copied=True)
+            return selected
+
+        original_copy(self, source, select=_counting_select, page_rows=page_rows)
+
+    monkeypatch.setattr(KnowledgeCollection, "write_source_rows", _write)
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _copy)
+    return writes
+
+
+def _served(config: Config, collection: str) -> list[tuple[str, str]]:
     """Return what one collection serves, as sorted ``(source path, text)`` rows."""
-    return sorted((record.metadata["source_path"], record.content) for record in _FakeVectorDb.store[collection])
+    return sorted(
+        (row["metadata"]["source_path"], row["content"]) for row in stored_rows(_collection(config, collection))
+    )
 
 
 def _corpus(docs_path: Path) -> list[tuple[str, str]]:
@@ -4478,16 +4146,11 @@ def _published_collection(config: Config) -> str:
     return state.collection
 
 
-def _copied_rows() -> int:
-    """Return rows copied from the published index since the counters were last cleared."""
-    return sum(_FakeVectorDb.writes)
-
-
 async def _refresh_and_check(config: Config, docs_path: Path) -> str:
     """Refresh, assert the new publication serves exactly the files on disk, and return it."""
     assert (await _manager(config).reindex_all()).published
     published = _published_collection(config)
-    assert _served(published) == _corpus(docs_path), "the publication lost, duplicated or kept stale rows"
+    assert _served(config, published) == _corpus(docs_path), "the publication lost, duplicated or kept stale rows"
     return published
 
 
@@ -4503,6 +4166,8 @@ async def _build_steady_state(config: Config, docs_path: Path, names: Sequence[s
 async def test_a_refresh_writes_only_the_rows_that_changed_once_a_retired_collection_is_kept(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
 ) -> None:
     """A small change must cost rows for that change, not a copy of every published row."""
     docs_path = tmp_path / "docs"
@@ -4510,11 +4175,11 @@ async def test_a_refresh_writes_only_the_rows_that_changed_once_a_retired_collec
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     cold = await _refresh_and_check(config, docs_path)
-    cold_rows = _rows_by_id(cold)
+    cold_rows = _rows_by_id(config, cold)
     (docs_path / names[0]).write_text("first change", encoding="utf-8")
     second = await _refresh_and_check(config, docs_path)
     assert second != cold, "publication must still swap in a separate collection"
-    assert _rows_by_id(cold) == cold_rows, "the retired collection was dropped or written after it was retired"
+    assert _rows_by_id(config, cold) == cold_rows, "the retired collection was dropped or written after it was retired"
     assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None, (
         "a kept collection must not look like an in-progress candidate"
     )
@@ -4522,38 +4187,46 @@ async def test_a_refresh_writes_only_the_rows_that_changed_once_a_retired_collec
     (docs_path / names[1]).write_text("second change", encoding="utf-8")
     (docs_path / names[2]).unlink()
     (docs_path / "added.md").write_text("added body", encoding="utf-8")
-    _FakeVectorDb.writes = []
-    _FakeVectorDb.upserts = []
-    _FakeVectorDb.queries = []
+    store_writes.clear()
+    probed: list[str] = []
+    original_probe = KnowledgeCollection.paths_with_vectors
+
+    def _record_probe(self: KnowledgeCollection, relative_paths: Sequence[str]) -> set[str]:
+        probed.extend(relative_paths)
+        return original_probe(self, relative_paths)
+
+    monkeypatch.setattr(KnowledgeCollection, "paths_with_vectors", _record_probe)
     embedder.embedded_texts.clear()
 
     assert await _refresh_and_check(config, docs_path) == cold, "the retired collection was not resumed"
 
-    assert _copied_rows() == 0, "the refresh copied the published index"
+    assert store_writes.copied == 0, "the refresh copied the published index"
     # The resumed collection is one publication behind, so the previous refresh's change is written again too.
     assert sorted(embedder.embedded_texts) == ["added body", "first change", "second change"]
-    assert sum(_FakeVectorDb.upserts) == 3, "the refresh rewrote rows it did not change"
-    assert _vector_existence_probe_count() == 0, "a sealed collection's claims were probed again"
+    assert store_writes.file_rows == 3, "the refresh rewrote rows it did not change"
+    assert probed == [], "a sealed collection's claims were probed again"
     untouched = set(names[3:])
-    assert {i: r for i, r in _rows_by_id(cold).items() if r[0] in untouched} == {
+    assert {i: r for i, r in _rows_by_id(config, cold).items() if r[0] in untouched} == {
         i: r for i, r in cold_rows.items() if r[0] in untouched
     }, "unchanged rows were rewritten"
-    assert second in _FakeVectorDb.store, "the collection this publication retired was not kept in turn"
-    assert sorted(_FakeVectorDb.store) == sorted({cold, second})
+    assert second in _collection_names(config), "the collection this publication retired was not kept in turn"
+    assert sorted(_collection_names(config)) == sorted({cold, second})
 
 
-def _rows_by_id(collection: str) -> dict[str, tuple[str, str]]:
+def _rows_by_id(config: Config, collection: str) -> dict[str, tuple[str, str]]:
     return {
-        record.identifier: (record.metadata["source_path"], record.content)
-        for record in _FakeVectorDb.store[collection]
+        row["id"]: (row["metadata"]["source_path"], row["content"])
+        for row in stored_rows(_collection(config, collection))
     }
 
 
 @pytest.mark.asyncio
-async def test_every_publication_stays_exact_as_two_collections_take_turns(tmp_path: Path) -> None:
+async def test_every_publication_stays_exact_as_two_collections_take_turns(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+) -> None:
     """Edits, additions, removals and mtime-only touches never lose, duplicate or keep stale rows."""
     docs_path = tmp_path / "docs"
-    # Large enough that no collection reaches the dead-entry bound within these refreshes.
     names = _write_corpus(docs_path, 40)
     config = _config(tmp_path, docs_path)
     await _refresh_and_check(config, docs_path)
@@ -4564,11 +4237,11 @@ async def test_every_publication_stays_exact_as_two_collections_take_turns(tmp_p
             (docs_path / f"new{step - 3}.md").unlink(missing_ok=True)
         touched = docs_path / names[(step + 5) % len(names)]
         os.utime(touched, ns=(touched.stat().st_atime_ns, touched.stat().st_mtime_ns + 1_000_000_000))
-        _FakeVectorDb.writes = []
+        store_writes.clear()
         await _refresh_and_check(config, docs_path)
         if step > 1:
-            assert _copied_rows() == 0, f"refresh {step} copied the published index"
-        assert len(_FakeVectorDb.store) <= 2, "more than the published and the kept collection stayed on disk"
+            assert store_writes.copied == 0, f"refresh {step} copied the published index"
+        assert len(_collection_names(config)) <= 2, "more than the published and the kept collection stayed on disk"
 
 
 async def _disable_finalization(*_args: object, **_kwargs: object) -> None:
@@ -4590,6 +4263,7 @@ def _crash_after(target: Any) -> Any:  # noqa: ANN401
 async def test_a_crash_at_any_step_leaves_a_whole_index_and_costs_at_most_one_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
     crash_point: str,
 ) -> None:
     """Readers see the old or the new index after any crash, and later refreshes converge."""
@@ -4639,17 +4313,17 @@ async def test_a_crash_at_any_step_leaves_a_whole_index_and_costs_at_most_one_co
         with pytest.raises(_Crash):
             await _manager(config).reindex_all()
 
-    served = _served(_published_collection(config))
+    served = _served(config, _published_collection(config))
     assert served in (old_corpus, new_corpus), "a crash left a published index that is neither old nor new"
 
     copies = 0
     for step in range(4):
         (docs_path / names[step]).write_text(f"after the crash {step}", encoding="utf-8")
-        _FakeVectorDb.writes = []
+        store_writes.clear()
         await _refresh_and_check(config, docs_path)
-        copies += _copied_rows() > 0
+        copies += store_writes.copied > 0
     assert copies <= 1, f"the crash cost {copies} copies of the whole index"
-    assert len(_FakeVectorDb.store) <= 2
+    assert len(_collection_names(config)) <= 2
 
 
 @pytest.mark.asyncio
@@ -4684,7 +4358,7 @@ async def test_rows_a_crash_wrote_before_their_claim_are_never_carried_into_a_ke
     for step in range(4):
         (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
         await _refresh_and_check(config, docs_path)
-        assert tainted not in _FakeVectorDb.store, "the collection holding unclaimed rows was kept for reuse"
+        assert tainted not in _collection_names(config), "the collection holding unclaimed rows was kept for reuse"
 
 
 @pytest.mark.parametrize("change", ["chunking", "forced"])
@@ -4699,7 +4373,7 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
     names = _write_corpus(docs_path, 6)
     config = _config(tmp_path, docs_path)
     await _build_steady_state(config, docs_path, names)
-    old_collections = set(_FakeVectorDb.store)
+    old_collections = set(_collection_names(config))
     if change == "chunking":
         config = _config(tmp_path, docs_path, chunk_size=4000)
     embedder.embedded_texts.clear()
@@ -4707,7 +4381,7 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
     assert (await _manager(config).reindex_all(force_reindex=change == "forced")).published
 
     assert sorted(embedder.embedded_texts) == sorted(text for _name, text in _corpus(docs_path))
-    assert not old_collections & set(_FakeVectorDb.store), "a collection holding old vectors survived"
+    assert not old_collections & set(_collection_names(config)), "a collection holding old vectors survived"
     (docs_path / names[5]).write_text("next change", encoding="utf-8")
     embedder.embedded_texts.clear()
     await _refresh_and_check(config, docs_path)
@@ -4715,75 +4389,65 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
 
 
 @pytest.mark.asyncio
-async def test_a_kept_collection_mostly_made_of_dead_entries_is_copied_afresh(
+async def test_a_kept_collection_a_shrinking_source_left_mostly_empty_is_copied_afresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    embedder: _RecordingEmbedder,
+    store_writes: _StoreWrites,
 ) -> None:
-    """Deleted rows stay in a local vector index, so a kept collection's dead entries must stay bounded."""
+    """Deleted rows never shrink a file, so a kept collection left mostly free pages is replaced by a fresh copy."""
     docs_path = tmp_path / "docs"
-    _write_corpus(docs_path, 6)
+    names = _write_corpus(docs_path, 4)
     large = docs_path / "large.md"
-    large.write_text(_overlapping_body(300), encoding="utf-8")
+    large.write_text(_overlapping_body(4000), encoding="utf-8")
     config = _config(tmp_path, docs_path, chunk_size=500)
     assert (await _manager(config).reindex_all()).published
-    large_rows = sum(path == "large.md" for path, _text in _served(_published_collection(config)))
-    assert large_rows > 3, "the large file must be several chunks for this to prove anything"
+    (docs_path / names[0]).write_text("first edit", encoding="utf-8")
+    assert (await _manager(config).reindex_all()).published
+    assert len(_collection_names(config)) == 2
+    large.unlink()
     collections_while_copying: list[int] = []
     original_copy = KnowledgeManager._copy_published_vectors
 
     def _recording_copy(self: KnowledgeManager, **kwargs: Any) -> dict[str, FileSignature]:  # noqa: ANN401
-        collections_while_copying.append(len(_FakeVectorDb.store))
+        collections_while_copying.append(len(_collection_names(config)))
         return original_copy(self, **kwargs)
 
     monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _recording_copy)
+    store_writes.clear()
 
-    copies = 0
-    for version in range(1, 16):
-        large.write_text(_overlapping_body(300).replace("token0000", f"tokenv{version:03d}"), encoding="utf-8")
-        _FakeVectorDb.writes = []
-        embedder.embedded_texts.clear()
-        assert (await _manager(config).reindex_all()).published
-        served = _served(_published_collection(config))
-        assert [row for row in served if row[0] != "large.md"] == [
-            row for row in _corpus(docs_path) if row[0] != "large.md"
-        ]
-        large_texts = [text for path, text in served if path == "large.md"]
-        assert len(large_texts) == large_rows, "the large file's rows were lost or duplicated"
-        assert [text.startswith(f"tokenv{version:03d}") for text in large_texts].count(True) == 1, (
-            "the large file's rows are stale"
-        )
-        copies += _copied_rows() > 0
-        assert not [text for text in embedder.embedded_texts if text.startswith("content")], (
-            "rows of unchanged files were embedded again"
-        )
-        for name, records in _FakeVectorDb.store.items():
-            dead = _FakeVectorDb.written.get(name, 0) - len(records)
-            assert dead <= len(records) + 2 * large_rows, f"{name} holds {dead} dead entries over {len(records)} rows"
-    assert 2 <= copies <= 8, f"the index was copied afresh {copies} times in 15 refreshes"
+    # Two take-overs leave both collections mostly empty; the next two refreshes replace each with a fresh copy.
+    for step in range(4):
+        (docs_path / names[step]).write_text(f"edit {step}", encoding="utf-8")
+        await _refresh_and_check(config, docs_path)
+
+    assert store_writes.copied > 0, "no collection left mostly empty was copied afresh"
     # The worn collection is dropped before the copy, so only the published index and the copy share the disk.
     assert max(collections_while_copying) == 2
+    assert all(_collection(config, name).free_fraction() <= 0.25 for name in _collection_names(config))
 
 
 @pytest.mark.asyncio
-async def test_a_refresh_that_finds_nothing_changed_keeps_the_retired_collection(tmp_path: Path) -> None:
+async def test_a_refresh_that_finds_nothing_changed_keeps_the_retired_collection(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+) -> None:
     """The unchanged-source path must not discard the collection the next change resumes."""
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 4)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     await _build_steady_state(config, docs_path, names)
-    collections = set(_FakeVectorDb.store)
+    collections = set(_collection_names(config))
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     assert result.index_published is True
-    assert set(_FakeVectorDb.store) == collections
+    assert set(_collection_names(config)) == collections
     assert get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).candidate is None
     (docs_path / names[3]).write_text("change after an idle refresh", encoding="utf-8")
-    _FakeVectorDb.writes = []
+    store_writes.clear()
     await _refresh_and_check(config, docs_path)
-    assert _copied_rows() == 0, "the idle refresh dropped the collection the next change could resume"
+    assert store_writes.copied == 0, "the idle refresh dropped the collection the next change could resume"
 
 
 @pytest.mark.asyncio
@@ -4797,7 +4461,9 @@ async def test_resuming_the_retired_collection_waits_for_readers_still_holding_i
     config = _config(tmp_path, docs_path)
     storage = _storage_path(config, runtime_paths_for(config))
     await _build_steady_state(config, docs_path, names)
-    retired_rows = {name: _served(name) for name in _FakeVectorDb.store if name != _published_collection(config)}
+    retired_rows = {
+        name: _served(config, name) for name in _collection_names(config) if name != _published_collection(config)
+    }
     (docs_path / names[2]).write_text("change while a reader holds the old index", encoding="utf-8")
     reader_holds = Event()
     release_reader = Event()
@@ -4816,16 +4482,19 @@ async def test_resuming_the_retired_collection_waits_for_readers_still_holding_i
     await asyncio.sleep(0.3)
     try:
         assert not refresh.done(), "the refresh did not wait for the reader"
-        assert {name: _served(name) for name in retired_rows} == retired_rows, "the held collection was written"
+        assert {name: _served(config, name) for name in retired_rows} == retired_rows, "the held collection was written"
     finally:
         release_reader.set()
         reader.join(timeout=5)
     assert (await refresh).published
-    assert _served(_published_collection(config)) == _corpus(docs_path)
+    assert _served(config, _published_collection(config)) == _corpus(docs_path)
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_seal_costs_one_copy_and_nothing_else(tmp_path: Path) -> None:
+async def test_an_unreadable_seal_costs_one_copy_and_nothing_else(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+) -> None:
     """A seal that cannot be read proves nothing, so the refresh copies the published index as before."""
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 4)
@@ -4837,12 +4506,12 @@ async def test_an_unreadable_seal_costs_one_copy_and_nothing_else(tmp_path: Path
     for path in seals:
         path.write_text("not json", encoding="utf-8")
     (docs_path / names[3]).write_text("change after the seals broke", encoding="utf-8")
-    _FakeVectorDb.writes = []
+    store_writes.clear()
 
     await _refresh_and_check(config, docs_path)
 
-    assert _copied_rows() > 0
-    assert len(_FakeVectorDb.store) <= 2
+    assert store_writes.copied > 0
+    assert len(_collection_names(config)) <= 2
 
 
 @pytest.mark.parametrize("seal_step", ["take_sealed_candidate", "rotate_seals"])
@@ -4890,7 +4559,7 @@ async def test_a_cancelled_refresh_finishes_its_seal_change_before_it_returns(
 @pytest.mark.asyncio
 async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or_serving_lost_rows(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
     damage: str,
 ) -> None:
     """A kept collection the store cannot read, or that lost rows at rest, is dropped and the index copied."""
@@ -4898,29 +4567,21 @@ async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or
     names = _write_corpus(docs_path, 6)
     config = _config(tmp_path, docs_path)
     await _build_steady_state(config, docs_path, names)
-    (retired,) = set(_FakeVectorDb.store) - {_published_collection(config)}
+    (retired,) = set(_collection_names(config)) - {_published_collection(config)}
+    retired_collection = _collection(config, retired)
     if damage == "unreadable":
-        original_count = _FakeCollection.count
-
-        def _unreadable_count(self: _FakeCollection) -> int:
-            if self.name == retired:
-                message = "Error constructing hnsw segment reader"
-                raise InternalError(message)
-            return original_count(self)
-
-        monkeypatch.setattr(_FakeCollection, "count", _unreadable_count)
+        retired_collection.file.write_bytes(b"not a knowledge collection" * 100)
     elif damage == "lost_row":
-        lost = next(record for record in _FakeVectorDb.store[retired] if record.metadata["source_path"] == names[5])
-        _FakeVectorDb.store[retired].remove(lost)
+        retired_collection.delete_source_paths([names[5]])
     else:
-        del _FakeVectorDb.store[retired]
+        retired_collection.delete()
     (docs_path / names[3]).write_text("change after the damage", encoding="utf-8")
-    _FakeVectorDb.writes = []
+    store_writes.clear()
 
     await _refresh_and_check(config, docs_path)
 
-    assert _copied_rows() > 0
-    assert retired not in _FakeVectorDb.store, "the damaged collection was kept"
+    assert store_writes.copied > 0
+    assert retired not in _collection_names(config), "the damaged collection was kept"
     for step in range(2):
         (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
         await _refresh_and_check(config, docs_path)
@@ -4930,6 +4591,7 @@ async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or
 async def test_taking_a_seal_over_a_stranded_candidate_never_leaves_that_candidate_without_its_journal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
 ) -> None:
     """An interrupted take-over leaves the candidate it replaces whole or gone, never a snapshot missing its journal."""
     docs_path = tmp_path / "docs"
@@ -4939,9 +4601,7 @@ async def test_taking_a_seal_over_a_stranded_candidate_never_leaves_that_candida
     await _build_steady_state(config, docs_path, names)
     # A candidate holding rows it never claimed is rebuilt, which is where a seal is taken over instead.
     stranded = f"{_manager(config)._collections.default_collection}_candidate_strandedstranded"
-    _FakeVectorDb.store[stranded] = [
-        _Record(identifier=_next_record_id(), content="stray", embedding=[1.0], metadata={"source_path": "stray.md"}),
-    ]
+    seed_collection(_collection(config, stranded), [{"content": "stray", "metadata": {"source_path": "stray.md"}}])
     save_candidate_checkpoint(
         storage,
         CandidateCheckpoint(collection=stranded, settings=_manager(config)._indexing_settings),
@@ -4962,6 +4622,6 @@ async def test_taking_a_seal_over_a_stranded_candidate_never_leaves_that_candida
 
     assert not snapshot.exists(), "the replaced candidate's snapshot outlived its journal"
     (docs_path / names[2]).write_text("change after the interrupted take-over", encoding="utf-8")
-    _FakeVectorDb.writes = []
+    store_writes.clear()
     await _refresh_and_check(config, docs_path)
-    assert _copied_rows() == 0, "the seal was lost along with the stranded candidate"
+    assert store_writes.copied == 0, "the seal was lost along with the stranded candidate"
