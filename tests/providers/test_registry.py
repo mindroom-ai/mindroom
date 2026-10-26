@@ -863,13 +863,8 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
     assert [message.content for message in messages] == ["Weather in Paris?"]
 
 
-@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "blocking"])
 @pytest.mark.asyncio
-async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn(
-    runtime_paths: RuntimePaths,
-    *,
-    stream: bool,
-) -> None:
+async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn(runtime_paths: RuntimePaths) -> None:
     """The provider bills the attempt that wrote the malformed call, so its usage joins the guidance retry's turn."""
     candidate = {"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}
     malformed = {"candidates": [candidate], "usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 5}}
@@ -877,12 +872,9 @@ async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn
         "candidates": [{"content": {"role": "model", "parts": [{"text": "Sunny."}]}, "finishReason": "STOP"}],
         "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 9},
     }
-    replies = [sse_response([malformed]), sse_response([answered])]
-    if not stream:
-        replies = [httpx.Response(200, json=malformed), httpx.Response(200, json=answered)]
-    wire = Wire(*replies)
+    wire = Wire(sse_response([malformed]), sse_response([answered]))
     provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
-    request = ModelRequest(messages=[_user("Weather in Paris?")], stream=stream)
+    request = ModelRequest(messages=[_user("Weather in Paris?")])
 
     events = [event async for event in provider.stream(request)]
 

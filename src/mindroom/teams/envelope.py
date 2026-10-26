@@ -203,6 +203,7 @@ async def prepare_materialized_team_execution(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
+        timezone=built.timezone,
         entity_name=configured_team_name,
         history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
@@ -260,12 +261,16 @@ async def prepare_materialized_team_execution(
 
 @dataclass(frozen=True)
 class _LeaderRun:
-    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata."""
+    """How the leader of one prepared team turn runs: its storage, hooks, request settings, model, and metadata.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
 
     spec: TeamSpec
     storage: RunStorage | None
     hooks: LoopHooks
     request_template: ModelRequest
+    stream: bool
     model_name: str
     metadata: dict[str, Any] | None
 
@@ -293,6 +298,7 @@ class _LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
             request_template=self.request_template,
+            stream=self.stream,
         )
 
 
@@ -327,7 +333,8 @@ def _leader_run(
             ),
             entity_name=configured_team_name,
         ),
-        request_template=with_native_history(ModelRequest(messages=(), stream=stream), history.native_history),
+        request_template=with_native_history(ModelRequest(messages=()), history.native_history),
+        stream=stream,
         model_name=prepared.runtime_model_name,
         metadata=prepared.run_metadata,
     )
@@ -437,6 +444,8 @@ class _TeamTurn:
     turn_recorder: TurnRecorder
     reason_prefix: str
     holder: _TeamTurnHolder
+    # The zone of the entity whose bot runs the turn, which dates all of it.
+    timezone: str
 
     @property
     def runtime_paths(self) -> RuntimePaths:
@@ -526,6 +535,7 @@ class _TeamTurn:
             execution_identity=self.execution_identity,
             model_name=runtime_model.model_name,
             configured_team_name=self.configured_team_name,
+            timezone=self.timezone,
             system_enrichment=render_system_enrichment_block(self.ctx.system_enrichment_items),
         )
         prepared = await prepare_materialized_team_execution(
@@ -957,6 +967,8 @@ def _team_turn(
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
         holder=_TeamTurnHolder(team_members=team_members, member_model_names=team_members.model_names),
+        # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
+        timezone=config.get_entity_timezone(ctx.entity_label),
     )
 
 

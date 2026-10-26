@@ -43,7 +43,6 @@
       "model": "mindroom.routing:_RoutingSuggestion"
     },
     "portable_replay": null,
-    "stream": false,
     "tool_choice": null,
     "tools": []
   },
@@ -51,7 +50,6 @@
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
       "provider_data": {
-        "incomplete_reason": null,
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -60,8 +58,7 @@
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
         "mindroom_system_sha256": "3815e2aa5abe2371e573aad504da599e37991a9b14158ea28b459edc73df188d",
-        "response_id": "resp_parity",
-        "response_status": "completed"
+        "response_id": "resp_parity"
       },
       "role": "assistant"
     },
@@ -75,6 +72,7 @@
   "request": {
     "body": {
       "model": "gpt-6-astra",
+      "stream": true,
       "input": [
         {
           "role": "developer",
@@ -126,43 +124,160 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "created_at": 1792540800,
-      "error": null,
-      "id": "resp_parity",
-      "incomplete_details": null,
-      "model": "gpt-6-astra",
-      "object": "response",
-      "output": [
-        {
-          "content": [
-            {
-              "annotations": [],
-              "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-              "type": "output_text"
+    "sse": [
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [],
+            "status": "in_progress",
+            "usage": null
+          },
+          "sequence_number": 0,
+          "type": "response.created"
+        },
+        "event": "response.created"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "in_progress",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 1,
+          "type": "response.output_item.added"
+        },
+        "event": "response.output_item.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "",
+            "type": "output_text"
+          },
+          "sequence_number": 2,
+          "type": "response.content_part.added"
+        },
+        "event": "response.content_part.added"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "delta": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 3,
+          "type": "response.output_text.delta"
+        },
+        "event": "response.output_text.delta"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "logprobs": [],
+          "output_index": 0,
+          "sequence_number": 4,
+          "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+          "type": "response.output_text.done"
+        },
+        "event": "response.output_text.done"
+      },
+      {
+        "data": {
+          "content_index": 0,
+          "item_id": "msg_parity",
+          "output_index": 0,
+          "part": {
+            "annotations": [],
+            "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+            "type": "output_text"
+          },
+          "sequence_number": 5,
+          "type": "response.content_part.done"
+        },
+        "event": "response.content_part.done"
+      },
+      {
+        "data": {
+          "item": {
+            "content": [
+              {
+                "annotations": [],
+                "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          },
+          "output_index": 0,
+          "sequence_number": 6,
+          "type": "response.output_item.done"
+        },
+        "event": "response.output_item.done"
+      },
+      {
+        "data": {
+          "response": {
+            "created_at": 1792540800,
+            "error": null,
+            "id": "resp_parity",
+            "incomplete_details": null,
+            "model": "gpt-6-astra",
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "text": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_parity",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "status": "completed",
+            "usage": {
+              "input_tokens": 42,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 12,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 54
             }
-          ],
-          "id": "msg_parity",
-          "role": "assistant",
-          "status": "completed",
-          "type": "message"
-        }
-      ],
-      "status": "completed",
-      "usage": {
-        "input_tokens": 42,
-        "input_tokens_details": {
-          "cached_tokens": 0
+          },
+          "sequence_number": 7,
+          "type": "response.completed"
         },
-        "output_tokens": 12,
-        "output_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "total_tokens": 54
+        "event": "response.completed"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output"

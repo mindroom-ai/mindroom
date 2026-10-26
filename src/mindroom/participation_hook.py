@@ -2,7 +2,7 @@
 
 An agent that already took part in a thread decides whether to reply again. The decision is asked of the configured
 judgment backend first; when that backend abstains or the conversation holds more than room text, the reply's own
-model answers a non-streaming decision request: the reply's request with the decision prompt appended to its exact
+model answers a decision request: the reply's request with the decision prompt appended to its exact
 messages and tool selection disabled, so the decision carries the reply's tools and settings, such as deferred tool
 search and native compaction, and the provider's prompt cache serves the reply that follows.
 """
@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import EndRun, SendRequest
+from mindroom.attachments.storage import mentions_attachments
 from mindroom.history.message_content import message_media_entries
 from mindroom.hooks.enrichment import is_transient_context, render_transient_context
 from mindroom.json_utils import object_with_unique_keys
@@ -82,8 +83,7 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
             or any(value for _, value in message_media_entries(message))
             # Attachment-only history and current-turn provenance can be plain
             # text even when the provider receives no media objects.
-            or "[attachments:" in message.content
-            or "Attachments sent with the current message" in message.content
+            or mentions_attachments(message.content)
         ):
             return None
     return tuple(JudgmentMessage(sender=message.role, text=message.get_content_string()) for message in conversation)
@@ -110,7 +110,6 @@ async def _request_decision(model: ModelProvider, gate: ParticipationGate, state
                     messages=decision_messages,
                     tools=state.tools,
                     tool_choice="none",
-                    stream=False,
                 ),
             )
         assert state.record.metrics is not None

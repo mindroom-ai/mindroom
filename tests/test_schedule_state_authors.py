@@ -176,7 +176,7 @@ async def test_human_written_task_is_hidden_from_list_and_cancel(tmp_path: Path)
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = _room_with_task(_pending_content(_workflow(created_by="@victim:server")), sender=HUMAN_ID)
 
-    listed = await scheduling.list_scheduled_tasks(client, ROOM_ID, runtime_paths)
+    listed = await scheduling.list_scheduled_tasks(client, ROOM_ID, runtime_paths, config=Config())
     cancelled = await scheduling.cancel_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
     cancelled_all = await scheduling.cancel_all_scheduled_tasks(client, ROOM_ID, runtime_paths)
 

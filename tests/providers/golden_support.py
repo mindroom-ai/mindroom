@@ -96,7 +96,6 @@ _HANDLED_INPUT_KEYS = frozenset(
         "output_schema",
         "portable_replay",
         "provider_tools_disabled",
-        "stream",
         "tool_choice",
         "tool_jobs",
         "tools",
@@ -151,6 +150,10 @@ class _Httpx2Body(httpx2.AsyncByteStream):
                 yield chunk
         except httpx.TransportError as error:
             raise _httpx2_error(error) from None
+
+    async def aclose(self) -> None:
+        """Close the body."""
+        await self._body.aclose()
 
 
 def httpx2_transport(handler: Callable[[httpx2.Request], httpx.Response | httpx2.Response]) -> httpx2.MockTransport:
@@ -251,6 +254,105 @@ def ndjson_response(
     """Return a newline-delimited JSON stream, as Ollama sends; the options are those of ``sse_response``."""
     chunks = [json.dumps(event).encode() + b"\n" for event in events]
     return _streamed(chunks, "application/x-ndjson", status=status, pause_seconds=pause_seconds, drop=drop)
+
+
+def streamed_reply(reply: dict[str, Any]) -> httpx.Response:
+    """Return the stream a route sends for one finished reply body.
+
+    ``reply`` is a Chat completion, a Responses response, a Claude message, a Gemini response, or Ollama's done chunk.
+    """
+    if "choices" in reply:
+        return sse_response([*_chat_chunks(reply), "[DONE]"])
+    if reply.get("object") == "response":
+        return sse_response(responses_events(reply), named=True)
+    if reply.get("type") == "message":
+        return sse_response(claude_stream_events(reply), named=True)
+    if "candidates" in reply or "promptFeedback" in reply:
+        return sse_response([reply])
+    return ndjson_response([reply])
+
+
+def _chat_chunks(completion: dict[str, Any]) -> list[dict[str, Any]]:
+    choice = completion["choices"][0]
+    base = {key: value for key, value in completion.items() if key not in {"choices", "usage"}}
+    base["object"] = "chat.completion.chunk"
+    delta = {key: value for key, value in choice["message"].items() if key != "tool_calls" and value is not None}
+    if calls := choice["message"].get("tool_calls"):
+        delta["tool_calls"] = [{"index": index, **call} for index, call in enumerate(calls)]
+    chunks = [
+        {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+        {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": choice["finish_reason"]}]},
+    ]
+    if (usage := completion.get("usage")) is not None:
+        chunks.append({**base, "choices": [], "usage": usage})
+    return chunks
+
+
+def responses_events(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the events the Responses API streams for ``response``: its start, each output item, then its end."""
+    events: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {**response, "output": [], "status": "in_progress", "usage": None}},
+    ]
+    for index, item in enumerate(response["output"]):
+        added = {**item, "arguments": ""} if item["type"] == "function_call" else item
+        events.append({"type": "response.output_item.added", "output_index": index, "item": added})
+        common = {"item_id": item.get("id"), "output_index": index, "content_index": 0}
+        if item["type"] == "function_call":
+            events.append({"type": "response.function_call_arguments.delta", **common, "delta": item["arguments"]})
+        if item["type"] == "message":
+            texts = [part["text"] for part in item["content"]]
+            events.extend(
+                {"type": "response.output_text.delta", **common, "delta": text, "logprobs": []} for text in texts
+            )
+        events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+    ended = "response.completed" if response["status"] == "completed" else "response.incomplete"
+    events.append({"type": ended, "response": response})
+    return [{**event, "sequence_number": number} for number, event in enumerate(events)]
+
+
+def claude_stream_events(
+    message: dict[str, Any],
+    *,
+    context_management: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return the events the Messages API streams for ``message``: a start, deltas per block, the stop reason, the stop.
+
+    A ``tool_use`` block may name the ``partial_json`` its arguments stream as, and another block the ``deltas`` it
+    streams; both helper-only keys stay out of the streamed block. ``context_management`` is the context editing the
+    response applied, which arrives with the stop reason.
+    """
+    usage = message["usage"]
+    start = {**message, "content": [], "stop_reason": None, "usage": {**usage, "output_tokens": 1}}
+    events: list[dict[str, Any]] = [{"type": "message_start", "message": start}]
+    for index, authored in enumerate(message["content"]):
+        # Popping the helper-only keys below must leave the caller's blocks reusable.
+        block = dict(authored)
+        if block["type"] == "text":
+            opened, deltas = {**block, "text": ""}, [{"type": "text_delta", "text": block["text"]}]
+        elif block["type"] == "tool_use":
+            partial_json = block.pop("partial_json", None)
+            arguments = json.dumps(block["input"]) if partial_json is None else partial_json
+            opened, deltas = {**block, "input": {}}, [{"type": "input_json_delta", "partial_json": arguments}]
+        elif block["type"] == "thinking":
+            opened = {**block, "thinking": "", "signature": ""}
+            deltas = [
+                {"type": "thinking_delta", "thinking": block["thinking"]},
+                {"type": "signature_delta", "signature": block["signature"]},
+            ]
+        else:
+            # Other blocks arrive whole, unless the block names deltas of its own.
+            deltas = block.pop("deltas", [])
+            opened = block
+        events.append({"type": "content_block_start", "index": index, "content_block": opened})
+        events.extend({"type": "content_block_delta", "index": index, "delta": delta} for delta in deltas)
+        events.append({"type": "content_block_stop", "index": index})
+    stop = {"stop_reason": message["stop_reason"], "stop_sequence": message.get("stop_sequence")}
+    applied = {} if context_management is None else {"context_management": context_management}
+    events.append(
+        {"type": "message_delta", "delta": stop, "usage": {"output_tokens": usage["output_tokens"]}, **applied},
+    )
+    events.append({"type": "message_stop"})
+    return events
 
 
 def encoded_response(response_raw: dict[str, Any]) -> httpx.Response:
@@ -418,7 +520,6 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
         tools=tools,
         tool_choice=tool_choice,
         output_schema=output_schema_from_golden(case_input["output_schema"]),
-        stream=case_input["stream"],
         deferred_tools=DeferredTools()
         if deferred is None
         else DeferredTools(names=frozenset(deferred["tool_names"]), portable=deferred["mode"] == "portable"),

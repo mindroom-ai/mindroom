@@ -50,7 +50,6 @@
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "stream": false,
       "messages": [
         {
           "content": "<your_role>\nNormalize voice transcriptions while preserving natural language and mention intent\n</your_role>",

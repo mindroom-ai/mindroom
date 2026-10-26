@@ -104,6 +104,7 @@ from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
     format_tool_combined,
+    format_tool_completed_event,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -467,15 +468,7 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) ->
 
 def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
     """Extract structured tool-trace metadata from a run record."""
-    if not record.tools:
-        return []
-
-    trace: list[ToolTraceEntry] = []
-    for tool in record.tools:
-        tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-        _, trace_entry = format_tool_combined(tool.tool_name, tool_args, tool.result)
-        trace.append(trace_entry)
-    return trace
+    return [format_tool_completed_event(tool.call) for tool in record.tools or ()]
 
 
 def _attach_blocking_pause_presentation(
@@ -696,7 +689,6 @@ async def _start_agent_run(
     *,
     storage: RunStorage,
     terminal: TerminalRecord[RunRecord],
-    stream: bool,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
@@ -743,7 +735,7 @@ async def _start_agent_run(
         ctx=run,
         hooks=hooks,
         persist=persist_into(terminal, storage),
-        request_template=replace(run_context.request_template, stream=stream),
+        request_template=run_context.request_template,
         metadata=run.metadata,
     )
     driven = drive_delegation_stream(
@@ -822,7 +814,7 @@ async def _run_blocking_agent_attempt(
         on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
     if pipeline_timing is not None:
         pipeline_timing.mark_model_request()
-    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal, stream=False)
+    events = _start_agent_run(run_context, attempt, storage=storage, terminal=terminal)
     async with closing_async_stream(events):
         async for event in events:
             terminal.collect(event)
@@ -1721,7 +1713,7 @@ async def _stream_agent_attempt_chunks(
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
                 pipeline_timing.mark_model_request()
-            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal, stream=True)
+            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal)
         events = stream_with_llm_request_log_context(run_events, request_context=request_context)
         chunks = _process_stream_events(
             events,

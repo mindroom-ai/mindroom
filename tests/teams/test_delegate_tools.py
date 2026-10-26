@@ -1,4 +1,4 @@
-"""What the leader reads for a finished member run, with and without streaming."""
+"""What the leader reads for a finished member run, with and without streaming, which is never ``null``."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -37,12 +37,12 @@ def test_a_streamed_member_result_is_its_text_else_its_tool_results_else_the_no_
     assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=True) == NO_MEMBER_RESPONSE
 
 
-def test_a_blocking_member_result_takes_the_tool_results_only_for_blank_text() -> None:
+def test_blocking_member_result_text_differs_only_for_a_blank_run_without_tools() -> None:
     assert member_result_text(RunRecord(run_id="r", content="42"), stream=False) == "42"
     assert member_result_text(RunRecord(run_id="r", content="", tools=_TOOLS), stream=False) == "first,second"
-    # Only blank text selects the tool results; a run with tools and no text at all reads ``null``.
-    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=False) == "null"
+    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=False) == "first,second"
     assert member_result_text(RunRecord(run_id="r", content=None), stream=False) == NO_MEMBER_RESPONSE
+    # A blank run without tools reads empty, where the streamed rules give the no-response notice.
     assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=False) == ""
 
 

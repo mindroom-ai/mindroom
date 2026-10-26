@@ -2,7 +2,7 @@
 
 The formatter echoes a stored assistant turn's ``content_blocks`` verbatim, because the API signs thinking
 blocks and verifies the sequence on replay; everything else is rebuilt from the message fields. The parser
-is the single place a finished response becomes an assistant ``Message``, whether it arrived streamed or not.
+is the single place a finished response becomes an assistant ``Message``.
 """
 
 from __future__ import annotations
@@ -557,15 +557,14 @@ def assistant_message_from_response(
     response: AnthropicMessage | BetaMessage,
     *,
     record_context_management: bool,
-    streamed: bool,
 ) -> Message:
     """Build the assistant message of one finished response.
 
-    A ``streamed`` response joins its thinking blocks and its redacted thinking blocks, and a non-streamed one
-    keeps only the last block of each. ``provider_data`` keeps ``content_blocks`` (the response blocks in order,
-    as the API produced them), ``server_tool_blocks`` (every other block, including types the SDK does not know),
-    the thinking ``signature``, the raw ``stop_reason``, and ``context_management`` when the model was configured
-    with one. Every tool use becomes a tool call, including the calls of a response the output limit cut off.
+    Its reasoning joins the response's thinking blocks, and its redacted reasoning its redacted thinking blocks.
+    ``provider_data`` keeps ``content_blocks`` (the response blocks in order, as the API produced them),
+    ``server_tool_blocks`` (every other block, including types the SDK does not know), the thinking ``signature``,
+    the raw ``stop_reason``, and ``context_management`` when the model was configured with one. Every tool use
+    becomes a tool call, including the calls of a response the output limit cut off.
     """
     texts: list[str] = []
     thinking: list[str] = []
@@ -602,20 +601,12 @@ def assistant_message_from_response(
     return Message(
         role="assistant",
         content="".join(texts) or None,
-        reasoning_content=_stored_reasoning(thinking, streamed=streamed),
-        redacted_reasoning_content=_stored_reasoning(redacted, streamed=streamed),
+        reasoning_content="".join(thinking) if thinking else None,
+        redacted_reasoning_content="".join(redacted) if redacted else None,
         tool_calls=tool_calls or None,
         provider_data=provider_data,
         metrics=parse_claude_usage(response.usage),
     )
-
-
-def _stored_reasoning(blocks: list[str], *, streamed: bool) -> str | None:
-    # TODO(simplify): A non-streamed reply stores only its last thinking and redacted-thinking block while a streamed
-    # one joins them all. Join them in both modes. Stored runs would notice.
-    if not blocks:
-        return None
-    return "".join(blocks) if streamed else blocks[-1]
 
 
 __all__ = [

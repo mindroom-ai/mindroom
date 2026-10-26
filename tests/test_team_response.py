@@ -58,7 +58,6 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.providers.anthropic_family_support import (
     isolated_provider_environment,
-    json_reply,
     route_provider,
     sse_reply,
 )
@@ -275,10 +274,10 @@ async def test_a_leader_on_a_claude_route_answers_with_its_reply_on_either_path(
     *,
     stream: bool,
 ) -> None:
-    """The Claude adapter's answer becomes the consensus whether the leader's reply streams or arrives whole."""
+    """The Claude adapter's answer becomes the consensus whether the team's reply streams or not."""
     blocks = [{"type": "text", "text": "Leader synthesis"}]
     team = _team(tmp_path, monkeypatch)
-    leader = route_provider("anthropic", tmp_path / "claude", Wire(sse_reply(blocks) if stream else json_reply(blocks)))
+    leader = route_provider("anthropic", tmp_path / "claude", Wire(sse_reply(blocks)))
     install_model_providers(monkeypatch, {**team.models, "default": leader})
 
     with isolated_provider_environment():
@@ -934,6 +933,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         execution_identity=team.identity,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
     )
     await prepare_materialized_team_execution(
         team.ctx(),
@@ -979,6 +979,7 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
             execution_identity=team.identity,
             model_name="default",
             configured_team_name=None,
+            timezone="UTC",
         )
 
 

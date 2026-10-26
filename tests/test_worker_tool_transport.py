@@ -12,10 +12,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 import yaml
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
 from agno.run import RunContext
-from agno.team import Team
 from agno.tools import openai as agno_openai
 
 from mindroom.agents import create_agent
@@ -266,7 +263,7 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
     assert media[0].content == content
 
 
-@pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "agent", "context", "team"])
+@pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "actor", "context"])
 def test_invalid_arguments_rejected_before_worker_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -291,9 +288,9 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         "key": {Opaque(): "value"},
         "nonfinite": float("nan"),
         "positional": Opaque(),
-        "agent": Agent(model=OpenAIChat(id="gpt-6-astra", api_key=_MODEL_KEY)),
+        # What an entrypoint's ``agent`` or ``team`` parameter receives, carrying the toolkit's state.
+        "actor": ToolCallActor(session_state={"secret": _MODEL_KEY}),
         "context": {"alias": RunContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})},
-        "team": Team(members=[]),
     }[shape]
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",

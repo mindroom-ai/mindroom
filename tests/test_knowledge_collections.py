@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
-from typing import TYPE_CHECKING, Never
+from typing import TYPE_CHECKING, Any, Never
 
 import pytest
 
@@ -37,6 +37,8 @@ from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection
 from tests.knowledge_test_support import seed_collection, stored_rows
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from mindroom.constants import RuntimePaths
 
 
@@ -356,3 +358,66 @@ async def test_cached_published_lookup_reports_probe_failure(
     assert (
         await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
     ).availability is KnowledgeAvailability.READY
+
+
+class _LengthEmbedder:
+    """Deterministic embedder, so a real refresh needs no provider."""
+
+    sends_batches = True
+
+    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        _ = purpose
+        return [[float(len(text)), float(sum(map(ord, text)) % 97), 1.0] for text in texts]
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
+
+
+@pytest.mark.asyncio
+async def test_real_refreshes_resume_the_retired_collection_and_serve_exactly_the_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Against the real store, the collection a publication retired is resumed and written only where files changed."""
+    monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_a, **_k: _LengthEmbedder())
+    copied: list[str] = []
+    original_copy = KnowledgeCollection.copy_rows
+
+    def _counting_copy(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
+        *,
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
+    ) -> None:
+        copied.append(source.name)
+        original_copy(self, source, select=select, page_rows=page_rows)
+
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _counting_copy)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for index in range(6):
+        (docs / f"doc{index}.md").write_text(f"body {index}", encoding="utf-8")
+
+    async def _refresh() -> str:
+        manager = _candidate_manager(tmp_path)
+        assert (await manager.reindex_all()).published
+        published = manager._published_collection
+        assert published is not None
+        served = sorted((row["metadata"]["source_path"], row["content"]) for row in stored_rows(published))
+        assert served == sorted((path.name, path.read_text(encoding="utf-8")) for path in docs.iterdir())
+        return published.name
+
+    cold = await _refresh()
+    (docs / "doc0.md").write_text("first change", encoding="utf-8")
+    second = await _refresh()
+    assert copied, "the first refresh after a cold build copies the published index"
+    copied.clear()
+    (docs / "doc1.md").write_text("second change", encoding="utf-8")
+    (docs / "doc2.md").unlink()
+    (docs / "added.md").write_text("added body", encoding="utf-8")
+
+    assert await _refresh() == cold
+    assert copied == [], "a refresh resuming the retired collection copied the published index"
+    (docs / "doc3.md").write_text("third change", encoding="utf-8")
+    assert await _refresh() == second

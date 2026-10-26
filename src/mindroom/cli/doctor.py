@@ -343,7 +343,6 @@ def _validate_vertexai_claude_connection(
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
         overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
-        stream=False,
     )
     try:
         provider = build_provider(probe_config, runtime_paths)

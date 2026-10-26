@@ -92,7 +92,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_the_summary_request_is_one_call_without_provider_retries_thinking_or_cache() -> None:
-    """The request is sent once, without streaming or tools, leaving the transport timeout to the route."""
+    """The request is sent once, without tools, leaving the transport timeout to the route."""
     model = summary_model()
 
     await generate_compaction_summary(
@@ -104,7 +104,6 @@ async def test_the_summary_request_is_one_call_without_provider_retries_thinking
     )
 
     [request] = model.requests
-    assert request.stream is False
     assert request.tools == ()
     assert request.tool_choice is None
     assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, disable_thinking=True)

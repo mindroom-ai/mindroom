@@ -16,7 +16,7 @@ from mindroom.history.summary_call import (
     is_summary_timeout,
 )
 from mindroom.llm.errors import TRANSPORT_TIMEOUT, ModelSafeguardRefusal, ProviderError, ProviderUnavailable
-from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
+from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for, sse_reply
 from tests.providers.golden_support import httpx2_transport, pipeline_provider
 
 if TYPE_CHECKING:
@@ -63,18 +63,10 @@ def _model(
 
 
 def _response(*, output_tokens: int = 100, stop_reason: str = "end_turn") -> httpx.Response:
-    return httpx.Response(
-        200,
-        json={
-            "id": "msg_summary",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-sonnet-5",
-            "content": [{"type": "text", "text": "Project facts"}],
-            "stop_reason": stop_reason,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 3000, "output_tokens": output_tokens},
-        },
+    return sse_reply(
+        [{"type": "text", "text": "Project facts"}],
+        stop_reason=stop_reason,
+        usage={"input_tokens": 3000, "output_tokens": output_tokens},
     )
 
 
@@ -107,7 +99,6 @@ async def test_summary_rejects_output_capped_at_effective_request_limit(
     with pytest.raises(CompactionSummaryOutputLimitError):
         await _summarize(_model(route, tmp_path, respond, request_params=params))
     assert requests[0]["max_tokens"] == 1024
-    assert "stream" not in requests[0]
 
 
 @pytest.mark.parametrize("route", sorted(_ROUTES))

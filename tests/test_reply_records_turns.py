@@ -21,6 +21,7 @@ from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
 from mindroom.event_journal.replies import ReplyStore
+from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -35,6 +36,7 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
@@ -1403,6 +1405,37 @@ async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(
     assert (started.type, started.tool_name) == ("tool_call_started", "counter")
     (finished,) = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
     assert (finished.type, finished.tool_name, finished.result_preview) == ("tool_call_completed", "counter", "1")
+
+
+async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answered_its_failure(tmp_path: Path) -> None:
+    """A restart's account of the reply's calls says which failed: a call that raised, and one that answered failed."""
+    bot = await _streaming_bot(tmp_path)
+    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+
+    async def fetch(url: str) -> str:
+        msg = f"HTTP 500 from {url}"
+        raise RuntimeError(msg)
+
+    async def schedule() -> ToolOutcome:
+        return ToolOutcome(content="Scheduled call `nightly` did not run: it was cancelled.", is_error=True)
+
+    async def answer(*_args: object, **_kwargs: object) -> str:
+        with suppress(RuntimeError):
+            await bridge("fetch", fetch, {"url": "https://example.com"})
+        await bridge("schedule", schedule, {})
+        return "Tried."
+
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+
+    reply = await _reply(bot)
+    recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
+    account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
+    assert account.splitlines()[0] == "(turn stopped before completion; 2 tool call(s) had failed)"
+    assert account.splitlines()[-2:] == [
+        '- The `fetch` tool failed with input preview "url=https://example.com" '
+        'and error preview "RuntimeError: HTTP 500 from https://example.com".',
+        '- The `schedule` tool failed with error preview "Scheduled call `nightly` did not run: it was cancelled.".',
+    ]
 
 
 async def test_a_tool_result_stands_when_recording_its_finish_fails(

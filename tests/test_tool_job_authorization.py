@@ -11,7 +11,7 @@ import mindroom.tool_jobs.authorization as authorization_module
 from mindroom.agents import build_agent_toolkit
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, ToolConfigEntry
+from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import resolved_mcp_tool_state
@@ -114,6 +114,45 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
     else:
         config.defaults.file_access = "workspace"
     assert not allowed()
+
+
+def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> None:
+    """A graph edit kept for approval or as a job must not run once its agent may no longer edit its graph."""
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", knowledge_graph=True, knowledge_graph_edits=True)},
+        models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
+        knowledge_graph={"model": "luna"},
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    toolkit = build_agent_toolkit(
+        "knowledge_graph",
+        agent_name="lead",
+        config=config,
+        runtime_paths=paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        tool_config_overrides={},
+        execution_identity=_OWNER,
+    )
+    assert toolkit is not None
+    assert "delete_graph_fact" in toolkit.get_async_functions()
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
+
+    def allowed(tool_name: str) -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name=tool_name,
+            toolkit_name="knowledge_graph",
+            origin={},
+            depth=0,
+            authority=authority,
+        )
+
+    assert allowed("delete_graph_fact")
+    config.agents["lead"].knowledge_graph_edits = False
+    assert not allowed("delete_graph_fact")
+    assert allowed("search_graph")
 
 
 def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:

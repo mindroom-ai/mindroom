@@ -1216,6 +1216,29 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
 
 
 @pytest.mark.asyncio
+async def test_schedule_tool_call_stores_and_shows_the_agents_timezone() -> None:
+    """A call an agent with its own timezone schedules keeps that zone, and its card and reply show its wall time."""
+    config = _gated_config()
+    config.agents["general"].timezone = "Asia/Tokyo"
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        result = await _schedule_from_tool()
+
+    [(_status, record)] = _persisted_workflows(context)
+    assert record.workflow.timezone == "Asia/Tokyo"
+    # 14:00 UTC is 23:00 in Tokyo.
+    assert request.await_args.kwargs["scheduled_for_text"] == "2030-01-02 23:00 JST"
+    assert "2030-01-02 23:00 JST" in str(result)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("approver", "authored_confirmation"),
     [("@owner:localhost", False), ("@user:localhost", True)],

@@ -50,7 +50,6 @@
         "id": "claude-sonnet-5-5",
         "provider": "Anthropic"
       },
-      "stream": false,
       "messages": [
         {
           "content": "You extract entities from conversations.\n\nAny extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.",

@@ -298,6 +298,33 @@ def _delivery_resolution(response_event_id: str | None) -> str | None:
     return response_event_id
 
 
+def test_agent_bot_tags_coalesced_and_regenerated_messages_in_its_own_timezone(tmp_path: Path) -> None:
+    """The message times a batch or an edit's regenerated prompt carries are the agent's, not the global zone's."""
+    config = _test_config(tmp_path)
+    config.timezone = "UTC"
+    config.agents["test_agent"].timezone = "America/Los_Angeles"
+    bot = make_test_agent_bot(
+        agent_user=AgentMatrixUser(
+            agent_name="test_agent",
+            user_id="@mindroom_test_agent:example.com",
+            display_name="Test Agent",
+            password="test_password",  # noqa: S106
+        ),
+        storage_path=tmp_path,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!test:example.com"],
+    )
+    # 2026-03-20 15:00 UTC.
+    timestamp_ms = 1_774_018_800_000
+
+    coalescing_formatter = bot._coalescing_gate._timestamp_formatter
+    assert coalescing_formatter is not None
+    assert coalescing_formatter(timestamp_ms) == "2026-03-20 08:00 PDT"
+    regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
+    assert regenerator.deps.timestamp_formatter(timestamp_ms) == "2026-03-20 08:00 PDT"
+
+
 @pytest.mark.asyncio
 async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     """Test that the bot regenerates its response when a user edits their message."""

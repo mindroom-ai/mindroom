@@ -181,6 +181,11 @@ class KnowledgeCollection:
                 )
         return found
 
+    def row_count(self) -> int:
+        """Return how many rows the collection holds."""
+        with closing(self._connect()) as connection:
+            return connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+
     def has_rows(self) -> bool:
         """Return whether the collection holds any row."""
         with closing(self._connect()) as connection:

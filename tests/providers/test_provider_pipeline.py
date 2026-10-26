@@ -291,17 +291,6 @@ async def test_silent_stream_is_retried_once_then_fails_as_stalled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_requests_are_not_retried() -> None:
-    inner = _ScriptedProvider([[_transient()], [_turn()]])
-    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
-
-    with pytest.raises(ProviderUnavailable):
-        await _drain(provider, ModelRequest(messages=[_user()], stream=False))
-
-    assert len(inner.requests) == 1
-
-
-@pytest.mark.asyncio
 async def test_a_timeout_the_provider_raises_is_not_reported_as_a_stall() -> None:
     """An SDK's own timeout inside the idle limit propagates as raised instead of becoming a retried stall."""
     inner = _ScriptedProvider([[TimeoutError("read timed out")], [_turn()]])

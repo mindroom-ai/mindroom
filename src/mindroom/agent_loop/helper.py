@@ -74,7 +74,6 @@ async def complete_prompt[T: BaseModel](
             messages=tuple(messages),
             output_schema=schema,
             overrides=overrides,
-            stream=False,
         ),
     )
     identity = provider.identity

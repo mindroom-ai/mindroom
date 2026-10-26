@@ -27,7 +27,15 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, TextDelta, ToolSpec, TurnCompleted, UsageReported
+from mindroom.llm.provider import (
+    ModelRequest,
+    ReasoningDelta,
+    RequestOverrides,
+    TextDelta,
+    ToolSpec,
+    TurnCompleted,
+    UsageReported,
+)
 from mindroom.providers import remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
@@ -107,6 +115,10 @@ def _gemini_chunk(*parts: dict[str, Any], finish: str | None = "STOP", usage: bo
     if usage:
         chunk["usageMetadata"] = {"promptTokenCount": 10, "candidatesTokenCount": 3, "thoughtsTokenCount": 2}
     return chunk
+
+
+def _ollama_text(content: str) -> dict[str, Any]:
+    return {"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": content}}
 
 
 def _ollama_done(reason: str = "stop", **message: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -235,7 +247,7 @@ async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itsel
     for overrides in (RequestOverrides(), RequestOverrides(caller_retries=True)):
         sent.clear()
         with pytest.raises(ProviderUnavailable):
-            await anext(adapter.stream(_request(stream=False, overrides=overrides)))
+            await anext(adapter.stream(_request(overrides=overrides)))
         attempts.append(len(sent))
 
     assert attempts == [3, 1]
@@ -540,26 +552,6 @@ async def test_a_stream_the_provider_never_ended_finishes_no_turn(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("family", "reply"),
-    [
-        (GEMINI, _gemini_chunk({"text": "Hi"}, finish=None, usage=False)),
-        (OLLAMA, {"model": "qwen3.8:27b", "done": False, "message": {"role": "assistant", "content": "Hi"}}),
-    ],
-    ids=["gemini", "ollama"],
-)
-async def test_a_whole_reply_finishes_its_turn_without_the_marker_a_stream_ends_with(
-    family: dict[str, Any],
-    reply: dict[str, Any],
-    tmp_path: Path,
-) -> None:
-    """Only a stream can be cut off, so a reply that arrives in one response body always finishes its turn."""
-    _, events = await run_adapter(family, _request(stream=False), tmp_path, httpx.Response(200, json=reply))
-
-    assert _completed(events).message.content == "Hi"
-
-
-@pytest.mark.asyncio
 async def test_gemini_malformed_function_call_fails_with_its_code(tmp_path: Path) -> None:
     """A malformed function call ends the stream with an error the loop can answer with guidance."""
     response = gemini_sse(_gemini_chunk(finish="MALFORMED_FUNCTION_CALL"))
@@ -707,20 +699,6 @@ async def test_gemini_usage_counts_thinking_as_output_and_keeps_cached_input(tmp
 
 
 @pytest.mark.asyncio
-async def test_gemini_non_streaming_requests_use_generate_content(tmp_path: Path) -> None:
-    """``stream=False`` sends the route's non-streaming call and yields only the usage and the finished turn."""
-    reply = httpx.Response(200, json=_gemini_chunk({"text": "Whole."}))
-
-    request, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
-
-    assert request["url"].endswith(":generateContent")
-    completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
-    assert completed.message.content == "Whole."
-    assert completed.message.metrics.tokens.input_tokens == 10
-
-
-@pytest.mark.asyncio
 async def test_gemini_chunks_without_output_are_reported_as_progress(tmp_path: Path) -> None:
     """A chunk that only shows a native tool at work keeps the idle limit alive without becoming output."""
     response = gemini_sse(
@@ -747,21 +725,9 @@ _GEMINI_BLOCKED_PROMPT = {
 
 
 @pytest.mark.asyncio
-async def test_gemini_blocked_prompt_ends_the_turn_without_output(tmp_path: Path) -> None:
-    """A streamed prompt Gemini blocks ends the turn empty and, as in Agno's streamed parser, reports no usage."""
+async def test_gemini_blocked_prompt_ends_the_turn_empty_and_reports_its_prompt_usage(tmp_path: Path) -> None:
+    """A prompt Gemini blocks ends the turn without output and still reports its billed prompt tokens."""
     _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(_GEMINI_BLOCKED_PROMPT))
-
-    completed = _completed(events)
-    assert [type(event).__name__ for event in events] == ["StreamProgress", "TurnCompleted"]
-    assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
-
-
-@pytest.mark.asyncio
-async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_path: Path) -> None:
-    """A non-streamed blocked prompt, such as a participation decision, still reports its billed prompt tokens."""
-    reply = httpx.Response(200, json=_GEMINI_BLOCKED_PROMPT)
-
-    _, events = await run_adapter(GEMINI, _request(stream=False), tmp_path, reply)
 
     completed = _completed(events)
     assert [type(event).__name__ for event in events] == ["UsageReported", "UsageReported", "TurnCompleted"]
@@ -771,6 +737,19 @@ async def test_gemini_non_streamed_blocked_prompt_reports_its_prompt_usage(tmp_p
     ] == [(9, 0, 9)]
     assert completed.message.metrics.tokens.input_tokens == 9
     assert (completed.message.content, completed.message.tool_calls, completed.stop_reason) == (None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_gemini_chunk_without_candidates_or_a_block_reason_neither_ends_the_reply_nor_counts(
+    tmp_path: Path,
+) -> None:
+    """A chunk with usage but no candidate and no blocked prompt leaves the reply to its finished candidate."""
+    early = {"usageMetadata": {"promptTokenCount": 4, "totalTokenCount": 4}}
+    _, events = await run_adapter(GEMINI, _request(), tmp_path, gemini_sse(early, _gemini_chunk({"text": "Hi"})))
+
+    completed = _completed(events)
+    assert (completed.message.content, completed.stop_reason) == ("Hi", "end")
+    assert (completed.message.metrics.tokens.input_tokens, completed.message.metrics.tokens.output_tokens) == (10, 5)
 
 
 @pytest.mark.asyncio
@@ -1780,30 +1759,35 @@ async def test_ollama_exceptions_that_are_not_provider_failures_propagate_unchan
 
 
 @pytest.mark.asyncio
-async def test_ollama_non_streaming_replies_split_think_tags(tmp_path: Path) -> None:
-    """A reply that arrives whole has its ``<think>`` reasoning moved out of the content, as Agno did."""
-    reply = httpx.Response(200, json=_ollama_done(content="<think>Plan first.</think>Hi there"))
+async def test_ollama_streams_a_leading_think_block_as_reasoning(tmp_path: Path) -> None:
+    """A thinking model's ``<think>`` block streams as reasoning, so the reply shows and stores only its answer."""
+    pieces = ["<think>Plan", " first.</thi", "nk>\n\nHi", " there"]
+    reply = ollama_ndjson(*(_ollama_text(piece) for piece in pieces), _ollama_done())
 
-    request, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)
+    request, events = await run_adapter(OLLAMA, _request(), tmp_path, reply)
 
-    assert request["body"]["stream"] is False
+    assert request["body"]["stream"] is True
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == ("Hi there", "Plan first.")
-    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
-    assert completed.message.metrics.tokens.input_tokens == 7
+    assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hi there"
+    assert "".join(event.text for event in events if isinstance(event, ReasoningDelta)) == "Plan first."
 
 
 @pytest.mark.asyncio
-async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Path) -> None:
-    """A whole reply that only calls a tool finishes with the call and no empty text or reasoning."""
-    reply = httpx.Response(
-        200,
-        json=_ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}]),
+async def test_ollama_tool_call_replies_have_no_text(tmp_path: Path) -> None:
+    """A reply that only calls a tool finishes with the call and no empty text or reasoning."""
+    reply = ollama_ndjson(
+        _ollama_done(tool_calls=[{"function": {"name": "get_weather", "arguments": {"city": "Oslo"}}}]),
     )
 
-    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER], stream=False), tmp_path, reply)
+    _, events = await run_adapter(OLLAMA, _request(tools=[WEATHER]), tmp_path, reply)
 
-    assert [type(event).__name__ for event in events] == ["UsageReported", "TurnCompleted"]
+    assert [type(event).__name__ for event in events] == [
+        "UsageReported",
+        "ToolCallReady",
+        "UsageReported",
+        "TurnCompleted",
+    ]
     completed = _completed(events)
     assert (completed.message.content, completed.message.reasoning_content) == (None, None)
     [call] = completed.message.tool_calls or []
@@ -1813,22 +1797,30 @@ async def test_ollama_non_streaming_tool_call_replies_have_no_text(tmp_path: Pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "content",
-    ["<think>\n\n</think>Hi there", "Plan first.</think>Hi there"],
-    ids=["empty-reasoning", "no-opening-tag"],
+    ("content", "expected"),
+    [
+        ("<think>\n\n</think>Hi there", ("Hi there", None)),
+        ("Plan first.</think>Hi there", ("Plan first.</think>Hi there", None)),
+        ("<think>Plan, cut off at </th", (None, "Plan, cut off at </th")),
+    ],
+    ids=["empty-reasoning-dropped", "no-opening-tag-kept", "unclosed-reasoning"],
 )
-async def test_ollama_leaves_think_tags_without_reasoning_or_an_opening_tag_in_the_content(
+async def test_ollama_splits_only_a_think_block_that_opens_the_reply(
     content: str,
+    expected: tuple[str | None, str | None],
     tmp_path: Path,
 ) -> None:
-    """An Ollama reply splits only at an opening ``<think>`` with reasoning inside; other replies stay as they came."""
-    reply = httpx.Response(200, json=_ollama_done(content=content))
+    """An empty ``<think>`` block leaves only the answer, and other text before the tag stays as it came.
 
-    _, events = await run_adapter(OLLAMA, _request(stream=False), tmp_path, reply)
+    The reply's end releases what the splitter held back.
+    """
+    _, events = await run_adapter(OLLAMA, _request(), tmp_path, ollama_ndjson(_ollama_text(content), _ollama_done()))
 
     completed = _completed(events)
-    assert completed.message.content == content
-    assert completed.message.reasoning_content is None
+    assert (completed.message.content, completed.message.reasoning_content) == expected
+    text = "".join(event.text for event in events if isinstance(event, TextDelta))
+    reasoning = "".join(event.text for event in events if isinstance(event, ReasoningDelta))
+    assert (text or None, reasoning or None) == expected
 
 
 @pytest.mark.asyncio
@@ -1877,28 +1869,6 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     _completed([event async for event in provider.stream(_request())])
 
     assert sleeps == [2.0, 2.0, 1.0]
-
-
-@pytest.mark.asyncio
-async def test_a_whole_synthetic_reply_yields_only_its_finished_turn(tmp_path: Path) -> None:
-    """``stream=False`` gets the planned text and shell call on the finished turn, without deltas, as on every route."""
-    config = _synthetic_config(chars_per_second=0, tool_call_probability=1.0)
-    provider = build_synthetic_provider(config, runtime_paths_for(tmp_path))
-    shell = ToolSpec(
-        name="run_shell_command",
-        description="Run a shell command.",
-        parameters={"type": "object"},
-        strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
-    )
-
-    [completed] = [event async for event in provider.stream(_request(tools=[shell], stream=False))]
-
-    assert isinstance(completed, TurnCompleted)
-    assert completed.message.content
-    assert [call["function"]["name"] for call in completed.message.tool_calls or []] == ["run_shell_command"]
 
 
 @pytest.mark.parametrize(

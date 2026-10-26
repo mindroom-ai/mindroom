@@ -9010,14 +9010,18 @@
       "dependencies": [
         "graphiti-core"
       ],
-      "description": "Look up facts, entities, and their sources in the agent's knowledge graph",
+      "description": "Look up facts, entities, and their sources in the agent's knowledge graph, and with knowledge_graph_edits delete wrong facts and entities, merge duplicates, and rewrite summaries",
       "display_name": "Knowledge Graph",
       "docs_url": "https://docs.mindroom.chat/knowledge-graph/#the-knowledge_graph-tool",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
         "graph_entity",
-        "search_graph"
+        "search_graph",
+        "delete_graph_entity",
+        "delete_graph_fact",
+        "merge_graph_entities",
+        "update_graph_entity_summary"
       ],
       "helper_text": null,
       "icon": "Network",

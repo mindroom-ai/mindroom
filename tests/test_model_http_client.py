@@ -32,38 +32,25 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider
 
-# A finished reply of each API, and an empty page every other request accepts.
-_CHAT_COMPLETION = {
-    "id": "chatcmpl-1",
-    "object": "chat.completion",
-    "created": 1,
-    "model": "test-model",
-    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
-    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-}
-_CLAUDE_MESSAGE = {
-    "id": "msg_1",
-    "type": "message",
-    "role": "assistant",
-    "model": "test-model",
-    "content": [{"type": "text", "text": "ok"}],
-    "stop_reason": "end_turn",
-    "stop_sequence": None,
-    "usage": {"input_tokens": 1, "output_tokens": 1},
+# A finished streamed reply of each model API, by the end of its request path, and an empty page every other request
+# accepts.
+_STREAMS = {
+    "/chat/completions": FAMILIES["openai_chat"].reply().content,
+    "/responses": FAMILIES["openai_responses"].reply().content,
+    "/messages": FAMILIES["anthropic"].reply().content,
 }
 _EMPTY_PAGE = {"object": "list", "data": [], "has_more": False, "first_id": None, "last_id": None}
-_REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")], stream=False)
+_REQUEST = ModelRequest(messages=[Message(role="user", content="Hi")])
 
 
 class _ModelsServer:
-    """A keep-alive server that answers chat and message requests with a finished reply, anything else empty.
+    """A keep-alive server that streams a finished reply to every model request and answers anything else empty.
 
-    A streamed request gets ``stream`` as a chunked event stream, whose terminating chunk follows its last event.
+    Each stream is a chunked body whose terminating chunk follows its last event.
     """
 
     def __init__(self) -> None:
         self.url = ""
-        self.stream = b""
         self.connections = 0
         self.peer: tuple[str, int] = ("", 0)
         self.closed = asyncio.Event()
@@ -76,23 +63,16 @@ class _ModelsServer:
                 head = (await reader.readuntil(b"\r\n\r\n")).decode()
                 request_line, *header_lines = head.split("\r\n")
                 headers = dict(line.lower().split(": ", 1) for line in header_lines if ": " in line)
-                request_body = await reader.readexactly(int(headers.get("content-length", "0")))
+                await reader.readexactly(int(headers.get("content-length", "0")))
                 path = request_line.split(" ")[1]
-                if request_body and json.loads(request_body).get("stream"):
+                stream = next((body for end, body in _STREAMS.items() if path.endswith(end)), None)
+                if stream is None:
+                    body = json.dumps(_EMPTY_PAGE).encode()
+                    status = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                    writer.write(status % len(body) + body)
+                else:
                     start = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
-                    writer.write(start + b"%x\r\n%s\r\n0\r\n\r\n" % (len(self.stream), self.stream))
-                    await writer.drain()
-                    continue
-                reply = (
-                    _CHAT_COMPLETION
-                    if path.endswith("/chat/completions")
-                    else _CLAUDE_MESSAGE
-                    if path.endswith("/messages")
-                    else _EMPTY_PAGE
-                )
-                body = json.dumps(reply).encode()
-                status = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n"
-                writer.write(status % len(body) + body)
+                    writer.write(start + b"%x\r\n%s\r\n0\r\n\r\n" % (len(stream), stream))
                 await writer.drain()
         except asyncio.IncompleteReadError:
             self.closed.set()
@@ -162,25 +142,19 @@ async def test_collected_model_leaves_its_pooled_connection_alone(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("provider", "api", "family"),
-    [
-        ("openai", "chat_completions", "openai_chat"),
-        ("openai", "responses", "openai_responses"),
-        ("anthropic", None, "anthropic"),
-    ],
+    ("provider", "api"),
+    [("openai", "chat_completions"), ("openai", "responses"), ("anthropic", None)],
 )
 async def test_a_streamed_reply_returns_its_connection_to_the_pool(
     tmp_path: Path,
     server: _ModelsServer,
     provider: str,
     api: str | None,
-    family: str,
 ) -> None:
     """A reply streamed to its end leaves its connection pooled, so the next request opens no new one."""
-    server.stream = FAMILIES[family].reply().content
     model = _provider(tmp_path, provider, server.url, api)
     for _ in range(2):
-        turn = await complete(model, ModelRequest(messages=[Message(role="user", content="Hi")]))
+        turn = await complete(model, _REQUEST)
         assert turn.message.content == "ok"
     assert server.connections == 1
 

@@ -133,10 +133,11 @@ def team_spec(
 
 
 def built_team(spec: TeamSpec) -> BuiltTeam:
-    """Return ``spec`` as a built team under the default history settings, with no leader middleware or jobs."""
+    """Return ``spec`` as a built team under the default history settings in UTC, with no leader middleware or jobs."""
     return BuiltTeam(
         spec=spec,
         history_settings=Config().resolve_entity(None).history_settings,
+        timezone="UTC",
         leader_middleware=(),
         leader_jobs=None,
     )
@@ -249,9 +250,21 @@ def start_team(
     ctx: RunContext,
     persist: Persist[AnyRunRecord] = no_store,
     request_template: ModelRequest = EMPTY_REQUEST,
+    stream: bool = True,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store."""
-    return run_team(team, run_input, ctx=ctx, hooks=NO_HOOKS, persist=persist, request_template=request_template)
+    """Start ``team``'s run (``run_team``) under no hooks, storing nothing unless the test passes a store.
+
+    ``stream`` says whether the turn's reply streams, which selects what the leader reads for a member's run.
+    """
+    return run_team(
+        team,
+        run_input,
+        ctx=ctx,
+        hooks=NO_HOOKS,
+        persist=persist,
+        request_template=request_template,
+        stream=stream,
+    )
 
 
 def resume_team(

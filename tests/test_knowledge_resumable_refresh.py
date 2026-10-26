@@ -18,7 +18,7 @@ import os
 import sqlite3
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -26,6 +26,7 @@ from agno.knowledge.document.base import Document
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from structlog.testing import capture_logs
 
+import mindroom.knowledge.candidate_checkpoint as knowledge_checkpoint_module
 import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.registry as knowledge_registry
@@ -51,8 +52,10 @@ from mindroom.knowledge.candidate_checkpoint import (
     append_candidate_journal,
     delete_candidate_checkpoint,
     load_candidate_checkpoint,
+    load_seals,
     save_candidate_checkpoint,
 )
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.collections import (
     CollectionSpace,
     _collection_name_for_base,
@@ -86,6 +89,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder
+    from mindroom.knowledge.vector_store import StoredRow
 
 
 # --------------------------------------------------------------------------
@@ -4006,3 +4010,600 @@ def test_collection_ownership_is_derived_from_identity_not_supplied() -> None:
     other_path = replace(space, knowledge_path=Path("/srv/knowledge/wiki"))
     assert other_base.default_collection != space.default_collection
     assert other_path.default_collection != space.default_collection
+
+
+# --------------------------------------------------------------------------
+# 18. Resuming the collection a publication retired instead of copying the index
+# --------------------------------------------------------------------------
+
+
+class _Crash(BaseException):
+    """A process death at one chosen point of a refresh: no ``except Exception`` handler may absorb it."""
+
+
+@dataclass
+class _StoreWrites:
+    """Rows written into the real store, counted by thin wrappers around its write methods."""
+
+    #: Rows copied from another collection since the last ``clear``.
+    copied: int = 0
+    #: Rows written for indexed files since the last ``clear``.
+    file_rows: int = 0
+    #: Rows ever written into each collection since it was created, deleted or not: what a seal's ``rows_written`` counts.
+    written: dict[str, int] = field(default_factory=dict)
+    lock: Lock = field(default_factory=Lock)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.copied = 0
+            self.file_rows = 0
+
+    def record(self, collection: str, rows: int, *, copied: bool) -> None:
+        with self.lock:
+            if copied:
+                self.copied += rows
+            else:
+                self.file_rows += rows
+            self.written[collection] = self.written.get(collection, 0) + rows
+
+
+@pytest.fixture
+def store_writes(monkeypatch: pytest.MonkeyPatch) -> _StoreWrites:
+    """Count the rows refreshes write into the real store, by how they write them."""
+    writes = _StoreWrites()
+    original_write = KnowledgeCollection.write_source_rows
+    original_copy = KnowledgeCollection.copy_rows
+    original_reset = KnowledgeCollection.reset
+    original_delete = KnowledgeCollection.delete
+
+    def _write(self: KnowledgeCollection, relative_path: str, rows: Sequence[StoredRow]) -> None:
+        original_write(self, relative_path, rows)
+        writes.record(self.name, len(rows), copied=False)
+
+    def _copy(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
+        *,
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
+    ) -> None:
+        def _counting_select(metadata: Mapping[str, Any]) -> bool:
+            selected = select(metadata)
+            if selected:
+                writes.record(self.name, 1, copied=True)
+            return selected
+
+        original_copy(self, source, select=_counting_select, page_rows=page_rows)
+
+    def _reset(self: KnowledgeCollection) -> None:
+        original_reset(self)
+        with writes.lock:
+            writes.written[self.name] = 0
+
+    def _delete(self: KnowledgeCollection) -> None:
+        original_delete(self)
+        with writes.lock:
+            writes.written.pop(self.name, None)
+
+    monkeypatch.setattr(KnowledgeCollection, "write_source_rows", _write)
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _copy)
+    monkeypatch.setattr(KnowledgeCollection, "reset", _reset)
+    monkeypatch.setattr(KnowledgeCollection, "delete", _delete)
+    return writes
+
+
+def _served(config: Config, collection: str) -> list[tuple[str, str]]:
+    """Return what one collection serves, as sorted ``(source path, text)`` rows."""
+    return sorted(
+        (row["metadata"]["source_path"], row["content"]) for row in stored_rows(_collection(config, collection))
+    )
+
+
+def _corpus(docs_path: Path) -> list[tuple[str, str]]:
+    """Return what an exact index of the files on disk serves: one row per file, holding its text."""
+    return sorted((path.name, path.read_text(encoding="utf-8")) for path in docs_path.iterdir())
+
+
+def _published_collection(config: Config) -> str:
+    state = _published_state(config, runtime_paths_for(config))
+    assert state is not None
+    assert state.status == "complete"
+    assert state.collection is not None
+    return state.collection
+
+
+async def _refresh_and_check(config: Config, docs_path: Path) -> str:
+    """Refresh, assert the new publication serves exactly the files on disk, and return it."""
+    assert (await _manager(config).reindex_all()).published
+    published = _published_collection(config)
+    assert _served(config, published) == _corpus(docs_path), "the publication lost, duplicated or kept stale rows"
+    return published
+
+
+async def _build_steady_state(config: Config, docs_path: Path, names: Sequence[str]) -> None:
+    """Build cold, then publish twice, so the next refresh has a retired collection to resume."""
+    await _refresh_and_check(config, docs_path)
+    for step in range(2):
+        (docs_path / names[step]).write_text(f"warm-up change {step}", encoding="utf-8")
+        await _refresh_and_check(config, docs_path)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_writes_only_the_rows_that_changed_once_a_retired_collection_is_kept(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
+) -> None:
+    """A small change must cost rows for that change, not a copy of every published row."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    cold = await _refresh_and_check(config, docs_path)
+    cold_rows = _rows_by_id(config, cold)
+    (docs_path / names[0]).write_text("first change", encoding="utf-8")
+    second = await _refresh_and_check(config, docs_path)
+    assert second != cold, "publication must still swap in a separate collection"
+    assert _rows_by_id(config, cold) == cold_rows, "the retired collection was dropped or written after it was retired"
+    assert load_candidate_checkpoint(_storage_path(config, runtime_paths)) is None, (
+        "a kept collection must not look like an in-progress candidate"
+    )
+
+    (docs_path / names[1]).write_text("second change", encoding="utf-8")
+    (docs_path / names[2]).unlink()
+    (docs_path / "added.md").write_text("added body", encoding="utf-8")
+    store_writes.clear()
+    probed: list[str] = []
+    original_probe = KnowledgeCollection.paths_with_vectors
+
+    def _record_probe(self: KnowledgeCollection, relative_paths: Sequence[str]) -> set[str]:
+        probed.extend(relative_paths)
+        return original_probe(self, relative_paths)
+
+    monkeypatch.setattr(KnowledgeCollection, "paths_with_vectors", _record_probe)
+    embedder.embedded_texts.clear()
+
+    assert await _refresh_and_check(config, docs_path) == cold, "the retired collection was not resumed"
+
+    assert store_writes.copied == 0, "the refresh copied the published index"
+    # The resumed collection is one publication behind, so the previous refresh's change is written again too.
+    assert sorted(embedder.embedded_texts) == ["added body", "first change", "second change"]
+    assert store_writes.file_rows == 3, "the refresh rewrote rows it did not change"
+    assert probed == [], "a sealed collection's claims were probed again"
+    untouched = set(names[3:])
+    assert {i: r for i, r in _rows_by_id(config, cold).items() if r[0] in untouched} == {
+        i: r for i, r in cold_rows.items() if r[0] in untouched
+    }, "unchanged rows were rewritten"
+    assert second in _collection_names(config), "the collection this publication retired was not kept in turn"
+    assert sorted(_collection_names(config)) == sorted({cold, second})
+
+
+def _rows_by_id(config: Config, collection: str) -> dict[str, tuple[str, str]]:
+    return {
+        row["id"]: (row["metadata"]["source_path"], row["content"])
+        for row in stored_rows(_collection(config, collection))
+    }
+
+
+@pytest.mark.asyncio
+async def test_every_publication_stays_exact_as_two_collections_take_turns(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+) -> None:
+    """Edits, additions, removals and mtime-only touches never lose, duplicate or keep stale rows."""
+    docs_path = tmp_path / "docs"
+    # Large enough that no collection reaches the dead-entry bound within these refreshes.
+    names = _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+    await _refresh_and_check(config, docs_path)
+    for step in range(1, 15):
+        (docs_path / names[step % len(names)]).write_text(f"edit {step}", encoding="utf-8")
+        if step % 3 == 0:
+            (docs_path / f"new{step}.md").write_text(f"new {step}", encoding="utf-8")
+            (docs_path / f"new{step - 3}.md").unlink(missing_ok=True)
+        touched = docs_path / names[(step + 5) % len(names)]
+        os.utime(touched, ns=(touched.stat().st_atime_ns, touched.stat().st_mtime_ns + 1_000_000_000))
+        store_writes.clear()
+        await _refresh_and_check(config, docs_path)
+        if step > 1:
+            assert store_writes.copied == 0, f"refresh {step} copied the published index"
+        assert len(_collection_names(config)) <= 2, "more than the published and the kept collection stayed on disk"
+
+
+async def _disable_finalization(*_args: object, **_kwargs: object) -> None:
+    """Stand in for the checkpoint compaction a killed process never runs."""
+
+
+def _crash_after(target: Any) -> Any:  # noqa: ANN401
+    """Return ``target`` wrapped to raise ``_Crash`` once it has done its work."""
+
+    def _wrapper(*args: object, **kwargs: object) -> object:
+        target(*args, **kwargs)
+        raise _Crash
+
+    return _wrapper
+
+
+@pytest.mark.parametrize("crash_point", ["take_seal", "write_rows", "commit", "rotate_seals", "write_seal"])
+@pytest.mark.asyncio
+async def test_a_crash_at_any_step_leaves_a_whole_index_and_costs_at_most_one_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
+    crash_point: str,
+) -> None:
+    """Readers see the old or the new index after any crash, and later refreshes converge."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 8)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    old_corpus = _corpus(docs_path)
+    (docs_path / names[3]).write_text("changed before the crash", encoding="utf-8")
+    (docs_path / "added.md").write_text("added before the crash", encoding="utf-8")
+    new_corpus = _corpus(docs_path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(KnowledgeManager, "_finalize_candidate_checkpoint", _disable_finalization)
+        if crash_point == "take_seal":
+            patch.setattr(
+                knowledge_manager_module,
+                "take_sealed_candidate",
+                _crash_after(knowledge_manager_module.take_sealed_candidate),
+            )
+        elif crash_point == "write_rows":
+            original_write = knowledge_manager_module.write_source_rows
+
+            def _crash_after_added_rows(collection: KnowledgeCollection, **kwargs: Any) -> None:  # noqa: ANN401
+                original_write(collection, **kwargs)
+                if kwargs["relative_path"] == "added.md":
+                    raise _Crash
+
+            patch.setattr(knowledge_manager_module, "write_source_rows", _crash_after_added_rows)
+        elif crash_point == "commit":
+            patch.setattr(
+                knowledge_manager_module,
+                "save_published_index_state",
+                _crash_after(knowledge_manager_module.save_published_index_state),
+            )
+        elif crash_point == "rotate_seals":
+            patch.setattr(knowledge_manager_module, "rotate_seals", _crash_after(lambda *_a, **_k: None))
+        else:
+            original_atomic = knowledge_checkpoint_module.write_json_atomic
+
+            def _crash_writing_seal(path: Path, payload: Any) -> None:  # noqa: ANN401
+                if "seal" in path.name:
+                    raise _Crash
+                original_atomic(path, payload)
+
+            patch.setattr(knowledge_checkpoint_module, "write_json_atomic", _crash_writing_seal)
+        with pytest.raises(_Crash):
+            await _manager(config).reindex_all()
+
+    served = _served(config, _published_collection(config))
+    assert served in (old_corpus, new_corpus), "a crash left a published index that is neither old nor new"
+
+    copies = 0
+    for step in range(4):
+        (docs_path / names[step]).write_text(f"after the crash {step}", encoding="utf-8")
+        store_writes.clear()
+        await _refresh_and_check(config, docs_path)
+        copies += store_writes.copied > 0
+    assert copies <= 1, f"the crash cost {copies} copies of the whole index"
+    assert len(_collection_names(config)) <= 2
+
+
+@pytest.mark.asyncio
+async def test_rows_a_crash_wrote_before_their_claim_are_never_carried_into_a_kept_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed candidate may hold rows it never claimed, so it is never sealed and never resumed again."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 6)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    (docs_path / "transient.md").write_text("transient body", encoding="utf-8")
+    original_write = knowledge_manager_module.write_source_rows
+
+    def _crash_after_transient_rows(collection: KnowledgeCollection, **kwargs: Any) -> None:  # noqa: ANN401
+        original_write(collection, **kwargs)
+        if kwargs["relative_path"] == "transient.md":
+            raise _Crash
+
+    with monkeypatch.context() as patch:
+        patch.setattr(KnowledgeManager, "_finalize_candidate_checkpoint", _disable_finalization)
+        patch.setattr(knowledge_manager_module, "write_source_rows", _crash_after_transient_rows)
+        with pytest.raises(_Crash):
+            await _manager(config).reindex_all()
+    (docs_path / "transient.md").unlink()
+    (docs_path / names[4]).write_text("change after the crash", encoding="utf-8")
+    # The resumed candidate publishes once with the rows it never claimed: the gap ordinary resume always had.
+    assert (await _manager(config).reindex_all()).published
+    tainted = _published_collection(config)
+
+    for step in range(4):
+        (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
+        await _refresh_and_check(config, docs_path)
+        assert tainted not in _collection_names(config), "the collection holding unclaimed rows was kept for reuse"
+
+
+@pytest.mark.parametrize("change", ["chunking", "forced"])
+@pytest.mark.asyncio
+async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keeps_nothing_old(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    change: str,
+) -> None:
+    """Old vectors are neither resumed nor kept for a later refresh once they are not to be trusted."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 6)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    old_collections = set(_collection_names(config))
+    if change == "chunking":
+        config = _config(tmp_path, docs_path, chunk_size=4000)
+    embedder.embedded_texts.clear()
+
+    assert (await _manager(config).reindex_all(force_reindex=change == "forced")).published
+
+    assert sorted(embedder.embedded_texts) == sorted(text for _name, text in _corpus(docs_path))
+    assert not old_collections & set(_collection_names(config)), "a collection holding old vectors survived"
+    (docs_path / names[5]).write_text("next change", encoding="utf-8")
+    embedder.embedded_texts.clear()
+    await _refresh_and_check(config, docs_path)
+    assert embedder.embedded_texts == ["next change"]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_collection_mostly_made_of_dead_entries_is_copied_afresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    embedder: _RecordingEmbedder,
+    store_writes: _StoreWrites,
+) -> None:
+    """A kept collection's ``rows_written`` bookkeeping bounds its rewritten rows, so a worn one is copied afresh."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 6)
+    large = docs_path / "large.md"
+    large.write_text(_overlapping_body(300), encoding="utf-8")
+    config = _config(tmp_path, docs_path, chunk_size=500)
+    assert (await _manager(config).reindex_all()).published
+    large_rows = sum(path == "large.md" for path, _text in _served(config, _published_collection(config)))
+    assert large_rows > 3, "the large file must be several chunks for this to prove anything"
+    collections_while_copying: list[int] = []
+    original_copy = KnowledgeManager._copy_published_vectors
+
+    def _recording_copy(self: KnowledgeManager, **kwargs: Any) -> dict[str, FileSignature]:  # noqa: ANN401
+        collections_while_copying.append(len(_collection_names(config)))
+        return original_copy(self, **kwargs)
+
+    monkeypatch.setattr(KnowledgeManager, "_copy_published_vectors", _recording_copy)
+
+    copies = 0
+    for version in range(1, 16):
+        large.write_text(_overlapping_body(300).replace("token0000", f"tokenv{version:03d}"), encoding="utf-8")
+        store_writes.clear()
+        embedder.embedded_texts.clear()
+        assert (await _manager(config).reindex_all()).published
+        served = _served(config, _published_collection(config))
+        assert [row for row in served if row[0] != "large.md"] == [
+            row for row in _corpus(docs_path) if row[0] != "large.md"
+        ]
+        large_texts = [text for path, text in served if path == "large.md"]
+        assert len(large_texts) == large_rows, "the large file's rows were lost or duplicated"
+        assert [text.startswith(f"tokenv{version:03d}") for text in large_texts].count(True) == 1, (
+            "the large file's rows are stale"
+        )
+        copies += store_writes.copied > 0
+        assert not [text for text in embedder.embedded_texts if text.startswith("content")], (
+            "rows of unchanged files were embedded again"
+        )
+        for name in _collection_names(config):
+            rows = _collection(config, name).row_count()
+            dead = store_writes.written.get(name, 0) - rows
+            assert dead <= rows + 2 * large_rows, f"{name} holds {dead} rewritten rows over {rows} live rows"
+    assert 2 <= copies <= 8, f"the index was copied afresh {copies} times in 15 refreshes"
+    # The worn collection is dropped before the copy, so only the published index and the copy share the disk.
+    assert max(collections_while_copying) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_that_finds_nothing_changed_keeps_the_retired_collection(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+) -> None:
+    """The unchanged-source path must not discard the collection the next change resumes."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await _build_steady_state(config, docs_path, names)
+    collections = set(_collection_names(config))
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert set(_collection_names(config)) == collections
+    assert get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).candidate is None
+    (docs_path / names[3]).write_text("change after an idle refresh", encoding="utf-8")
+    store_writes.clear()
+    await _refresh_and_check(config, docs_path)
+    assert store_writes.copied == 0, "the idle refresh dropped the collection the next change could resume"
+
+
+@pytest.mark.asyncio
+async def test_resuming_the_retired_collection_waits_for_readers_still_holding_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader that selected the retired collection before the swap must finish before it is written."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    storage = _storage_path(config, runtime_paths_for(config))
+    await _build_steady_state(config, docs_path, names)
+    retired_rows = {
+        name: _served(config, name) for name in _collection_names(config) if name != _published_collection(config)
+    }
+    (docs_path / names[2]).write_text("change while a reader holds the old index", encoding="utf-8")
+    reader_holds = Event()
+    release_reader = Event()
+
+    def _reader() -> None:
+        with collection_lifetime_lock(storage, exclusive=False):
+            reader_holds.set()
+            assert release_reader.wait(timeout=10)
+
+    reader = Thread(target=_reader)
+    reader.start()
+    assert reader_holds.wait(timeout=5)
+    # Candidate cleanup waits on the same lock; without it, only the resume itself stands between the two.
+    monkeypatch.setattr(knowledge_manager_module, "cleanup_superseded_collections", lambda *_a, **_k: None)
+    refresh = asyncio.create_task(_manager(config).reindex_all())
+    await asyncio.sleep(0.3)
+    try:
+        assert not refresh.done(), "the refresh did not wait for the reader"
+        assert {name: _served(config, name) for name in retired_rows} == retired_rows, "the held collection was written"
+    finally:
+        release_reader.set()
+        reader.join(timeout=5)
+    assert (await refresh).published
+    assert _served(config, _published_collection(config)) == _corpus(docs_path)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_seal_costs_one_copy_and_nothing_else(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+) -> None:
+    """A seal that cannot be read proves nothing, so the refresh copies the published index as before."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    storage = _storage_path(config, runtime_paths_for(config))
+    await _build_steady_state(config, docs_path, names)
+    seals = load_seals(storage)
+    assert seals, "a clean publication left no seal"
+    for path in seals:
+        path.write_text("not json", encoding="utf-8")
+    (docs_path / names[3]).write_text("change after the seals broke", encoding="utf-8")
+    store_writes.clear()
+
+    await _refresh_and_check(config, docs_path)
+
+    assert store_writes.copied > 0
+    assert len(_collection_names(config)) <= 2
+
+
+@pytest.mark.parametrize("seal_step", ["take_sealed_candidate", "rotate_seals"])
+@pytest.mark.asyncio
+async def test_a_cancelled_refresh_finishes_its_seal_change_before_it_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seal_step: str,
+) -> None:
+    """A seal change still running after cancellation could undo the next refresh's, such as a forced rebuild's."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    (docs_path / names[1]).write_text("change before the cancellation", encoding="utf-8")
+    original = getattr(knowledge_manager_module, seal_step)
+    started = Event()
+    release = Event()
+    finished = Event()
+
+    def _blocking(*args: object, **kwargs: object) -> object:
+        started.set()
+        assert release.wait(timeout=10)
+        result = original(*args, **kwargs)
+        finished.set()
+        return result
+
+    monkeypatch.setattr(knowledge_manager_module, seal_step, _blocking)
+    refresh = asyncio.create_task(_manager(config).reindex_all())
+    assert await asyncio.to_thread(started.wait, 10)
+    refresh.cancel()
+    await asyncio.sleep(0.1)
+    try:
+        assert not refresh.done(), "the cancellation escaped while the seal change was still running"
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh
+    assert finished.is_set()
+    monkeypatch.setattr(knowledge_manager_module, seal_step, original)
+    await _refresh_and_check(config, docs_path)
+
+
+@pytest.mark.parametrize("damage", ["unreadable", "lost_row", "missing"])
+@pytest.mark.asyncio
+async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing_or_serving_lost_rows(
+    tmp_path: Path,
+    store_writes: _StoreWrites,
+    damage: str,
+) -> None:
+    """A kept collection the store cannot read, or that lost rows at rest, is dropped and the index copied."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 6)
+    config = _config(tmp_path, docs_path)
+    await _build_steady_state(config, docs_path, names)
+    (retired,) = set(_collection_names(config)) - {_published_collection(config)}
+    retired_collection = _collection(config, retired)
+    if damage == "unreadable":
+        retired_collection.file.write_bytes(b"not a knowledge collection" * 100)
+    elif damage == "lost_row":
+        retired_collection.delete_source_paths([names[5]])
+    else:
+        retired_collection.delete()
+    (docs_path / names[3]).write_text("change after the damage", encoding="utf-8")
+    store_writes.clear()
+
+    await _refresh_and_check(config, docs_path)
+
+    assert store_writes.copied > 0
+    assert retired not in _collection_names(config), "the damaged collection was kept"
+    for step in range(2):
+        (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
+        await _refresh_and_check(config, docs_path)
+
+
+@pytest.mark.asyncio
+async def test_taking_a_seal_over_a_stranded_candidate_never_leaves_that_candidate_without_its_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    store_writes: _StoreWrites,
+) -> None:
+    """An interrupted take-over leaves the candidate it replaces whole or gone, never a snapshot missing its journal."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    storage = _storage_path(config, runtime_paths_for(config))
+    await _build_steady_state(config, docs_path, names)
+    # A candidate holding rows it never claimed is rebuilt, which is where a seal is taken over instead.
+    stranded = f"{_manager(config)._collections.default_collection}_candidate_strandedstranded"
+    seed_collection(_collection(config, stranded), [{"content": "stray", "metadata": {"source_path": "stray.md"}}])
+    save_candidate_checkpoint(
+        storage,
+        CandidateCheckpoint(collection=stranded, settings=_manager(config)._indexing_settings),
+    )
+    append_candidate_journal(storage, removed=("stray.md",))
+    snapshot = _candidate_checkpoint_path(storage)
+    original_replace = Path.replace
+
+    def _crash_before_the_seal_lands(self: Path, target: Path) -> Path:
+        if Path(target) == snapshot:
+            raise _Crash
+        return original_replace(self, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", _crash_before_the_seal_lands)
+        with pytest.raises(_Crash):
+            await _manager(config).reindex_all()
+
+    assert not snapshot.exists(), "the replaced candidate's snapshot outlived its journal"
+    (docs_path / names[2]).write_text("change after the interrupted take-over", encoding="utf-8")
+    store_writes.clear()
+    await _refresh_and_check(config, docs_path)
+    assert store_writes.copied == 0, "the seal was lost along with the stranded candidate"

@@ -262,22 +262,6 @@ def tool_result_view(message: Message) -> ToolResultView:
     )
 
 
-def split_thinking(content: str) -> tuple[str | None, str]:
-    """Split ``<think>`` reasoning from a reply that arrived whole.
-
-    A missing opening tag means the reasoning starts the reply. Without a closing tag, or when the reasoning is
-    empty, the reply comes back unchanged with no reasoning, so an empty ``<think></think>`` block stays in the text.
-    """
-    end = content.find("</think>")
-    if end == -1:
-        return None, content
-    start = content.find("<think>")
-    reasoning = (content[:end] if start == -1 else content[start + len("<think>") : end]).strip()
-    if not reasoning:
-        return None, content
-    return reasoning, content[end + len("</think>") :].strip()
-
-
 __all__ = [
     "AGGREGATE_USAGE_KEY",
     "MODEL_PROVENANCE_KEY",
@@ -287,6 +271,5 @@ __all__ = [
     "is_own_model_message",
     "model_provenance",
     "read_model_provenance",
-    "split_thinking",
     "tool_result_view",
 ]

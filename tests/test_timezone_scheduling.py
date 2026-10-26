@@ -6,7 +6,9 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
+from pydantic import ValidationError
 
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.scheduling.tasks import _format_scheduled_time
 
@@ -79,3 +81,30 @@ def test_config_timezone_field() -> None:
     # Test default
     config_default = Config()
     assert config_default.timezone == "UTC"
+
+
+def test_agent_timezone_overrides_the_global_timezone_and_falls_back_to_it() -> None:
+    """An agent's own timezone wins; agents without one, teams, the router, and agentless jobs use the global one."""
+    config = Config(
+        timezone="America/Los_Angeles",
+        agents={
+            "atlas": AgentConfig(display_name="Atlas", timezone="Europe/Amsterdam"),
+            "nova": AgentConfig(display_name="Nova"),
+        },
+        teams={"crew": TeamConfig(display_name="Crew", role="Pair", agents=["atlas", "nova"])},
+    )
+
+    assert config.get_entity_timezone("atlas") == "Europe/Amsterdam"
+    assert config.get_entity_timezone("nova") == "America/Los_Angeles"
+    assert config.get_entity_timezone("crew") == "America/Los_Angeles"
+    assert config.get_entity_timezone("router") == "America/Los_Angeles"
+    assert config.get_entity_timezone(None) == "America/Los_Angeles"
+
+
+@pytest.mark.parametrize("zone", ["Mars/Olympus_Mons", "", "../etc/localtime"])
+def test_unknown_timezones_are_rejected_by_config_validation(zone: str) -> None:
+    """Both the global and the per-agent timezone must name an IANA zone."""
+    with pytest.raises(ValidationError, match="timezone"):
+        AgentConfig(display_name="Atlas", timezone=zone)
+    with pytest.raises(ValidationError, match="timezone"):
+        Config(timezone=zone)

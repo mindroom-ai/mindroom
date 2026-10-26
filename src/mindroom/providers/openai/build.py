@@ -527,7 +527,6 @@ def _build_responses(
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         provider_default_sampling=_provider_default_sampling(model_id),
-        streams_only=route_key == "codex",
     )
     wire = ResponsesWire(
         route=route_key,

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.llm.messages import is_own_model_message
-from mindroom.llm.runs import RunStatus
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
 
 if TYPE_CHECKING:
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, RunStatus
     from mindroom.llm.usage import RunMetrics, TokenCounts
 
 _AI_RUN_METADATA_VERSION = 1
@@ -77,12 +76,9 @@ class _ReplyUsage:
 def _build_context_payload(context: ContextTokens | None, model_config: ModelConfig | None) -> dict[str, Any] | None:
     if context is None or model_config is None or model_config.context_window is None:
         return None
-    context_window = model_config.context_window
-    if context_window <= 0:
-        return None
     payload = {
         "input_tokens": context.tokens,
-        "window_tokens": context_window,
+        "window_tokens": model_config.context_window,
     }
     if context.cache_read_input_tokens > 0:
         payload["cache_read_input_tokens"] = context.cache_read_input_tokens
@@ -96,47 +92,37 @@ def _build_context_payload(context: ContextTokens | None, model_config: ModelCon
     return payload
 
 
-def _build_compaction_metadata_payload(prepared_history: PreparedHistoryState | None) -> dict[str, Any] | None:
-    """Serialize reply-level compaction diagnostics for Matrix run metadata."""
-    if prepared_history is None:
-        return None
+def _prepared_history_payload(prepared_history: PreparedHistoryState) -> dict[str, Any]:
+    """Return the prepared-context and compaction diagnostics a reply's run metadata publishes."""
+    payload: dict[str, Any] = {}
+    if prepared_history.prepared_context_tokens is not None:
+        payload["prepared_context"] = {"tokens": prepared_history.prepared_context_tokens}
     decision = prepared_history.compaction_decision
-    payload: dict[str, Any] = {
+    compaction: dict[str, Any] = {
         "decision": decision.mode,
         "outcome": prepared_history.compaction_reply_outcome,
         "reason": decision.reason,
     }
     if decision.current_history_tokens is not None:
-        payload["current_history_tokens"] = decision.current_history_tokens
+        compaction["current_history_tokens"] = decision.current_history_tokens
     if decision.trigger_budget_tokens is not None:
-        payload["trigger_budget_tokens"] = decision.trigger_budget_tokens
+        compaction["trigger_budget_tokens"] = decision.trigger_budget_tokens
     if decision.hard_budget_tokens is not None:
-        payload["hard_budget_tokens"] = decision.hard_budget_tokens
+        compaction["hard_budget_tokens"] = decision.hard_budget_tokens
     if decision.fitted_replay_tokens is not None:
-        payload["fitted_replay_tokens"] = decision.fitted_replay_tokens
+        compaction["fitted_replay_tokens"] = decision.fitted_replay_tokens
     if prepared_history.replay_plan is not None:
-        payload["replay_plan"] = {
+        compaction["replay_plan"] = {
             "mode": prepared_history.replay_plan.mode,
             "estimated_tokens": prepared_history.replay_plan.estimated_tokens,
         }
+    payload["compaction"] = compaction
     return payload
 
 
-def build_prepared_history_metadata_content(prepared_history: PreparedHistoryState | None) -> dict[str, Any] | None:
+def build_prepared_history_metadata_content(prepared_history: PreparedHistoryState) -> dict[str, Any]:
     """Build Matrix message metadata for prepared-context and compaction diagnostics."""
-    if prepared_history is None:
-        return None
-    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
-    if prepared_history.prepared_context_tokens is not None:
-        payload["prepared_context"] = {
-            "tokens": prepared_history.prepared_context_tokens,
-        }
-    compaction_payload = _build_compaction_metadata_payload(prepared_history)
-    if compaction_payload:
-        payload["compaction"] = compaction_payload
-    if len(payload) == 1:
-        return None
-    return {AI_RUN_METADATA_KEY: payload}
+    return {AI_RUN_METADATA_KEY: {"version": _AI_RUN_METADATA_VERSION, **_prepared_history_payload(prepared_history)}}
 
 
 def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -210,19 +196,19 @@ def _uncached_input_tokens(
     )
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912
+def build_ai_run_metadata_content(
     *,
     config: Config,
     model_name: str,
-    run_id: str | None,
-    session_id: str | None,
-    status: RunStatus | str | None,
+    run_id: str,
+    session_id: str,
+    status: RunStatus,
     model: str | None,
     model_provider: str | None,
     prices: Mapping[tuple[str, str], PricedModel],
+    tool_count: int,
     metrics: RunMetrics | None = None,
     context_run: AnyRunRecord | None = None,
-    tool_count: int | None = None,
     prepared_history: PreparedHistoryState | None = None,
 ) -> dict[str, Any]:
     """Build the Matrix event content fragment for one AI run.
@@ -240,14 +226,12 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     provider = model_provider or (model_config.provider if model_config is not None else None)
     configured_provider = model_config.provider if model_config is not None else None
 
-    payload: dict[str, Any] = {"version": _AI_RUN_METADATA_VERSION}
-    if run_id is not None:
-        payload["run_id"] = run_id
-    if session_id is not None:
-        payload["session_id"] = session_id
-    if status is not None:
-        raw_status = status.value if isinstance(status, RunStatus) else str(status)
-        payload["status"] = raw_status.lower()
+    payload: dict[str, Any] = {
+        "version": _AI_RUN_METADATA_VERSION,
+        "run_id": run_id,
+        "session_id": session_id,
+        "status": status.value.lower(),
+    }
     model_payload: dict[str, Any] = {"config": model_name}
     if model_config is not None and model_config.display_name:
         model_payload["display_name"] = model_config.display_name
@@ -267,7 +251,6 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
             payload["usage"] = usage
     cost = run_cost_usd(
         metrics,
-        metrics.tokens.to_dict() if metrics is not None else None,
         model_provider=model_provider,
         model_id=model_id,
         prices=prices,
@@ -284,14 +267,8 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     context_payload = _build_context_payload(context, model_config)
     if context_payload:
         payload["context"] = context_payload
-    if prepared_history is not None and prepared_history.prepared_context_tokens is not None:
-        payload["prepared_context"] = {
-            "tokens": prepared_history.prepared_context_tokens,
-        }
-    compaction_payload = _build_compaction_metadata_payload(prepared_history)
-    if compaction_payload:
-        payload["compaction"] = compaction_payload
-    if tool_count is not None:
-        payload["tools"] = {"count": tool_count}
+    if prepared_history is not None:
+        payload.update(_prepared_history_payload(prepared_history))
+    payload["tools"] = {"count": tool_count}
 
     return {AI_RUN_METADATA_KEY: payload}

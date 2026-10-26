@@ -12,14 +12,13 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
-import httpx
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
@@ -28,7 +27,8 @@ from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
-from tests.providers.golden_support import hide_provider_environment
+from tests.providers.golden_support import Wire, hide_provider_environment, streamed_reply
+from tests.providers.openai_family_support import openai_family_adapter
 from tests.teams.squad import (
     PANEL,
     SQUAD,
@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    import httpx
+
     from mindroom.llm.usage import MessageMetrics
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -59,10 +61,8 @@ def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetric
     return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=metrics)
 
 
-# A blocking turn's leader requests do not stream, which selects the non-stream delegation.
-_BLOCKING = ModelRequest(messages=(), stream=False)
-
 _OLLAMA_MEMBER = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
+_LLAMA_CPP_MEMBER = {"provider": "llama_cpp", "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"}
 
 
 async def _overloaded() -> None:
@@ -76,7 +76,7 @@ def _silent() -> list[Any]:
 
 
 def _blank() -> list[Any]:
-    """A turn whose provider sent an empty string whole, as a reply that does not stream can end."""
+    """A turn whose text is an empty string rather than no text."""
     return [TurnCompleted(message=Message(role="assistant", content=""), stop_reason="end")]
 
 
@@ -533,8 +533,8 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         pytest.param(
             [calls(tool_call("echo", "call-a", text="a"), tool_call("echo", "call-b", text="")), _blank()],
             [calls(tool_call("echo", "call-c", text="c")), _silent()],
-            # The broadcast keeps an empty tool result, which a coordinate delegation drops.
-            "Agent Writer: a,Agent Checker: null",
+            # Blank text keeps an empty tool result in the broadcast; no text drops it, as a coordinate delegation does.
+            "Agent Writer: a,Agent Checker: c",
             id="tool-only",
         ),
         pytest.param(
@@ -570,7 +570,7 @@ async def test_a_blocking_collaborate_run_gives_the_leader_each_member_result_la
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=_BLOCKING,
+            stream=False,
         ),
     )
 
@@ -636,7 +636,7 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
             persist=store,
-            request_template=ModelRequest(messages=(), stream=stream),
+            stream=stream,
         ),
     )
 
@@ -666,7 +666,7 @@ async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_re
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=_BLOCKING,
+            stream=False,
             persist=store,
         ),
     )
@@ -689,7 +689,7 @@ async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_re
         pytest.param(True, [answer("")], NO_MEMBER_RESPONSE, id="streamed-empty"),
         pytest.param(False, [_blank()], "", id="blocking-empty"),
         pytest.param(True, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="streamed-tool-only"),
-        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "null", id="blocking-tool-only"),
+        pytest.param(False, [calls(tool_call("echo", "call-x", text="x")), _silent()], "x", id="blocking-tool-only"),
     ],
 )
 async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member_result_rule_of_its_stream_mode(
@@ -710,7 +710,7 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=ModelRequest(messages=(), stream=stream),
+            stream=stream,
         ),
     )
 
@@ -719,55 +719,89 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_member
     assert leader.requests[1].messages[-1].content == expected
 
 
-@pytest.mark.parametrize("mode", [TeamMode.COORDINATE, TeamMode.COLLABORATE])
-@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
-async def test_every_member_request_streams_exactly_when_the_team_turn_does(mode: TeamMode, stream: bool) -> None:
-    # Each member runs with the team turn's own ``stream``, so a blocking turn sends no member a streamed request.
-    leader = scripted("leader-model", _delegation_to_both(mode), answer("Both found 5."))
-    writer = scripted("writer-model", calls(tool_call("add", "call-add", a=2, b=3)), answer("5"))
-    checker = scripted("checker-model", answer("5"))
-    team = squad(leader, writer, checker, mode=mode, checker_toolkits=())
+def _chat_completion(message: dict[str, Any], finish_reason: str) -> dict[str, Any]:
+    """A finished llama.cpp Chat completion with ``message``, which ``streamed_reply`` streams as the server does."""
+    return {
+        "id": "chatcmpl-member",
+        "object": "chat.completion",
+        "created": 1,
+        "model": _LLAMA_CPP_MEMBER["id"],
+        "choices": [{"index": 0, "message": {"role": "assistant", **message}, "finish_reason": finish_reason}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+    }
+
+
+@pytest.mark.parametrize(
+    ("stop_after_call", "replies"),
+    [
+        pytest.param(True, 1, id="stopped-by-its-tool"),
+        pytest.param(False, 2, id="silent-after-its-tool"),
+    ],
+)
+async def test_a_blocking_turn_hands_the_leader_a_chat_member_s_tool_results_when_it_writes_no_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stop_after_call: bool,
+    replies: int,
+) -> None:
+    # The server sends ``content: ""`` beside the tool call and in a reply after it, which the turn reads as no text.
+    hide_provider_environment(monkeypatch)
+    call = {"id": "call-x", "type": "function", "function": {"name": "echo", "arguments": '{"text": "x"}'}}
+    wire = Wire(
+        streamed_reply(_chat_completion({"content": "", "tool_calls": [call]}, "tool_calls")),
+        streamed_reply(_chat_completion({"content": ""}, "stop")),
+    )
+    leader = scripted("leader-model", _delegate("call-w", "writer", "Echo x.", metrics=usage(10, 2)), answer("x."))
+    writer = openai_family_adapter(_LLAMA_CPP_MEMBER, tmp_path, wire.respond)
+    team = squad(
+        leader,
+        writer,
+        scripted("checker-model"),
+        writer_toolkits=(toolkit(echo, stop_after_call=stop_after_call),),
+    )
 
     _, record = await collect(
         start_team(
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=ModelRequest(messages=(), stream=stream),
+            stream=False,
         ),
     )
 
-    assert record.status is RunStatus.completed
-    assert (len(writer.requests), len(checker.requests)) == (2, 1)
-    assert [request.stream for request in (*leader.requests, *writer.requests, *checker.requests)] == [stream] * 5
+    assert len(wire.requests) == replies
+    assert record.tools is not None
+    assert record.tools[0].result == "x"
+    assert leader.requests[1].messages[-1].content == "x"
 
 
 async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_without_its_thinking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A thinking model's ``<think>`` text stays the member's reasoning, which a non-stream member run splits off.
+    # A thinking model's ``<think>`` text stays the member's reasoning, so the leader reads only the answer.
     hide_provider_environment(monkeypatch)
     reply = "<think>Five has two divisors.</think>Five is prime."
     sent: list[dict[str, Any]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
-        # Ollama puts a thinking model's tags in the content, whether the reply streams or arrives whole.
-        body = json.loads(request.content)
-        sent.append(body)
+        # Ollama puts a thinking model's tags in the content.
+        sent.append(json.loads(request.content))
         done = {
             "model": _OLLAMA_MEMBER["id"],
             "created_at": "2026-10-20T00:00:00Z",
             "done": True,
             "done_reason": "stop",
-            "message": {"role": "assistant", "content": reply},
+            "message": {"role": "assistant", "content": ""},
             "prompt_eval_count": 7,
             "eval_count": 5,
         }
-        if not body["stream"]:
-            return httpx.Response(200, json=done)
-        text = {key: done[key] for key in ("model", "created_at", "message")} | {"done": False}
-        return ollama_ndjson(text, done | {"message": {"role": "assistant", "content": ""}})
+        text = {key: done[key] for key in ("model", "created_at")} | {
+            "done": False,
+            "message": {"role": "assistant", "content": reply},
+        }
+        return ollama_ndjson(text, done)
 
     leader = scripted(
         "leader-model",
@@ -783,7 +817,7 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
             team,
             prompt({"messages": [{"role": "user", "content": "hi"}]}),
             ctx=run_context("r", SQUAD),
-            request_template=_BLOCKING,
+            stream=False,
             persist=store,
         ),
     )
@@ -793,4 +827,4 @@ async def test_a_blocking_turn_hands_the_leader_an_ollama_member_s_answer_withou
     assert record.tools[0].result == "Five is prime."
     [member] = store.members
     assert (member.content, member.messages[-1].reasoning_content) == ("Five is prime.", "Five has two divisors.")
-    assert [body["stream"] for body in sent] == [False]
+    assert [body["stream"] for body in sent] == [True]
