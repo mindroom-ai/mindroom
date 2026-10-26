@@ -15,7 +15,7 @@ import pytest
 
 from mindroom.history import legacy_compaction_state
 from mindroom.history.legacy_compaction_state import adopt_summary_rows
-from mindroom.session_storage.legacy_agno2_runs import move_blob_runs_to_rows, number_unindexed_runs
+from mindroom.session_storage.legacy_agno2_runs import decode_json, move_blob_runs_to_rows, number_unindexed_runs
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.store import ConversationStore
@@ -182,6 +182,54 @@ def test_a_blob_entry_with_an_unusable_value_converts_alone(tmp_path: Path, fiel
         # The conversion's time stands in for one Agno never wrote.
         assert created["odd"] >= started
     assert store.load_session("session-1", "agent") is not None
+
+
+@pytest.mark.parametrize(
+    ("text", "decoded"),
+    [
+        ('"x\\ud800y"', "x\ufffdy"),
+        ('"x\\uDBFF"', "x\ufffd"),
+        ('"\\udc00x"', "\ufffdx"),
+        ('"\\ude00\\ud83d"', "\ufffd\ufffd"),
+        ('"\\ud800\\ud83d\\ude00"', "\ufffd\U0001f600"),
+        ('"\\ud83d\\ude00 \\uD83D\\uDE00"', "\U0001f600 \U0001f600"),
+        ('"\\\\ud800"', "\\ud800"),
+        ('"\\\\\\ud800"', "\\\ufffd"),
+        ('{"\\ud800": ["\\udfff"]}', {"\ufffd": ["\ufffd"]}),
+        (b'"\\ud800"', "\ufffd"),
+        (b'"\xed\xa0\x80"', "\ufffd\ufffd\ufffd"),
+    ],
+    ids=[
+        "high",
+        "uppercase",
+        "low",
+        "reversed-pair",
+        "high-before-a-pair",
+        "pairs",
+        "escaped-backslash",
+        "escape-after-an-escaped-backslash",
+        "key-and-nested",
+        "bytes-escape",
+        "bytes-encoded-surrogate",
+    ],
+)
+def test_json_reads_each_lone_surrogate_as_a_replacement_character(text: str | bytes, decoded: object) -> None:
+    """A lone surrogate, which SQLite cannot store, reads as U+FFFD; surrogate pairs and escaped backslashes stay."""
+    assert decode_json(text) == decoded
+
+
+@pytest.mark.parametrize("field", ["agent_id", "user_id"])
+def test_a_blob_entry_with_a_lone_surrogate_converts(tmp_path: Path, field: str) -> None:
+    """A text field worker code wrote with an escaped lone surrogate converts with a replacement character instead."""
+    db_file = _agno_2_database(tmp_path)
+    _set_blob(db_file, [{**_entry("odd", 1), field: "x\ud800"}, _entry("ok", 2)])
+
+    store = _converted(db_file)
+
+    odd = store.get_run("odd")
+    assert odd is not None
+    assert odd.to_dict()[field] == "x\ufffd"
+    assert [run_id for run_id, _, _ in _log(db_file)] == ["odd", "ok"]
 
 
 def test_a_database_with_summary_rows_is_never_migrated_again(tmp_path: Path) -> None:

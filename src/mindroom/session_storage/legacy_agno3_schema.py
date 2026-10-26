@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.session_storage.legacy_agno2_runs import decode_json
 from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage.storage import quote_identifier, usage_table_sql
@@ -127,7 +128,7 @@ def run_from_row(run_type: str, run_data: str) -> AnyRunRecord | None:
     """Decode one Agno runs-table row; a row of any other type than agent or team (Agno's workflow runs) reads as None."""
     if run_type not in ("agent", "team"):
         return None
-    data = json.loads(run_data)
+    data = cast("dict[str, Any]", decode_json(run_data))
     _drop_tool_schemas(data)
     run = TeamRunRecord.from_dict(data) if run_type == "team" else RunRecord.from_dict(data)
     split_combined_tool_results(run)

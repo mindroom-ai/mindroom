@@ -13,11 +13,13 @@ import pytest
 
 from mindroom import constants
 from mindroom.history import summary_rows
+from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.history_helpers import folded_run_ids, stored_run_ids
@@ -34,10 +36,12 @@ _ARCHIVE_DDL = (
     "session_id TEXT NOT NULL REFERENCES code_sessions(session_id) ON DELETE CASCADE, "
     "scope_key TEXT NOT NULL, summary TEXT, summary_model TEXT, "
     "legacy INTEGER NOT NULL DEFAULT 0, legacy_event_ids TEXT, created_at INTEGER NOT NULL)",
+    "CREATE INDEX code_sessions_compactions_scope ON code_sessions_compactions (session_id, scope_key)",
     "CREATE TABLE code_sessions_compacted_runs (id INTEGER PRIMARY KEY, "
     "compaction_id INTEGER NOT NULL REFERENCES code_sessions_compactions(id) ON DELETE CASCADE, "
     "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, event_ids TEXT NOT NULL, "
     "seen_event_ids TEXT NOT NULL DEFAULT '[]', run_data TEXT, UNIQUE(session_id, run_id))",
+    "CREATE INDEX code_sessions_compacted_runs_generation ON code_sessions_compacted_runs (compaction_id)",
 )
 
 
@@ -333,6 +337,52 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
     assert folded == ["t0"]
 
 
+def test_a_generation_of_several_runs_sorts_after_its_last_top_level_run_with_their_event_ids_once(
+    tmp_path: Path,
+) -> None:
+    """A generation covers all of its runs, members aside, and keeps each event id its runs carry once, sorted.
+
+    A generation that is not legacy keeps no captured ids of its own.
+    """
+    member = RunRecord(run_id="m1", agent_id="helper", session_id="s1", parent_run_id="t1")
+    team_runs = [
+        TeamRunRecord(run_id=f"t{n}", team_id="eng", session_id="s1", status=RunStatus.completed) for n in (0, 1, 2)
+    ]
+    _main_database(
+        tmp_path,
+        live=[team_runs[2]],
+        generations=[
+            _Generation(
+                "team summary",
+                [team_runs[0], team_runs[1], member],
+                legacy_event_ids=("$not-legacy",),
+                scope_key="team:eng",
+            ),
+        ],
+        team=True,
+    )
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        for run_id, event_ids, seen_event_ids in (
+            ("t0", ["$z", "$shared"], ["$shared"]),
+            ("t1", ["$shared", "$a"], ["$a", "$shared"]),
+        ):
+            connection.execute(
+                "UPDATE code_sessions_compacted_runs SET event_ids = ?, seen_event_ids = ? WHERE run_id = ?",
+                (json.dumps(event_ids), json.dumps(seen_event_ids), run_id),
+            )
+
+    session = _open(tmp_path).load_session("s1", "team")
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        rows = connection.execute(
+            "SELECT run.run_id, summary.event_ids, summary.seen_event_ids FROM code_sessions_log_summaries AS summary "
+            "LEFT JOIN code_sessions_log_runs AS run ON run.session_id = summary.session_id AND run.seq = summary.through",
+        ).fetchall()
+
+    assert session is not None
+    assert [run.run_id for run in session.runs or []] == ["t2"]
+    assert rows == [("t1", '["$a", "$shared", "$z"]', '["$a", "$shared"]')]
+
+
 def test_rows_without_an_index_keep_their_place(tmp_path: Path) -> None:
     """Rows an old writer stored without an index keep the place a read gave them: first among the live runs."""
     _main_database(tmp_path, live=[_run("r1"), _run("r2")], generations=[_Generation("summary of r0", [_run("r0")])])
@@ -473,6 +523,66 @@ def test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text(tmp_path: 
     for kind in ("all", "seen"):
         assert summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind=kind) == expected
     assert _replay(tmp_path).loaded == ["r1"]
+
+
+def test_archive_text_that_is_not_utf8_reads_with_replacement_characters(tmp_path: Path) -> None:
+    """Worker code can write archive text that is not UTF-8, or JSON that escapes a lone surrogate; the database converts."""
+    _main_database(
+        tmp_path,
+        live=[_run("r1")],
+        generations=[
+            _Generation("legacy summary", legacy=True, legacy_event_ids=("$legacy",)),
+            _Generation("summary of r0", [_run("r0")]),
+        ],
+    )
+    run_data = json.dumps(_run("r0").to_dict()).encode().replace(b'"answer r0"', b'"answer r0 \x80"')
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        for table, column, value in (
+            ("code_sessions_compacted_runs", "run_data", run_data),
+            ("code_sessions_compacted_runs", "event_ids", b'["$r0", "$\xff"]'),
+            ("code_sessions_compacted_runs", "seen_event_ids", b'["$r0", "$\\ud800"]'),
+            ("code_sessions_compactions", "summary", b"summary \xfe"),
+            ("code_sessions_compactions", "summary_model", b"model \xfe"),
+            ("code_sessions_compactions", "legacy_event_ids", b'["$legacy\xfe"]'),
+        ):
+            connection.execute(f"UPDATE {table} SET {column} = CAST(? AS TEXT)", (value,))  # noqa: S608
+
+    storage = _open(tmp_path)
+    restored = storage.get_run("r0")
+    candidates = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="all")
+    seen = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="seen")
+    replay = _replay(tmp_path)
+
+    assert isinstance(restored, RunRecord)
+    assert restored.content == "answer r0 \ufffd"
+    assert (replay.loaded, replay.stored, replay.summary) == (["r1"], ["r0", "r1"], "summary \ufffd")
+    assert candidates == {"$legacy\ufffd", "$r0", "$\ufffd"}
+    assert seen == {"$legacy\ufffd", "$r0", "$\ufffd\ufffd\ufffd"}
+
+
+@pytest.mark.parametrize("field", ["agent_id", "user_id"])
+def test_an_archived_run_with_a_lone_surrogate_returns_with_a_replacement_character(tmp_path: Path, field: str) -> None:
+    """A text field worker code archived with an escaped lone surrogate, which SQLite cannot store, reads as U+FFFD."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    _set_archived(tmp_path, "run_data", json.dumps({**_run("r0").to_dict(), field: "x\ud800"}))
+
+    restored = _open(tmp_path).get_run("r0")
+
+    assert restored is not None
+    assert restored.to_dict()[field] == "x\ufffd"
+    assert _replay(tmp_path).stored == ["r0", "r1"]
+
+
+def test_the_archive_step_leaves_text_reads_to_the_steps_after_it(tmp_path: Path) -> None:
+    """Replacement characters stay the archive's rule: the connection reads text as it did once the step ends."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        adopt_summary_rows(connection, AgnoTableNames("code"))
+
+        assert connection.text_factory is str
+        assert "code_sessions_compactions" not in {
+            name for (name,) in connection.execute("SELECT name FROM sqlite_master")
+        }
 
 
 @pytest.mark.parametrize(
