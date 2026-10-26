@@ -56,11 +56,11 @@ def test_member_and_leader_events_land_in_their_slots() -> None:
 
     assert presentation.per_member == {"ledger-agent": "Three vendors.", "scout": "Two more."}
     assert presentation.consensus == "Five in all."
-    assert presentation.render_body() == (
+    assert presentation.render_body(finished=True) == (
         "🤝 **Team Response** (Ledger, Scout):\n\n"
         "**Ledger**: Three vendors.\n\n**Scout**: Two more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
-    assert strip_team_display(presentation.render_body()) == (
+    assert strip_team_display(presentation.render_body(finished=True)) == (
         "**Ledger**: Three vendors.\n\n**Scout**: Two more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
 
@@ -96,6 +96,7 @@ def test_member_content_that_opens_a_block_starts_its_own_paragraph(content: str
         display_names_by_id={"ledger": "ledger"},
         per_member={"ledger": content},
         consensus="x",
+        finished=True,
     )[:1]
     assert part == f"**ledger**:\n\n{content}"
 
@@ -108,22 +109,31 @@ def test_member_prose_stays_on_the_name_line(content: str) -> None:
         display_names_by_id={"scout": "scout"},
         per_member={"scout": content},
         consensus="x",
+        finished=True,
     )[:1]
     assert part == f"**scout**: {content}"
 
 
-def test_members_without_a_consensus_get_the_no_consensus_note_and_a_lone_consensus_renders_alone() -> None:
+@pytest.mark.parametrize("finished", [True, False])
+def test_members_without_a_consensus_get_the_no_consensus_note_once_finished_and_a_lone_consensus_renders_alone(
+    *,
+    finished: bool,
+) -> None:
+    """Only a finished reply whose leader said nothing ends with the no-consensus note; one still running does not."""
+    note = ["\n*No team consensus - showing individual responses only*"] if finished else []
     assert render_team_member_slots(
         ["a"],
         display_names_by_id={"a": "agent1"},
         per_member={"a": "Response 1"},
         consensus="",
-    ) == ["**agent1**: Response 1", "\n*No team consensus - showing individual responses only*"]
+        finished=finished,
+    ) == ["**agent1**: Response 1", *note]
     assert render_team_member_slots(
         ["a"],
         display_names_by_id={"a": "agent1"},
         per_member={"a": ""},
         consensus="Team consensus only",
+        finished=finished,
     ) == ["\n**Team Consensus**:", "Team consensus only"]
     assert format_team_header(["Ledger", "Scout"]) == "🤝 **Team Response** (Ledger, Scout):\n\n"
 
@@ -252,7 +262,7 @@ def test_members_with_the_same_display_name_keep_their_own_slots() -> None:
         "member-b": "Second answer.\n\n🔧 `inspect` [1] ⏳\n\n",
     }
     assert presentation.tool_trace[0].scope_key == "agent:member-b"
-    assert presentation.render_body().count("**Same**:") == 2
+    assert presentation.render_body(finished=True).count("**Same**:") == 2
 
 
 def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
@@ -270,7 +280,7 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
             RunRequirement(first, member_agent_id="first"),
             RunRequirement(second, member_agent_id="second"),
         ),
-        response_text=presentation.render_body(),
+        response_text=presentation.render_body(finished=False),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
         toolkit_owners={("first", "inspect_first"): "test_toolkit", ("second", "inspect_second"): "test_toolkit"},
@@ -310,7 +320,7 @@ def test_a_hidden_snapshot_keeps_the_call_identity_without_markers() -> None:
     )
     restored.append_member("general", " After.")
 
-    assert "🔧" not in restored.render_body()
+    assert "🔧" not in restored.render_body(finished=True)
     assert (restored.tool_trace[0].tool_call_id, restored.tool_trace[0].type) == ("call-1", "tool_call_completed")
 
 

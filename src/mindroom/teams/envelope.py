@@ -628,15 +628,17 @@ class _TeamTurn:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state, stream=True)
         emitted_output = False
+        shown: str | None = None
         try:
             async with closing_async_stream(events):
                 async for event in events:
                     if not attempt.apply(event):
                         continue
                     self.sync_live_turn_recorder(run, attempt)
-                    chunk = attempt.chunk()
+                    chunk = attempt.chunk(finished=False)
                     if chunk is not None:
                         emitted_output = True
+                        shown = chunk.content
                         yield chunk
         except Exception as error:
             logger.exception("team_streaming_failed", agents=attempt.members.display_names)
@@ -659,7 +661,9 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        if shown_reasons and (chunk := attempt.chunk()) is not None:
+        # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
+        # when only members spoke.
+        if (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             emitted_output = True
             yield chunk
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run

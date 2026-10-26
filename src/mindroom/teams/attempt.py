@@ -97,6 +97,7 @@ class TeamReplyText:
                 display_names_by_id=self.presentation.display_names_by_id,
                 per_member=self.per_member,
                 consensus=self.consensus,
+                finished=True,
             ),
         )
 
@@ -203,9 +204,12 @@ class TeamAttempt:
                 shown = self.show_unshown_handover(member) or shown
         return shown
 
-    def chunk(self) -> StructuredStreamChunk | None:
-        """Return the rendered document as a stream chunk, or None while it is still empty."""
-        rendered_body = self.presentation.render_body()
+    def chunk(self, *, finished: bool) -> StructuredStreamChunk | None:
+        """Return the rendered document as a stream chunk, or None while it is still empty.
+
+        A live chunk shows the run still running; the ``finished`` one shows the reply its completed run ends with.
+        """
+        rendered_body = self.presentation.render_body(finished=finished)
         if not rendered_body:
             return None
         return StructuredStreamChunk(
