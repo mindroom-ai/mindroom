@@ -310,6 +310,10 @@ def _runtime_with_env(tmp_path: Path, env_file: dict[str, str], exported: dict[s
             ["m.base_url", "m.client_params.api_base"],
         ),
         ({"client_params": {"http_options": {"baseUrl": "https://a"}}}, ["m.client_params.http_options.baseUrl"]),
+        (
+            {"client_params": {"apiBase": "https://a", "defaultHeaders": {"X": "y"}}},
+            ["m.client_params.apiBase", "m.client_params.defaultHeaders"],
+        ),
         ({"host": "https://a", "azure_endpoint": "https://b"}, ["m.host", "m.azure_endpoint"]),
         ({"client_params": {"default_headers": {"Authorization": "Bearer g"}}}, ["m.client_params.default_headers"]),
         ({"base_url": "", "host": None, "default_headers": {}, "temperature": 0.2, "api_key": "k"}, []),
