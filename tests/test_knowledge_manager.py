@@ -4210,7 +4210,7 @@ async def test_cancelled_async_file_lock_waiter_closes_unacquired_handle(
 
 @pytest.mark.asyncio
 async def test_refresh_generations_keep_latest_index_without_protecting_old_handles(tmp_path: Path) -> None:
-    """Old read handles are best effort; refresh cleanup only guarantees the next active index."""
+    """Old read handles are best effort; refresh cleanup only guarantees the active index and the one it retired."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -4227,9 +4227,10 @@ async def test_refresh_generations_keep_latest_index_without_protecting_old_hand
         doc.write_text(f"generation {generation}", encoding="utf-8")
         await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert first_collection not in _VectorDb.collections
     latest = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert latest.index is not None
+    # Two collections take turns: the first one was resumed and rewritten under its old handle, and no third survives.
+    assert set(_VectorDb.collections) == {first_collection, latest.index.reader.collection_name}
     assert [document.content for document in await latest.index.reader.asearch("generation", limit=5)] == [
         "generation 6",
     ]
@@ -4304,7 +4305,7 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
 
 @pytest.mark.asyncio
 async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) -> None:
-    """Repeated publishes keep the published index and clean older generations best effort."""
+    """Repeated publishes keep the published index and the one it retired, and clean older generations."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -4320,7 +4321,7 @@ async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) ->
     state = load_published_index_state(published_index_metadata_path(key))
     assert state is not None
     assert state.collection in _VectorDb.collections
-    assert len(_VectorDb.collections) == 1
+    assert len(_VectorDb.collections) == 2, "only the published index and the one the next refresh resumes may stay"
     lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
     assert lookup.index is not None
     assert [document.content for document in await lookup.index.reader.asearch("generation", limit=5)] == [
