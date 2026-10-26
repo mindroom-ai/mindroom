@@ -30,7 +30,7 @@ from mindroom.providers.credentials import uses_alternative_auth
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
-from mindroom.providers.gemini.settings import GeminiSettings
+from mindroom.providers.gemini.settings import GeminiSettings, calls_vertexai
 from mindroom.providers.gemini.wire import (
     GeminiReply,
     MediaRoute,
@@ -259,7 +259,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
             ),
         ),
         settings=settings,
-        vertexai=settings.vertexai or os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() == "true",
+        vertexai=calls_vertexai(settings.vertexai),
     )
 
 

@@ -15,7 +15,7 @@ from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_E
 from mindroom.providers.anthropic.settings import ClaudeRouteKind, ClaudeSettings, configured_anthropic_endpoint
 from mindroom.providers.credentials import dashboard_api_key
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
-from mindroom.providers.gemini.settings import GeminiSettings
+from mindroom.providers.gemini.settings import GeminiSettings, configured_gemini_endpoint
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama.settings import OllamaSettings
 from mindroom.providers.openai.build import ENDPOINT_VARIABLES as OPENAI_ENDPOINT_VARIABLES
@@ -159,11 +159,14 @@ def _sets_base_url(value: object) -> bool:
 def configured_endpoint(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
     """Return the endpoint one model calls when its config or its route's endpoint variable sets one, else None.
 
-    The OpenAI Chat Completions routes and the direct Anthropic route resolve it as their builders do; any other
-    route gets None.
+    The OpenAI Chat Completions routes, the direct Anthropic route, and Gemini resolve it as their clients do; any
+    other route gets None.
     """
-    if provider_route(model_config.provider) == "anthropic":
+    provider = provider_route(model_config.provider)
+    if provider == "anthropic":
         return configured_anthropic_endpoint((model_config.extra_kwargs or {}).get("client_params"))
+    if provider == "google":
+        return configured_gemini_endpoint(model_config.extra_kwargs)
     return openai_configured_endpoint(model_config, runtime_paths)
 
 

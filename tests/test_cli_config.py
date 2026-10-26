@@ -4366,46 +4366,24 @@ class TestDoctor:
         shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
         assert shared_key_urls == ["https://api.openai.com/v1/models"]
 
-    def test_memory_llm_openai_base_url_used_when_host_absent(
+    def test_memory_llm_explicit_key_is_checked_at_its_openai_base_url(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
+        """Mem0 sends ``memory.llm.config.api_key`` to ``openai_base_url``, so doctor checks that pair."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-oss-low\n"
-            "      openai_base_url: http://localllm:9292/v1\n",
+            _VALID_CONFIG + "memory:\n  llm:\n    provider: openai\n    config:\n      model: gpt-oss-low\n"
+            "      openai_base_url: http://localllm:9292/v1\n      api_key: sk-mem\n",
         )
-        storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        _patch_homeserver_ok(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
 
-        called_urls: list[str] = []
-
-        def _mock_check(url: str, _headers: dict[str, str] | None = None) -> tuple[bool, str]:
-            called_urls.append(url)
-            return True, ""
-
-        monkeypatch.setattr("mindroom.cli.doctor._http_check", _mock_check)
-        monkeypatch.setattr(
-            "mindroom.cli.doctor._validate_provider_key",
-            lambda _prov, _key, base_url=None: called_urls.append(base_url or "NO_BASE_URL") or (True, ""),
-        )
-
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 0
-        assert "http://localllm:9292/v1" in called_urls, (
-            f"Expected openai_base_url to be passed as base_url, got: {called_urls}"
-        )
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        assert "Memory LLM: openai/gpt-oss-low API key valid" in result.output
+        assert ("http://localllm:9292/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
 
     def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
         self,

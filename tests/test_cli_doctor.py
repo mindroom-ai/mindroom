@@ -15,6 +15,7 @@ from mindroom.cli.doctor import (
     _check_matrix_homeserver,
     _check_memory_config,
     _check_memory_embedder,
+    _check_memory_llm,
     _check_pairing,
     _check_providers,
     _check_single_provider,
@@ -281,6 +282,12 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     assert vertex_models == ["claude-sonnet-5-5"]
 
 
+def _clear_sdk_endpoint_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset the endpoint variables the Anthropic and Gemini SDKs read from the process environment."""
+    for name in ("ANTHROPIC_BASE_URL", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
     """Answer every doctor key check with 200 and return the requests it sent."""
     sent: list[tuple[str, dict[str, str]]] = []
@@ -340,6 +347,20 @@ def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[
             {},
             "https://openrouter.ai/api/v1",
         ),
+        (
+            "google",
+            {"client_params": {"http_options": {"base_url": "https://gemini-gateway.example"}}},
+            "",
+            {},
+            "https://gemini-gateway.example",
+        ),
+        (
+            "gemini",
+            {},
+            "",
+            {"GOOGLE_GEMINI_BASE_URL": "https://gemini-gateway.example"},
+            "https://gemini-gateway.example",
+        ),
     ],
 )
 def test_doctor_never_sends_a_shared_key_to_a_custom_endpoint(
@@ -353,7 +374,7 @@ def test_doctor_never_sends_a_shared_key_to_a_custom_endpoint(
     endpoint: str,
 ) -> None:
     """A model calling a custom endpoint, as the runtime resolves it, has the shared key reported as not checked."""
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    _clear_sdk_endpoint_variables(monkeypatch)
     for name, value in process_env.items():
         monkeypatch.setenv(name, value)
     env_key = env_key_for_provider(provider)
@@ -384,7 +405,7 @@ def test_doctor_checks_a_shared_key_at_the_provider_s_own_api(
     url: str,
 ) -> None:
     """A model without a custom endpoint gets the shared key checked at its provider's API."""
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    _clear_sdk_endpoint_variables(monkeypatch)
     (tmp_path / ".env").write_text(f"{env_key_for_provider(provider)}=shared\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     sent = _record_key_checks(monkeypatch)
@@ -489,6 +510,42 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
     config = _openai_embedder_config(host="http://embeddings.local:9292/v1")
 
     assert _check_memory_embedder(config, _doctor_runtime_paths(tmp_path)) == (0, 0, 1)
+
+
+def test_memory_llm_shared_key_is_not_sent_to_its_custom_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A shared key is checked only at the provider's own API, so a memory LLM endpoint gets no key check."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=shared\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent = _record_key_checks(monkeypatch)
+    llm = {"provider": "openai", "config": {"model": "m", "openai_base_url": "https://mem-gateway.example/v1"}}
+    config = Config(memory={"backend": "mem0", "llm": llm}, router=RouterConfig(model="default"))
+
+    assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Memory LLM: OPENAI_API_KEY not checked for openai/m, which calls https://mem-gateway.example/v1" in output
+
+
+def test_memory_embedder_shared_key_is_checked_only_at_the_provider_s_own_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mem0 calls a gemini embedder at Google's API whatever its ``host``, so the shared key goes only there."""
+    (tmp_path / ".env").write_text("GOOGLE_API_KEY=shared\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent = _record_key_checks(monkeypatch)
+    embedder = {
+        "provider": "gemini",
+        "config": {"model": "gemini-embedding-2", "host": "https://embed-gateway.example"},
+    }
+    config = Config(memory={"backend": "mem0", "embedder": embedder}, router=RouterConfig(model="default"))
+
+    assert _check_memory_embedder(config, runtime_paths) == (1, 0, 0)
+    assert [url for url, _headers in sent] == ["https://generativelanguage.googleapis.com/v1beta/models?key=shared"]
 
 
 def test_memory_config_probes_embedder_for_knowledge_only_config(

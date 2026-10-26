@@ -204,6 +204,11 @@ def _models_using_shared_key(
         return None
 
 
+def _print_key_not_checked(subject: str, env_key: str, user: str, endpoint: str) -> None:
+    """Print that the shared ``env_key`` is not checked for ``user``, which calls a custom endpoint."""
+    console.print(f"[yellow]![/yellow] {subject}: {env_key} not checked for {user}, which calls {escape(endpoint)}")
+
+
 def _custom_endpoints(models: dict[str, ModelConfig], runtime_paths: RuntimePaths) -> dict[str, str]:
     """Return the endpoint, by model name, of each model that calls one its config or its route's variable sets."""
     # Deferred: the provider routes load the model HTTP client and token counter.
@@ -465,9 +470,7 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
     # runtime sends in its place, such as a header, so a model calling one is reported as not checked.
     custom_endpoints = _custom_endpoints(shared_key_models or {}, runtime_paths)
     for name, endpoint in custom_endpoints.items():
-        console.print(
-            f"[yellow]![/yellow] {provider}: {env_key} not checked for {name}, which calls {escape(endpoint)}",
-        )
+        _print_key_not_checked(provider, env_key, name, endpoint)
     if shared_key_models and len(custom_endpoints) == len(shared_key_models):
         return 0, 0, len(custom_endpoints)
     valid, detail = _validate_provider_key(provider, api_key)
@@ -546,13 +549,16 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
     # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
-    api_key = config.memory.llm.config.get("api_key") or (
-        get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
-    )
+    configured_key = config.memory.llm.config.get("api_key")
+    api_key = configured_key or (get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None)
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
+        return 0, 0, 1
+    # A shared key is checked only at the provider's own API, as for models.
+    if llm_base_url and env_key and not configured_key:
+        _print_key_not_checked("Memory LLM", env_key, f"{llm_provider}/{llm_model}", llm_base_url)
         return 0, 0, 1
     # The runtime drops host for memory LLMs other than Ollama.
     valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
@@ -615,8 +621,8 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
         return 0, 0, 1
 
-    base_url = emb.config.host
-    valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)
+    # Mem0 passes these embedders only a model, so they call their provider's own API whatever the host says.
+    valid, detail = _validate_provider_key(emb.provider, api_key or "")
     return _print_validation(
         valid,
         detail,
