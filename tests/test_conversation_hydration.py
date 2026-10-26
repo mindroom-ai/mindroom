@@ -1989,6 +1989,43 @@ class DeepestEventDepthPages(FakeClient):
                 yield parse(source)
 
 
+@dataclass
+class FailsAfterTheWalk(FakeClient):
+    """A homeserver that answers the thread walk and then fails every recursive request.
+
+    nio reports a relations request that comes back as an error response by
+    raising a plain ``RemoteProtocolError`` from the iterator.
+    """
+
+    recursive_requests: int = 0
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        rel_type: RelationshipType | None = None,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Yield the first recursive walk, and fail the ones after it."""
+        if recurse:
+            self.recursive_requests += 1
+            if self.recursive_requests > 1:
+                msg = "M_UNKNOWN: the homeserver could not answer"
+                raise nio.RemoteProtocolError(msg)
+        async for event in super().room_get_event_relations(
+            room_id=room_id,
+            event_id=event_id,
+            rel_type=rel_type,
+            direction=direction,
+            recurse=recurse,
+            minimum_recursion_depth=minimum_recursion_depth,
+        ):
+            yield event
+
+
 class TestAWalkThatStoppedAboveTheReplyEdits:
     """A thread walk that did not reach the depth replies' edits sit at does not pass them off as unedited.
 
@@ -2014,6 +2051,39 @@ class TestAWalkThatStoppedAboveTheReplyEdits:
         # The walk, one request asking how deep it went, and the reply's lookup.
         assert client.relation_calls == 3
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_an_edit_of_the_root_does_not_show_the_walk_reached_reply_edits(self, alice: PrincipalStore) -> None:
+        """The root's edits are among its direct relations, so a walk that stopped above reply edits still holds them."""
+        root_edit = raw("$root-edit", "the question, clarified", ts=1_500, replaces="$root")
+        reply = raw("$reply", "first wording", sender=BOB, ts=2_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_000, replaces="$reply")
+        client = DirectRelationsOnly(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [root_edit, reply, edit], "$reply": [edit]},
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question, clarified", "second wording"]
+        assert client.relation_calls == 3
+
+    async def test_a_depth_check_the_server_fails_fails_the_read(self, alice: PrincipalStore) -> None:
+        """Only a server saying it stopped above the edits sends the replies to their lookups.
+
+        Any other failure of the request is a failure to answer, which fails
+        the read and leaves the thread for the next read, like a failed walk.
+        """
+        client = FailsAfterTheWalk(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
+        )
+
+        with pytest.raises(nio.RemoteProtocolError) as failure:
+            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert type(failure.value) is nio.RemoteProtocolError
+        assert client.recursive_requests == 2
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_pages_reporting_varying_depths_hydrate_normally(self, alice: PrincipalStore) -> None:
         """A page holding only replies reports 0 on older servers, and that neither fails the read nor costs lookups.
