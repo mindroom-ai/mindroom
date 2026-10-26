@@ -36,12 +36,12 @@ async def test_chunk_contexts_situate_each_chunk_in_its_document(
     tmp_path: Path,
 ) -> None:
     """Each chunk gets its own answer, in order, from a prompt holding the document and the chunk; usage is recorded."""
-    prompts: list[str] = []
+    prompts: list[tuple[tuple[str, ...], str]] = []
     usage_kinds: list[str] = []
 
-    async def complete(_provider: object, prompt: str) -> _Answer:
-        prompts.append(prompt)
-        return _Answer(content=f"  context {prompt.rsplit('<chunk>', 1)[1].split(maxsplit=1)[0]}  ")
+    async def complete(_provider: object, prompt: str, *, instructions: tuple[str, ...]) -> _Answer:
+        prompts.append((instructions, prompt))
+        return _Answer(content=f"  context {prompt.split('<chunk>', 1)[1].split(maxsplit=1)[0]}  ")
 
     async def record(_record: object, *, runtime_paths: object, kind: str) -> None:
         del runtime_paths
@@ -55,7 +55,12 @@ async def test_chunk_contexts_situate_each_chunk_in_its_document(
     contexts = await chunk_contexts(config, runtime_paths_for(config), "fast", ["alpha one", "beta two"])
 
     assert contexts == ["context alpha", "context beta"]
-    assert all("<document>\nalpha one\nbeta two\n</document>" in prompt for prompt in prompts)
+    # The shared document leads, in the system message, so a provider can cache it across the file's chunks.
+    assert all(instructions == ("<document>\nalpha one\nbeta two\n</document>",) for instructions, _prompt in prompts)
+    assert sorted(prompt.split("<chunk>\n", 1)[1].split("\n", 1)[0] for _instructions, prompt in prompts) == [
+        "alpha one",
+        "beta two",
+    ]
     assert usage_kinds == ["knowledge_chunk_context", "knowledge_chunk_context"]
 
 

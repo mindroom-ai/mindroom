@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.helper import complete_prompt
@@ -19,11 +20,10 @@ if TYPE_CHECKING:
 _CONCURRENCY = 8
 #: Document text sent with each chunk; a longer document sends the window around the chunk.
 _MAX_DOCUMENT_CHARS = 60_000
-# Adapted from Anthropic's contextual retrieval prompt (https://www.anthropic.com/news/contextual-retrieval).
-_PROMPT = """<document>
-{document}
-</document>
-Here is the chunk we want to situate within the whole document
+# Adapted from Anthropic's contextual retrieval prompt (https://www.anthropic.com/news/contextual-retrieval). The
+# document goes in the system message, ahead of the varying chunk, so providers can cache it across a file's chunks.
+_DOCUMENT = "<document>\n{document}\n</document>"
+_PROMPT = """Here is the chunk we want to situate within the whole document
 <chunk>
 {chunk}
 </chunk>
@@ -48,14 +48,19 @@ async def chunk_contexts(
     """Return one short context per chunk of one document, in order; the first failed model call raises."""
     provider = build_model_provider(config, runtime_paths, model_name)
     document = "\n".join(chunks)
-    starts = [sum(len(chunk) + 1 for chunk in chunks[:index]) for index in range(len(chunks))]
+    starts = [0, *accumulate(len(chunk) + 1 for chunk in chunks[:-1])]
     slots = asyncio.Semaphore(_CONCURRENCY)
 
     async def context_for(index: int) -> str:
         chunk = chunks[index]
-        prompt = _PROMPT.format(document=_document_window(document, starts[index], len(chunk)), chunk=chunk)
         async with slots:
-            response = await complete_prompt(provider, prompt)
+            # Built inside the slot, so queued chunks hold no copy of the document.
+            window = _document_window(document, starts[index], len(chunk))
+            response = await complete_prompt(
+                provider,
+                _PROMPT.format(chunk=chunk),
+                instructions=(_DOCUMENT.format(document=window),),
+            )
         await record_system_usage(response.record, runtime_paths=runtime_paths, kind="knowledge_chunk_context")
         return str(response.content).strip()
 

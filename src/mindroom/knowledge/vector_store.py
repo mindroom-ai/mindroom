@@ -114,9 +114,14 @@ class KnowledgeCollection:
         self.file.unlink(missing_ok=True)
 
     def write_source_rows(self, relative_path: str, rows: Sequence[StoredRow]) -> None:
-        """Replace one source file's rows with ``rows`` in one transaction."""
-        with closing(self._connect(write=True)) as connection, connection:
+        """Replace one source file's rows with ``rows`` in one transaction; vectors must match the collection's width."""
+        with closing(self._connect()) as connection, connection:
             connection.execute("DELETE FROM chunks WHERE source_path = ?", (relative_path,))
+            stored = connection.execute("SELECT length(embedding) / 4 FROM chunks LIMIT 1").fetchone()
+            dimensions = {len(row.embedding) for row in rows} | ({stored[0]} if stored else set())
+            if len(dimensions) > 1:
+                message = f"Embedding dimensions {sorted(dimensions)} do not match within one knowledge collection"
+                raise ValueError(message)
             _insert_rows(connection, rows)
 
     def copy_rows(
@@ -127,7 +132,7 @@ class KnowledgeCollection:
         page_rows: int = 500,
     ) -> None:
         """Copy the rows of ``source`` whose metadata ``select`` accepts, verbatim, in pages of ``page_rows``."""
-        with closing(source._connect(write=False)) as reader, closing(self._connect(write=True)) as writer:
+        with closing(source._connect(read_only=True)) as reader, closing(self._connect()) as writer:
             last_rowid = 0
             while page := reader.execute(
                 "SELECT rowid, id, source_path, document, metadata, embedding FROM chunks "
@@ -144,7 +149,7 @@ class KnowledgeCollection:
 
     def delete_source_paths(self, relative_paths: Sequence[str]) -> None:
         """Delete every row of the given source paths."""
-        with closing(self._connect(write=True)) as connection, connection:
+        with closing(self._connect()) as connection, connection:
             for batch in _batches(relative_paths):
                 connection.execute(f"DELETE FROM chunks WHERE source_path IN ({_placeholders(batch)})", batch)  # noqa: S608
 
@@ -153,7 +158,7 @@ class KnowledgeCollection:
         if not relative_paths:
             return set()
         found: set[str] = set()
-        with closing(self._connect(write=False)) as connection:
+        with closing(self._connect()) as connection:
             for batch in _batches(relative_paths):
                 found.update(
                     row[0]
@@ -166,7 +171,7 @@ class KnowledgeCollection:
 
     def has_rows(self) -> bool:
         """Return whether the collection holds any row."""
-        with closing(self._connect(write=False)) as connection:
+        with closing(self._connect()) as connection:
             return connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
 
     def search(self, embedding: Sequence[float], *, limit: int, query: str | None = None) -> list[SearchHit]:
@@ -178,7 +183,7 @@ class KnowledgeCollection:
         """
         import numpy as np  # noqa: PLC0415 - only searching needs numpy, which installs on first use.
 
-        with closing(self._connect(write=False)) as connection:
+        with closing(self._connect(read_only=True)) as connection:
             index = _vector_index(connection, self.file)
             if not len(index.rowids):
                 return []
@@ -204,13 +209,17 @@ class KnowledgeCollection:
                 limit=limit,
             )
 
-    def _connect(self, *, write: bool) -> sqlite3.Connection:
-        """Open the existing collection file, read-write or read-only, after checking its schema version."""
+    def _connect(self, *, read_only: bool = False) -> sqlite3.Connection:
+        """Open the existing collection file after checking its schema version.
+
+        Only published files, which are never mid-transaction, open read-only. Anything else opens read-write, so
+        SQLite can roll back the journal a refresh killed mid-write left behind instead of refusing to read.
+        """
         if not self.file.is_file():
             message = f"Knowledge collection {self.name!r} does not exist"
             raise _CollectionNotFoundError(message)
         connection = sqlite3.connect(
-            f"{self.file.resolve().as_uri()}?mode={'rw' if write else 'ro'}",
+            f"{self.file.resolve().as_uri()}?mode={'ro' if read_only else 'rw'}",
             uri=True,
             timeout=30.0,
         )
@@ -353,6 +362,8 @@ class _VectorIndex:
 
 _index_cache: OrderedDict[tuple[str, int, int, int, int], _VectorIndex] = OrderedDict()
 _index_cache_lock = threading.Lock()
+#: Held while a matrix loads, so concurrent cold searches load it once instead of each allocating a copy.
+_index_load_lock = threading.Lock()
 
 
 def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
@@ -364,14 +375,19 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
         if index is not None:
             _index_cache.move_to_end(key)
             return index
-    index = _load_vector_index(connection)
-    if index.nbytes <= _MATRIX_CACHE_BYTES:
+    with _index_load_lock:
         with _index_cache_lock:
-            _index_cache[key] = index
-            cached_bytes = sum(cached.nbytes for cached in _index_cache.values())
-            while cached_bytes > _MATRIX_CACHE_BYTES:
-                _, evicted = _index_cache.popitem(last=False)
-                cached_bytes -= evicted.nbytes
+            index = _index_cache.get(key)
+        if index is not None:
+            return index
+        index = _load_vector_index(connection)
+        if index.nbytes <= _MATRIX_CACHE_BYTES:
+            with _index_cache_lock:
+                _index_cache[key] = index
+                cached_bytes = sum(cached.nbytes for cached in _index_cache.values())
+                while cached_bytes > _MATRIX_CACHE_BYTES:
+                    _, evicted = _index_cache.popitem(last=False)
+                    cached_bytes -= evicted.nbytes
     return index
 
 

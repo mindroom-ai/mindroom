@@ -263,7 +263,9 @@ def cleanup_superseded_collections(
                     collection=collection_name,
                     exc_info=True,
                 )
-        _remove_legacy_chroma_storage(space)
+        if not candidates_only:
+            # Only the sweep after a publication: until then the Chroma files are what a downgrade would read.
+            _remove_legacy_chroma_storage(space)
         if unowned:
             logger.info(
                 "Preserved knowledge collections with unprovable ownership",

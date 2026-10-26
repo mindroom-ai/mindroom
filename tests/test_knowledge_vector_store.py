@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.knowledge.vector_store as vector_store_module
 from mindroom.knowledge.vector_store import (
     KnowledgeCollection,
     StoredRow,
@@ -218,3 +223,57 @@ def test_hybrid_search_stems_words_and_ignores_punctuation(collection: Knowledge
 
     assert collection.search([1.0, 0.0], limit=1, query="who leads?")[0].content == "Ada is the lead"
     assert collection.search([1.0, 0.0], limit=1, query="?!")[0].content == "unrelated"
+
+
+def test_a_write_killed_mid_transaction_rolls_back_on_the_next_open(collection: KnowledgeCollection) -> None:
+    """A refresh killed mid-write leaves a hot journal; the next probe rolls it back and keeps the committed rows."""
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "kept", [1.0, 0.0])])
+    crash = (
+        "import os, sqlite3, sys\n"
+        "connection = sqlite3.connect(sys.argv[1])\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "connection.executemany('INSERT INTO chunks(id, source_path, document, metadata, embedding) "
+        "VALUES (?, ?, ?, ?, ?)', [(str(i), 'b.md', 'x' * 1000, '{}', bytes(8)) for i in range(3000)])\n"
+        "connection.execute(\"DELETE FROM chunks WHERE id = 'a1'\")\n"
+        "os._exit(0)\n"
+    )
+    subprocess.run([sys.executable, "-c", crash, str(collection.file)], check=True)
+    assert collection.file.with_name(f"{collection.file.name}-journal").exists()
+
+    assert collection.has_rows()
+    assert collection.paths_with_vectors(["a.md", "b.md"]) == {"a.md"}
+    assert [hit.content for hit in collection.search([1.0, 0.0], limit=5)] == ["kept"]
+
+
+def test_writes_reject_vectors_of_another_width(collection: KnowledgeCollection) -> None:
+    """A collection holds one vector width, so an embedder that changed width fails the write instead of publishing."""
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0])])
+
+    with pytest.raises(ValueError, match="dimensions"):
+        collection.write_source_rows("b.md", [_row("b1", "b.md", "beta", [1.0, 0.0, 0.0])])
+    with pytest.raises(ValueError, match="dimensions"):
+        collection.write_source_rows("c.md", [_row("c1", "c.md", "c", [1.0]), _row("c2", "c.md", "c", [1.0, 0.0])])
+    collection.write_source_rows("a.md", [_row("a2", "a.md", "alpha again", [0.0, 1.0])])
+    assert collection.paths_with_vectors(["a.md", "b.md", "c.md"]) == {"a.md"}
+
+
+def test_concurrent_cold_searches_load_the_matrix_once(
+    collection: KnowledgeCollection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Searches that all miss the cache share one matrix load instead of each allocating a copy."""
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0])])
+    loads: list[int] = []
+    real_load = vector_store_module._load_vector_index
+
+    def slow_load(connection: sqlite3.Connection) -> object:
+        loads.append(1)
+        time.sleep(0.2)
+        return real_load(connection)
+
+    monkeypatch.setattr(vector_store_module, "_load_vector_index", slow_load)
+    with ThreadPoolExecutor(8) as pool:
+        results = list(pool.map(lambda _index: collection.search([1.0, 0.0], limit=1), range(8)))
+
+    assert loads == [1]
+    assert all(result[0].content == "alpha" for result in results)

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_path: Path) -> None:
-    """Deletion and cleanup reclaim superseded collections and old Chroma files while preserving everything else."""
+    """Cleanup reclaims superseded collections, and after a publication old Chroma files, preserving everything else."""
     storage_path = tmp_path / "storage"
     space = CollectionSpace(
         base_id="docs",
@@ -58,6 +58,13 @@ async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_
         preserved=frozenset({space.default_collection}),
         candidates_only=True,
     )
+
+    assert list_collection_names(storage_path) == (space.default_collection,)
+    # Until a publication, the Chroma files stay: they are what a downgrade would read.
+    assert all(legacy_file.exists() for legacy_file in legacy_files)
+    assert legacy_segment.is_dir()
+
+    cleanup_superseded_collections(space, preserved=frozenset({space.default_collection}))
 
     assert list_collection_names(storage_path) == (space.default_collection,)
     assert [row["content"] for row in stored_rows(live)] == ["live"]
