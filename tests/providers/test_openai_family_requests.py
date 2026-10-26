@@ -43,7 +43,6 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
-from mindroom.system_prompt import render_session_context
 from tests.agent_loop.helpers import collect, context
 from tests.providers.golden_support import responses_events, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
@@ -545,7 +544,7 @@ async def _reply(adapter: ResponsesAdapter, messages: list[Message]) -> Message:
 def _dated_prompt(day: str) -> list[Message]:
     return [
         Message(role="system", content="You are Parity."),
-        Message(role="system", content=render_session_context(f"Today is {day}.")),
+        Message(role="system", content=f"Today is {day}."),
     ]
 
 
@@ -799,7 +798,7 @@ def test_only_a_completed_response_records_its_replay_policy(*, portable: bool, 
 def _messages(day: str) -> list[Message]:
     return [
         Message(role="system", content="Shared agent instructions."),
-        Message(role="system", content=render_session_context(f"Current day: {day}.")),
+        Message(role="system", content=f"Current day: {day}."),
         Message(role="user", content="Write an introduction."),
     ]
 

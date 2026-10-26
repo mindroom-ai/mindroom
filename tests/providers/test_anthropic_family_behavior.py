@@ -47,7 +47,6 @@ from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
 from mindroom.providers.anthropic.wire import supports_prefill, supports_structured_outputs
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.system_prompt import render_session_context
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
     ROUTE_CONFIGS,
@@ -1389,7 +1388,7 @@ async def test_the_stable_prompt_stays_cacheable_when_the_turn_context_changes(
         provider = route_provider(route, tmp_path / day, wire, extra_kwargs=settings)
         messages = [
             Message(role="system", content="Shared instructions."),
-            Message(role="system", content=render_session_context(f"Current date: {day}")),
+            Message(role="system", content=f"Current date: {day}"),
             Message(role="user", content="First request."),
             Message(role="assistant", content="First answer."),
             Message(role="user", content="Follow-up request."),

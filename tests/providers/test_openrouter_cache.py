@@ -11,7 +11,6 @@ import pytest
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, TurnCompleted
-from mindroom.system_prompt import render_session_context
 from tests.providers.openai_family_support import golden_provider
 
 if TYPE_CHECKING:
@@ -76,7 +75,7 @@ async def _send(
 def _conversation(day: str = "Monday") -> list[Message]:
     return [
         Message(role="system", content=_SHARED),
-        Message(role="system", content=render_session_context(f"Current day: {day}.")),
+        Message(role="system", content=f"Current day: {day}."),
         Message(role="user", content="Look something up."),
         Message(
             role="assistant",
@@ -110,7 +109,7 @@ async def test_an_anthropic_route_gets_the_claude_ladder(tmp_path: Path) -> None
     messages = payload["messages"]
     assert messages[0]["content"] == [
         {"type": "text", "text": _SHARED, "cache_control": _ONE_HOUR},
-        {"type": "text", "text": render_session_context("Current day: Monday.")},
+        {"type": "text", "text": "Current day: Monday."},
     ]
     assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _ONE_HOUR}]
     assert messages[-2]["content"] == [{"type": "text", "text": "Found it.", "cache_control": _ONE_HOUR}]

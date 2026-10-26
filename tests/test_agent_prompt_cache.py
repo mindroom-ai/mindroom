@@ -22,7 +22,6 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.media_inputs import MediaInputs
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prepare_request_body
-from mindroom.system_prompt import render_session_context
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import bare_adapter
@@ -66,7 +65,7 @@ def _agent_request(
         },
     )
     persist_entity_accounts(config, runtime_paths)
-    with patch("mindroom.agents.render_date_context", return_value=f"Current date: {date}"):
+    with patch("mindroom.agents.render_session_context", return_value=f"Current date: {date}"):
         build = create_agent(
             "writer",
             config,
@@ -146,7 +145,7 @@ def test_authored_system_blocks_go_as_authored_within_the_cache_budget(
     """Authored system blocks keep their text and markers, the input is untouched, and markers stay within the limit."""
     cache_control = {"type": "ephemeral", **({"ttl": "1h"} if extended_cache_time else {})}
     authored_system = [
-        {"type": "text", "text": "Shared instructions.\n\n" + render_session_context("Current date: Monday")},
+        {"type": "text", "text": "Shared instructions.\n\nCurrent date: Monday"},
         {"type": "text", "text": "Custom system block.", "cache_control": cache_control},
     ]
     request = {
