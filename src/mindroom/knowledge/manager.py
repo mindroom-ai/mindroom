@@ -41,7 +41,10 @@ from mindroom.knowledge.candidate_checkpoint import (
     delete_candidate_checkpoint,
     file_signature_from_fields,
     load_candidate_checkpoint,
+    load_seals,
+    rotate_seals,
     save_candidate_checkpoint,
+    take_sealed_candidate,
 )
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
@@ -57,6 +60,7 @@ from mindroom.knowledge.collections import (
     delete_source_path_vectors,
     open_collection,
     paths_with_vectors,
+    readers_drained,
     reset_collection,
     write_source_rows,
 )
@@ -202,6 +206,8 @@ class _CandidateRun:
     embedder: RefreshEmbedder
     #: Revision the candidate's file signatures describe, when known.
     baseline_revision: str | None = None
+    #: The collection published when this refresh started, which publishing this candidate retires.
+    retired_collection: str | None = None
     completed: dict[str, FileSignature] = field(default_factory=dict)
     failed: dict[str, CandidateFailure] = field(default_factory=dict)
     vanished: set[str] = field(default_factory=set)
@@ -539,6 +545,8 @@ class KnowledgeManager:
     _persisted_collection_missing_on_init: bool = field(default=False, init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
     _embedding_retry_count: int = field(default=0, init=False, repr=False)
+    #: Rows this refresh wrote into its candidate, each one an entry the local vector index keeps even once deleted.
+    _rows_written: int = field(default=0, init=False, repr=False)
     _file_index_errors: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _embedder_failure_streak: int = field(default=0, init=False, repr=False)
     _global_embedder_failure: str | None = field(default=None, init=False, repr=False)
@@ -868,6 +876,7 @@ class KnowledgeManager:
             )
 
         indexed_signatures[prepared.relative_path] = prepared.signature
+        self._rows_written += len(prepared.chunks)
         self._file_index_errors.pop(prepared.relative_path, None)
         self._note_embedder_success()
         # DEBUG, not INFO: a large corpus is 10^5 of these lines per refresh.
@@ -1190,6 +1199,7 @@ class KnowledgeManager:
                     documents=[documents[index] for index in kept],
                     metadatas=[dict(metadatas[index]) for index in kept],
                 )
+                self._rows_written += len(kept)
 
     def _reusable_published_collection(self, persisted_state: PublishedIndexState | None) -> str | None:
         """Return the published collection a fresh candidate may copy, if any.
@@ -1255,6 +1265,7 @@ class KnowledgeManager:
                 exc_info=True,
             )
             await asyncio.to_thread(reset_collection, candidate)
+            self._rows_written = 0
             return {}
         logger.info(
             "Reused published knowledge vectors in a new candidate",
@@ -1345,7 +1356,7 @@ class KnowledgeManager:
         checkpoint = await asyncio.to_thread(
             save_candidate_checkpoint,
             self._base_storage_path,
-            replace(checkpoint, completed={}, failed={}),
+            replace(checkpoint, completed={}, failed={}, rows_written=0),
         )
         collection = open_collection(self._collections, checkpoint.collection)
         await asyncio.to_thread(reset_collection, collection)
@@ -1458,17 +1469,11 @@ class KnowledgeManager:
             rebuild = True
 
         if rebuild:
-            reusable_published_collection = (
-                None if force_reindex else self._reusable_published_collection(persisted_state)
-            )
-            opened = await self._rebuild_candidate_collection(
+            opened, baseline_revision = await self._start_candidate(
                 checkpoint,
-                published_collection=reusable_published_collection,
-            )
-            baseline_revision = (
-                persisted_state.published_revision
-                if reusable_published_collection is not None and persisted_state is not None
-                else None
+                persisted_state,
+                force_reindex=force_reindex,
+                cleanup_is_safe=cleanup_is_safe,
             )
         else:
             opened = await self._resume_candidate_collection(checkpoint)
@@ -1480,6 +1485,7 @@ class KnowledgeManager:
             collection=opened.collection,
             embedder=RefreshEmbedder(create_configured_embedder(self.config, self.runtime_paths)),
             baseline_revision=baseline_revision,
+            retired_collection=published_collection,
             completed=dict(checkpoint.completed),
             failed=dict(checkpoint.failed),
             # Rows this process just copied need no vector-existence probe: the
@@ -1505,6 +1511,82 @@ class KnowledgeManager:
                 base_id=self.base_id,
             )
         return run
+
+    async def _start_candidate(
+        self,
+        checkpoint: CandidateCheckpoint,
+        persisted_state: PublishedIndexState | None,
+        *,
+        force_reindex: bool,
+        cleanup_is_safe: bool,
+    ) -> tuple[_OpenedCandidate, str | None]:
+        """Start a candidate no failed refresh wrote: a sealed retired collection, else a copy or a cold build.
+
+        Returns it with the revision its claims describe.
+        """
+        published_collection = None if persisted_state is None else persisted_state.collection
+        sealed = await asyncio.to_thread(
+            self._take_sealed_collection,
+            # A forced rebuild trusts no stored vectors, so it keeps no seal either.
+            None if force_reindex else published_collection,
+            take=cleanup_is_safe and not force_reindex,
+        )
+        if sealed is not None:
+            # A seal is exact by construction, so, like a fresh copy, its claims need no vector probe.
+            opened = _OpenedCandidate(
+                checkpoint=sealed,
+                collection=open_collection(self._collections, sealed.collection),
+                reused=dict(sealed.completed),
+            )
+            return opened, sealed.target_revision
+        reusable_published_collection = None if force_reindex else self._reusable_published_collection(persisted_state)
+        opened = await self._rebuild_candidate_collection(
+            checkpoint,
+            published_collection=reusable_published_collection,
+        )
+        if reusable_published_collection is None or persisted_state is None:
+            return opened, None
+        return opened, persisted_state.published_revision
+
+    def _take_sealed_collection(self, published_collection: str | None, *, take: bool) -> CandidateCheckpoint | None:
+        """Take one sealed, retired collection over as the candidate when ``take``; drop every other seal.
+
+        Only the published collection's own seal is kept, for the publication
+        that later retires it. Taking a seal first waits out readers that
+        selected its collection before it was retired, then renames the seal
+        onto the candidate snapshot, so the collection is never sealed and
+        writable at once.
+        """
+        taken: CandidateCheckpoint | None = None
+        for seal_path, seal in load_seals(self._base_storage_path).items():
+            if seal is not None and seal.settings == self._indexing_settings:
+                if seal.collection == published_collection:
+                    continue
+                if take and taken is None and self._sealed_collection_is_usable(seal):
+                    with readers_drained(self._collections):
+                        take_sealed_candidate(self._base_storage_path, seal_path)
+                    taken = seal
+                    continue
+            seal_path.unlink(missing_ok=True)
+        if taken is not None:
+            logger.info(
+                "Resuming the retired knowledge collection instead of copying the published one",
+                base_id=self.base_id,
+                collection=taken.collection,
+                claimed_files=len(taken.completed),
+            )
+        return taken
+
+    def _sealed_collection_is_usable(self, seal: CandidateCheckpoint) -> bool:
+        """Return whether a sealed collection still exists and is not mostly dead vector-index entries.
+
+        Chroma's local vector index never reuses a deleted row's entry, so a
+        collection written over and over is copied afresh once its dead entries
+        outnumber its live rows.
+        """
+        collection = open_collection(self._collections, seal.collection)
+        with closing(collection):
+            return collection.exists() and seal.rows_written <= 2 * collection.collection().count()
 
     def _published_state_and_cleanup_safety(self) -> tuple[PublishedIndexState | None, bool]:
         """Return the persisted state, and whether candidate cleanup may run at all.
@@ -1768,6 +1850,7 @@ class KnowledgeManager:
             self._last_refresh_error = None
             self._last_file_index_error = None
             self._embedding_retry_count = 0
+            self._rows_written = 0
             self._file_index_errors.clear()
             self._embedder_failure_streak = 0
             self._global_embedder_failure = None
@@ -1951,9 +2034,26 @@ class KnowledgeManager:
             # never be rewritten as if the build were still in progress.
             run.published = publish_state.index_published
         await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
+        seal = replace(
+            run.checkpoint,
+            completed=dict(run.completed),
+            failed={},
+            target_revision=run.baseline_revision,
+            total_files=run.total_files,
+            rows_written=run.checkpoint.rows_written + self._rows_written,
+        )
+        kept = await asyncio.to_thread(
+            rotate_seals,
+            self._base_storage_path,
+            retired=run.retired_collection,
+            # A candidate resumed from an earlier refresh may hold rows a crash
+            # wrote before their claim, so only one this refresh started from a
+            # trusted state is sealed for reuse.
+            published=None if run.resumed else seal,
+        )
         await asyncio.to_thread(
             cleanup_superseded_collections,
             self._collections,
             client=run.collection.client,
-            preserved=frozenset({run.collection.name}),
+            preserved=frozenset(name for name in (run.collection.name, kept) if name is not None),
         )

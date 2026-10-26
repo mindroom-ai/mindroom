@@ -29,6 +29,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from chromadb.api.client import Client
@@ -106,6 +107,11 @@ def candidate_collection_name(space: CollectionSpace) -> str:
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
     """Return a handle on one collection in this base's storage directory; nothing is opened yet."""
     return KnowledgeCollection(path=str(space.storage_path), name=collection_name)
+
+
+def readers_drained(space: CollectionSpace) -> AbstractContextManager[None]:
+    """Wait out every native reader of this base's collections, and admit none until released."""
+    return collection_lifetime_lock(space.storage_path, exclusive=True)
 
 
 def _delete_if_present(client: Client, collection_name: str) -> None:
