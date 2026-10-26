@@ -143,7 +143,7 @@ def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> 
     continuing request never resends it, so the response continues only when that system text is the request's. Only
     a stored response records its digest, so an unstored one never continues.
     Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain, but
-    ``instructions`` cannot hold the explicit prompt-cache breakpoint of the shared system prefix, so a changed system
+    ``instructions`` cannot hold the explicit prompt-cache breakpoint of the stable system message, so a changed system
     text replays the history instead.
     """
     # LEGACY_COMPAT: Stored Responses replies without the digest of their system text.
