@@ -9,8 +9,10 @@ from dataclasses import dataclass
 
 from mindroom.model_defaults import (
     ANTHROPIC_BASE_URL_DEFAULT,
+    CEREBRAS_API_PATH,
     CEREBRAS_HOST_DEFAULT,
     DEEPSEEK_BASE_URL_DEFAULT,
+    GROQ_API_PATH,
     GROQ_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
     OPENROUTER_BASE_URL_DEFAULT,
@@ -66,6 +68,6 @@ PROVIDER_KEY_CHECKS: dict[str, ProviderKeyCheck] = {
     # OpenRouter's key endpoint describes the key it is sent, so only a valid key reads it; its model list is public.
     "openrouter": _bearer(f"{OPENROUTER_BASE_URL_DEFAULT}/key", path="/key"),
     "deepseek": _bearer(f"{DEEPSEEK_BASE_URL_DEFAULT}/v1/models"),
-    "cerebras": _bearer(f"{CEREBRAS_HOST_DEFAULT}/v1/models"),
-    "groq": _bearer(f"{GROQ_HOST_DEFAULT}/openai/v1/models"),
+    "cerebras": _bearer(f"{CEREBRAS_HOST_DEFAULT}{CEREBRAS_API_PATH}/models"),
+    "groq": _bearer(f"{GROQ_HOST_DEFAULT}{GROQ_API_PATH}/models"),
 }

@@ -17,9 +17,11 @@ from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderE
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity, StructuredOutput
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
+    CEREBRAS_API_PATH,
     CEREBRAS_HOST_DEFAULT,
     CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
     DEEPSEEK_BASE_URL_DEFAULT,
+    GROQ_API_PATH,
     GROQ_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
@@ -155,25 +157,25 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider="Groq",
         provider_name="Groq",
         api_key_env=PROVIDER_ENV_KEYS["groq"],
-        base_url=f"{GROQ_HOST_DEFAULT}/openai/v1",
+        base_url=f"{GROQ_HOST_DEFAULT}{GROQ_API_PATH}",
         dialect="groq",
         accepted=GROQ_FIELDS,
         structured_output="json_mode",
         omitted_media=frozenset({"audio", "file", "video"}),
         base_url_variable="GROQ_BASE_URL",
-        api_path="/openai/v1",
+        api_path=GROQ_API_PATH,
     ),
     "cerebras": _ChatRoute(
         provider="Cerebras",
         provider_name="Cerebras",
         api_key_env=PROVIDER_ENV_KEYS["cerebras"],
-        base_url=f"{CEREBRAS_HOST_DEFAULT}/v1",
+        base_url=f"{CEREBRAS_HOST_DEFAULT}{CEREBRAS_API_PATH}",
         dialect="cerebras",
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
         omitted_media=frozenset({"audio", "image", "file", "video"}),
         base_url_variable="CEREBRAS_BASE_URL",
-        api_path="/v1",
+        api_path=CEREBRAS_API_PATH,
     ),
 }
 # The endpoint variable of every route that reads one, by route.
