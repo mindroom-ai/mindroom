@@ -473,3 +473,31 @@ def test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text(tmp_path: 
     for kind in ("all", "seen"):
         assert summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind=kind) == expected
     assert _replay(tmp_path).loaded == ["r1"]
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "value", "replay"),
+    [
+        ("code_sessions_compacted_runs", "session_id", "gone", (["r1"], ["r1"], "summary of r0")),
+        ("code_sessions_compacted_runs", "session_id", b"s1", (["r1"], ["r1"], "summary of r0")),
+        ("code_sessions_compacted_runs", "run_id", b"r0", (["r1"], ["r1"], "summary of r0")),
+        ("code_sessions_compactions", "session_id", "gone", (["r0", "r1"], ["r0", "r1"], None)),
+        ("code_sessions_compactions", "session_id", b"s1", (["r0", "r1"], ["r0", "r1"], None)),
+    ],
+    ids=["run-of-no-session", "run-of-a-blob-session", "blob-run-id", "generation-of-no-session", "blob-generation"],
+)
+def test_archive_rows_naming_no_stored_session_or_a_run_by_an_id_that_is_not_text_stay_out(
+    tmp_path: Path,
+    table: str,
+    column: str,
+    value: object,
+    replay: tuple[list[str], list[str], str | None],
+) -> None:
+    """Worker code can write the archive; a row no stored session or text run id names stays out, and the rest converts."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute(f"UPDATE {table} SET {column} = ?", (value,))  # noqa: S608
+
+    converted = _replay(tmp_path)
+
+    assert (converted.loaded, converted.stored, converted.summary) == replay

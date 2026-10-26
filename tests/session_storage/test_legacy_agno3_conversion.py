@@ -22,7 +22,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState, SubagentPersona
-from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids
+from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, legacy_event_ids, retire
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage import legacy_agno3_conversion
@@ -185,10 +185,11 @@ def _insert_summary(
         )
 
 
-def _set_summary_column(database: Path, row_id: int, column: str, value: object) -> None:
-    """Store ``value`` in summary row ``row_id``'s ``column`` as worker code could, whatever its type."""
+def _store_raw(database: Path, table: str, column: str, value: object, **row: object) -> None:
+    """Store ``value`` in ``column`` of ``table``'s row ``row`` names, as worker code could, whatever its type."""
+    [(key, match)] = row.items()
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(f'UPDATE "code_sessions_summaries" SET {column} = ? WHERE id = ?', (value, row_id))  # noqa: S608
+        connection.execute(f'UPDATE "{table}" SET {column} = ? WHERE {key} = ?', (value, match))  # noqa: S608
 
 
 def _segment(
@@ -634,22 +635,110 @@ def test_converted_call_ids_are_text_or_none_so_folded_calls_read(
 
 
 @pytest.mark.parametrize("position", ["later", b"\x01"], ids=["text", "blob"])
-def test_a_summary_row_whose_position_is_not_a_number_covers_every_run_as_a_load_read_it(
+def test_a_summary_row_whose_position_is_not_a_number_covers_every_numbered_run_as_a_load_read_it(
     tmp_path: Path,
     position: object,
 ) -> None:
-    """SQLite sorts text and blobs after every number, so a load read such a row after every run; it converts so."""
+    """SQLite sorts text and blobs after every number, so such a row covered every numbered run, and never one without."""
     database = _agno_database(tmp_path)
     for index in range(2):
         _insert_run(database, _run(f"r{index}"), run_index=index)
+    _insert_run(database, _run("unplaced"), run_index=None)
     _insert_summary(database, 1, 0)
     _insert_summary(database, 2, 0)
-    _set_summary_column(database, 2, "after_run_index", position)
+    _store_raw(database, "code_sessions_summaries", "after_run_index", position, id=2)
 
     store = _converted(database)
 
     assert _query(database, 'SELECT id, through FROM "code_sessions_log_summaries" ORDER BY id') == [(1, 1), (2, 2)]
-    assert _loaded_ids(store) == []
+    assert _loaded_ids(store) == ["unplaced"]
+
+
+@pytest.mark.parametrize("position", ["later", b"\x01"], ids=["text", "blob"])
+def test_a_run_whose_position_is_not_a_number_goes_last_as_a_load_read_it(tmp_path: Path, position: object) -> None:
+    """SQLite sorts text and blobs after every number, so no summary row covered such a run; it converts last.
+
+    It goes after a fold's run without a row too, and the database converts.
+    """
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("odd"), run_index=0)
+    _insert_run(database, _run("r1"), run_index=1)
+    _store_raw(database, "code_sessions_runs", "run_index", position, run_id="odd")
+    _insert_summary(database, 1, 1)
+    _insert_summary(database, 2, 1, segment_run_id="gone", segment=_segment())
+
+    store = _converted(database)
+
+    assert sorted(_seqs(database), key=_seqs(database).get) == ["r1", "gone", "odd"]
+    assert _query(database, 'SELECT id, through FROM "code_sessions_log_summaries" ORDER BY id') == [(1, 1), (2, 1)]
+    assert _loaded_ids(store) == ["gone", "odd"]
+
+
+def test_a_run_row_whose_id_is_not_text_is_left_out(tmp_path: Path) -> None:
+    """No read could address a run by an id that is not text, so its row stays out, a paused team's with its embeds too.
+
+    A member keeps its own row, as a member of a team row that does not decode does, and the session reads.
+    """
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    member = _run("member", parent_run_id="team", status=RunStatus.paused)
+    team = TeamRunRecord(run_id="team", team_id="squad", session_id=_SESSION, status=RunStatus.paused)
+    embedded = _run("member", parent_run_id="team", status=RunStatus.completed)
+    _insert_run(database, team.to_dict() | {"member_responses": [embedded.to_dict()]}, run_index=1)
+    _insert_run(database, member, run_index=2)
+    _store_raw(database, "code_sessions_runs", "run_id", b"team", run_id="team")
+
+    store = _converted(database)
+
+    assert set(_seqs(database)) == {"r0", "member"}
+    assert _query(database, "SELECT status FROM \"code_sessions_log_runs\" WHERE run_id = 'member'") == [("PAUSED",)]
+    assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "member"]
+    assert _loaded_ids(store) == ["r0"]
+
+
+def test_a_summary_row_whose_scope_key_is_not_text_is_left_out(tmp_path: Path) -> None:
+    """No read names a scope that is not text, so such a row stays out, a fold's without a run row too."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    _insert_summary(database, 1, 0)
+    _insert_summary(
+        database,
+        2,
+        0,
+        segment_run_id="gone",
+        segment=_segment(members=(_run("gone.m", parent_run_id="gone"),)),
+    )
+    for row_id in (1, 2):
+        _store_raw(database, "code_sessions_summaries", "scope_key", b"agent:code", id=row_id)
+
+    store = _converted(database)
+
+    assert _query(database, 'SELECT count(*) FROM "code_sessions_log_summaries"') == [(0,)]
+    assert set(_seqs(database)) == {"r0"}
+    assert _loaded_ids(store) == ["r0"]
+
+
+@pytest.mark.parametrize("fold_run_id", ["r1", "gone"], ids=["run-with-a-row", "run-without-a-row"])
+def test_a_fold_whose_run_id_is_not_text_names_no_run(tmp_path: Path, fold_run_id: str) -> None:
+    """A fold row whose run id is not text converts as a summary of no run, so a later retirement removes nothing."""
+    database = _agno_database(tmp_path)
+    _insert_run(database, _run("r0"), run_index=0)
+    _insert_run(database, _run("r1"), run_index=1)
+    _insert_summary(database, 1, 0)
+    _insert_summary(database, 2, 1, segment_run_id=fold_run_id, segment=_segment())
+    _store_raw(database, "code_sessions_summaries", "segment_run_id", fold_run_id.encode(), id=2)
+
+    store = _converted(database)
+
+    assert _query(database, 'SELECT id, through, fold_run_id FROM "code_sessions_log_summaries"') == [
+        (1, 1, None),
+        (2, 2, None),
+    ]
+    assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "r1"]
+    session = store.load_session(_SESSION, "agent")
+    assert session is not None
+    retire(store, session=session, scope_key="agent:code")
+    assert [run.run_id for run in store.list_runs(_SESSION)] == ["r0", "r1"]
 
 
 @pytest.mark.parametrize(
@@ -666,7 +755,7 @@ def test_summary_event_ids_keep_only_their_text_entries(tmp_path: Path, raw: str
     _insert_run(database, _run("r0"), run_index=0)
     _insert_summary(database, 1, 0)
     for column in ("event_ids", "seen_event_ids"):
-        _set_summary_column(database, 1, column, raw)
+        _store_raw(database, "code_sessions_summaries", column, raw, id=1)
 
     store = _converted(database)
 
@@ -690,7 +779,7 @@ def test_a_summary_rows_unusable_creation_time_becomes_the_conversions(tmp_path:
     database = _agno_database(tmp_path)
     _insert_run(database, _run("r0"), run_index=0)
     _insert_summary(database, 1, 0)
-    _set_summary_column(database, 1, "created_at", created_at)
+    _store_raw(database, "code_sessions_summaries", "created_at", created_at, id=1)
     started = int(time.time())
 
     store = _converted(database)

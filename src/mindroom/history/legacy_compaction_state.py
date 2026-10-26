@@ -127,19 +127,23 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
 # match what the archive gave after its pre-reply reconcile, and so do seen ids, except that metadata seen ids
 # reconcile dropped when the cached summary differed from the newest generation (an interrupted summary
 # write) stay; tombstones are not carried over. Worker code can write the archive, so an archived run that is not a JSON
-# object does not return, and event ids count only as text entries of valid JSON; neither fails the conversion.
+# object does not return, a row naming no stored session or a run by an id that is not text stays out, and event ids
+# count only as text entries of valid JSON; none fails the conversion.
 # Coverage: tests/test_archive_migration.py::test_ordinary_generations_become_summary_rows_after_their_runs,
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
 # ::test_redaction_candidates_keep_what_the_archive_matched, ::test_an_archived_run_that_does_not_decode_stays_out,
-# ::test_an_archived_run_with_unusable_values_returns_without_them, and
-# ::test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text.
+# ::test_an_archived_run_with_unusable_values_returns_without_them,
+# ::test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text, and
+# ::test_archive_rows_naming_no_stored_session_or_a_run_by_an_id_that_is_not_text_stay_out.
 def _convert_archive(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     compactions = quote_identifier(f"{names.sessions}_compactions")
     compacted_runs = quote_identifier(f"{names.sessions}_compacted_runs")
     archived: dict[str, list[tuple[str, str | None]]] = {}
+    # Worker code can write the archive: a row naming no stored session, or a run by an id that is not text, stays out.
     for session_id, run_id, run_data in connection.execute(
-        f"SELECT session_id, run_id, run_data FROM {compacted_runs} ORDER BY id",  # noqa: S608
+        f"SELECT session_id, run_id, run_data FROM {compacted_runs} WHERE typeof(run_id) = 'text' "  # noqa: S608
+        f"AND session_id IN (SELECT session_id FROM {quote_identifier(names.sessions)}) ORDER BY id",
     ):
         archived.setdefault(session_id, []).append((run_id, run_data))
     for session_id, entries in archived.items():
@@ -166,7 +170,8 @@ def _insert_generation_rows(connection: sqlite3.Connection, names: AgnoTableName
     summaries = quote_identifier(names.summaries)
     positions: dict[tuple[str, str], int] = {}
     generations = connection.execute(
-        f"SELECT id, session_id, scope_key, summary, summary_model, legacy, created_at FROM {compactions} ORDER BY id",  # noqa: S608
+        f"SELECT id, session_id, scope_key, summary, summary_model, legacy, created_at FROM {compactions} "  # noqa: S608
+        f"WHERE session_id IN (SELECT session_id FROM {quote_identifier(names.sessions)}) ORDER BY id",
     ).fetchall()
     for generation_id, session_id, scope_key, summary, summary_model, legacy, created_at in generations:
         (newest_run,) = connection.execute(
