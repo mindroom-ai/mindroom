@@ -331,6 +331,25 @@ async def test_gemini_and_ollama_send_every_system_message_as_one_system_prompt(
 
 
 @pytest.mark.asyncio
+async def test_gemini_names_a_tool_result_stored_without_its_name_after_its_call(tmp_path: Path) -> None:
+    """A result stored without its tool's name goes as a function response named after its call, not as user text."""
+    messages = (
+        Message(role="user", content="Weather?"),
+        Message(
+            role="assistant",
+            tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}],
+        ),
+        Message(role="tool", tool_call_id="call-1", content="Sunny."),
+    )
+
+    sent, _ = await run_adapter(GEMINI, _request(*messages), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+
+    assert sent["body"]["contents"][2]["parts"] == [
+        {"functionResponse": {"id": "call-1", "name": "get_weather", "response": {"result": "Sunny."}}},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gemini_leaves_out_a_stored_turn_without_text_or_calls(tmp_path: Path) -> None:
     """An assistant turn that kept only its reasoning sends no content, so the user turns around it merge."""
     messages = (

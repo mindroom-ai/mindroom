@@ -12,7 +12,7 @@ import base64
 import json
 import mimetypes
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -131,9 +131,24 @@ async def format_contents(
     ``InvalidRequest``, so the media fallback replaces it with its note instead of the model never seeing it.
     """
     contents: list[dict[str, Any]] = []
+    # LEGACY_COMPAT: Tool results stored without their tool's name.
+    # Legacy format: a stored ``tool`` message whose ``tool_name`` is null, as rows the Agno-backed runtime or another
+    # writer stored can be; the owned loop records the name with every result.
+    # Last legacy release: no single cutoff: v2026.10.498 was the last release whose Agno-backed writer stored tool
+    # results, the owned writers from v2026.10.499 always store the name, and foreign rows may still lack it.
+    # Handling: such a result takes the name of the call with its id earlier in the request, so it goes to Gemini as a
+    # function response instead of user text; one whose call the request does not hold still goes as text.
+    # Coverage: tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_names_a_tool_result_stored_without_its_name_after_its_call
+    call_names = {
+        call.get("id"): (call.get("function") or {}).get("name")
+        for message in messages
+        for call in message.tool_calls or ()
+    }
     for message in messages:
         if message.role == "system":
             continue
+        if message.role == "tool" and message.tool_name is None and message.tool_call_id in call_names:
+            message = replace(message, tool_name=call_names[message.tool_call_id])  # noqa: PLW2901
         role = _ROLE_MAP.get(message.role, message.role)
         parts = _message_parts(message, role)
         if role == "user" and message.tool_calls is None and not _is_tool_result(message):
