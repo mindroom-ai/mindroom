@@ -43,6 +43,7 @@ from mindroom.response_turn import (
     ResponseTurnContext,
     ResumedAttempt,
     own_approved_calls,
+    pause_without_approval_error,
     paused_attempt_from_response,
     pending_approval_requirements,
 )
@@ -234,8 +235,8 @@ async def _continue_persisted_agent(
         )
     if response.status is not RunStatus.completed:
         # Paused on a call no approval asks about and no delegation answers, such as a plugin's externally executed
-        # call: nothing can resume it, so the resume fails with what the run hands over.
-        raise RuntimeError(response.handover_content or "Approval continuation did not complete")
+        # call: nothing can resume it, so the resume fails naming that call, as a live turn does.
+        raise pause_without_approval_error(response, entity_label="agent")
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),

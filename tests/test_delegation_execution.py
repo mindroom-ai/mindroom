@@ -484,8 +484,9 @@ async def test_an_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
     stored = create_session_storage("code", config, paths, identity).get_run("run")
     assert stored is not None
     assert stored.status is RunStatus.paused
-    # The resume fails with what the paused run hands over, before the reply's continuation runs.
-    assert str(raised.value) == stored.handover_content
+    # The resume fails naming the waiting call before the reply's continuation runs, not with the run's stale
+    # pause notice ("I have tools to execute, but I need confirmation.").
+    assert str(raised.value) == "agent run 'run' paused on ['hand_off'] without an approval to ask for"
 
 
 @pytest.mark.asyncio

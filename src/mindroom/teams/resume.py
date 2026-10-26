@@ -29,7 +29,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
-from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
+from mindroom.response_turn import CompletedApprovalRun, pause_without_approval_error, paused_attempt_from_response
 from mindroom.run_storage import scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
@@ -463,7 +463,7 @@ async def continue_paused_team_run(
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:
             # Paused on a call no approval asks about and no delegation answers, as the agent resume fails on it.
-            raise RuntimeError(continued.handover_content or "Team continuation did not complete")
+            raise pause_without_approval_error(continued, entity_label="team")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply

@@ -856,7 +856,8 @@ async def test_a_team_approval_resume_that_pauses_on_a_call_nothing_answers_fail
         team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
         team.models["checker-model"] = ScriptedModel([calls(tool_call("hand_off", "call-hand"))])
 
-        with pytest.raises(RuntimeError):
+        # The failure names the call the team waits for, not the generic note it gave before.
+        with pytest.raises(RuntimeError, match=r"team run 'run-1' paused on \['hand_off'\] without an approval"):
             await team.resume(
                 raised.paused,
                 approved=True,
