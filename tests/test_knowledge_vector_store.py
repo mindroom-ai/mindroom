@@ -7,8 +7,10 @@ import sqlite3
 import subprocess
 import sys
 import time
+import tracemalloc
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -276,6 +278,24 @@ def test_concurrent_cold_searches_load_the_matrix_once(
 
     assert loads == [1]
     assert all(result[0].content == "alpha" for result in results)
+
+
+def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollection) -> None:
+    """Normalizing a loaded matrix needs one scratch block, not a temporary as large as the matrix."""
+    rows = 8 * vector_store_module._NORMALIZE_ROWS
+    vectors = np.random.default_rng(0).standard_normal((rows, 64), dtype=np.float32)
+    collection.add_rows([_row(str(index), f"{index}.md", "doc", vectors[index].tolist()) for index in range(rows)])
+
+    with closing(sqlite3.connect(collection.file)) as connection:
+        tracemalloc.start()
+        try:
+            index = vector_store_module._load_vector_index(connection)
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+    assert peak < 1.5 * index.matrix.nbytes
+    np.testing.assert_allclose(np.linalg.norm(index.matrix, axis=1), 1.0, rtol=1e-5)
 
 
 @pytest.mark.parametrize("name", ["", "/etc/elsewhere", "../outside", "a/b", ".hidden", "with space"])

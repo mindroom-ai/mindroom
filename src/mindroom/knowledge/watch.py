@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from watchfiles import Change, awatch
 
 from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_path
+from mindroom.knowledge.legacy_chroma_storage import chroma_era_shared_base_ids
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     KnowledgeSourceRoot,
@@ -160,7 +161,7 @@ class KnowledgeSourceWatcher:
         self._poll_tasks: dict[KnowledgeRefreshTarget, _WatchTask] = {}
 
     async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
-        """Replace watcher tasks so they match the current shared knowledge config."""
+        """Replace watcher tasks so they match the current shared knowledge config, and start Chroma-era conversions."""
         await self.shutdown()
         if config is None:
             return
@@ -189,6 +190,10 @@ class KnowledgeSourceWatcher:
                 poll_interval_seconds=poll_target.poll_interval_seconds,
                 git=poll_target.git,
             )
+
+        for base_id in chroma_era_shared_base_ids(config, runtime_paths):
+            if not self._refresh_scheduler.is_refreshing(base_id, config=config, runtime_paths=runtime_paths):
+                self._refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
     async def shutdown(self) -> None:
         """Stop all source watchers owned by this instance."""

@@ -521,6 +521,7 @@ Removing a private instance leaves its index behind; each index directory's `ind
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 A shared base's index that earlier MindRoom versions stored in Chroma is converted on its first refresh after upgrading: its chunks and vectors are copied out of Chroma, and only files changed since are embedded again.
+MindRoom schedules that refresh for every such base when it starts, so conversion does not wait for the base's first use.
 The copy needs the `chromadb` extra, which installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; without it, the base is rebuilt, which embeds every file again.
 Private agent indexes are rebuilt in their new location.
 A base cannot be searched until its converted index publishes, which for a very large base can take a while.

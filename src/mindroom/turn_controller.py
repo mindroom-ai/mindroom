@@ -30,7 +30,6 @@ from mindroom.constants import (
     SCHEDULED_MODEL_KEY,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
-    UNFINISHED_REPLY_STATUSES,
     RuntimePaths,
 )
 from mindroom.delivery_gateway import SendTextRequest
@@ -87,6 +86,7 @@ from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
+from mindroom.matrix.transport_progress import is_unfinished_reply
 from mindroom.response_admission import admitted_response_decision
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_payload_preparation import (
@@ -2241,9 +2241,7 @@ class TurnController:
         """Handle one text message inside the per-turn conversation lookup scope."""
         event_info = EventInfo.from_event(event.source)
         event_content = event.source.get("content") if isinstance(event.source, dict) else None
-        is_nonterminal_stream = (
-            isinstance(event_content, dict) and event_content.get(STREAM_STATUS_KEY) in UNFINISHED_REPLY_STATUSES
-        )
+        is_nonterminal_stream = isinstance(event_content, dict) and is_unfinished_reply(event_content)
         # A placeholder still streaming names no requester, so refusing it here would mark the turn its finished
         # reply needs as handled.
         if not isinstance(event.body, str) or is_nonterminal_stream:
