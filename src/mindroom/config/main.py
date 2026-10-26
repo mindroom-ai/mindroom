@@ -44,7 +44,7 @@ from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -478,6 +478,10 @@ class Config(BaseModel):
     knowledge_bases: dict[str, KnowledgeBaseConfig] = Field(
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
+    )
+    knowledge_reranker: KnowledgeRerankerConfig | None = Field(
+        default=None,
+        description="Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one",
     )
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,

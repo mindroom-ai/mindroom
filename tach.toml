@@ -6302,10 +6302,16 @@ depends_on = [
     "mindroom.knowledge.availability",
     "mindroom.knowledge.refresh_policy",
     "mindroom.knowledge.registry",
+    "mindroom.knowledge.rerank",
     "mindroom.knowledge.search",
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
 ]
+
+[[modules]]
+path = "mindroom.knowledge.rerank"
+depends_on = ["mindroom.credentials.sync", "mindroom.embeddings.signatures", "mindroom.tool_system.dependencies"]
+visibility = ["mindroom.knowledge.search", "mindroom.knowledge.utils"]
 
 [[modules]]
 path = "mindroom.knowledge.watch"
