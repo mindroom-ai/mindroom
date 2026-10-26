@@ -41,8 +41,9 @@ _MAX_KEYWORD_TERMS = 32
 _WORD = re.compile(r"\w+")
 #: What a collection name may be: one plain file-name component, the same characters Chroma allowed.
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-#: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
-_MATRIX_CACHE_BYTES = 512 * 1024 * 1024
+#: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one. Sized so
+#: several mid-sized bases (a 40k-chunk base at 3072 dimensions is about 0.5 GB) stay loaded side by side.
+_MATRIX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
 _SCHEMA = f"""
