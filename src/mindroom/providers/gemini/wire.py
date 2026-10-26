@@ -134,7 +134,7 @@ async def format_contents(
     contents: list[dict[str, Any]] = []
     # LEGACY_COMPAT: Tool results stored without their tool's name.
     # Legacy format: a stored ``tool`` message whose ``tool_name`` is null, as rows the Agno-backed runtime or another
-    # writer stored can be; the owned loop records the name with every result.
+    # writer stored can be; current writers record the name with every result.
     # Last legacy release: no single cutoff: v2026.10.498 was the last release whose Agno-backed writer stored tool
     # results, the owned writers from v2026.10.499 always store the name, and foreign rows may still lack it.
     # Handling: such a result takes the name of the call with its id earlier in the request, so it goes to Gemini as a
