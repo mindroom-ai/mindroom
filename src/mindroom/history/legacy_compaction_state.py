@@ -78,8 +78,9 @@ def adoption_copy_bytes(connection: sqlite3.Connection, names: AgnoTableNames) -
 
 
 def _octets(connection: sqlite3.Connection, table: str, column: str) -> int:
+    # The length of a BLOB cast counts bytes on every SQLite release; ``octet_length`` needs SQLite 3.43.
     (octets,) = connection.execute(
-        f"SELECT coalesce(sum(octet_length({column})), 0) FROM {quote_identifier(table)}",  # noqa: S608
+        f"SELECT coalesce(sum(length(CAST({column} AS BLOB))), 0) FROM {quote_identifier(table)}",  # noqa: S608
     ).fetchone()
     return octets
 

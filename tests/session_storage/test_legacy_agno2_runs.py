@@ -129,7 +129,7 @@ def test_converting_blob_runs_needs_room_for_the_copy_it_makes(
     """The blob runs' copy into rows is journaled, so the free space needed grows by their size beyond 2.5 times."""
     db_file = _agno_2_database(tmp_path)
     with closing(sqlite3.connect(db_file)) as connection:
-        [(blobs,)] = connection.execute("SELECT sum(octet_length(runs)) FROM code_sessions").fetchall()
+        [(blobs,)] = connection.execute("SELECT sum(length(CAST(runs AS BLOB))) FROM code_sessions").fetchall()
     needed = 5 * db_file.stat().st_size // 2 + blobs
     statvfs = os.statvfs
     monkeypatch.setattr(

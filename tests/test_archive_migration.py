@@ -205,7 +205,7 @@ def test_converting_the_archive_needs_room_for_the_runs_it_restores(
     _main_database(tmp_path, live=[_run("r3")], generations=[_Generation(summary="S1", runs=[_run("r1"), _run("r2")])])
     with closing(sqlite3.connect(_db(tmp_path))) as connection:
         [(archived,)] = connection.execute(
-            "SELECT sum(octet_length(run_data)) FROM code_sessions_compacted_runs",
+            "SELECT sum(length(CAST(run_data AS BLOB))) FROM code_sessions_compacted_runs",
         ).fetchall()
     needed = 5 * _db(tmp_path).stat().st_size // 2 + archived
     statvfs = os.statvfs
