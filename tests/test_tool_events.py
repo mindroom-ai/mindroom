@@ -434,6 +434,26 @@ def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
     ]
 
 
+def test_streaming_tool_tracker_marks_a_visible_slot_its_failed_call_completes() -> None:
+    """A visible slot a failed call completes is marked failed, as that call's completed trace is."""
+    tracker = StreamingToolTracker()
+    _tool_msg, trace_entry = tracker.start(
+        ToolExecution(tool_call_id="call-fetch", tool_name="fetch", tool_args={"url": "https://example.com"}).call,
+        tool_index=1,
+    )
+    assert trace_entry is not None
+    visible_trace = [trace_entry]
+
+    pending_tool, completed_trace = tracker.complete(
+        ToolExecution(tool_call_id="call-fetch", tool_name="fetch", result="HTTP 500", is_error=True).call,
+    )
+
+    assert pending_tool is not None
+    assert tracker.update_visible_trace_entry(visible_trace, pending_tool, completed_trace) is True
+    assert completed_trace.is_error is True
+    assert visible_trace[0].is_error is True
+
+
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
     """V2 tool trace keeps all events so `[N] -> events[N-1]` remains valid."""
     entries = [ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(125)]
@@ -614,6 +634,26 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     assert restored[0].scope_key == "member:GeneralAgent"
 
 
+def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
+    """Restart state keeps which call failed, Matrix clients never see it, and an entry stored without it did not fail."""
+    failed = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="fetch",
+        result_preview="HTTP 500",
+        tool_call_id="call-1",
+        is_error=True,
+    )
+
+    durable = serialize_tool_trace([failed], include_internal=True)
+    public = build_tool_trace_content([failed])
+
+    assert durable[0]["is_error"] is True
+    assert public is not None
+    assert "is_error" not in public[_TOOL_TRACE_KEY]["events"][0]
+    assert deserialize_tool_trace(durable)[0].is_error is True
+    assert deserialize_tool_trace([{"type": "tool_call_completed", "tool_name": "fetch"}])[0].is_error is False
+
+
 @pytest.mark.parametrize(
     "malformed",
     [
@@ -622,6 +662,7 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
         {"type": "tool_call_started", "tool_name": "inspect", "tool_call_id": 7},
         {"type": "tool_call_started", "tool_name": "inspect", "scope_key": []},
         {"type": "tool_call_completed", "tool_name": "inspect", "truncated": "yes"},
+        {"type": "tool_call_completed", "tool_name": "inspect", "is_error": "yes"},
     ],
 )
 def test_durable_tool_trace_rejects_malformed_events(malformed: dict[str, object]) -> None:

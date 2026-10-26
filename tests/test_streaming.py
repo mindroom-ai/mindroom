@@ -50,6 +50,7 @@ from mindroom.streaming import (
     StreamingLifecycleSuspensionError,
     StreamingResponse,
     UnfinishedStreamedReply,
+    _tool_traces_match,
     send_streaming_response,
     stream_progress_edits,
 )
@@ -424,6 +425,14 @@ async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config,
     assert traces == ([(sent_entry,)] if accepted else [])
     if accepted:
         assert visible == [gateway.ops[0].content["body"]]
+
+
+def test_a_trace_that_only_gained_a_calls_failure_still_differs() -> None:
+    """The reply's records keep which call failed, so a trace that only gained the flag is not yet committed."""
+    finished = ToolTraceEntry("tool_call_completed", "fetch", result_preview="HTTP 500")
+    failed = ToolTraceEntry("tool_call_completed", "fetch", result_preview="HTTP 500", is_error=True)
+
+    assert not _tool_traces_match([finished], [failed])
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,7 @@ from mindroom.reply_presentation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import ProgressPermission, UnfinishedStreamedReply
+from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -56,6 +57,7 @@ from mindroom.tool_system.events import (
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
 )
+from mindroom.tool_system.tool_function import ToolOutcome
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
@@ -194,8 +196,8 @@ _INTERRUPTED_OUTCOMES = frozenset(
 
 
 def _entry_json(entry: ToolTraceEntry) -> str:
-    """Return one tool call as the reply records store it."""
-    (encoded,) = serialize_tool_trace((entry,))
+    """Return one tool call as the reply records store it, with whether it failed."""
+    (encoded,) = serialize_tool_trace((entry,), include_internal=True)
     return json.dumps(encoded)
 
 
@@ -227,8 +229,13 @@ class _SpanToolCalls:
         if handle is None:
             return
         if isinstance(result, BaseException):
-            result = f"{type(result).__name__}: {result}"
-        _, entry = format_tool_combined(tool_name, dict(args), result)
+            result, is_error = f"{type(result).__name__}: {result}", True
+        else:
+            # A value that carries text and media is recorded as the text the model reads.
+            value = read_tool_value(result)
+            is_error = isinstance(value, ToolOutcome) and value.is_error
+            result = result if value is None else value.content
+        _, entry = format_tool_combined(tool_name, dict(args), result, is_error=is_error)
         try:
             await self.runtime.store.replies.record_tool_call(
                 span_id=handle.span_id,

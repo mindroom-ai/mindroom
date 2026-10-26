@@ -26,10 +26,15 @@ PROVIDER_ROUTES = frozenset(
 )
 
 
+def normalized_provider_name(provider: str) -> str:
+    """Return a configured ``provider`` value stripped, lowercased, and with ``-`` spelled ``_``."""
+    return provider.strip().lower().replace("-", "_")
+
+
 def provider_route(provider: str) -> str:
     """Return the route a configured ``provider`` value selects, which model dispatch and pricing compare.
 
     It is the value's normalized spelling with aliases resolved, so ``gemini`` selects ``google``.
     """
-    canonical = provider.strip().lower().replace("-", "_")
+    canonical = normalized_provider_name(provider)
     return _PROVIDER_ALIASES.get(canonical, canonical)

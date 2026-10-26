@@ -50,7 +50,7 @@ def get_helper_usage_owner() -> HelperUsageOwner | None:
 def helper_usage_context(scope_context: ScopeSessionContext | None) -> Iterator[None]:
     """Bind exact agent or team ownership for one async call, stream pull, or close."""
     owner = None
-    if scope_context is not None and scope_context.storage_factory is not None:
+    if scope_context is not None:
         owner = HelperUsageOwner(
             storage_factory=scope_context.storage_factory,
             session_id=scope_context.session_id,

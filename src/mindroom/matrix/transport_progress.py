@@ -32,6 +32,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UNFINISHED_REPLY_STATUSES,
 )
 from mindroom.event_journal import replacement_target, visible_content
 
@@ -53,6 +54,17 @@ def is_transport_progress_revision(event: ProjectedEvent, *, self_sender: str) -
     if replacement_target(event.content) is None:
         return False
     return visible_content(event.content).get(STREAM_STATUS_KEY) in _TRANSPORT_STREAM_STATUSES
+
+
+def is_unfinished_reply(content: Mapping[str, object]) -> bool:
+    """Return whether one shown revision says its reply will be revised again.
+
+    Wider than transport: a reply waiting for a tool approval is unfinished,
+    but its pause is content the conversation keeps. Anyone can write a
+    status, so a value that is not text is not one.
+    """
+    status = content.get(STREAM_STATUS_KEY)
+    return isinstance(status, str) and status in UNFINISHED_REPLY_STATUSES
 
 
 def is_transport_progress_source(source: Mapping[str, object], *, self_sender: str) -> bool:

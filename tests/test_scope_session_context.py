@@ -23,6 +23,7 @@ def _context(kind: SessionKind, session: ConversationSession | None) -> ScopeSes
         storage=Mock(spec=ConversationStore),
         session=session,
         session_id="session-1",
+        storage_factory=lambda: Mock(spec=ConversationStore),
     )
 
 

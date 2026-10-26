@@ -79,6 +79,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
+    agent_turn_recorder_for_test,
     bind_runtime_paths,
     install_model_providers,
     install_runtime_journal_support,
@@ -1242,17 +1243,19 @@ async def _respond_through_runner(
     request: ResponseRequest,
     *,
     streaming: bool,
-) -> tuple[Any, list[str]]:
-    """Run one reply through the runner's turn, in its reply span, and return the outcome and the attempt run ids."""
-    run_ids: list[str] = []
+) -> tuple[Any, str | None]:
+    """Run one reply through the runner's turn, in its reply span, and return the outcome and the last attempt's run id."""
+    runtime = await runner.prepare_response_runtime(request)
+    recorder = agent_turn_recorder_for_test(runner, request, runtime)
     async with response_span(runner, request):
         outcome = await process_and_respond_for_test(
             runner,
             request,
             streaming=streaming,
-            attempt_run_id_collector=run_ids,
+            runtime=runtime,
+            turn_recorder=recorder,
         )
-    return outcome, run_ids
+    return outcome, recorder.run_id
 
 
 def _interrupted_record_spy(monkeypatch: pytest.MonkeyPatch, storage: ConversationStore) -> list[RunStatus | None]:
@@ -1294,10 +1297,10 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     [result] = await asyncio.gather(task, return_exceptions=True)
 
     assert not isinstance(result, BaseException), result
-    outcome, run_ids = result
+    outcome, run_id = result
     assert outcome.delivery.terminal_status == "cancelled"
     assert outcome.run_succeeded is False
-    [run_id] = run_ids
+    assert run_id is not None
     assert statuses_when_interrupted_record_written == [RunStatus.cancelled]
     record = reply.storage.get_run(run_id)
     assert record is not None

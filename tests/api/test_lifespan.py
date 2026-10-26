@@ -128,6 +128,26 @@ async def test_standalone_api_shutdown_removes_its_docker_worker_containers(
 
 
 @pytest.mark.asyncio
+async def test_standalone_api_refresh_scheduler_reads_concurrency_from_the_env_file(tmp_path: Path) -> None:
+    """An API served without `mindroom run` limits its knowledge refreshes by the `.env` beside `config.yaml`."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY=3\n", encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    api_app = FastAPI()
+    main.initialize_api_app(api_app, runtime_paths)
+
+    async with main._lifespan(api_app):
+        scheduler = config_lifecycle.app_state(api_app).knowledge_refresh_scheduler
+        assert scheduler is not None
+        assert scheduler.max_concurrent_refreshes == 3
+
+
+@pytest.mark.asyncio
 async def test_embedded_api_shutdown_leaves_workers_to_the_orchestrator(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

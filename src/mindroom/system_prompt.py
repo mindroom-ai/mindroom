@@ -12,16 +12,16 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 
-def render_session_context(config: Config) -> str:
+def render_session_context(config: Config, timezone: str) -> str:
     """Return the session context that opens the turn part of the system prompt.
 
-    It names the current date and timezone, never a clock time, so it changes only once a day.
+    It names the current date in ``timezone`` and that timezone, never a clock time, so it changes only once a day.
     """
-    now = datetime.now(ZoneInfo(config.timezone))
+    now = datetime.now(ZoneInfo(timezone))
     date_context = render_prompt_template(
         config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
         date_str=now.strftime("%A, %B %d, %Y"),
-        timezone_str=config.timezone,
-        timezone_abbrev=now.tzname() or config.timezone,
+        timezone_str=timezone,
+        timezone_abbrev=now.tzname() or timezone,
     )
     return f"<mindroom_session_context>\n{date_context.strip()}\n</mindroom_session_context>"

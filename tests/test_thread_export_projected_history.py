@@ -19,7 +19,8 @@ import pytest
 from nio.crypto.attachments import encrypt_attachment
 
 from mindroom.config.main import Config
-from mindroom.event_journal import DepartureSource, EventClass, EventKind
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.event_journal import DepartureSource, EventClass, EventKind, HydrationPolicy
 from mindroom.matrix.conversation_hydration import (
     _MAX_FETCHED_EVENTS,
     _MAX_MESSAGES_REQUESTS,
@@ -53,6 +54,7 @@ ROOM = "!room:example.org"
 ROOT = "$root:example.org"
 ALICE = "@alice:example.org"
 ROUTER = "@mindroom_router:example.org"
+HELPER = "@mindroom_helper:example.org"
 PRINCIPAL = f"router@{ROUTER}"
 SIDECAR_URL = "mxc://example.org/whole-message"
 SIDECAR_TEXT = "the whole long message, all of it, well past any preview"
@@ -418,6 +420,71 @@ async def test_an_edited_message_exports_its_current_revision(router: PrincipalS
     # The ordering key stays the original's; the edit's own time is separate.
     assert edited.timestamp == 200
     assert edited.edited_timestamp == 500
+
+
+def streamed_reply(event_id: str, *, ts: int) -> dict[str, Any]:
+    """Return an agent reply still showing its streaming placeholder."""
+    return raw(
+        event_id,
+        "Thinking...",
+        ts=ts,
+        sender=HELPER,
+        thread_id=ROOT,
+        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+    )
+
+
+def stream_ending(event_id: str, *, replaces: str, ts: int) -> dict[str, Any]:
+    """Return the edit that ends a streamed reply, its status in the new content."""
+    ending = raw(event_id, "the whole answer", ts=ts, sender=HELPER, replaces=replaces)
+    ending["content"]["m.new_content"][STREAM_STATUS_KEY] = STREAM_STATUS_COMPLETED
+    return ending
+
+
+async def test_a_reply_ending_the_thread_walk_missed_is_exported(router: PrincipalStore) -> None:
+    """A recursive walk that left out how a reply ended still exports the ending, not its placeholder."""
+    homeserver = FakeHomeserver()
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), [streamed_reply("$a:example.org", ts=200)])
+    homeserver.relations["$a:example.org"] = [stream_ending("$a-end:example.org", replaces="$a:example.org", ts=300)]
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole answer"]
+
+
+async def test_a_thread_an_older_walk_left_mid_stream_exports_the_ending(
+    journal_store: EventJournalStore,
+    router: PrincipalStore,
+) -> None:
+    """A thread an older walk marked whole with a reply at its placeholder is walked again before it is exported.
+
+    Export rewrites a thread's file whenever its bytes change, so the next pass
+    after this read replaces a placeholder already written to disk.
+    """
+    root = raw(ROOT, "root", ts=100)
+    reply = streamed_reply("$a:example.org", ts=200)
+    await router.install_hydrated_conversation(
+        room_id=ROOM,
+        thread_id=ROOT,
+        events=tuple(
+            projected
+            for source in (root, reply)
+            if (projected := _projected_event(ROOM, parse(source), EventKind.MESSAGE, self_sender=ROUTER)) is not None
+        ),
+        complete=True,
+        attempted_policy_rank=HydrationPolicy.EXPORT,
+        expected_membership_epoch=await router.membership_epoch(ROOM),
+    )
+    await journal_store.backend.write(
+        lambda transaction: transaction.execute("UPDATE conversation_hydration SET walk_version = walk_version - 1"),
+    )
+    homeserver = FakeHomeserver()
+    serve_thread(homeserver, root, [reply])
+    homeserver.relations["$a:example.org"] = [stream_ending("$a-end:example.org", replaces="$a:example.org", ts=300)]
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole answer"]
 
 
 async def test_a_replacement_from_another_sender_is_not_an_edit(router: PrincipalStore) -> None:

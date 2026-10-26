@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import EndRun, SendRequest
+from mindroom.attachments.storage import mentions_attachments
 from mindroom.history.message_content import message_media_entries
 from mindroom.hooks.enrichment import is_transient_context, render_transient_context
 from mindroom.json_utils import object_with_unique_keys
@@ -81,8 +82,7 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
             or any(value for _, value in message_media_entries(message))
             # Attachment-only history and current-turn provenance can be plain
             # text even when the provider receives no media objects.
-            or "[attachments:" in message.content
-            or "Attachments sent with the current message" in message.content
+            or mentions_attachments(message.content)
         ):
             return None
     return tuple(JudgmentMessage(sender=message.role, text=message.get_content_string()) for message in conversation)

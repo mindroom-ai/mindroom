@@ -153,7 +153,8 @@ _BRIDGE_ADMIN = "@alice:m-alpha.example.com"
 _BRIDGE_CREDENTIAL_ARGS = {
     "telegram": [
         "--api-id",
-        "12345",
+        # Long enough that no temporary path the registry stores can contain it by chance.
+        "7350291846392",
         "--api-hash",
         "telegram-hash-for-tests",
         "--bot-token",

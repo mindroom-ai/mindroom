@@ -53,7 +53,7 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import install_model_providers, make_visible_message, seed_session
+from tests.conftest import install_model_providers, make_visible_message, seed_session, unstored_team_scope_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.providers.anthropic_family_support import (
@@ -369,25 +369,14 @@ async def test_a_member_pause_shows_the_member_s_text_and_pending_call_beside_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stream", "member_slot"),
-    [
-        # A blocking pause renders the member's run, whose text is Agno's paused notice.
-        pytest.param(
-            False,
-            "**GeneralAgent**: I have tools to execute, but I need confirmation.\n\n🔧 `touch` [1] ⏳",
-            id="blocking",
-        ),
-        pytest.param(True, "**GeneralAgent**:\n\n🔧 `touch` [1] ⏳", id="streamed"),
-    ],
-)
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_member_s_pending_call_gets_its_own_line_under_the_member_s_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
-    member_slot: str,
 ) -> None:
+    """A member that paused without text shows its pending call alone, without the paused notice its run holds."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -398,7 +387,7 @@ async def test_a_member_s_pending_call_gets_its_own_line_under_the_member_s_name
 
     paused = await _paused(team, stream=stream)
 
-    assert member_slot in paused.response_text
+    assert "**GeneralAgent**:\n\n🔧 `touch` [1] ⏳" in paused.response_text
     require_ordered_pause_presentation(paused, show_tool_calls=True)
 
 
@@ -777,19 +766,13 @@ async def test_the_stored_team_run_carries_the_turn_s_run_session_and_requester(
     stream: bool,
 ) -> None:
     team = _team(tmp_path, monkeypatch, leader=[answer("General response")])
-    run_ids: list[str] = []
 
-    await team.reply(
-        stream=stream,
-        ctx=team.ctx(run_id="run-123"),
-        user_id="@alice:localhost",
-        run_id_callback=run_ids.append,
-    )
+    await team.reply(stream=stream, ctx=team.ctx(run_id="run-123"), user_id="@alice:localhost")
 
     record, members = team.stored_runs()
     assert (record.run_id, record.session_id, record.user_id) == ("run-123", SESSION_ID, "@alice:localhost")
     assert members == []
-    assert run_ids == ["run-123"]
+    assert team.recorder.run_id == "run-123"
 
 
 @pytest.mark.asyncio
@@ -926,6 +909,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         list(team.member_names),
         team.orchestrator,
         team.identity,
+        config=team.config,
         configured_team_name=None,
         reason_prefix="Team request",
         active_model_names=dict.fromkeys(team.member_names, "default"),
@@ -948,6 +932,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         execution_identity=team.identity,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
     )
     await prepare_materialized_team_execution(
         team.ctx(),
@@ -976,6 +961,7 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
         list(team.member_names),
         team.orchestrator,
         team.identity,
+        config=team.config,
         configured_team_name=None,
         reason_prefix="Team request",
         active_model_names=dict.fromkeys(team.member_names, "default"),
@@ -989,10 +975,11 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
         mode=team.mode,
         config=team.config,
         runtime_paths=team.runtime_paths,
-        scope_context=None,
+        scope_context=unstored_team_scope_context(team.config, team.member_names, team_name=None),
         execution_identity=team.identity,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
     )
 
     assert [member.role for member in built.spec.members] == ["Answers."]

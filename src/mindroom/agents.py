@@ -2061,7 +2061,7 @@ def create_agent(
         instructions=tuple(instructions),
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         tool_instructions=tool_assembly.instructions,
-        turn_context=render_session_context(config),
+        turn_context=render_session_context(config, config.get_entity_timezone(agent_name)),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
         knowledge_block=None if enabled_knowledge is None else enabled_knowledge.prompt_block(),
     )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -37,8 +36,8 @@ _MAX_CONCURRENT_REFRESHES_ENV = "MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY"
 _REFRESH_CLAIM_RETRY_SECONDS = 0.1
 
 
-def _default_max_concurrent_refreshes() -> int:
-    raw_value = os.getenv(_MAX_CONCURRENT_REFRESHES_ENV)
+def _max_concurrent_refreshes(runtime_paths: RuntimePaths) -> int:
+    raw_value = runtime_paths.env_value(_MAX_CONCURRENT_REFRESHES_ENV)
     if raw_value is None:
         return _DEFAULT_MAX_CONCURRENT_REFRESHES
     try:
@@ -65,12 +64,17 @@ class _ScheduledRefresh:
 class KnowledgeRefreshScheduler:
     """Deduplicate per-binding refreshes and limit global background refresh concurrency."""
 
-    max_concurrent_refreshes: int = field(default_factory=_default_max_concurrent_refreshes)
+    max_concurrent_refreshes: int = _DEFAULT_MAX_CONCURRENT_REFRESHES
     _tasks: dict[KnowledgeRefreshTarget, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _pending: dict[KnowledgeRefreshTarget, _ScheduledRefresh] = field(default_factory=dict, init=False)
     _claim_retry_handles: dict[KnowledgeRefreshTarget, asyncio.TimerHandle] = field(default_factory=dict, init=False)
     _shutting_down: bool = field(default=False, init=False)
     _refresh_slots: asyncio.Semaphore | None = field(default=None, init=False)
+
+    @classmethod
+    def from_runtime(cls, runtime_paths: RuntimePaths) -> KnowledgeRefreshScheduler:
+        """Build a scheduler limited by the runtime's ``MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY``; a bad value raises."""
+        return cls(max_concurrent_refreshes=_max_concurrent_refreshes(runtime_paths))
 
     def schedule_refresh(
         self,

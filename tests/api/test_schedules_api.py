@@ -22,6 +22,7 @@ def _task(
     new_thread: bool = False,
     history_limit: int | None = None,
     silent: bool = False,
+    timezone: str | None = None,
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -39,6 +40,7 @@ def _task(
         created_by="@user:localhost",
         new_thread=new_thread,
         silent=silent,
+        timezone=timezone,
     )
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -125,6 +127,27 @@ def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> N
     assert data["tasks"][0]["next_run_at"] is None
 
 
+def test_list_schedules_describes_each_task_in_its_own_timezone(test_client: TestClient) -> None:
+    """A task stored with a timezone is described in it; one without falls back to the global timezone (UTC here)."""
+    mock_client = _mock_matrix_client()
+    midnight_utc = {"minute": "0", "hour": "0", "day": "*", "month": "*", "weekday": "*"}
+    tasks = [
+        _task("tokyo123", schedule_type="cron", cron_fields=midnight_utc, timezone="Asia/Tokyo"),
+        _task("global12", schedule_type="cron", cron_fields=midnight_utc),
+    ]
+
+    with (
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
+        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=tasks),
+    ):
+        response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    tasks_by_id = {task["task_id"]: task for task in response.json()["tasks"]}
+    assert tasks_by_id["tokyo123"]["cron_description"] == "At 09:00 (Asia/Tokyo)"
+    assert tasks_by_id["global12"]["cron_description"] == "At 00:00 (UTC)"
+
+
 def test_update_schedule_once_success(test_client: TestClient) -> None:
     """Update endpoint should persist prompt and once schedule changes."""
     mock_client = _mock_matrix_client()
@@ -187,6 +210,7 @@ def test_update_schedule_once_success(test_client: TestClient) -> None:
     assert save_mock.await_args.kwargs["room_id"] == "test_room"
     assert save_mock.await_args.kwargs["workflow"].new_thread is True
     assert save_mock.await_args.kwargs["workflow"].silent is True
+    assert save_mock.await_args.kwargs["timezone"] == "UTC"
 
 
 def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> None:

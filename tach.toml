@@ -582,8 +582,10 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.stop",
     "mindroom.streaming",
+    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]
@@ -775,7 +777,6 @@ depends_on = [
     "mindroom.history.request_messages",
     "mindroom.history.runtime",
     "mindroom.history.session_context",
-    "mindroom.history.storage",
     "mindroom.history.turn_recorder",
     "mindroom.history.types",
     "mindroom.hooks",
@@ -1193,9 +1194,10 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.providers.google_adc"
-depends_on = ["mindroom.startup_errors"]
+depends_on = ["mindroom.constants", "mindroom.startup_errors"]
 visibility = [
     "mindroom.providers.anthropic.messages",
+    "mindroom.providers.gemini",
 ]
 
 [[modules]]
@@ -1253,7 +1255,6 @@ depends_on = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.helper_usage",
     "mindroom.history.types",
-    "mindroom.delegation.state",
     "mindroom.session_storage.agent_storage",
     "mindroom.agents",
     "mindroom.ai",
@@ -2897,10 +2898,8 @@ depends_on = [
     "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.replay",
-    "mindroom.history.session_context",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
-    "mindroom.history.team_scope",
     "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",
@@ -3363,8 +3362,6 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.session_context",
     "mindroom.history.storage",
-    "mindroom.history.team_scope",
-    "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.llm",
@@ -3405,7 +3402,12 @@ depends_on = ["mindroom.config.models"]
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = ["mindroom.config.models", "mindroom.config.schema_hints", "mindroom.path_globs"]
+depends_on = [
+    "mindroom.config.models",
+    "mindroom.config.schema_hints",
+    "mindroom.path_globs",
+    "mindroom.providers.names",
+]
 
 [[modules]]
 path = "mindroom.config.models"
@@ -6451,7 +6453,14 @@ expose = [
 from = ["mindroom.ai"]
 
 [[interfaces]]
-expose = ["dashboard_api_key", "missing_model_api_key_provider", "model_uses_own_credential", "uses_alternative_auth"]
+expose = [
+    "dashboard_api_key",
+    "gemini_uses_vertexai",
+    "missing_model_api_key_provider",
+    "model_api_key",
+    "model_uses_own_credential",
+    "uses_alternative_auth",
+]
 from = ["mindroom.providers.credentials"]
 
 [[interfaces]]
@@ -7762,6 +7771,7 @@ depends_on = [
     "mindroom.tool_jobs.settings",
     "mindroom.tool_jobs.background_after",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -7994,7 +8004,6 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
-    "mindroom.credentials.sync",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
@@ -8002,6 +8011,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.google_adc",
     "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
@@ -8846,6 +8856,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.filters",
     "mindroom.tool_system.registry_state",
+    "mindroom.config.knowledge_graph",
     "mindroom.agent_policy",
 ]
 
@@ -9438,6 +9449,7 @@ depends_on = [
 path = "mindroom.knowledge_graph.episodes"
 depends_on = [
     "mindroom.automations.steps",
+    "mindroom.config.knowledge_graph",
     "mindroom.constants",
     "mindroom.delegation.state",
     "mindroom.history.conversation_text",
@@ -9491,7 +9503,7 @@ visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.tools.knowledge_graph"
-depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+depends_on = ["mindroom.config.knowledge_graph", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
 # Exploration: the automation that asks the agent to explore its sources.
 [[modules]]

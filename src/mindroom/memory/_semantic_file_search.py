@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _SEMANTIC_TIMING_PREFIX = "system_prompt_assembly.memory_search.semantic"
-_memory_refresh_scheduler = KnowledgeRefreshScheduler()
+_memory_refresh_scheduler: KnowledgeRefreshScheduler | None = None
 
 
 class SemanticFileMemoryIndexUnavailableError(RuntimeError):
@@ -43,6 +43,14 @@ class SemanticFileMemoryIndexUnavailableError(RuntimeError):
     def __init__(self, message: str, *, degraded_reason: str | None = None) -> None:
         super().__init__(message)
         self.degraded_reason = degraded_reason
+
+
+def _memory_scheduler(runtime_paths: RuntimePaths) -> KnowledgeRefreshScheduler:
+    """Return the process's file-memory refresh scheduler, built with the refresh limit of its first runtime."""
+    global _memory_refresh_scheduler
+    if _memory_refresh_scheduler is None:
+        _memory_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
+    return _memory_refresh_scheduler
 
 
 def schedule_semantic_file_memory_refresh(
@@ -62,7 +70,7 @@ def schedule_semantic_file_memory_refresh(
         search_config=search_config,
     )
     try:
-        _memory_refresh_scheduler.schedule_refresh(
+        _memory_scheduler(runtime_paths).schedule_refresh(
             resolution.base_id,
             config=resolution.config,
             runtime_paths=runtime_paths,

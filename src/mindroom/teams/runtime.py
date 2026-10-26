@@ -25,13 +25,13 @@ from mindroom.agent_loop.run import (
     resume_planned,
     resumed_record,
     run_agent,
+    started_run_fields,
 )
 from mindroom.agent_loop.tools import PreparedTools, sorted_specs
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
-from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.teams.delegate_tools import (
     DELEGATION_TOOLS,
@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, ReasoningDelta, ToolSpec
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.teams.delegate_tools import MemberRunner
     from mindroom.teams.spec import TeamMember, TeamSpec
 
@@ -91,17 +92,7 @@ def run_team(
     the stream cancels the members with the leader.
     """
     leader = spec.leader
-    identity = leader.model.identity
-    record = TeamRunRecord(
-        run_id=ctx.run_id,
-        session_id=ctx.session_id,
-        user_id=ctx.user_id,
-        model=identity.id,
-        model_provider=identity.provider,
-        metrics=RunMetrics(),
-        metadata=ctx.metadata,
-        team_id=leader.id,
-    )
+    record = TeamRunRecord(**started_run_fields(ctx, leader.model, metadata=ctx.metadata), team_id=leader.id)
     messages = [*leader.system_messages, *run_input]
     return _drive_team(
         spec,

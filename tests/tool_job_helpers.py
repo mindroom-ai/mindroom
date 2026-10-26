@@ -806,8 +806,7 @@ class DelegatingLeader:
         )
         return await _drive_delegations(
             record,
-            storage=runner.storage,
-            continue_parent=runner.continue_run,
+            continue_parent=runner,
             agent_name="leader",
             run_child=run_child,
             config=self.config,

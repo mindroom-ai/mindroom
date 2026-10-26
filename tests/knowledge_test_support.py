@@ -171,6 +171,10 @@ class _Collection:
             rows[:] = [row for row in rows if row["id"] not in replaced]
         self.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
 
+    def count(self) -> int:
+        with _VectorDb.lock:
+            return len(_VectorDb.collections.get(self._name, []))
+
     def delete(self, *, where: dict[str, object]) -> None:
         validate_where_operands(where)
         key, condition = next(iter(where.items()))

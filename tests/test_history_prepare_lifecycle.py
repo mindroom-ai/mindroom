@@ -864,7 +864,13 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,
             config=config,
-            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            scope_context=ScopeSessionContext(
+                scope=scope,
+                storage=storage,
+                session=session,
+                session_id="session-1",
+                storage_factory=lambda: storage,
+            ),
             pipeline_timing=None,
             allow_native_compaction=True,
         )
@@ -957,7 +963,13 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
             non_prompt_tokens=0,
             runtime_paths=runtime_paths,
             config=config,
-            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            scope_context=ScopeSessionContext(
+                scope=scope,
+                storage=storage,
+                session=session,
+                session_id="session-1",
+                storage_factory=lambda: storage,
+            ),
             allow_native_compaction=allow_native_compaction,
             pipeline_timing=None,
         )
@@ -1976,7 +1988,13 @@ async def _prepare_with_reported_usage(
             non_prompt_tokens=400,
             runtime_paths=runtime_paths,
             config=config,
-            scope_context=ScopeSessionContext(scope=scope, storage=storage, session=session, session_id="session-1"),
+            scope_context=ScopeSessionContext(
+                scope=scope,
+                storage=storage,
+                session=session,
+                session_id="session-1",
+                storage_factory=lambda: storage,
+            ),
             pipeline_timing=None,
             allow_native_compaction=True,
         )

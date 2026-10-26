@@ -34,18 +34,12 @@ from mindroom.history.replay import (
     plan_replay_that_fits,
     scope_visible_runs,
 )
-from mindroom.history.session_context import (
-    ScopeSessionContext,
-    has_named_member,
-    resolve_bound_team_scope,
-)
 from mindroom.history.storage import (
     consume_pending_force_compaction_scope,
     read_scope_state,
     set_force_compaction,
 )
 from mindroom.history.summary_call import is_summary_timeout
-from mindroom.history.team_scope import ad_hoc_team_has_private_member
 from mindroom.history.types import (
     CompactionDecision,
     CompactionLifecycleFailure,
@@ -73,6 +67,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
     from mindroom.history.summary_rows import Segment
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
@@ -752,14 +747,13 @@ def finalize_history_preparation(
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_bound_scope_history(
     *,
-    member_names: Sequence[str],
     model: ModelProvider,
     runtime_paths: RuntimePaths,
     config: Config,
     history_settings: ResolvedHistorySettings,
     static_prompt_tokens: int,
     non_prompt_tokens: int,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     team_name: str | None,
     active_model_name: str | None,
     active_context_window: int | None,
@@ -773,13 +767,6 @@ async def prepare_bound_scope_history(
     team's, whose replay policy and compaction config the scope follows. ``team_name`` is the configured team, or None
     for an ad hoc one.
     """
-    if scope_context is not None:
-        # A team without a named member has no history, whether or not its scope is open.
-        has_scope = has_named_member(member_names)
-    elif team_name is None and ad_hoc_team_has_private_member(member_names, config.agents):
-        has_scope = False
-    else:
-        has_scope = resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name) is not None
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         entity_name=team_name,
@@ -788,8 +775,6 @@ async def prepare_bound_scope_history(
         active_model_name=active_model_name,
         active_context_window=active_context_window,
     )
-    if not has_scope:
-        return PreparedScopeHistory(scope=None, session=None, resolved_inputs=resolved_inputs)
     return await prepare_scope_history(
         model=model,
         resolved_inputs=resolved_inputs,

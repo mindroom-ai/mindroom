@@ -36,7 +36,8 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.providers import remote_media, synthetic_adapter
+from mindroom.providers import credentials as provider_credentials
+from mindroom.providers import google_adc, remote_media, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
@@ -53,8 +54,10 @@ from tests.providers.gemini_ollama_support import (
 from tests.providers.golden_support import hide_provider_environment
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import StreamEvent
 
 GEMINI = {"provider": "google", "id": "gemini-3.1-pro-preview", "api_key": "test-key"}
@@ -160,7 +163,7 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
         requested.append(provider)
         return "shared-key"
 
-    monkeypatch.setattr(gemini_adapter, "get_api_key_for_provider", shared_key)
+    monkeypatch.setattr(provider_credentials, "get_api_key_for_provider", shared_key)
     runtime_paths = runtime_paths_for(tmp_path)
 
     api = gemini_adapter.build_provider(ModelConfig(provider="gemini", id="gemini-3.1-pro-preview"), runtime_paths)
@@ -169,35 +172,60 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
 
     assert api.settings.api_key == "shared-key"
     assert vertex.settings.api_key is None
-    assert vertex.vertexai
+    assert vertex.settings.vertexai
     assert own.settings.api_key == "test-key"
-    assert requested == ["google"]
+    assert requested == ["gemini"]
 
 
-def test_gemini_passes_the_environment_key_project_and_location_as_explicit_client_arguments(
+def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runtime_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The SDK ranks an explicit argument above its own environment reads, so these variables stay explicit, as in Agno."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-project")
-    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west4")
+    """A Vertex AI model the config gives no project, location, or credentials takes them from ``.env``."""
+    credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
+    loaded: list[str] = []
+
+    def load(path: str) -> Credentials:
+        loaded.append(path)
+        return credentials
+
+    monkeypatch.setattr(google_adc, "_load_google_application_credentials", load)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
+        encoding="utf-8",
+    )
     runtime_paths = runtime_paths_for(tmp_path)
 
-    api = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
     vertex = gemini_adapter.build_provider(
         ModelConfig(**_config({"provider": "gemini", "id": "gemini-3.8-flash"}, vertexai=True)),
         runtime_paths,
     )
 
-    assert api._client_params() == {"api_key": "env-key"}
-    assert vertex._client_params() == {"vertexai": True, "project": "env-project", "location": "europe-west4"}
+    assert vertex._client_params() == {
+        "vertexai": True,
+        "project": "env-project",
+        "location": "europe-west4",
+        "credentials": credentials,
+    }
+    assert loaded == [str((tmp_path / "adc.json").resolve())]
+    authored = Credentials(token="authored-token")  # noqa: S106 - synthetic SDK credential
+    configured = gemini_adapter.build_provider(
+        ModelConfig(**_config(GEMINI_VERTEX, client_params={"credentials": authored})),
+        runtime_paths,
+    )
+    assert configured._client_params() == {
+        "vertexai": True,
+        "project": "test-project",
+        "location": "us-central1",
+        "credentials": authored,
+    }
+    assert len(loaded) == 1
 
 
 @pytest.mark.asyncio
-async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """GOOGLE_GENAI_USE_VERTEXAI=true sends a model without ``vertexai`` to Vertex AI, as Agno's Gemini did."""
-    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` in ``.env`` sends a model without ``vertexai`` to Vertex AI."""
+    (tmp_path / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
     seen: list[httpx.Request] = []
 
     def respond(http_request: httpx.Request) -> httpx.Response:
@@ -208,7 +236,7 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, mo
         {"provider": "google", "id": "gemini-3.8-flash"},
         project_id="test-project",
         location="us-central1",
-        credentials=Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+        client_params={"credentials": Credentials(token="test-token")},  # noqa: S106 - synthetic SDK credential
     )
     adapter = build_adapter(config, tmp_path, respond)
     _completed([event async for event in adapter.stream(_request())])
@@ -216,11 +244,150 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path, mo
     assert "/projects/test-project/locations/us-central1/" in str(seen[0].url)
 
 
+@pytest.mark.asyncio
+async def test_the_sdk_s_own_vertex_switches_do_not_move_a_gemini_api_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """google-genai gets MindRoom's Vertex AI choice, so variables only the SDK reads cannot switch the route."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    adapter = build_adapter(GEMINI, tmp_path, respond)
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == "generativelanguage.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
+def _transported_gemini(
+    model_config: dict[str, Any],
+    respond: Callable[[httpx.Request], httpx.Response],
+    runtime_paths: RuntimePaths,
+    **client_params: Any,  # noqa: ANN401
+) -> gemini_adapter.GeminiProvider:
+    """Build a Gemini adapter whose SDK client sends through ``respond``, with ``client_params`` merged in as given."""
+    extra_kwargs = dict(model_config.get("extra_kwargs", {}))
+    extra_kwargs["client_params"] = {
+        **extra_kwargs.get("client_params", {}),
+        **client_params,
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
+    }
+    return gemini_adapter.build_provider(ModelConfig(**{**model_config, "extra_kwargs": extra_kwargs}), runtime_paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authored", "host"),
+    [
+        (
+            {
+                "client_params": {
+                    "enterprise": True,
+                    "project": "test-project",
+                    "location": "us-central1",
+                    "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
+                },
+            },
+            "us-central1-aiplatform.googleapis.com",
+        ),
+        ({"vertexai": True, "client_params": {"vertexai": False}}, "generativelanguage.googleapis.com"),
+    ],
+    ids=["client-params-enterprise", "client-params-vertexai-false"],
+)
+async def test_client_params_choose_the_gemini_route_and_the_sdk_agrees(
+    tmp_path: Path,
+    authored: dict[str, Any],
+    host: str,
+) -> None:
+    """An explicit ``enterprise`` or ``vertexai`` client option, which wins over every other option, picks the route."""
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    adapter = _transported_gemini(
+        {"provider": "google", "id": "gemini-3.8-flash", "api_key": "test-key", "extra_kwargs": authored},
+        respond,
+        runtime_paths_for(tmp_path),
+    )
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == host
+    # Vertex AI never takes the Gemini API key, which google-genai refuses beside a project.
+    assert ("x-goog-api-key" in seen[0].headers) is (host == "generativelanguage.googleapis.com")
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_vertexai_false_keeps_a_model_on_the_gemini_api_whatever_the_environment_says(
+    tmp_path: Path,
+) -> None:
+    """``GOOGLE_GENAI_USE_VERTEXAI`` moves only the Gemini models that choose no route themselves."""
+    (tmp_path / ".env").write_text("GOOGLE_GENAI_USE_VERTEXAI=true\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(tmp_path)
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    gemini_api = _transported_gemini({**GEMINI, "extra_kwargs": {"vertexai": False}}, respond, runtime_paths)
+    unset = gemini_adapter.build_provider(ModelConfig(provider="google", id="gemini-3.8-flash"), runtime_paths)
+    _completed([event async for event in gemini_api.stream(_request())])
+
+    assert (gemini_api.settings.vertexai, unset.settings.vertexai) == (False, True)
+    assert seen[0].url.host == "generativelanguage.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_vertex_express_mode_takes_no_project_location_or_credentials_from_the_runtime_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vertex AI key in ``client_params`` excludes a project, a location, and credentials, so none are filled in."""
+    env_credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
+    monkeypatch.setattr(google_adc, "_load_google_application_credentials", lambda _path: env_credentials)
+    (tmp_path / ".env").write_text(
+        "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
+        encoding="utf-8",
+    )
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    config = {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True}}
+    adapter = _transported_gemini(config, respond, runtime_paths_for(tmp_path), api_key="express-key")
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == "aiplatform.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "express-key"
+
+
+def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path: Path) -> None:
+    """``OLLAMA_API_KEY`` in ``.env`` authenticates a model that configures no key."""
+    (tmp_path / ".env").write_text("OLLAMA_API_KEY=env-key\n", encoding="utf-8")
+    runtime_paths = runtime_paths_for(tmp_path)
+
+    shared = build_ollama_provider(ModelConfig(**OLLAMA), runtime_paths)
+    own = build_ollama_provider(ModelConfig(**OLLAMA, api_key="own-key"), runtime_paths)
+
+    assert shared._client_params()["headers"] == {"authorization": "Bearer env-key"}
+    assert own._client_params()["headers"] == {"authorization": "Bearer own-key"}
+
+
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
     """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
     adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
 
-    assert adapter._client_params() == {"api_key": "test-key", "http_options": {"timeout": 12500}}
+    assert adapter._client_params() == {"api_key": "test-key", "vertexai": False, "http_options": {"timeout": 12500}}
 
 
 @pytest.mark.asyncio

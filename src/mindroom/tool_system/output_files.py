@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import stat
 import sys
 import uuid
@@ -128,14 +127,7 @@ class _ToolOutputWriteResult:
 
 
 def _output_redirect_max_bytes(runtime_paths: RuntimePaths) -> int:
-    # TODO(simplify): Unlike other runtime settings, an empty value falls through to the next source, ending at the
-    # live os.environ. Read it with runtime_paths.env_value alone. Operators who set it only outside the runtime's env,
-    # or blank it to restore the default, would notice.
-    raw_value = (
-        runtime_paths.process_env.get(_MAX_BYTES_ENV)
-        or runtime_paths.env_file_values.get(_MAX_BYTES_ENV)
-        or os.environ.get(_MAX_BYTES_ENV)
-    )
+    raw_value = runtime_paths.env_value(_MAX_BYTES_ENV)
     if not raw_value:
         return DEFAULT_TOOL_OUTPUT_MAX_BYTES
     try:

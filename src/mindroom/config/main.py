@@ -85,6 +85,7 @@ from mindroom.config.runtime_overlays import (
 )
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
+from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
     ConfigIncludeError,
@@ -517,9 +518,9 @@ class Config(BaseModel):
         default_factory=MatrixSyncConfig,
         description="Matrix event sync transport configuration",
     )
-    timezone: str = Field(
+    timezone: TimezoneName = Field(
         default="UTC",
-        description="Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
+        description="IANA timezone for dates, times, and schedules (e.g., 'America/New_York'); agents can override it",
     )
     scheduler_catch_up_grace_seconds: int = Field(
         default=3600,
@@ -2078,6 +2079,16 @@ class Config(BaseModel):
         agent = self.get_agent(agent_name)
         return agent.knowledge_graph if agent.knowledge_graph is not None else self.defaults.knowledge_graph
 
+    def agent_edits_knowledge_graph(self, agent_name: str) -> bool:
+        """Return whether an agent may delete facts and entities from its knowledge graph, merge entities, and rewrite summaries."""
+        agent = self.get_agent(agent_name)
+        edits = (
+            agent.knowledge_graph_edits
+            if agent.knowledge_graph_edits is not None
+            else self.defaults.knowledge_graph_edits
+        )
+        return edits and self.agent_uses_knowledge_graph(agent_name)
+
     def knowledge_graph_agents(self) -> list[str]:
         """Return the agents that build a knowledge graph."""
         return [agent_name for agent_name in self.agents if self.agent_uses_knowledge_graph(agent_name)]
@@ -2191,6 +2202,13 @@ class Config(BaseModel):
                 raise ValueError(msg)
         return self
 
+    def get_entity_timezone(self, entity_name: str | None) -> str:
+        """Return an agent's own timezone, else the global one, which configured teams, the router, and room jobs use."""
+        agent = self.agents.get(entity_name) if entity_name is not None else None
+        if agent is not None and agent.timezone is not None:
+            return agent.timezone
+        return self.timezone
+
     def get_agent_cheap_model(self, agent_name: str) -> str | None:
         """Return the agent's cheap model, ignoring an inherited default the agent already runs."""
         agent = self.agents[agent_name]
@@ -2221,7 +2239,11 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_knowledge_graph(self) -> Config:
-        """Validate the graph's model once any agent enables the graph."""
+        """Validate that agents allowing graph edits have a graph, and the graph's model once any agent enables it."""
+        for agent_name, agent in self.agents.items():
+            if agent.knowledge_graph_edits and not self.agent_uses_knowledge_graph(agent_name):
+                msg = f"Agent {agent_name!r} knowledge_graph_edits needs knowledge_graph: true"
+                raise ValueError(msg)
         settings = self.knowledge_graph
         if not self.knowledge_graph_agents():
             return self

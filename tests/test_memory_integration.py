@@ -238,6 +238,7 @@ def test_memory_conversation_skips_turns_without_a_cached_system_prompt_to_keep(
         storage=MagicMock(),
         session=session,
         session_id="thread",
+        storage_factory=lambda: MagicMock(),
     )
     ctx = make_turn_context("general", session_id="thread")
     mem0 = TestMemoryIntegration._config()

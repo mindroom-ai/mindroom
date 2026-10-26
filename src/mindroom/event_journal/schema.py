@@ -332,6 +332,12 @@ _TABLES = (
         -- all three of them together and two policies can differ on any one.
         -- Also the best answer rather than the newest, for the reason above.
         attempted_policy_rank BIGINT NOT NULL DEFAULT 0,
+        -- The version of the walk that earned this marker, which it stands for
+        -- and no other. A walk that learns to fetch what it used to miss bumps
+        -- it, so a conversation an older walk marked is walked again on its
+        -- next read instead of being trusted for the rest of the membership.
+        -- The two facts above belong to that walk and reset with it.
+        walk_version BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (principal_id, room_id, thread_id)
     )
     """,

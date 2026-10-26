@@ -61,6 +61,7 @@ async def test_team_approval_finalizes_consumption_after_member_assembly_fails(t
             runs=[TeamRunRecord(run_id="run-1", session_id="session-1", status=RunStatus.paused, team_id=None)],
         ),
         session_id="session-1",
+        storage_factory=lambda: MagicMock(),
     )
     finalized: list[bool] = []
 

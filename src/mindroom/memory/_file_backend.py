@@ -1057,7 +1057,7 @@ def append_agent_daily_file_memory(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    current_date = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
+    current_date = datetime.now(ZoneInfo(config.get_entity_timezone(agent_name))).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
     scope_user_id = agent_scope_user_id(agent_name)
     result = _append_scope_memory_entry(

@@ -528,7 +528,7 @@ def build_provider_message_blobs_from_messages(
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)
             if cache_control is not None:
-                chat_messages, _ = mark_message_cache_rungs(chat_messages, cache_control, MESSAGE_RUNG_COUNT)
+                chat_messages = mark_message_cache_rungs(chat_messages, cache_control, MESSAGE_RUNG_COUNT)
         raw_blobs = tuple(stable_json(message) for message in chat_messages)
         normalized_blobs = tuple(stable_json(strip_cache_control(message)) for message in chat_messages)
         return raw_blobs, normalized_blobs, preview

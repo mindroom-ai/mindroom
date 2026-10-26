@@ -89,6 +89,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     team = BuiltTeam(
         spec=team_spec("squad", "Squad", model, "You lead the squad.", ()),
         history_settings=settings,
+        timezone="UTC",
         leader_middleware=(_middleware,),
         leader_jobs=JobActor(name="squad", team=True, depth=0, tools={}),
     )

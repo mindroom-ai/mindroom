@@ -37,6 +37,11 @@ _PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) A
 # message in a thread name one, so a row limit alone does not bound a read.
 PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 
+# The version of hydration walk whose markers stand. Version 1 looks up the
+# edits of every message a thread walk left mid-stream, which a recursive
+# relations walk can miss.
+_HYDRATION_WALK_VERSION = 1
+
 # What the loaded rows of one page may decode to, estimated before decoding.
 # Prose decodes to about its stored size, but every JSON value becomes a Python
 # object: a string or number of a few bytes takes 35 to 55 bytes once decoded,
@@ -350,13 +355,15 @@ def _current_hydration(
 
     A repairable recovery obligation withholds every marker in the room so the
     next read enters the repair path. A truncated obligation leaves its bounded
-    context readable, but cannot certify completeness.
+    context readable, but cannot certify completeness. A marker an older walk
+    version earned speaks for nothing, so the next read walks again.
     """
     row = transaction.fetchone(
         """
         SELECT hydration.membership_epoch AS hydrated_epoch,
                hydration.complete AS complete,
                hydration.attempted_policy_rank AS attempted_policy_rank,
+               hydration.walk_version AS walk_version,
                COALESCE(membership.membership_epoch, 0) AS current_epoch,
                recovery.state AS recovery_state
         FROM conversation_hydration AS hydration
@@ -372,6 +379,8 @@ def _current_hydration(
         (principal_id, room_id, encode_thread_id(thread_id)),
     )
     if row is None or int(row["hydrated_epoch"]) != int(row["current_epoch"]):
+        return None
+    if int(row["walk_version"]) != _HYDRATION_WALK_VERSION:
         return None
     if row["recovery_state"] == "repairable":
         return None
@@ -491,10 +500,12 @@ def mark_conversation_hydrated(
     once more before publishing coverage, so a fence between any two commits
     deletes the earlier rows and makes every later step refuse the stale epoch.
 
-    Coverage only ever grows within one membership epoch. Two hydrators can
-    finish in either order, and a narrower walk finishing last cannot overwrite
-    the wider walk's proof that it reached the end or attempted a stronger
-    policy. A later membership is a different view and clears both facts.
+    Coverage only ever grows within one membership epoch and walk version. Two
+    hydrators can finish in either order, and a narrower walk finishing last
+    cannot overwrite the wider walk's proof that it reached the end or
+    attempted a stronger policy. A later membership is a different view and
+    clears both facts, and so does a newer walk version, because an older
+    walk's proof is the thing that version stopped trusting.
     """
     if not claim_membership_epoch(
         transaction,
@@ -529,23 +540,26 @@ def publish_conversation_hydration(
     transaction.execute(
         """
         INSERT INTO conversation_hydration (
-            principal_id, room_id, thread_id, membership_epoch, complete, attempted_policy_rank
+            principal_id, room_id, thread_id, membership_epoch, complete, attempted_policy_rank, walk_version
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (principal_id, room_id, thread_id) DO UPDATE SET
             membership_epoch = excluded.membership_epoch,
             complete = CASE
                 WHEN conversation_hydration.membership_epoch = excluded.membership_epoch
+                     AND conversation_hydration.walk_version = excluded.walk_version
                      AND conversation_hydration.complete <> 0
                 THEN conversation_hydration.complete
                 ELSE excluded.complete
             END,
             attempted_policy_rank = CASE
                 WHEN conversation_hydration.membership_epoch = excluded.membership_epoch
+                     AND conversation_hydration.walk_version = excluded.walk_version
                      AND conversation_hydration.attempted_policy_rank > excluded.attempted_policy_rank
                 THEN conversation_hydration.attempted_policy_rank
                 ELSE excluded.attempted_policy_rank
-            END
+            END,
+            walk_version = excluded.walk_version
         """,
         (
             principal_id,
@@ -554,6 +568,7 @@ def publish_conversation_hydration(
             membership_epoch,
             int(complete),
             attempted_policy_rank,
+            _HYDRATION_WALK_VERSION,
         ),
     )
 

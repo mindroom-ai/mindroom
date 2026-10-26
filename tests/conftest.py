@@ -123,7 +123,9 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     load_scope_session,
+    resolve_bound_team_scope,
 )
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -161,6 +163,8 @@ from mindroom.response_runner import (
     PostLockRequestPreparationError,
     ResponseRequest,
     ResponseRunner,
+    _agent_run_metadata,
+    _PreparedResponseRuntime,
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
@@ -562,6 +566,23 @@ async def prepare_agent_and_prompt_for_test(
     )
 
 
+def agent_turn_recorder_for_test(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    runtime: _PreparedResponseRuntime,
+) -> TurnRecorder:
+    """Return the recorder the runner gives an agent turn of ``request`` under ``runtime``."""
+    return runner._build_turn_recorder(
+        user_message=runtime.model_prompt,
+        user_message_is_structured=request.current_prompt_is_structured,
+        reply_to_event_id=request.reply_to_event_id,
+        room_id=request.room_id,
+        thread_id=runtime.resolved_target.resolved_thread_id,
+        requester_id=request.user_id,
+        matrix_run_metadata=_agent_run_metadata(request),
+    )
+
+
 async def process_and_respond_for_test(
     runner: ResponseRunner,
     request: ResponseRequest,
@@ -571,17 +592,20 @@ async def process_and_respond_for_test(
 ) -> _ResponseGenerationOutcome:
     """Deliver ``request`` through the runner's streaming or non-streaming driver with a plain turn's options.
 
-    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id, ignores its
-    delivery start, collects its attempt run ids into a list nothing reads, and prepares its runtime from ``request``.
+    ``options`` names the driver options a test sets; otherwise the turn runs under a fresh run id in the bot's
+    history scope, ignores its delivery start, prepares its runtime from ``request``, and records into the recorder
+    the runner gives such a turn.
     """
     driver = runner._process_and_respond_streaming if streaming else runner._process_and_respond
+    runtime = options.pop("runtime", None) or await runner.prepare_response_runtime(request)
     driver_options: dict[str, Any] = {
         "run_id": str(uuid.uuid4()),
         "on_delivery_started": lambda _event_id: None,
-        "attempt_run_id_collector": [],
+        "runtime": runtime,
+        "history_scope": runner.deps.state_writer.history_scope(),
     }
-    if "runtime" not in options:
-        driver_options["runtime"] = await runner.prepare_response_runtime(request)
+    if "turn_recorder" not in options:
+        driver_options["turn_recorder"] = agent_turn_recorder_for_test(runner, request, runtime)
     return await driver(request, **(driver_options | options))
 
 
@@ -593,7 +617,7 @@ def build_unseen_context_messages_for_test(
     """Build one turn's unseen thread context through ``_build_unseen_context_messages`` with a plain reply's options.
 
     ``options`` names the options a test sets; the others take the values a thread reply without a sender, display
-    names, timestamp, transient context, or attachments passes.
+    names, timestamp, transient context, or attachments passes, in UTC.
     """
     turn_options: dict[str, Any] = {
         "transient_context_messages": (),
@@ -602,6 +626,7 @@ def build_unseen_context_messages_for_test(
         "current_timestamp_ms": None,
         "prompt_event_id": None,
         "current_prompt_is_structured": False,
+        "timezone": "UTC",
         "attachment_context": None,
     }
     return _build_unseen_context_messages(prompt, thread_history, **(turn_options | options))
@@ -742,15 +767,20 @@ async def prepare_history_for_run_for_test(
             storage=storage,
             session=persisted_session,
             session_id=session_id,
+            storage_factory=lambda: storage,
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     else:
-        scope_context = load_scope_session(
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            scope=resolved_scope,
+        scope_context = (
+            load_scope_session(
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                scope=resolved_scope,
+            )
+            if session_id is not None
+            else None
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     return finalize_history_preparation(
@@ -3706,6 +3736,23 @@ def squad_probe() -> Iterator[type["ProbeToolkit"]]:
 
     with registered_probe() as toolkit:
         yield toolkit
+
+
+def unstored_team_scope_context(
+    config: Config,
+    member_names: Sequence[str],
+    *,
+    team_name: str | None,
+) -> ScopeSessionContext:
+    """Return the scope context of a team with no stored session, whose store keeps nothing, for building a team."""
+    storage = MagicMock()
+    return ScopeSessionContext(
+        scope=resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name),
+        storage=storage,
+        session=None,
+        session_id="session-1",
+        storage_factory=lambda: storage,
+    )
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

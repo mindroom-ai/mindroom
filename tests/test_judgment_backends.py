@@ -189,18 +189,13 @@ async def test_backends_share_capacity_and_cancellation_releases_it(
 
 def _gemini_config(respond: Callable[[httpx.Request], httpx.Response], *, vertexai: bool) -> Config:
     """Return a config whose ``cheap`` model is Gemini 3.8 Flash answering through ``respond``."""
-    extra_kwargs: dict[str, object] = {
-        "client_params": {
-            "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
-        },
+    client_params: dict[str, object] = {
+        "http_options": {"httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond))},
     }
+    extra_kwargs: dict[str, object] = {"client_params": client_params}
     if vertexai:
-        extra_kwargs |= {
-            "vertexai": True,
-            "project_id": "test-project",
-            "location": "us-central1",
-            "credentials": Credentials(token="test-token"),  # noqa: S106 - synthetic SDK credential
-        }
+        client_params["credentials"] = Credentials(token="test-token")  # noqa: S106 - synthetic SDK credential
+        extra_kwargs |= {"vertexai": True, "project_id": "test-project", "location": "us-central1"}
     model = ModelConfig(
         provider="google",
         id="gemini-3.8-flash",

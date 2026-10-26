@@ -47,7 +47,7 @@ from mindroom.tool_jobs.execution_authority import (
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.agno_toolkits import read_tool_value
@@ -379,7 +379,6 @@ async def _run_managed_call(
     baseline = deepcopy(detached.context.session_state)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(function.name, dict(detached.arguments))
-    reference = scope.resources.acquire()
 
     async def ask_approval() -> tuple[bool, str | None]:
         # The policy and approver current when the job asks decide, as for a paused reply.
@@ -395,7 +394,9 @@ async def _run_managed_call(
     approval = ask_approval if job_approval else None
     claim = None
     retained = False
+    reference: ExecutionResourceReference | None = None
     try:
+        reference = scope.resources.acquire()
         _, claim = await runtime.start(
             job_id,
             tool_name=function.name,
@@ -430,16 +431,19 @@ async def _run_managed_call(
             retained = True
             # Every outcome but completion tells the model why, such as the reason an approval was denied.
             error = None if waited.job.status == "completed" else job_failure_text(value, payload)
-        # A released wait's call returned its job handle, which names the job a restart's account points to.
-        await record_return(value if error is None else error)
-    except JobAccessError as refused:
-        # The runtime refused the job, or this caller's wait for it: the call fails, not the reply's run.
-        await record_return(str(refused))
+        # A released wait's call returned its job handle, which names the job a restart's account points to. A
+        # failed call is recorded as failed, with the text the model reads.
+        await record_return(value if error is None else ToolOutcome(content=error, is_error=True))
+    except Exception as failure:
+        # The call fails with what ended it, as the model reads it, such as the runtime refusing the job or this
+        # caller's wait for it, which fails the call, not the reply's run. A cancelled call stays started, since its
+        # job may still take effect.
+        await record_return(ToolOutcome(content=failure_text(failure), is_error=True))
         raise
     finally:
         if not retained:
             await runtime.release_wait(job_id, claim)
-        if not runtime.owns_execution(job_id, adapter):
+        if reference is not None and not runtime.owns_execution(job_id, adapter):
             await reference.release()
     if error is not None:
         raise _JobCallError(error)

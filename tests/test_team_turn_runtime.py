@@ -3,8 +3,9 @@
 The seam is ``run_team`` fed by scripted providers behind the production member and leader builders: what a team
 reply streams and renders, what it stores, how a member's approval pauses and resumes it, which scope its members'
 tools address, and how it ends when a member is stopped. The last tests drive turns through ``ResponseRunner``, the
-lifecycle owner: it writes the interrupted-turn record after the loop stored its own terminal record, and it posts the
-approval cards of a member's gated delegations and resumes the turn they approve.
+lifecycle owner: it dates a turn in the zone of the entity whose bot runs it, it writes the interrupted-turn record
+after the loop stored its own terminal record, and it posts the approval cards of a member's gated delegations and
+resumes the turn they approve.
 """
 # ruff: noqa: D103
 
@@ -15,8 +16,9 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 from agno.tools import Toolkit
 
@@ -26,9 +28,11 @@ from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
@@ -36,6 +40,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
@@ -43,6 +48,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
+from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -56,13 +62,15 @@ from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import carries_approval_receipt, receipt_call_ids, request_call_ids
-from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
+from tests.bot_helpers import make_test_agent_bot, make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_runtime_journal_support,
     make_matrix_client_mock,
+    make_pending_event,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
 )
@@ -91,9 +99,10 @@ from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
-    from mindroom.bot import TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import ApprovalCall, MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -676,7 +685,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     captured: dict[str, Any] = {}
     # Every member's hooks come from the same builder; the leader's compaction is the one built for the team.
     compactions: list[dict[str, Any]] = []
-    real_run_team = envelope.run_team
+    real_run_team = leader_module.run_team
     real_compaction_hook = loop_hooks.mid_turn_compaction_hook
 
     def capture_run_team(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -687,7 +696,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
         compactions.append(kwargs)
         return real_compaction_hook(**kwargs)
 
-    monkeypatch.setattr(envelope, "run_team", capture_run_team)
+    monkeypatch.setattr(leader_module, "run_team", capture_run_team)
     monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capture_compaction_hook)
 
     await team.stream()
@@ -710,6 +719,9 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
 async def _pause_on_the_checker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool = True,
+    show_tool_calls: bool = False,
 ) -> tuple[TeamTurn, ResponsePausedForApproval]:
     team = squad_turn(
         tmp_path,
@@ -719,7 +731,7 @@ async def _pause_on_the_checker(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.stream(show_tool_calls=False)
+        await team.reply(stream=stream, show_tool_calls=show_tool_calls)
     return team, raised.value
 
 
@@ -762,54 +774,39 @@ _TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 @pytest.mark.parametrize(
-    ("show_tool_calls", "text", "checker_slot", "consensus_slot", "separators"),
+    ("show_tool_calls", "text", "checker_slot", "consensus_slot"),
     [
         pytest.param(
             True,
-            f"{HEADER}**Checker**: {_MEMBER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n\n"
-            f"**Team Consensus**:\n\n{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]",
-            f"{_MEMBER_PAUSED}\n\n🔧 `touch` [1] ⏳\n\n",
-            f"{_TEAM_PAUSED}\n\n🔧 `delegate_task_to_member` [2]\n\n",
-            None,
+            f"{HEADER}**Checker**:\n\n🔧 `touch` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]",
+            "\n\n🔧 `touch` [1] ⏳\n\n",
+            "\n\n🔧 `delegate_task_to_member` [2]\n\n",
             id="tool-calls-shown",
         ),
-        pytest.param(
-            False,
-            f"{HEADER}**Checker**: {_MEMBER_PAUSED}\n\n\n**Team Consensus**:\n\n{_TEAM_PAUSED}",
-            _MEMBER_PAUSED,
-            _TEAM_PAUSED,
-            ["agent:checker", "team"],
-            id="tool-calls-hidden",
-        ),
+        # With tool calls hidden and no text yet, the pause shows no document of its own.
+        pytest.param(False, "", "", "", id="tool-calls-hidden"),
     ],
 )
-async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_notices(
+async def test_a_team_pause_shows_the_document_its_events_built_without_paused_notices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
     show_tool_calls: bool,
     text: str,
     checker_slot: str,
     consensus_slot: str,
-    separators: list[str] | None,
 ) -> None:
-    """A blocking pause renders its runs' records, not its events' document.
+    """A blocking pause shows the document its run's events built, as a streamed pause does.
 
-    Each slot holds its run's text first, the member's and the leader's paused notices included, and then the run's
-    tool calls, the member's gated call still pending. The snapshot the resume continues holds the same slots.
+    The member and the leader paused without text of their own, so their runs hold the paused notices, which the
+    pause does not show. The snapshot the resume continues holds the same slots.
     """
-    team = squad_turn(
-        tmp_path,
-        monkeypatch,
-        leader=[delegate("call-team", "checker", "Touch it")],
-        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
-        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
-    )
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
 
-    with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.respond(show_tool_calls=show_tool_calls)
-
-    paused = raised.value.paused
+    paused = raised.paused
     assert paused.response_text == text
     assert [(entry.tool_name, entry.scope_key, entry.type) for entry in paused.tool_trace] == [
         ("touch", "agent:checker", "tool_call_started"),
@@ -818,16 +815,43 @@ async def test_a_blocking_team_pause_shows_its_runs_records_with_their_paused_no
     state = paused.response_presentation_state
     assert [member["content"] for member in state["members"]] == ["", checker_slot]
     assert state["consensus"] == consensus_slot
-    assert state.get("separate_next_scopes") == separators
+    record, [member] = team.stored_runs()
+    assert (record.content, member.content) == (_TEAM_PAUSED, _MEMBER_PAUSED)
     assert team.recorder.outcome == "suspended"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+@pytest.mark.parametrize(
+    ("show_tool_calls", "body"),
+    [
+        pytest.param(
+            True,
+            "**Checker**:\n\n🔧 `touch` [1]\n\nTouched.\n\n\n"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nThe checker touched it.",
+            id="tool-calls-shown",
+        ),
+        pytest.param(
+            False,
+            "**Checker**: Touched.\n\n\n**Team Consensus**:\n\nThe checker touched it.",
+            id="tool-calls-hidden",
+        ),
+    ],
+)
 async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_the_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+    show_tool_calls: bool,
+    body: str,
 ) -> None:
-    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    """A blocking reply and a streamed one end alike: each run's text after its approval, and no paused notice.
+
+    The member and the leader paused without text of their own, so their runs held the paused notices, which no
+    longer hold once the approved call ran.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 
@@ -835,11 +859,12 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
         raised.paused,
         approved=True,
         approvals=(member_approval("call-touch", "dangerous"),),
+        show_tool_calls=show_tool_calls,
     )
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
-    assert result.response_text == f"{HEADER}**Checker**: Touched.\n\n\n**Team Consensus**:\n\nThe checker touched it."
+    assert result.response_text == HEADER + body
     assert result.metadata_content["io.mindroom.ai_run"]["status"] == "completed"
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
@@ -850,6 +875,86 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert team.models["default"].requests[-1].messages[-1].content == (
         "Member results after human-in-the-loop resolution:\n[Checker]: Touched."
     )
+
+
+class _HandOffProbe(ProbeToolkit):
+    """The squad's probe toolkit plus ``hand_off``, a call executed outside the agent loop, which nothing answers."""
+
+    def __init__(self) -> None:
+        Toolkit.__init__(
+            self,
+            name="probe",
+            tools=[self.touch, self.scope, self.dig, self.model, self.hand_off],
+            external_execution_required_tools=["hand_off"],
+        )
+
+    async def hand_off(self) -> str:
+        """Hand the work to an external executor."""
+        return "handed off"
+
+
+@pytest.mark.asyncio
+async def test_a_team_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member that pauses again on an externally executed call no approval asks about fails the team's resume."""
+    with registered_toolkit(PROBE_TOOL, _HandOffProbe):
+        team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+        team.models["checker-model"] = ScriptedModel([calls(tool_call("hand_off", "call-hand"))])
+
+        # The failure names the call the team waits for, not the generic note it gave before.
+        with pytest.raises(RuntimeError, match=r"team run 'run-1' paused on \['hand_off'\] without an approval"):
+            await team.resume(
+                raised.paused,
+                approved=True,
+                approvals=(member_approval("call-touch", "dangerous"),),
+            )
+
+    assert ProbeToolkit.calls == ["dangerous"]
+    record, _members = team.stored_runs()
+    assert record.status is RunStatus.paused
+
+
+@pytest.mark.asyncio
+async def test_a_member_resumed_by_an_approval_stores_to_the_team_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member's calls after its approved call address the team's history, as its calls before the pause did."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("Done.")])
+    team.models["checker-model"] = ScriptedModel([calls(tool_call("scope", "call-scope")), answer("Touched.")])
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.scopes == ["team:squad"]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_team_approval_resumes_the_run_in_the_scope_its_approval_retained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team no longer configured resumes from the storage its approval retained, not the scope it resolves to now."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("The checker touched it.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    del team.config.teams["squad"]
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous"]
 
 
 @pytest.mark.asyncio
@@ -1116,41 +1221,19 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("leader", "writer", "body"),
-    [
-        pytest.param(
-            [delegate("call-write", "writer", "Write it up"), answer("Done.")],
-            [[Await(_writer_unavailable)]],
-            "**Writer**: Writer unavailable\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\nDone.",
-            id="completed",
-        ),
-        pytest.param(
-            [delegate("call-write", "writer", "Touch it too")],
-            [calls(tool_call("touch", "call-touch-2", label="risky"))],
-            f"**Writer**: {_MEMBER_PAUSED}\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\n"
-            "Team run paused. The following require input:\n- Writer: touch requires confirmation",
-            id="paused-again",
-        ),
-    ],
-)
 async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_streamed_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    leader: list[list[ScriptStep]],
-    writer: list[list[ScriptStep]],
-    body: str,
 ) -> None:
     """A resume shows each run's content in a slot that streamed no text of its own, as the Agno-backed resume did.
 
     The approved checker's streamed answer stands as it streamed. The writer the resumed leader then hands a task
-    streams nothing: its error, or its paused notice when its own call pauses the team again, fills its slot, and a
-    leader that streamed nothing before that pause shows its paused notice as the consensus.
+    streams nothing, and its error fills its slot.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
-    team.models["default"] = ScriptedModel(leader)
+    team.models["default"] = ScriptedModel([delegate("call-write", "writer", "Write it up"), answer("Done.")])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
-    team.models["writer-model"] = ScriptedModel(writer)
+    team.models["writer-model"] = ScriptedModel([[Await(_writer_unavailable)]])
 
     result = await team.resume(
         raised.paused,
@@ -1159,7 +1242,42 @@ async def test_an_approved_resume_shows_each_run_s_content_in_a_slot_that_stream
     )
 
     assert ProbeToolkit.calls == ["dangerous"]
-    assert result.response_text == HEADER + body
+    assert result.response_text == (
+        HEADER + "**Writer**: Writer unavailable\n\n**Checker**: Touched.\n\n\n**Team Consensus**:\n\nDone."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_notice_through_the_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """A resume that pauses again on a call of the writer shows no paused notice, nor does the reply it completes.
+
+    The writer the resumed leader hands a task pauses on its own gated call without text, so its run and the leader's
+    hold paused notices naming that call, which no earlier pause showed. A blocking reply and a streamed one end alike.
+    """
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream)
+    team.models["default"] = ScriptedModel([delegate("call-write", "writer", "Touch it too"), answer("Both touched.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="risky")), answer("")])
+
+    repaused = await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
+    assert isinstance(repaused, PausedAttempt)
+    assert repaused.response_text == (
+        f"{HEADER}**Checker**: Touched.\n\n\n*No team consensus - showing individual responses only*"
+    )
+    writer_call = replace(member_approval("call-touch-2", "risky"), invoking_agent="writer")
+    result = await team.resume(repaused, approved=True, approvals=(writer_call,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous", "risky"]
+    assert result.response_text == f"{HEADER}**Checker**: Touched.\n\n\n**Team Consensus**:\n\nBoth touched."
+    record, _members = team.stored_runs()
+    assert record.status is RunStatus.completed
 
 
 _KEY = "api_key=unit-test-secret"
@@ -1320,13 +1438,17 @@ async def test_a_streamed_team_reply_shows_a_failed_member_run_s_reason_after_th
 
 
 @pytest.mark.asyncio
-async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it_streamed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
 ) -> None:
-    """The document a live streamed pause shows, and its resume continues, holds a failed member run's reason.
+    """The document a live pause shows, and its resume continues, holds a failed member run's reason.
 
-    The checker fails after writing; the writer the leader then hands a task pauses on its gated call.
+    The checker fails after writing; the writer the leader then hands a task pauses on its gated call. A blocking
+    pause shows the same document as a streamed one.
     """
     team = squad_turn(
         tmp_path,
@@ -1338,7 +1460,7 @@ async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_th
     )
 
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.stream(show_tool_calls=False)
+        await team.reply(stream=stream, show_tool_calls=False)
 
     paused = raised.value.paused
     slot = "Checking it\n\nChecker unavailable: api_key=***redacted***"
@@ -1351,6 +1473,8 @@ async def test_a_streamed_team_pause_shows_a_failed_member_run_s_reason_after_th
 async def _pause_after_the_checker_wrote(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool = True,
 ) -> tuple[TeamTurn, PausedAttempt]:
     """Pause the team on the checker's gated call after the leader and the checker each wrote a sentence."""
     team = squad_turn(
@@ -1366,12 +1490,11 @@ async def _pause_after_the_checker_wrote(
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
     with pytest.raises(ResponsePausedForApproval) as raised:
-        await team.stream(show_tool_calls=False)
+        await team.reply(stream=stream, show_tool_calls=False)
     return team, raised.value.paused
 
 
 _WROTE_BEFORE_THE_PAUSE = f"{HEADER}**Checker**: Let me touch it.\n\n\n**Team Consensus**:\n\nAsking the checker."
-_CHECKER_PAUSED_AGAIN = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
 
 
 @pytest.mark.asyncio
@@ -1451,7 +1574,7 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 ) -> None:
     """A member whose approved call leads only to another gated call keeps its earlier text once in the new pause.
 
-    The leader sends no request while its member waits, and its paused notice says what the team waits for.
+    The leader sends no request while its member waits, so its run holds a paused notice, which the pause does not show.
     """
     team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel([])
@@ -1461,22 +1584,25 @@ async def test_a_member_that_pauses_again_after_approval_shows_its_earlier_text_
 
     assert isinstance(repaused, PausedAttempt)
     assert ProbeToolkit.calls == ["dangerous"]
-    assert repaused.response_text == f"{_WROTE_BEFORE_THE_PAUSE}\n\n{_CHECKER_PAUSED_AGAIN}"
+    assert repaused.response_text == _WROTE_BEFORE_THE_PAUSE
     state = repaused.response_presentation_state
     assert [member["content"] for member in state["members"]] == ["", "Let me touch it."]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
 ) -> None:
-    """Two approvals in a row show the text the checker wrote before the first pause once.
+    """Two approvals in a row show the text the checker wrote before the first pause once, and no paused notice.
 
     Its first approved call leads only to a second gated call, and after the second it answers without text, as
-    the leader does; the leader's paused notice from the second pause stays.
+    the leader does. A blocking reply and a streamed one end alike.
     """
-    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch)
+    team, paused = await _pause_after_the_checker_wrote(tmp_path, monkeypatch, stream=stream)
     team.models["default"] = ScriptedModel([answer("")])
     team.models["checker-model"] = ScriptedModel([calls(tool_call("touch", "call-touch-2", label="again")), answer("")])
 
@@ -1486,7 +1612,7 @@ async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
-    assert result.response_text == f"{_WROTE_BEFORE_THE_PAUSE}\n\n{_CHECKER_PAUSED_AGAIN}"
+    assert result.response_text == _WROTE_BEFORE_THE_PAUSE
 
 
 @pytest.mark.asyncio
@@ -2354,17 +2480,19 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
     )
 
 
-def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:
+def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:
     """Build the squad's team bot on the team's config, with a mocked Matrix client and inert post-response effects.
 
-    A completed reply would otherwise queue a thread summary on the config's real ``default`` model.
+    A completed reply would otherwise queue a thread summary on the config's real ``default`` model. An agent
+    ``entity`` builds that agent's bot instead, which runs a team request as an ad hoc team.
     """
-    bot = make_test_team_bot(
+    make_bot = make_test_team_bot if entity in team.config.teams else make_test_agent_bot
+    bot = make_bot(
         AgentMatrixUser(
-            agent_name="squad",
+            agent_name=entity,
             password=TEST_PASSWORD,
-            display_name="Squad",
-            user_id="@mindroom_squad:localhost",
+            display_name=entity.title(),
+            user_id=f"@mindroom_{entity}:localhost",
         ),
         tmp_path,
         team.config,
@@ -2372,7 +2500,7 @@ def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:
         rooms=[ROOM_ID],
     )
     install_direct_response_admission(bot)
-    bot.client = make_matrix_client_mock(user_id="@mindroom_squad:localhost")
+    bot.client = make_matrix_client_mock(user_id=f"@mindroom_{entity}:localhost")
     unique_room_send_responses(bot.client)
     install_runtime_journal_support(bot)
     _install_inert_post_response_effects(bot._response_runner)
@@ -2402,6 +2530,120 @@ def _request(prompt: str = "Hello") -> ResponseRequest:
         ),
         sources=ResponseSources(pending_event_ids=(EVENT_ID,), logical_source_event_ids=(EVENT_ID,)),
     )
+
+
+# 2026-03-20 15:00 UTC, which is 08:00 in Los Angeles.
+_OLDER_MESSAGE_MS = 1_774_018_800_000
+
+
+def _older_thread_history(bot: AgentBot) -> AbstractContextManager[object]:
+    """Serve the thread as one older message from the requester, which the turn reads once it owns the thread."""
+    history = [make_visible_message(sender=REQUESTER_ID, body="older text", timestamp=_OLDER_MESSAGE_MS)]
+    return patch.object(
+        bot._conversation_resolver,
+        "fetch_thread_history",
+        new=AsyncMock(return_value=ThreadHistoryResult(history, is_full_history=True)),
+    )
+
+
+def _leader_request_text(team: TeamTurn, model: str) -> tuple[str, str]:
+    """Return the leader's first request on ``model`` as the text of its system messages and of every other message."""
+    messages = team.models[model].requests[0].messages
+    system = [message for message in messages if message.role == "system"]
+    rest = [message for message in messages if message.role != "system"]
+    return "\n".join(str(message.content) for message in system), "\n".join(str(message.content) for message in rest)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coalesced", [True, False], ids=["coalesced", "single"])
+async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_runs_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coalesced: bool,
+) -> None:
+    """An ad hoc team turn on the writer's bot uses the writer's zone for every time the leader sees.
+
+    The message tags of a coalesced batch or of a single message, the thread history, and the leader's date line all
+    read Los Angeles time, though the global timezone is UTC. The leader of a team the writer's bot runs uses the
+    writer's model.
+    """
+    team = squad_turn(tmp_path, monkeypatch, leader=[], writer=[answer("Done.")])
+    team.config.agents["writer"].timezone = "America/Los_Angeles"
+    bot = _team_bot(team, tmp_path, "writer")
+    room = nio.MatrixRoom(ROOM_ID, "@mindroom_writer:localhost")
+    messages = [
+        ("$first:localhost", "first", _OLDER_MESSAGE_MS + 900_000),
+        (EVENT_ID, "second", _OLDER_MESSAGE_MS + 960_000),
+    ]
+    batch = build_prepared_turn(
+        CoalescingKey(ROOM_ID, THREAD_ID, RequesterCoalescingOwner(REQUESTER_ID)),
+        [
+            make_pending_event(
+                nio.RoomMessageText.from_dict(
+                    {
+                        "content": {"body": body, "msgtype": "m.text"},
+                        "event_id": event_id,
+                        "sender": REQUESTER_ID,
+                        "origin_server_ts": timestamp_ms,
+                        "room_id": ROOM_ID,
+                        "type": "m.room.message",
+                    },
+                ),
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=REQUESTER_ID,
+            )
+            for event_id, body, timestamp_ms in (messages if coalesced else messages[1:])
+        ],
+        timestamp_formatter=bot._coalescing_gate._timestamp_formatter,
+    )
+    assert batch.current_prompt_is_structured is coalesced
+    request = _request(batch.event.body)
+    request = replace(
+        request,
+        response_envelope=replace(request.response_envelope, agent_name="writer"),
+        current_prompt_is_structured=batch.current_prompt_is_structured,
+        current_timestamp_ms=_OLDER_MESSAGE_MS + 960_000,
+    )
+
+    with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
+        await bot._response_runner.generate_team_response_helper(
+            request,
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+
+    system, turn = _leader_request_text(team, "writer-model")
+    assert "Timezone: America/Los_Angeles (" in system
+    assert ('ts="2026-03-20 08:15 PDT"' in turn) is coalesced
+    assert 'ts="2026-03-20 08:16 PDT"' in turn
+    assert "[2026-03-20 08:00 PDT] older text" in turn
+    assert "UTC" not in turn
+
+
+@pytest.mark.asyncio
+async def test_a_configured_team_turn_is_dated_in_the_global_zone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured team has no zone of its own, so its turn uses the global one even when a member has another."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.")])
+    team.config.agents["writer"].timezone = "America/Los_Angeles"
+    request = replace(_request("What changed?"), current_timestamp_ms=_OLDER_MESSAGE_MS + 960_000)
+    bot = _team_bot(team, tmp_path)
+
+    with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
+        await bot._response_runner.generate_team_response_helper(
+            request,
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+
+    system, turn = _leader_request_text(team, "default")
+    assert "Timezone: UTC (UTC)" in system
+    assert 'ts="2026-03-20 15:16 UTC"' in turn
+    assert "[2026-03-20 15:00 UTC] older text" in turn
+    assert "PDT" not in turn
 
 
 @pytest.mark.asyncio
@@ -2466,7 +2708,7 @@ async def _approving_team_bot(
     tmp_path: Path,
     *,
     streaming: bool = True,
-) -> AsyncIterator[tuple[TeamBot, list[MatrixDelivery]]]:
+) -> AsyncIterator[tuple[AgentBot, list[MatrixDelivery]]]:
     """Yield the squad's team bot with its approval cards published into the yielded list, the n-th as ``$card-n``."""
     bot = _team_bot(team, tmp_path)
     cards: list[MatrixDelivery] = []
@@ -2501,7 +2743,7 @@ def _card_calls(cards: list[MatrixDelivery]) -> list[tuple[object, object]]:
     return [(card.payload["tool_name"], card.payload["tool_call_id"]) for card in cards]
 
 
-async def _approve(bot: TeamBot, card_event_id: str) -> None:
+async def _approve(bot: AgentBot, card_event_id: str) -> None:
     """Approve one card as the requester does, then hand the request's source to the readied resume, as the journal does."""
     manager = get_approval_store()
     assert manager is not None
@@ -2519,7 +2761,7 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
     await runner.wait_for_source_owned_inbox_responses()
 
 
-def _shown(bot: TeamBot) -> str:
+def _shown(bot: AgentBot) -> str:
     """Return what the reply shows now: the body of its last send or edit."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
     return str(content.get("m.new_content", content)["body"])

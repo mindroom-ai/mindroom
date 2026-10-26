@@ -152,6 +152,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         matrix_admin=matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
         responder_candidates_for_room=context.responder_candidates_for_current_room,
+        agent_name=context.agent_name,
     )
     config_providers = []
     for call_kwargs in (first_call, second_call, third_call):
@@ -314,6 +315,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         conversation_reader=context.conversation_reader,
         agent_reply_memberships=context.agent_reply_memberships,
         responder_candidates_for_room=context.responder_candidates_for_current_room,
+        agent_name=context.agent_name,
     )
     assert mock_edit.await_count == 3
     first_call = mock_edit.await_args_list[0].kwargs.copy()

@@ -10,7 +10,6 @@ import hashlib
 import inspect
 import json
 import math
-import os
 import secrets
 from contextlib import suppress
 from dataclasses import asdict, dataclass
@@ -200,13 +199,7 @@ def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
 
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves, by default the retained media limit."""
-    # TODO(simplify): Unlike other runtime settings, this falls back to the live os.environ after the runtime's env.
-    # Read it with runtime_paths.env_value alone. Operators who set it only outside the runtime's env would notice.
-    raw_value = (
-        runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV)
-        or os.environ.get(INLINE_ATTACHMENT_BYTES_ENV)
-        or str(RETAINED_MEDIA_MAX_BYTES)
-    )
+    raw_value = runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV) or str(RETAINED_MEDIA_MAX_BYTES)
     try:
         limit = int(raw_value)
     except ValueError:

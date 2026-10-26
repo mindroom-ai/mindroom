@@ -35,7 +35,6 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
     BuiltTeam,
-    ResolvedExactTeamMembers,
     build_team_spec,
     materialize_exact_team_members,
 )
@@ -44,7 +43,13 @@ from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    seed_session,
+    unstored_team_scope_context,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
 from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
@@ -104,10 +109,12 @@ def _build_pair(
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime_paths,
-        scope_context=scope_context,
+        scope_context=scope_context
+        or unstored_team_scope_context(config, ["zeta", "alpha"], team_name=configured_team_name),
         execution_identity=None,
         model_name="default",
         configured_team_name=configured_team_name,
+        timezone="UTC",
     )
 
 
@@ -155,7 +162,6 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
         ) as mock_finalize,
     ):
         prepared_scope_history = await prepare_bound_scope_history(
-            member_names=["zeta", "alpha"],
             model=built.spec.leader.model,
             runtime_paths=runtime_paths,
             config=config,
@@ -288,20 +294,16 @@ def test_the_team_build_names_its_leader_by_the_members_label_and_identifies_it_
     config, runtime_paths = _pair_config(tmp_path)
 
     ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
-    # A team that names no member has no history scope, so its label identifies it.
-    memberless = build_team_spec(
-        members=ResolvedExactTeamMembers(requested_agent_names=[], builds=[], display_names=[], failed_agent_names=[]),
-        mode=TeamMode.COORDINATE,
-        config=config,
-        runtime_paths=runtime_paths,
-        scope_context=None,
-        execution_identity=None,
-        model_name="default",
-        configured_team_name=None,
-    )
 
     assert (ad_hoc.spec.leader.id, ad_hoc.spec.leader.name) == ("team_alpha+zeta", "Team (Zeta, Alpha)")
-    assert (memberless.spec.leader.id, memberless.spec.leader.name) == ("Team ()", "Team ()")
+
+
+def test_an_ad_hoc_team_that_names_no_member_has_no_history_scope(tmp_path: Path) -> None:
+    """Every team run names a member, so an ad hoc team that names none is refused rather than run without history."""
+    config, _runtime_paths = _pair_config(tmp_path)
+
+    with pytest.raises(ValueError, match="names no member"):
+        resolve_bound_team_scope(member_names=[], config=config, team_name=None)
 
 
 _PAST_2_ONLY = ["past-2 team question", "past-2 team answer"]
@@ -438,6 +440,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         storage=MagicMock(),
         session=None,
         session_id="session-1",
+        storage_factory=lambda: MagicMock(),
     )
 
     with patch(
@@ -445,7 +448,6 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         new=AsyncMock(return_value=MagicMock()),
     ) as mock_prepare:
         await prepare_bound_scope_history(
-            member_names=["private_worker", "shared"],
             model=estimate_only_model(),
             runtime_paths=runtime_paths,
             config=config,

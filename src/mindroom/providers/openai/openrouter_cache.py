@@ -99,7 +99,7 @@ def request_kwargs_with_prompt_cache(
     conversation = prepared[system_count:]
     # Only messages that receive a marker keep the text-part form; others stay unchanged.
     candidates = [_with_text_part_content(message) for message in conversation]
-    marked, _ = mark_message_cache_rungs(candidates, cache_control, MESSAGE_RUNG_COUNT)
+    marked = mark_message_cache_rungs(candidates, cache_control, MESSAGE_RUNG_COUNT)
     prepared[system_count:] = [
         original if marked_message is candidate else marked_message
         for original, candidate, marked_message in zip(conversation, candidates, marked, strict=True)

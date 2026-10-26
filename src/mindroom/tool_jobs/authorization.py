@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_policy import resolve_agent_policy_from_data
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -86,6 +87,10 @@ def locally_allowed(
         None,
     )
     if entry is None or (entry.name == "memory" and view.memory_backend == "none"):
+        return False
+    # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.
+    edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+    if edits_graph and not config.agent_edits_knowledge_graph(owner.agent_name):
         return False
     return _configured_tool_allowed(config, owner, entry, tool_name, origin, construction)
 

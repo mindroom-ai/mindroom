@@ -45,6 +45,9 @@ class ToolTraceEntry:
     scope_key: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
+    # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
+    # the identity above: the reply's records keep it, and public Matrix metadata omits it.
+    is_error: bool = field(default=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -128,6 +131,7 @@ class StreamingToolTracker:
         existing_entry.type = "tool_call_completed"
         existing_entry.result_preview = completed_trace.result_preview
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated
+        existing_entry.is_error = completed_trace.is_error
         return True
 
     def restore_pending(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
@@ -720,8 +724,10 @@ def format_tool_combined(
     tool_args: dict[str, object],
     result: object | None,
     tool_index: int | None = None,
+    *,
+    is_error: bool = False,
 ) -> tuple[str, ToolTraceEntry]:
-    """Format a complete tool call marker and associated trace metadata."""
+    """Format a complete tool call marker and associated trace metadata, marked failed when ``is_error``."""
     args_preview, truncated = _format_tool_args(tool_args)
     result_display = ""
     if result is not None and result != "":
@@ -734,6 +740,7 @@ def format_tool_combined(
         args_preview=args_preview or None,
         result_preview=result_display or None,
         truncated=truncated,
+        is_error=is_error,
     )
     return _format_tool_marker(tool_name, tool_index, pending=False), trace
 
@@ -782,8 +789,20 @@ def format_tool_started_event(
 
 def format_tool_completed_event(call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> ToolTraceEntry:
     """Return a tool-call completion's trace metadata."""
-    _, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result)
+    _, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result, is_error=call.is_error is True)
     return _identified(trace, call, origin)
+
+
+def _internal_fields(entry: ToolTraceEntry) -> dict[str, object]:
+    """Return the restart-only fields an entry sets: its identity, where a hidden CLI call ran, and its failure."""
+    fields: dict[str, object] = {
+        "parent_bash_call_id": entry.parent_bash_call_id,
+        "toolkit_name": entry.toolkit_name,
+        "tool_call_id": entry.tool_call_id,
+        "scope_key": entry.scope_key,
+        "is_error": entry.is_error or None,
+    }
+    return {key: value for key, value in fields.items() if value is not None}
 
 
 def serialize_tool_trace(
@@ -791,7 +810,7 @@ def serialize_tool_trace(
     *,
     include_internal: bool = False,
 ) -> tuple[dict[str, object], ...]:
-    """Serialize trace entries, optionally retaining restart-only identity."""
+    """Serialize trace entries, optionally retaining restart-only identity and failure."""
     serialized: list[dict[str, object]] = []
     for entry in tool_trace:
         event: dict[str, object] = {
@@ -805,14 +824,7 @@ def serialize_tool_trace(
         if entry.truncated:
             event["truncated"] = True
         if include_internal:
-            if entry.parent_bash_call_id is not None:
-                event["parent_bash_call_id"] = entry.parent_bash_call_id
-            if entry.toolkit_name is not None:
-                event["toolkit_name"] = entry.toolkit_name
-            if entry.tool_call_id is not None:
-                event["tool_call_id"] = entry.tool_call_id
-            if entry.scope_key is not None:
-                event["scope_key"] = entry.scope_key
+            event.update(_internal_fields(entry))
         serialized.append(event)
     return tuple(serialized)
 
@@ -830,6 +842,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
         parent_bash_call_id = event.get("parent_bash_call_id")
         toolkit_name = event.get("toolkit_name")
         truncated = event.get("truncated")
+        is_error = event.get("is_error")
         if (
             not isinstance(event_type, str)
             or event_type not in {"tool_call_started", "tool_call_completed"}
@@ -842,6 +855,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
             or (parent_bash_call_id is not None and not isinstance(parent_bash_call_id, str))
             or (toolkit_name is not None and not isinstance(toolkit_name, str))
             or (truncated is not None and not isinstance(truncated, bool))
+            or (is_error is not None and not isinstance(is_error, bool))
         ):
             msg = "Durable tool trace contains a malformed event"
             raise RuntimeError(msg)
@@ -856,6 +870,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
                 scope_key=cast("str | None", scope_key),
                 parent_bash_call_id=parent_bash_call_id,
                 toolkit_name=toolkit_name,
+                is_error=is_error is True,
             ),
         )
     return restored

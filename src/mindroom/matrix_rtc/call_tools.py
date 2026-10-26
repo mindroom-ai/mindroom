@@ -796,7 +796,6 @@ async def _run_authorized_call_agent(
                     runtime_paths=runtime_paths,
                     config=config,
                     knowledge=knowledge_resolution.knowledge,
-                    on_attempt_start=lambda run_id, _model_name: recorder.set_run_id(run_id),
                     show_tool_calls=False,
                     run_metadata_collector=run_metadata,
                     execution_identity=execution_identity,
