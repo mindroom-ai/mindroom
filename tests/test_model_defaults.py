@@ -19,10 +19,11 @@ def test_default_model_strings_are_not_redeclared_in_source() -> None:
         model_defaults_path,
         repo_root / "src" / "mindroom" / "tools_metadata.json",
     }
+    # API paths such as ``/v1`` are URL fragments every endpoint contains, not default identifiers.
     model_strings = {
         value
         for name, value in vars(model_defaults).items()
-        if name.isupper()
+        if name.isupper() and not name.endswith("_API_PATH")
         if isinstance(value, str) and any(marker in value for marker in ("-", ".", "/", ":"))
     }
 
