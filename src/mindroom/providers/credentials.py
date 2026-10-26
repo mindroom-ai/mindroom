@@ -20,18 +20,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "dashboard_api_key",
+    "gemini_uses_vertexai",
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",
     "uses_alternative_auth",
 ]
 
-# Settings the provider adapters accept in place of ``api_key``; Gemini with ``vertexai: true``
-# authenticates with Google Cloud credentials instead.
+# Settings the provider adapters accept in place of ``api_key``.
 _ALTERNATIVE_AUTH_KWARGS: dict[str, tuple[str, ...]] = {
     "anthropic": ("auth_token",),
     "azure": ("azure_ad_token", "azure_ad_token_provider"),
-    "google": ("vertexai",),
 }
 
 
@@ -41,14 +40,24 @@ def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | Non
     return model_creds.get("api_key") if model_creds else None
 
 
-def uses_alternative_auth(model_config: ModelConfig) -> bool:
+def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a Gemini model runs on Vertex AI: ``extra_kwargs.vertexai``, else ``GOOGLE_GENAI_USE_VERTEXAI``."""
+    return bool((model_config.extra_kwargs or {}).get("vertexai")) or runtime_paths.env_flag(
+        "GOOGLE_GENAI_USE_VERTEXAI",
+    )
+
+
+def uses_alternative_auth(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
     """Return whether a model authenticates with a provider credential other than ``api_key``.
 
-    Such a model never falls back to the provider's shared key; the provider adapters build it with this rule.
+    Gemini on Vertex AI authenticates with Google Cloud credentials. Such a model never falls back to the provider's
+    shared key; the provider adapters build it with this rule.
     """
+    provider = provider_route(model_config.provider)
+    if provider == "google":
+        return gemini_uses_vertexai(model_config, runtime_paths)
     extra_kwargs = model_config.extra_kwargs or {}
-    alternative_kwargs = _ALTERNATIVE_AUTH_KWARGS.get(provider_route(model_config.provider), ())
-    return any(extra_kwargs.get(name) for name in alternative_kwargs)
+    return any(extra_kwargs.get(name) for name in _ALTERNATIVE_AUTH_KWARGS.get(provider, ()))
 
 
 def model_api_key(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
@@ -57,7 +66,7 @@ def model_api_key(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str
     A model that authenticates another way (``uses_alternative_auth``) never receives the shared key.
     """
     configured = model_config.configured_api_key()
-    if configured is not None or uses_alternative_auth(model_config):
+    if configured is not None or uses_alternative_auth(model_config, runtime_paths):
         return configured
     return get_api_key_for_provider(model_config.provider, runtime_paths=runtime_paths)
 
@@ -72,7 +81,7 @@ def model_uses_own_credential(model_name: str, model_config: ModelConfig, runtim
     """
     return bool(
         model_config.configured_api_key()
-        or uses_alternative_auth(model_config)
+        or uses_alternative_auth(model_config, runtime_paths)
         or dashboard_api_key(model_name, runtime_paths),
     )
 

@@ -24,7 +24,7 @@ from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
-from mindroom.providers.credentials import model_api_key
+from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -65,7 +65,6 @@ class GeminiProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: GeminiSettings
-    vertexai: bool
     _client: Client | None = field(default=None, init=False, repr=False)
     # Gemini keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
@@ -200,11 +199,13 @@ class GeminiProvider:
 
     def _client_params(self) -> dict[str, Any]:
         settings = self.settings
-        if self.vertexai:
-            params: dict[str, Any] = {"vertexai": True, "project": settings.project_id, "location": settings.location}
+        if settings.vertexai:
+            params: dict[str, Any] = {"project": settings.project_id, "location": settings.location}
         else:
             params = {"api_key": settings.api_key}
         params = {key: value for key, value in params.items() if value is not None}
+        # The route is always explicit, so google-genai never chooses it from its own environment variables.
+        params["vertexai"] = settings.vertexai
         if settings.timeout is not None:
             params["http_options"] = {"timeout": int(settings.timeout * 1000)}
         return {**params, **(settings.client_params or {})}
@@ -238,12 +239,14 @@ def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dic
 
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
-    """Build the adapter for a ``google`` or ``gemini`` model config."""
-    vertexai = bool((model_config.extra_kwargs or {}).get("vertexai")) or runtime_paths.env_flag(
-        "GOOGLE_GENAI_USE_VERTEXAI",
-    )
+    """Build the adapter for a ``google`` or ``gemini`` model config; its settings record the resolved route."""
+    vertexai = gemini_uses_vertexai(model_config, runtime_paths)
     # Vertex AI authenticates with Google Cloud credentials, so it never takes the shared key.
-    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": model_api_key(model_config, runtime_paths)}
+    extra_kwargs = {
+        **(model_config.extra_kwargs or {}),
+        "vertexai": vertexai,
+        "api_key": model_api_key(model_config, runtime_paths),
+    }
     if vertexai:
         extra_kwargs = _vertex_kwargs(extra_kwargs, runtime_paths)
     settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
@@ -256,7 +259,6 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
             ),
         ),
         settings=settings,
-        vertexai=vertexai,
     )
 
 

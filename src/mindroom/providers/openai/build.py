@@ -201,7 +201,7 @@ def _configured_key(route_key: str, model_config: ModelConfig, runtime: Provider
         return model_config.configured_api_key()
     key = model_api_key(model_config, runtime.runtime_paths)
     # Azure and Z.ai keys may also come straight from their variables, including the ``_FILE`` forms.
-    if key or uses_alternative_auth(model_config) or route_key not in _ROUTE_KEY_VARIABLES:
+    if key or uses_alternative_auth(model_config, runtime.runtime_paths) or route_key not in _ROUTE_KEY_VARIABLES:
         return key
     return get_secret_from_env(PROVIDER_ENV_KEYS[route_key], runtime_paths=runtime.runtime_paths)
 
@@ -456,7 +456,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
                 route_key,
                 settings,
                 api_key=api_key,
-                alternative_auth=uses_alternative_auth(model_config),
+                alternative_auth=uses_alternative_auth(model_config, runtime.runtime_paths),
                 base_url=base_url,
                 runtime=runtime,
             ),

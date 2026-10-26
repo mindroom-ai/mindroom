@@ -174,7 +174,7 @@ def test_gemini_uses_the_shared_google_key_except_on_vertex(tmp_path: Path, monk
 
     assert api.settings.api_key == "shared-key"
     assert vertex.settings.api_key is None
-    assert vertex.vertexai
+    assert vertex.settings.vertexai
     assert own.settings.api_key == "test-key"
     assert requested == ["gemini"]
 
@@ -246,6 +246,26 @@ async def test_gemini_use_vertexai_variable_selects_vertex_ai(tmp_path: Path) ->
     assert "/projects/test-project/locations/us-central1/" in str(seen[0].url)
 
 
+@pytest.mark.asyncio
+async def test_the_sdk_s_own_vertex_switches_do_not_move_a_gemini_api_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """google-genai gets MindRoom's Vertex AI choice, so variables only the SDK reads cannot switch the route."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_ENTERPRISE", "true")
+    seen: list[httpx.Request] = []
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return gemini_sse(_gemini_chunk({"text": "ok"}))
+
+    adapter = build_adapter(GEMINI, tmp_path, respond)
+    _completed([event async for event in adapter.stream(_request())])
+
+    assert seen[0].url.host == "generativelanguage.googleapis.com"
+    assert seen[0].headers["x-goog-api-key"] == "test-key"
+
+
 def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path: Path) -> None:
     """``OLLAMA_API_KEY`` in ``.env`` authenticates a model that configures no key."""
     (tmp_path / ".env").write_text("OLLAMA_API_KEY=env-key\n", encoding="utf-8")
@@ -262,7 +282,7 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
     """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
     adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
 
-    assert adapter._client_params() == {"api_key": "test-key", "http_options": {"timeout": 12500}}
+    assert adapter._client_params() == {"api_key": "test-key", "vertexai": False, "http_options": {"timeout": 12500}}
 
 
 @pytest.mark.asyncio

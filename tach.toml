@@ -6453,6 +6453,7 @@ from = ["mindroom.ai"]
 [[interfaces]]
 expose = [
     "dashboard_api_key",
+    "gemini_uses_vertexai",
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",

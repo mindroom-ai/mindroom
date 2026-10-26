@@ -167,7 +167,7 @@ With adaptive thinking, the notes these models write between tool calls are hidd
 Provider credentials come from environment variables, stored credentials, CLI logins, or a model-specific key.
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
-A model whose `extra_kwargs` authenticate another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or `vertexai: true` for `google` and `gemini`) never receives the shared key.
+A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
@@ -224,6 +224,7 @@ For `claude-sonnet-5-5`, use the [global endpoint or a supported multi-region en
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 For Gemini on Vertex AI (`provider: google` with `extra_kwargs.vertexai: true`), authenticate the same way and set `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, or pass `extra_kwargs.project_id` and `extra_kwargs.location`.
+Setting `GOOGLE_GENAI_USE_VERTEXAI=true` moves every `google` and `gemini` model to Vertex AI; `GOOGLE_GENAI_USE_ENTERPRISE` does not.
 
 `OPENAI_BASE_URL` is described in [Configuration — Model Providers](https://docs.mindroom.chat/configuration/#model-providers).
 

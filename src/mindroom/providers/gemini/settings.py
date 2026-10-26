@@ -16,6 +16,7 @@ class GeminiSettings:
     """The ``extra_kwargs`` a Gemini model accepts."""
 
     api_key: str | None = field(default=None, metadata=SECRET)
+    # The model builder records here whether ``vertexai`` or ``GOOGLE_GENAI_USE_VERTEXAI`` chose Vertex AI.
     vertexai: bool = False
     project_id: str | None = None
     location: str | None = None
