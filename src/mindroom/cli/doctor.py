@@ -263,7 +263,7 @@ def _validate_provider_key(
     api_key: str,
     base_url: str | None = None,
 ) -> tuple[bool | None, str]:
-    """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
+    """Validate an API key with the provider's key check, sent below a custom endpoint when one is set.
 
     A provider without a key check is never probed, at a custom endpoint either: its key style and a model list
     are unknown, so a probe could report a valid key as invalid.
@@ -274,7 +274,7 @@ def _validate_provider_key(
     check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
     if check is None:
         return None, "no key check for this provider"
-    url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
+    url, headers = check.request(api_key, endpoint=base_url)
     return _http_check(url, headers)
 
 

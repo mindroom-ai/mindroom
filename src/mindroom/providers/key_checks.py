@@ -23,26 +23,28 @@ __all__ = ["PROVIDER_KEY_CHECKS", "ProviderKeyCheck"]
 class ProviderKeyCheck:
     """One provider's key check: where it is sent and how the key travels.
 
-    ``header_name`` carries the key after ``header_prefix``; without one, the key travels as the ``key`` query
-    parameter, as Google's Gemini API takes it.
+    ``path`` is what the check reads below an OpenAI-compatible endpoint a model's config sets in place of the
+    provider's own. ``header_name`` carries the key after ``header_prefix``; without one, the key travels as the
+    ``key`` query parameter, as Google's Gemini API takes it.
     """
 
     url: str
     header_name: str | None
     header_prefix: str = ""
     extra_headers: tuple[tuple[str, str], ...] = ()
+    path: str = "/models"
 
-    def request(self, api_key: str, *, url: str | None = None) -> tuple[str, dict[str, str]]:
-        """Return the URL and headers that send ``api_key`` to ``url``, the check's own URL unless given."""
-        target = url or self.url
+    def request(self, api_key: str, *, endpoint: str | None = None) -> tuple[str, dict[str, str]]:
+        """Return the URL and headers that send ``api_key`` to the check's ``path`` below ``endpoint``, else to its URL."""
+        target = f"{endpoint.rstrip('/')}{self.path}" if endpoint else self.url
         headers = dict(self.extra_headers)
         if self.header_name is None:
             return f"{target}?key={api_key}", headers
         return target, {self.header_name: f"{self.header_prefix}{api_key}", **headers}
 
 
-def _bearer(url: str) -> ProviderKeyCheck:
-    return ProviderKeyCheck(url=url, header_name="Authorization", header_prefix="Bearer ")
+def _bearer(url: str, *, path: str = "/models") -> ProviderKeyCheck:
+    return ProviderKeyCheck(url=url, header_name="Authorization", header_prefix="Bearer ", path=path)
 
 
 # By route, as ``provider_route`` names it. No ``zai`` entry: Z.ai's paas/v4 API exposes no read a key check could
@@ -61,8 +63,8 @@ PROVIDER_KEY_CHECKS: dict[str, ProviderKeyCheck] = {
         url="https://generativelanguage.googleapis.com/v1beta/models",
         header_name=None,
     ),
-    # OpenRouter's key endpoint describes the key it is sent, so only a valid key reads it.
-    "openrouter": _bearer(f"{OPENROUTER_BASE_URL_DEFAULT}/key"),
+    # OpenRouter's key endpoint describes the key it is sent, so only a valid key reads it; its model list is public.
+    "openrouter": _bearer(f"{OPENROUTER_BASE_URL_DEFAULT}/key", path="/key"),
     "deepseek": _bearer(f"{DEEPSEEK_BASE_URL_DEFAULT}/v1/models"),
     "cerebras": _bearer(f"{CEREBRAS_HOST_DEFAULT}/v1/models"),
     "groq": _bearer(f"{GROQ_HOST_DEFAULT}/openai/v1/models"),

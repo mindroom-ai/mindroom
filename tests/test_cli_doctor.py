@@ -292,6 +292,13 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
         ("openai", {}, "OPENAI_BASE_URL=https://env-proxy.example/v1\n", "https://env-proxy.example/v1/models"),
         ("groq", {"base_url": "https://groq-proxy.example"}, "", "https://groq-proxy.example/openai/v1/models"),
         ("google", {}, "", "https://generativelanguage.googleapis.com/v1beta/models?key=k"),
+        # OpenRouter's model list is public, so its key is read back from the key endpoint at any endpoint.
+        (
+            "openrouter",
+            {"client_params": {"base_url": "https://openrouter.ai/api/v1"}},
+            "",
+            "https://openrouter.ai/api/v1/key",
+        ),
     ],
 )
 def test_doctor_checks_a_provider_key_at_the_endpoint_the_runtime_calls(
