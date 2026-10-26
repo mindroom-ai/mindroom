@@ -319,100 +319,126 @@
             {
               "description": "Create a calendar event and invite attendees.",
               "name": "calendar_create_event",
-              "parameters": {
-                "properties": {
-                  "attendees": {
-                    "description": "People to invite.",
-                    "items": {
-                      "properties": {
-                        "contact": {
-                          "properties": {
-                            "email": {
-                              "format": "email",
-                              "title": "Email",
-                              "type": "STRING"
-                            },
-                            "name": {
-                              "nullable": true,
-                              "type": "STRING"
-                            }
-                          },
-                          "required": [
-                            "email"
-                          ],
-                          "title": "Contact",
-                          "type": "OBJECT"
-                        },
-                        "optional": {
-                          "default": false,
-                          "title": "Optional",
-                          "type": "BOOLEAN"
-                        },
-                        "role": {
-                          "default": "guest",
-                          "enum": [
-                            "guest",
-                            "organizer"
-                          ],
-                          "title": "Role",
-                          "type": "STRING"
-                        }
-                      },
-                      "required": [
-                        "contact"
-                      ],
-                      "title": "Attendee",
-                      "type": "OBJECT"
-                    },
-                    "max_items": 50,
-                    "title": "Attendees",
-                    "type": "ARRAY"
-                  },
-                  "labels": {
-                    "description": "Free-form labels.",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Attendee": {
                     "properties": {
-                      "example_key": {
-                        "description": "Example key-value pair. This object can contain any number of keys with string values.",
-                        "type": "STRING"
+                      "contact": {
+                        "$ref": "#/$defs/Contact"
+                      },
+                      "optional": {
+                        "default": false,
+                        "title": "Optional",
+                        "type": "boolean"
+                      },
+                      "role": {
+                        "default": "guest",
+                        "enum": [
+                          "guest",
+                          "organizer"
+                        ],
+                        "title": "Role",
+                        "type": "string"
                       }
                     },
-                    "type": "OBJECT"
+                    "required": [
+                      "contact"
+                    ],
+                    "title": "Attendee",
+                    "type": "object"
                   },
-                  "location": {
-                    "nullable": true,
+                  "Contact": {
+                    "properties": {
+                      "email": {
+                        "format": "email",
+                        "title": "Email",
+                        "type": "string"
+                      },
+                      "name": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "title": "Name"
+                      }
+                    },
+                    "required": [
+                      "email"
+                    ],
+                    "title": "Contact",
+                    "type": "object"
+                  },
+                  "Location": {
                     "properties": {
                       "address": {
                         "title": "Address",
-                        "type": "STRING"
+                        "type": "string"
                       },
                       "room": {
                         "description": "Room inside the venue.",
-                        "nullable": true,
-                        "type": "STRING"
+                        "type": [
+                          "string",
+                          "null"
+                        ]
                       }
                     },
                     "required": [
                       "address"
                     ],
                     "title": "Location",
-                    "type": "OBJECT"
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "attendees": {
+                    "description": "People to invite.",
+                    "items": {
+                      "$ref": "#/$defs/Attendee"
+                    },
+                    "maxItems": 50,
+                    "title": "Attendees",
+                    "type": "array"
+                  },
+                  "labels": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Free-form labels.",
+                    "title": "Labels",
+                    "type": "object"
+                  },
+                  "location": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Location"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
                   },
                   "reminder_minutes": {
                     "default": 10,
-                    "maximum": 1440.0,
-                    "minimum": 0.0,
+                    "maximum": 1440,
+                    "minimum": 0,
                     "title": "Reminder Minutes",
-                    "type": "INTEGER"
+                    "type": "integer"
                   },
                   "starts_at": {
                     "format": "date-time",
                     "title": "Starts At",
-                    "type": "STRING"
+                    "type": "string"
                   },
                   "title": {
                     "description": "Event title.",
                     "title": "Title",
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
@@ -421,45 +447,52 @@
                   "attendees"
                 ],
                 "title": "create_eventArguments",
-                "type": "OBJECT"
+                "type": "object"
               }
             },
             {
               "description": "Plan a multi-stop trip.",
               "name": "plan_trip",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "budget": {
-                    "description": "Total budget for the trip.",
-                    "nullable": true,
-                    "properties": {
-                      "amount": {
-                        "title": "Amount",
-                        "type": "NUMBER"
-                      },
-                      "currency": {
-                        "default": "EUR",
-                        "enum": [
-                          "EUR",
-                          "USD"
+                    "anyOf": [
+                      {
+                        "description": "Total budget for the trip.",
+                        "properties": {
+                          "amount": {
+                            "title": "Amount",
+                            "type": "number"
+                          },
+                          "currency": {
+                            "default": "EUR",
+                            "enum": [
+                              "EUR",
+                              "USD"
+                            ],
+                            "title": "Currency",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "amount"
                         ],
-                        "title": "Currency",
-                        "type": "STRING"
+                        "title": "TripBudget",
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
                       }
-                    },
-                    "required": [
-                      "amount"
                     ],
-                    "title": "TripBudget",
-                    "type": "OBJECT"
+                    "description": "Optional total budget."
                   },
                   "days": {
                     "description": "Total trip length in days.",
-                    "type": "INTEGER"
+                    "type": "integer"
                   },
                   "destination": {
                     "description": "Country or region to visit.",
-                    "type": "STRING"
+                    "type": "string"
                   },
                   "pace": {
                     "description": "How full each day should be.",
@@ -467,7 +500,7 @@
                       "relaxed",
                       "packed"
                     ],
-                    "type": "STRING"
+                    "type": "string"
                   },
                   "stops": {
                     "description": "Ordered stops with nights per stop.",
@@ -477,44 +510,50 @@
                         "city": {
                           "description": "City name.",
                           "title": "City",
-                          "type": "STRING"
+                          "type": "string"
                         },
                         "nights": {
                           "default": 1,
                           "description": "Nights to stay.",
-                          "minimum": 1.0,
+                          "minimum": 1,
                           "title": "Nights",
-                          "type": "INTEGER"
+                          "type": "integer"
                         }
                       },
                       "required": [
                         "city"
                       ],
                       "title": "TripStop",
-                      "type": "OBJECT"
+                      "type": "object"
                     },
-                    "type": "ARRAY"
+                    "type": "array"
                   },
                   "travelers": {
-                    "items": {
-                      "description": "Dictionary with string values. Can contain any number of key-value pairs.",
-                      "properties": {
-                        "example_key": {
-                          "description": "Example key-value pair. This object can contain any number of keys with string values.",
-                          "type": "STRING"
-                        }
+                    "anyOf": [
+                      {
+                        "items": {
+                          "additionalProperties": {
+                            "type": "string"
+                          },
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
                       },
-                      "type": "OBJECT"
-                    },
-                    "nullable": true,
-                    "type": "ARRAY"
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Traveler names and roles."
                   }
                 },
                 "required": [
                   "destination",
                   "stops"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             }
           ]

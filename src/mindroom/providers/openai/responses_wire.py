@@ -289,16 +289,8 @@ def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, expli
 
 
 def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return tools sorted by name with function definitions flattened as Responses expects."""
-    functions: list[dict[str, Any]] = []
-    for tool in tools:
-        definition: dict[str, Any] = {**function_definition(tool), "type": "function"}
-        # TODO(simplify): A top-level parameter's list `type` keeps only its first entry, so ["string", "null"] loses
-        # null, while nested schemas and Chat routes send the list. Send the schema unchanged. Models.
-        for property_schema in definition.get("parameters", {}).get("properties", {}).values():
-            if isinstance(property_schema, dict) and isinstance(property_schema.get("type"), list):
-                property_schema["type"] = property_schema["type"][0]
-        functions.append(definition)
+    """Return tools sorted by name with function definitions flattened as Responses expects, schemas as authored."""
+    functions = [{**function_definition(tool), "type": "function"} for tool in tools]
     return sorted(functions, key=lambda tool: tool["name"])
 
 

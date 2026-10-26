@@ -42,7 +42,7 @@ from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 
     from ollama import ChatResponse
 
@@ -177,21 +177,47 @@ class OllamaProvider:
 
 
 def _format_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return Ollama tool definitions sorted by name; a tool without a description sends none."""
-    # TODO(simplify): the SDK's tool model keeps only a parameter's type, items, description, and enum, so an
-    # ``anyOf`` parameter such as ``background_after`` reaches the model without a type. Send such a parameter
-    # with its type. Models would notice (#3075).
+    """Return Ollama tool definitions sorted by name; a tool without a description sends none.
+
+    Ollama reads only a parameter's type, items, description, and enum, so a parameter typed by an ``anyOf``, such as
+    ``background_after``'s number or null, goes with those types as a type list (``_typed_property``).
+    """
     return [
         {
             "type": "function",
             "function": {
                 "name": tool.name,
                 **({} if tool.description is None else {"description": tool.description}),
-                "parameters": tool.parameters,
+                "parameters": _with_typed_properties(tool.parameters),
             },
         }
         for tool in sorted(tools, key=lambda tool: tool.name)
     ]
+
+
+def _with_typed_properties(parameters: Mapping[str, Any]) -> dict[str, Any]:
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        return dict(parameters)
+    return {**parameters, "properties": {name: _typed_property(value) for name, value in properties.items()}}
+
+
+def _typed_property(schema: Any) -> Any:  # noqa: ANN401 - any JSON schema node
+    """Return a property whose ``anyOf`` alternatives each name a type as one property with their types as a list.
+
+    The first alternative that has ``items`` or ``enum`` gives them, which Ollama also reads; anything else stays as
+    it is.
+    """
+    alternatives = schema.get("anyOf") if isinstance(schema, dict) and "type" not in schema else None
+    if not isinstance(alternatives, list) or not all(
+        isinstance(item, dict) and isinstance(item.get("type"), str) for item in alternatives
+    ):
+        return schema
+    typed: dict[str, Any] = {"type": [item["type"] for item in alternatives]}
+    for key in ("items", "enum"):
+        if (source := next((item for item in alternatives if key in item), None)) is not None:
+            typed[key] = source[key]
+    return {**typed, **{key: value for key, value in schema.items() if key != "anyOf"}}
 
 
 async def _format_message(message: Message, provider: str) -> dict[str, Any]:

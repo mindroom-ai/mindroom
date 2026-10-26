@@ -283,7 +283,6 @@
           "name": "call_tool",
           "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "arguments": {
                 "description": "The function's arguments as a JSON object.",
@@ -297,14 +296,13 @@
             "required": [
               "name"
             ],
-            "additionalProperties": false
+            "type": "object"
           }
         },
         {
           "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -322,14 +320,13 @@
             "required": [
               "city"
             ],
-            "additionalProperties": false
+            "type": "object"
           }
         },
         {
           "name": "tool_search",
           "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
           "input_schema": {
-            "type": "object",
             "properties": {
               "max_results": {
                 "description": "Maximum number of function definitions to return, at most 20.",
@@ -341,7 +338,7 @@
               }
             },
             "required": [],
-            "additionalProperties": false
+            "type": "object"
           },
           "cache_control": {
             "type": "ephemeral",

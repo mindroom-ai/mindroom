@@ -159,7 +159,6 @@
           "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -177,7 +176,7 @@
             "required": [
               "city"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "cache_control": {
             "type": "ephemeral",
@@ -188,17 +187,15 @@
           "name": "lookup_order",
           "description": "Look up one order by id.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "order_id": {
-                "type": "string",
-                "description": ""
+                "type": "string"
               }
             },
             "required": [
               "order_id"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "defer_loading": true
         },
@@ -206,17 +203,15 @@
           "name": "send_invoice",
           "description": "Email the invoice for one order.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "order_id": {
-                "type": "string",
-                "description": ""
+                "type": "string"
               }
             },
             "required": [
               "order_id"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "defer_loading": true
         }

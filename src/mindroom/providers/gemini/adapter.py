@@ -38,7 +38,6 @@ from mindroom.providers.gemini.wire import (
     function_declarations,
     malformed_tool_call_error,
     read_chunk,
-    response_schema,
     stop_reason,
     tool_config,
     without_tool_selection,
@@ -160,7 +159,8 @@ class GeminiProvider:
             config["system_instruction"] = system_instruction
         if request.output_schema is not None:
             config["response_mime_type"] = "application/json"
-            config["response_schema"] = response_schema(request.output_schema)
+            # The output schema goes as authored, as JSON Schema.
+            config["response_json_schema"] = request.output_schema.model_json_schema()
         thinking = {
             "thinking_budget": settings.thinking_budget,
             "include_thoughts": settings.include_thoughts,

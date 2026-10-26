@@ -180,31 +180,31 @@
             {
               "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
               "name": "call_tool",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "arguments": {
                     "description": "The function's arguments as a JSON object.",
-                    "type": "OBJECT"
+                    "type": "object"
                   },
                   "name": {
                     "description": "Exact function name from tool_search.",
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
                   "name"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             },
             {
               "description": "Return the forecast for one city.",
               "name": "get_weather",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "city": {
                     "description": "City name.",
-                    "type": "STRING"
+                    "type": "string"
                   },
                   "unit": {
                     "description": "Temperature unit.",
@@ -212,31 +212,31 @@
                       "celsius",
                       "fahrenheit"
                     ],
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
                   "city"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             },
             {
               "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
               "name": "tool_search",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "max_results": {
                     "description": "Maximum number of function definitions to return, at most 20.",
-                    "type": "INTEGER"
+                    "type": "integer"
                   },
                   "query": {
                     "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [],
-                "type": "OBJECT"
+                "type": "object"
               }
             }
           ]

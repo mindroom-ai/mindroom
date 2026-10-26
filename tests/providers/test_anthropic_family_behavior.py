@@ -660,14 +660,16 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
         ("bedrock_claude", True, "/v1/messages?beta=true", None),
     ],
 )
-async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
+async def test_tool_definitions_send_each_schema_as_authored(
     tmp_path: Path,
     route: str,
     strict_sent: bool,
     url_suffix: str,
     beta_header: str | None,
 ) -> None:
-    """An unset description goes out empty, ``strict`` only when True on a route that takes it, approval flags never.
+    """Schemas go as authored, an unset description not at all, and a strict tool's objects closed where strict counts.
+
+    A strict tool, on a route that takes it, closes its objects as strict tool use requires.
 
     The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
     through the beta endpoint without one.
@@ -696,17 +698,12 @@ async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
-    input_schema = {
-        "type": "object",
-        "properties": {"city": {"type": "string", "description": ""}},
-        "required": [],
-        "additionalProperties": False,
-    }
+    closed = {**schema, "additionalProperties": False}
     assert wire.body()["tools"] == [
-        {"name": "gated", "description": "Gated.", "input_schema": input_schema}
+        {"name": "gated", "description": "Gated.", "input_schema": closed if strict_sent else schema}
         | ({"strict": True} if strict_sent else {}),
-        {"name": "plain", "description": "Plain.", "input_schema": input_schema},
-        {"name": "unset", "description": "", "input_schema": input_schema},
+        {"name": "plain", "description": "Plain.", "input_schema": schema},
+        {"name": "unset", "input_schema": schema},
     ]
     request = wire.requests[0]
     assert str(request.url).endswith(url_suffix)

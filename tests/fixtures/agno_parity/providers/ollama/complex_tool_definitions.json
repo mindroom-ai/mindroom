@@ -439,6 +439,10 @@
               ],
               "properties": {
                 "budget": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
                   "description": "Optional total budget."
                 },
                 "days": {
@@ -484,6 +488,19 @@
                   "description": "Ordered stops with nights per stop."
                 },
                 "travelers": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
                   "description": "Traveler names and roles."
                 }
               }

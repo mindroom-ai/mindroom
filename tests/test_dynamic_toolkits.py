@@ -29,6 +29,7 @@ from mindroom.desktop.credentials import (
 )
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.llm.messages import system_text
+from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
@@ -1776,13 +1777,17 @@ def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
     assert "properties" not in object_schema
 
 
-def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
-    """Gemini conversion must not invent placeholder argument keys."""
-    converted = gemini_wire.convert_schema(adapt_function(_search_toolkit().functions["call_tool"]).parameters)
+def test_call_tool_schema_reaches_gemini_as_authored() -> None:
+    """Gemini receives ``call_tool``'s schema unchanged, so no placeholder argument key is invented."""
+    parameters = adapt_function(_search_toolkit().functions["call_tool"]).parameters
+    tool = ToolSpec(name="call_tool", description=None, parameters=parameters, strict=None)
 
-    assert converted is not None
-    assert "example_key" not in str(converted)
-    assert "JSON object" in converted["properties"]["arguments"]["description"]
+    declarations = gemini_wire.function_declarations([tool])
+
+    assert declarations == {
+        "function_declarations": [{"name": "call_tool", "parameters_json_schema": dict(parameters)}],
+    }
+    assert "example_key" not in str(declarations)
 
 
 class _DualTools(Toolkit):

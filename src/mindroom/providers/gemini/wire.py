@@ -43,7 +43,6 @@ if TYPE_CHECKING:
         GenerateContentResponseUsageMetadata,
         Part,
     )
-    from pydantic import BaseModel
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
@@ -369,11 +368,13 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  #
 
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
-    """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
-    # TODO(simplify): a tool without a description sends an empty one. Leave it out, as Chat, Responses, and Ollama do
-    # (#3113). Models would notice: Gemini tool declarations change for tools without a description.
+    """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes.
+
+    Each schema goes as authored, as JSON Schema (``parameters_json_schema``), which the Gemini API and Vertex AI both
+    take; a tool without a description sends none.
+    """
     declarations = [
-        _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
+        _without_none(name=tool.name, description=tool.description, parameters_json_schema=dict(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
     ]
     return {"function_declarations": declarations} if declarations else None
@@ -424,177 +425,6 @@ def without_tool_selection(config: Mapping[str, Any], *, vertexai: bool) -> Gene
 def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
     """Return the function-calling config for ``tool_choice``; ``"none"`` turns function calling off."""
     return None if tool_choice is None else {"function_calling_config": {"mode": "NONE"}}
-
-
-def response_schema(output_schema: type[BaseModel]) -> type[BaseModel] | dict[str, Any]:
-    """Return the response schema for a pydantic output model, converted where Gemini needs it."""
-    schema = output_schema.model_json_schema()
-    if not _needs_conversion(schema):
-        return output_schema
-    return convert_schema(schema) or output_schema
-
-
-def _needs_conversion(schema: Mapping[str, Any]) -> bool:
-    """Return whether a schema has dict fields or self references, which Gemini cannot take as a class."""
-    if _has_additional_properties(schema):
-        return True
-    definitions: Mapping[str, Any] = schema.get("$defs", {})
-    return any(
-        isinstance(definition, dict) and _has_self_reference(definition, f"#/$defs/{name}")
-        for name, definition in definitions.items()
-    )
-
-
-def _has_additional_properties(schema: Mapping[str, Any]) -> bool:
-    if "additionalProperties" in schema:
-        return True
-    properties: Mapping[str, Any] = schema.get("properties", {})
-    children = [*properties.values(), schema.get("items")]
-    return any(isinstance(child, dict) and _has_additional_properties(child) for child in children)
-
-
-def _has_self_reference(schema: Mapping[str, Any], target: str) -> bool:
-    if schema.get("$ref") == target:
-        return True
-    properties: Mapping[str, Any] = schema.get("properties", {})
-    alternatives = [sub for key in ("anyOf", "oneOf", "allOf") for sub in schema.get(key, ())]
-    children = [*properties.values(), schema.get("items"), *alternatives]
-    return any(isinstance(child, dict) and _has_self_reference(child, target) for child in children)
-
-
-def convert_schema(  # noqa: C901, PLR0911, PLR0912
-    schema: Mapping[str, Any],
-    root: Mapping[str, Any] | None = None,
-    visited: frozenset[str] = frozenset(),
-) -> dict[str, Any] | None:
-    """Convert a JSON schema to Gemini's schema dialect, resolving ``$ref`` and breaking cycles.
-
-    The input is never modified.
-    """
-    # TODO(simplify): tool and output schemas are rewritten into Gemini's OpenAPI subset, which drops some
-    # descriptions and invents an ``example_key`` property for dicts. Send them as authored, in the SDK's
-    # recommended ``parameters_json_schema`` and ``response_json_schema``, and delete this. Models would notice.
-    root = schema if root is None else root
-    if "$ref" in schema:
-        ref = schema["$ref"]
-        if ref in visited:
-            return {"type": "OBJECT", "description": f"Circular reference to {ref}"}
-        definitions = root.get("$defs", {})
-        name = ref.split("/")[-1]
-        if ref.startswith("#/$defs/") and name in definitions:
-            return convert_schema(definitions[name], root, visited | {ref})
-        return None
-
-    schema_type = schema.get("type", "")
-    if schema_type is None or schema_type == "null":
-        return None
-    description = schema.get("description")
-    title = schema.get("title")
-    default = schema.get("default")
-
-    if "enum" in schema:
-        return _without_none(type="STRING", enum=schema["enum"], description=description, default=default, title=title)
-
-    if schema_type == "object":
-        if "properties" in schema:
-            properties = {key: _property_schema(value, root, visited) for key, value in schema["properties"].items()}
-            if properties:
-                return _without_none(
-                    type="OBJECT",
-                    properties=properties,
-                    required=schema.get("required", []),
-                    description=description,
-                    default=default,
-                    title=title,
-                )
-        elif isinstance(additional := schema.get("additionalProperties"), dict) and "type" in additional:
-            return _dictionary_schema(additional, description=description, default=default)
-        return _without_none(type="OBJECT", description=description, default=default, title=title)
-
-    if schema_type == "array" and "items" in schema:
-        items = (convert_schema(schema["items"], root, visited) if schema["items"] else None) or {"type": "STRING"}
-        return _without_none(
-            type="ARRAY",
-            description=description,
-            items=items,
-            min_items=schema.get("minItems"),
-            max_items=schema.get("maxItems"),
-            title=title,
-        )
-
-    if schema_type == "string":
-        return _without_none(
-            type="STRING",
-            description=description,
-            default=default,
-            title=title,
-            format=schema.get("format"),
-        )
-
-    if schema_type in ("integer", "number"):
-        return _without_none(
-            type=schema_type.upper(),
-            description=description,
-            default=default,
-            title=title,
-            maximum=schema.get("maximum"),
-            minimum=schema.get("minimum"),
-        )
-
-    if schema_type == "" and "anyOf" in schema:
-        converted = [convert_schema(sub, root, visited) for sub in schema["anyOf"]]
-        alternatives = [sub for sub in converted if sub is not None]
-        if len(alternatives) == 1:
-            # TODO(simplify): a nullable ``anyOf`` keeps only its alternative's fields, so a parameter such as
-            # ``background_after`` loses its description. Keep the outer description. Models would notice (#3075).
-            alternatives[0]["nullable"] = any(sub is None for sub in converted)
-            return alternatives[0]
-        return _without_none(any_of=alternatives, description=description, default=default, title=title)
-
-    if isinstance(schema_type, list):
-        schema_type = next((name for name in schema_type if name != "null"), "")
-    if schema_type:
-        return _without_none(type=schema_type.upper(), description=description, default=default, title=title)
-    return None
-
-
-def _property_schema(value: Mapping[str, Any], root: Mapping[str, Any], visited: frozenset[str]) -> dict[str, Any]:
-    value_type = value.get("type", "")
-    # A ["<type>", "null"] list type is sent as its first entry, marked nullable.
-    nullable = isinstance(value_type, list) and "null" in value_type
-    converted = convert_schema({**value, "type": value_type[0]} if nullable else value, root, visited)
-    if converted is None:
-        return _without_none(title=value.get("title"), description=value.get("description"))
-    if nullable:
-        converted["nullable"] = True
-    return converted
-
-
-def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None, default: object) -> dict[str, Any]:
-    """Represent a ``dict[str, T]`` as an object with one example property, since Gemini needs properties."""
-    type_value = additional.get("type", "string")
-    if isinstance(type_value, list):
-        value_type = type_value[0].upper() if type_value else "STRING"
-        suffix = f" (supports union types: {', '.join(type_value)})"
-    else:
-        value_type = type_value.upper()
-        suffix = ""
-    example: dict[str, Any] = {
-        "type": value_type,
-        "description": (
-            f"Example key-value pair. This object can contain any number of keys with {value_type.lower()} values"
-            f"{suffix}."
-        ),
-    }
-    if value_type == "ARRAY":
-        example["items"] = {}
-    return _without_none(
-        type="OBJECT",
-        properties={"example_key": example},
-        description=description
-        or f"Dictionary with {value_type.lower()} values{suffix}. Can contain any number of key-value pairs.",
-        default=default,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -727,12 +557,10 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 __all__ = [
     "GeminiReply",
     "MediaRoute",
-    "convert_schema",
     "format_contents",
     "function_declarations",
     "malformed_tool_call_error",
     "read_chunk",
-    "response_schema",
     "stop_reason",
     "tool_config",
     "without_tool_selection",

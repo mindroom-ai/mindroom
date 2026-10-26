@@ -1505,8 +1505,8 @@ async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reason
 
 
 @pytest.mark.asyncio
-async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_path: Path) -> None:
-    """An MCP tool may declare a nullable parameter as a list of types; Responses receives the first one."""
+async def test_responses_tool_parameters_keep_a_list_of_types(tmp_path: Path) -> None:
+    """An MCP tool may declare a nullable parameter as a list of types; Responses receives the list as authored."""
     tool = ToolSpec(
         name="search_issues",
         description="Search issues.",
@@ -1521,7 +1521,7 @@ async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_pat
     await _turn(built, ModelRequest(messages=[_user()], tools=[tool]))
 
     sent = built.body()["tools"][0]["parameters"]["properties"]
-    assert sent == {"label": {"type": "string"}, "limit": {"type": "integer"}}
+    assert sent == {"label": {"type": ["string", "null"]}, "limit": {"type": "integer"}}
     assert tool.parameters["properties"]["label"]["type"] == ["string", "null"]
 
 

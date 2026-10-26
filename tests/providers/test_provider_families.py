@@ -100,7 +100,6 @@ _TRI_STATE_TOOLS = [
         strict=False,
     ),
 ]
-_GEMINI_SCHEMA = {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}, "required": []}
 _STRICT = {"gated": {"strict": True}, "plain": {"strict": False}}
 
 
@@ -109,8 +108,8 @@ _STRICT = {"gated": {"strict": True}, "plain": {"strict": False}}
 async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family: str, tmp_path: Path) -> None:
     """An unset field is left out; each wire keeps the fields its API takes.
 
-    OpenAI's Chat and Responses wires carry ``strict`` when set; Cerebras and Ollama send only name, description, and
-    parameters; Gemini sends an empty description for a tool without one.
+    OpenAI's Chat and Responses wires carry ``strict`` when set; Cerebras, Ollama, and Gemini send only name,
+    description, and parameters, Gemini's as JSON Schema.
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())
@@ -121,8 +120,8 @@ async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family:
     sent = spec.wire_tools(wire.body())
     assert list(sent) == ["gated", "plain", "unset"]
     if family == "gemini":
-        assert sent["unset"] == {"name": "unset", "description": "", "parameters": _GEMINI_SCHEMA}
-        assert sent["gated"] == {"name": "gated", "description": "Gated.", "parameters": _GEMINI_SCHEMA}
+        assert sent["unset"] == {"name": "unset", "parameters_json_schema": _SCHEMA}
+        assert sent["gated"] == {"name": "gated", "description": "Gated.", "parameters_json_schema": _SCHEMA}
         return
     kind = {"type": "function"} if family == "openai_responses" else {}
     assert sent["unset"] == {"name": "unset", "parameters": _SCHEMA, **kind}

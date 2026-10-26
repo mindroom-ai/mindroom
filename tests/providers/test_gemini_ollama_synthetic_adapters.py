@@ -1375,158 +1375,37 @@ async def test_gemini_keeps_function_responses_last_in_their_user_turn(tmp_path:
     assert [next(iter(part)) for part in contents[-1]["parts"]] == ["text", "inlineData", "functionResponse"]
 
 
-def test_gemini_schema_conversion_breaks_cycles_and_leaves_the_input_alone() -> None:
-    """Self references end in a placeholder object, and nullable type lists do not rewrite the caller's schema."""
-    schema = {
-        "type": "object",
-        "properties": {"child": {"$ref": "#/$defs/Node"}, "note": {"type": ["string", "null"]}},
-        "$defs": {"Node": {"type": "object", "properties": {"child": {"$ref": "#/$defs/Node"}}}},
-    }
-    original = copy.deepcopy(schema)
+@pytest.mark.asyncio
+async def test_gemini_sends_tool_and_output_schemas_as_authored_json_schema(tmp_path: Path) -> None:
+    """Tool and output schemas go as JSON Schema, references, nullable alternatives, and dicts included."""
 
-    converted = gemini_wire.convert_schema(schema)
+    class Topic(BaseModel):
+        """An output model that refers to itself."""
 
-    assert converted == {
-        "type": "OBJECT",
-        "required": [],
-        "properties": {
-            "child": {
-                "type": "OBJECT",
-                "required": [],
-                "properties": {"child": {"type": "OBJECT", "description": "Circular reference to #/$defs/Node"}},
-            },
-            "note": {"type": "STRING", "nullable": True},
-        },
-    }
-    assert schema == original
+        name: str
+        subtopics: list[Topic] = []
+        labels: dict[str, str] = {}
 
-
-def test_gemini_converts_the_json_schema_shapes_mcp_tools_send() -> None:
-    """Unions, type lists, dict values, empty objects, and unresolved or untyped properties convert for Gemini.
-
-    MCP and plugin tools send their own JSON schemas, so any of these can reach a Gemini request.
-    """
     schema = {
         "type": "object",
         "properties": {
-            "issue": {"anyOf": [{"type": "string"}, {"type": "integer"}], "description": "Issue key or number."},
-            "limit": {"type": ["integer", "string"]},
-            "labels": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
-            "weights": {"type": "object", "additionalProperties": {"type": ["number", "string"]}},
-            "filter": {"type": "object", "properties": {}, "description": "Field filters."},
-            "parent": {"$ref": "#/$defs/Issue", "description": "Parent issue."},
-            "payload": {"description": "Any JSON value."},
+            "location": {"anyOf": [{"$ref": "#/$defs/Location"}, {"type": "null"}], "description": "Where."},
+            "labels": {"type": "object", "additionalProperties": {"type": "string"}},
         },
-        "required": ["issue"],
+        "$defs": {"Location": {"type": "object", "properties": {"city": {"type": "string"}}}},
     }
+    tool = ToolSpec(name="plan", description=None, parameters=schema, strict=None)
 
-    assert gemini_wire.convert_schema(schema) == {
-        "type": "OBJECT",
-        "required": ["issue"],
-        "properties": {
-            "issue": {"any_of": [{"type": "STRING"}, {"type": "INTEGER"}], "description": "Issue key or number."},
-            "limit": {"type": "INTEGER"},
-            "labels": {
-                "type": "OBJECT",
-                "properties": {
-                    "example_key": {
-                        "type": "ARRAY",
-                        "description": "Example key-value pair. This object can contain any number of keys with array values.",
-                        "items": {},
-                    },
-                },
-                "description": "Dictionary with array values. Can contain any number of key-value pairs.",
-            },
-            "weights": {
-                "type": "OBJECT",
-                "properties": {
-                    "example_key": {
-                        "type": "NUMBER",
-                        "description": (
-                            "Example key-value pair. This object can contain any number of keys with number values"
-                            " (supports union types: number, string)."
-                        ),
-                    },
-                },
-                "description": (
-                    "Dictionary with number values (supports union types: number, string)."
-                    " Can contain any number of key-value pairs."
-                ),
-            },
-            "filter": {"type": "OBJECT", "description": "Field filters."},
-            "parent": {"description": "Parent issue."},
-            "payload": {"description": "Any JSON value."},
-        },
-    }
+    sent, _ = await run_adapter(
+        GEMINI,
+        _request(Message(role="user", content="Hi"), tools=[tool], output_schema=Topic),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": '{"name": "x"}'})),
+    )
 
-
-class Extraction(BaseModel):
-    """An output model with a dict field."""
-
-    aliases: dict[str, list[str]]
-
-
-class Topic(BaseModel):
-    """An output model that refers to itself."""
-
-    name: str
-    subtopics: list[Topic] = []
-
-
-@pytest.mark.parametrize(
-    ("output_model", "expected"),
-    [
-        (
-            Extraction,
-            {
-                "type": "OBJECT",
-                "title": "Extraction",
-                "description": "An output model with a dict field.",
-                "required": ["aliases"],
-                "properties": {
-                    "aliases": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "example_key": {
-                                "type": "ARRAY",
-                                "description": (
-                                    "Example key-value pair. This object can contain any number of keys with array"
-                                    " values."
-                                ),
-                                "items": {},
-                            },
-                        },
-                        "description": "Dictionary with array values. Can contain any number of key-value pairs.",
-                    },
-                },
-            },
-        ),
-        (
-            Topic,
-            {
-                "type": "OBJECT",
-                "title": "Topic",
-                "description": "An output model that refers to itself.",
-                "required": ["name"],
-                "properties": {
-                    "name": {"type": "STRING", "title": "Name"},
-                    "subtopics": {
-                        "type": "ARRAY",
-                        "title": "Subtopics",
-                        "items": {"type": "OBJECT", "description": "Circular reference to #/$defs/Topic"},
-                    },
-                },
-            },
-        ),
-    ],
-    ids=["dict-field", "self-reference"],
-)
-def test_gemini_converts_output_models_it_cannot_take_as_a_class(
-    output_model: type[BaseModel],
-    expected: dict[str, Any],
-) -> None:
-    """Gemini cannot take a model with dict fields or self references as a class, so its schema is converted."""
-    assert gemini_wire.response_schema(output_model) == expected
+    body = sent["body"]
+    assert body["tools"] == [{"functionDeclarations": [{"name": "plan", "parameters_json_schema": schema}]}]
+    assert body["generationConfig"]["responseJsonSchema"] == Topic.model_json_schema()
 
 
 # ---------------------------------------------------------------------------

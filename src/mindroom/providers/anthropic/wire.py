@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -462,37 +463,20 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
 def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> list[dict[str, Any]]:
     """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable.
 
-    A tool without a description gets an empty one, ``strict`` is sent only when it is True and the route accepts
-    it, and the approval flags never reach the wire.
+    Each schema goes as authored, except that a strict tool closes every object with ``additionalProperties: false``,
+    as strict tool use requires. A tool without a description sends none, and ``strict`` is sent only when it is True
+    and the route accepts it.
     """
     formatted: list[dict[str, Any]] = []
     for tool in sorted(tools, key=lambda item: item.name):
-        parameters = dict(tool.parameters)
-        properties = parameters.get("properties") or {}
-        input_properties: dict[str, Any] = {}
-        for name, schema in properties.items():
-            property_schema = _with_additional_properties_false(schema)
-            if isinstance(property_schema, dict) and "description" not in property_schema:
-                property_schema["description"] = ""
-            input_properties[name] = property_schema
-        input_schema: dict[str, Any] = {
-            "type": parameters.get("type", "object"),
-            "properties": input_properties,
-            "required": parameters.get("required", []),
-            "additionalProperties": False,
-        }
-        # Raw JSON schemas, such as MCP input schemas, may share nested types through $defs or definitions.
-        for key in ("$defs", "definitions"):
-            if key in parameters:
-                input_schema[key] = parameters[key]
-        # TODO(simplify): a tool without a description sends an empty one, as on Gemini. Leave it out, as Chat,
-        # Responses, and Ollama do (#3113). Models would notice: Claude tool definitions change for such tools.
+        strict = bool(tool.strict) and strict_allowed
+        parameters = deepcopy(dict(tool.parameters))
         definition: dict[str, Any] = {
             "name": tool.name,
-            "description": tool.description or "",
-            "input_schema": input_schema,
+            **({} if tool.description is None else {"description": tool.description}),
+            "input_schema": _with_additional_properties_false(parameters) if strict else parameters,
         }
-        if tool.strict and strict_allowed:
+        if strict:
             definition["strict"] = True
         formatted.append(definition)
     return formatted
