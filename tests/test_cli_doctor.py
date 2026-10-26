@@ -26,7 +26,8 @@ from mindroom.cli.doctor import (
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.constants import env_key_for_provider, resolve_primary_runtime_paths
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
@@ -280,71 +281,8 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     assert vertex_models == ["claude-sonnet-5-5"]
 
 
-@pytest.mark.parametrize(
-    ("provider", "extra_kwargs", "env", "url"),
-    [
-        (
-            "openai",
-            {"client_params": {"base_url": "https://proxy.example/v1"}, "base_url": "https://other.example/v1"},
-            "",
-            "https://proxy.example/v1/models",
-        ),
-        ("openai", {}, "OPENAI_BASE_URL=https://env-proxy.example/v1\n", "https://env-proxy.example/v1/models"),
-        ("groq", {"base_url": "https://groq-proxy.example"}, "", "https://groq-proxy.example/openai/v1/models"),
-        ("google", {}, "", "https://generativelanguage.googleapis.com/v1beta/models?key=k"),
-        ("OpenAI", {"base_url": "https://proxy.example/v1"}, "", "https://proxy.example/v1/models"),
-        (
-            "Anthropic",
-            {"client_params": {"base_url": "https://gateway.example/anthropic"}},
-            "",
-            "https://gateway.example/anthropic/v1/models",
-        ),
-        # OpenRouter's model list is public, so its key is read back from the key endpoint at any endpoint.
-        (
-            "openrouter",
-            {"client_params": {"base_url": "https://openrouter.ai/api/v1"}},
-            "",
-            "https://openrouter.ai/api/v1/key",
-        ),
-    ],
-)
-def test_doctor_checks_a_provider_key_at_the_endpoint_the_runtime_calls(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    provider: str,
-    extra_kwargs: dict[str, object],
-    env: str,
-    url: str,
-) -> None:
-    """The key check goes to the model's runtime endpoint: ``client_params.base_url``, then ``base_url``, then the endpoint variable."""
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    env_key = f"{provider.upper()}_API_KEY"
-    (tmp_path / ".env").write_text(f"{env_key}=k\n{env}", encoding="utf-8")
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    probed: list[str] = []
-
-    def get(url: str, **_kwargs: object) -> httpx.Response:
-        probed.append(url)
-        return httpx.Response(200, request=httpx.Request("GET", url))
-
-    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
-    config = Config(
-        models={"default": ModelConfig(provider=provider, id="gpt-6-astra", extra_kwargs=extra_kwargs or None)},
-        router=RouterConfig(model="default"),
-    )
-
-    assert _check_providers(config, runtime_paths) == (1, 0, 0)
-    assert probed == [url]
-
-
-def test_doctor_checks_an_anthropic_key_at_the_endpoint_the_sdk_reads(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``ANTHROPIC_BASE_URL``, which the Anthropic SDK reads from the process environment, moves the key check too."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example/anthropic/")
-    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=k\n", encoding="utf-8")
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
+    """Answer every doctor key check with 200 and return the requests it sent."""
     sent: list[tuple[str, dict[str, str]]] = []
 
     def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
@@ -352,18 +290,130 @@ def test_doctor_checks_an_anthropic_key_at_the_endpoint_the_sdk_reads(
         return httpx.Response(200, request=httpx.Request("GET", url))
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    return sent
+
+
+@pytest.mark.parametrize(
+    ("provider", "extra_kwargs", "env", "process_env", "endpoint"),
+    [
+        (
+            "openai",
+            {"client_params": {"base_url": "https://proxy.example/v1"}, "base_url": "https://other.example/v1"},
+            "",
+            {},
+            "https://proxy.example/v1",
+        ),
+        ("openai", {}, "OPENAI_BASE_URL=https://env-proxy.example/v1\n", {}, "https://env-proxy.example/v1"),
+        ("groq", {"base_url": "https://groq-proxy.example"}, "", {}, "https://groq-proxy.example/openai/v1"),
+        ("OpenAI", {"base_url": "https://proxy.example/v1"}, "", {}, "https://proxy.example/v1"),
+        # The SDK sends a configured Authorization header in place of the key it is given.
+        (
+            "openai",
+            {
+                "client_params": {
+                    "base_url": "https://gateway.example/v1",
+                    "default_headers": {"Authorization": "Bearer gateway-key"},
+                },
+            },
+            "",
+            {},
+            "https://gateway.example/v1",
+        ),
+        (
+            "Anthropic",
+            {"client_params": {"base_url": "https://gateway.example/anthropic"}},
+            "",
+            {},
+            "https://gateway.example/anthropic",
+        ),
+        (
+            "anthropic",
+            {},
+            "",
+            {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
+            "https://gateway.example/anthropic",
+        ),
+        (
+            "openrouter",
+            {"client_params": {"base_url": "https://openrouter.ai/api/v1"}},
+            "",
+            {},
+            "https://openrouter.ai/api/v1",
+        ),
+    ],
+)
+def test_doctor_never_sends_a_shared_key_to_a_custom_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provider: str,
+    extra_kwargs: dict[str, object],
+    env: str,
+    process_env: dict[str, str],
+    endpoint: str,
+) -> None:
+    """A model calling a custom endpoint, as the runtime resolves it, has the shared key reported as not checked."""
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    for name, value in process_env.items():
+        monkeypatch.setenv(name, value)
+    env_key = env_key_for_provider(provider)
+    (tmp_path / ".env").write_text(f"{env_key}=shared\n{env}", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent = _record_key_checks(monkeypatch)
     config = Config(
-        models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
-        router=RouterConfig(model="default"),
+        models={"gateway": ModelConfig(provider=provider, id="m", extra_kwargs=extra_kwargs or None)},
+        router=RouterConfig(model="gateway"),
     )
 
-    assert _check_providers(config, runtime_paths) == (1, 0, 0)
-    assert sent == [
-        (
-            "https://gateway.example/anthropic/v1/models",
-            {"x-api-key": "k", "anthropic-version": "2023-06-01"},
-        ),
-    ]
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    assert f"{env_key} not checked for gateway, which calls {endpoint}" in " ".join(capsys.readouterr().out.split())
+
+
+def test_doctor_never_sends_the_environment_key_where_a_stored_key_goes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runtime sends a key saved for the provider, not the environment's, so the gateway gets no check."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=env-key\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "openai",
+        {"api_key": "gateway-key", "_source": "ui"},
+    )
+    sent = _record_key_checks(monkeypatch)
+    gateway = {"client_params": {"base_url": "https://gateway.example/v1"}}
+    config = Config(
+        models={"gateway": ModelConfig(provider="openai", id="m", extra_kwargs=gateway)},
+        router=RouterConfig(model="gateway"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+
+
+def test_doctor_checks_a_shared_key_at_the_provider_s_own_api_beside_a_custom_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A model on the provider's own API still gets the shared key checked there; the gateway model is not checked."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=shared\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent = _record_key_checks(monkeypatch)
+    gateway = {"client_params": {"base_url": "https://gateway.example/v1"}}
+    config = Config(
+        models={
+            "hosted": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "gateway": ModelConfig(provider="openai", id="m", extra_kwargs=gateway),
+        },
+        router=RouterConfig(model="hosted"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 1)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer shared"})]
+    output = " ".join(capsys.readouterr().out.split())
+    assert "OPENAI_API_KEY not checked for gateway, which calls https://gateway.example/v1" in output
 
 
 def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(
@@ -373,13 +423,7 @@ def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_clie
     """A model whose ``client_params`` set an endpoint and a key sends that key there, never the shared one."""
     (tmp_path / ".env").write_text("OPENAI_API_KEY=shared\n", encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    sent: list[tuple[str, dict[str, str]]] = []
-
-    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
-        sent.append((url, headers))
-        return httpx.Response(200, request=httpx.Request("GET", url))
-
-    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    sent = _record_key_checks(monkeypatch)
     client_params = {"base_url": "https://proxy.example/v1", "api_key": "proxy-key"}
     config = Config(
         models={

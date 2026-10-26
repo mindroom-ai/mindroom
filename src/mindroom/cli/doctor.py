@@ -187,25 +187,29 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     return config, 1, 0, 0
 
 
-def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
-    """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
+def _models_using_shared_key(
+    config: Config,
+    env_key: str,
+    runtime_paths: RuntimePaths,
+) -> dict[str, ModelConfig] | None:
+    """Return the models, by name, that read the shared ``env_key``, or None when the credential store is unreadable."""
     try:
-        return [
-            model
+        return {
+            name: model
             for name, model in config.models.items()
             if env_key_for_provider(model.provider) == env_key
             and not model_uses_own_credential(name, model, runtime_paths)
-        ]
+        }
     except (OSError, ValueError):
         return None
 
 
-def _get_custom_base_url(models: list[ModelConfig], runtime_paths: RuntimePaths) -> str | None:
-    """Return the endpoint the runtime sends the shared key to when a model's config or its route's endpoint variable sets one."""
+def _custom_endpoints(models: dict[str, ModelConfig], runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return the endpoint, by model name, of each model that calls one its config or its route's variable sets."""
     # Deferred: the provider routes load the model HTTP client and token counter.
     from mindroom.providers.registry import configured_endpoint  # noqa: PLC0415
 
-    return next((endpoint for model in models if (endpoint := configured_endpoint(model, runtime_paths))), None)
+    return {name: endpoint for name, model in models.items() if (endpoint := configured_endpoint(model, runtime_paths))}
 
 
 def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
@@ -263,7 +267,7 @@ def _validate_provider_key(
     api_key: str,
     base_url: str | None = None,
 ) -> tuple[bool | None, str]:
-    """Validate an API key with the provider's key check, sent below a custom endpoint when one is set.
+    """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
 
     A provider without a key check is never probed, at a custom endpoint either: its key style and a model list
     are unknown, so a probe could report a valid key as invalid.
@@ -274,7 +278,7 @@ def _validate_provider_key(
     check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
     if check is None:
         return None, "no key check for this provider"
-    url, headers = check.request(api_key, endpoint=base_url)
+    url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
     return _http_check(url, headers)
 
 
@@ -457,15 +461,24 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, int(needs_shared_key)
 
-    base_url = _get_custom_base_url(shared_key_models or [], runtime_paths)
-    valid, detail = _validate_provider_key(provider, api_key, base_url)
-    return _print_validation(
+    # The shared key is checked only at the provider's own API. A custom endpoint may take another credential the
+    # runtime sends in its place, such as a header, so a model calling one is reported as not checked.
+    custom_endpoints = _custom_endpoints(shared_key_models or {}, runtime_paths)
+    for name, endpoint in custom_endpoints.items():
+        console.print(
+            f"[yellow]![/yellow] {provider}: {env_key} not checked for {name}, which calls {escape(endpoint)}",
+        )
+    if shared_key_models and len(custom_endpoints) == len(shared_key_models):
+        return 0, 0, len(custom_endpoints)
+    valid, detail = _validate_provider_key(provider, api_key)
+    passed, failed, warnings = _print_validation(
         valid,
         detail,
         f"{provider} API key valid",
         f"{provider} API key invalid",
         f"{provider}: could not validate key",
     )
+    return passed, failed, warnings + len(custom_endpoints)
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:

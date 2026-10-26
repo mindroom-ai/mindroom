@@ -4211,8 +4211,8 @@ class TestDoctor:
         assert result.exit_code == exit_code
         assert message in normalize_console_output(result.output)
 
-    def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor validates against custom base_url when configured."""
+    def test_custom_base_url_is_not_sent_the_shared_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Doctor checks a shared key only at the provider's own API, so a custom base_url gets no key check."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
@@ -4243,9 +4243,9 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "API key valid" in result.output
-        # Should validate against the custom base_url, not api.openai.com
-        assert any("localhost:9292" in u for u in called_urls)
+        output = " ".join(result.output.split())
+        assert "OPENAI_API_KEY not checked for default, which calls http://localhost:9292/v1" in output
+        assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(
         self,
