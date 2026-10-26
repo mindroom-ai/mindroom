@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
+    from mindroom.approval.resume import ResumeDecisions
     from mindroom.llm.events import RunEvent
 
 _PAUSED = RunRecord(
@@ -51,16 +52,21 @@ async def _paused_run() -> AsyncIterator[RunEvent]:
     yield RunFinished(_PAUSED)
 
 
-async def _unused_continue(paused: RunRecord, _decisions: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
-    return paused
+@dataclass(frozen=True)
+class _UnusedContinuation:
+    storage: RunStorage
+
+    def events(self, _paused: RunRecord, _decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        return _paused_run()
 
 
 def _stream(**options: object) -> AsyncIterator[RunEvent]:
     return execution.drive_delegation_stream(
         _paused_run(),
         record_type=RunRecord,
-        storage=RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
-        continue_parent=_unused_continue,
+        continue_parent=_UnusedContinuation(
+            RunStorage(None, new_scope_session(session_id="session-1", scope_id="leader", is_team=False), None),
+        ),
         agent_name="leader",
         run_child=cast("Callable", None),
         config=cast("Callable", None),  # type: ignore[arg-type]
@@ -281,8 +287,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         with pytest.raises(failure, match="Consumer stopped"):
             await execution._drive_delegations(
                 paused,
-                storage=runner.storage,
-                continue_parent=runner.continue_run,
+                continue_parent=runner,
                 agent_name="leader",
                 run_child=unused_child,
                 config=config,

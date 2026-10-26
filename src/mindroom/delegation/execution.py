@@ -467,6 +467,22 @@ async def _observed_child_events(events: AsyncIterator[RunEvent]) -> AsyncIterat
             yield event
 
 
+@dataclass(frozen=True)
+class _ObservedChildResume:
+    """A delegated child's resume under ``runner``, its events passed through the child's observers."""
+
+    runner: ResumeRunner
+
+    @property
+    def storage(self) -> RunStorage:
+        """Where the child's row lives."""
+        return self.runner.storage
+
+    def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``, its events observed as this context's own."""
+        return _observed_child_events(self.runner.events(paused, decisions))
+
+
 async def _continue_child(
     runner: ResumeRunner,
     run_child: ChildResponseRunner,
@@ -480,24 +496,20 @@ async def _continue_child(
     approval_calls: Sequence[ApprovalCall],
 ) -> RunRecord:
     """Apply child decisions and drive any further nested delegations under the config ``runner`` resumes with."""
-
-    async def continue_run(paused: RunRecord, resume: ResumeDecisions, _on_event: ResumeEvents | None) -> RunRecord:
-        return await forward_resume(_observed_child_events(runner.events(paused, resume)), None, paused=paused)
-
+    resume = _ObservedChildResume(runner)
     driver_decisions: dict[str, bool] | None = decisions
     if not has_delegation_state(persisted):
-        persisted = await continue_run(
-            persisted,
-            approval_decisions(approval_calls, decisions, denial_reasons or {}),
+        persisted = await forward_resume(
+            resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons or {})),
             None,
+            paused=persisted,
         )
         driver_decisions = None
         denial_reasons = None
         approval_calls = ()
     return await _drive_delegations(
         persisted,
-        storage=runner.storage,
-        continue_parent=continue_run,
+        continue_parent=resume,
         agent_name=child.child_agent_name,
         run_child=run_child,
         config=runner.config,
@@ -1372,7 +1384,6 @@ def prepare_delegation_state(
 async def _drive_delegations[R: AnyRunRecord](
     response: R,
     *,
-    storage: RunStorage,
     continue_parent: ContinueRun[R],
     agent_name: str,
     run_child: ChildResponseRunner,
@@ -1390,9 +1401,10 @@ async def _drive_delegations[R: AnyRunRecord](
     """Advance one durable parent; sequential children preserve completed sibling results.
 
     ``continue_parent`` resumes the parent with the decisions on its own calls and its children's results, and
-    returns its new terminal record; the loop behind it refuses anything but exact coverage of the calls the parent
-    waits for. ``storage`` is where the parent's row lives.
+    holds where the parent's row lives; the loop behind it refuses anything but exact coverage of the calls the parent
+    waits for. The continuation's events reach ``on_event``.
     """
+    storage = continue_parent.storage
     if not has_delegation_state(response):
         return response
     if execution_identity is None or execution_identity.channel != "matrix":
@@ -1462,10 +1474,11 @@ async def _drive_delegations[R: AnyRunRecord](
             await persist(state)
             return response
         await persist(state)
-        response = await continue_parent(
-            _awaiting_answers(response),
-            replace(own, external_results=answered_delegation_calls(response)),
+        awaiting = _awaiting_answers(response)
+        response = await forward_resume(
+            continue_parent.events(awaiting, replace(own, external_results=answered_delegation_calls(response))),
             on_event,
+            paused=awaiting,
         )
         own = ResumeDecisions()
         state.clear_pending()
@@ -1477,7 +1490,6 @@ async def drive_delegation_stream[R: AnyRunRecord](
     events: AsyncIterator[RunEvent],
     *,
     record_type: type[R],
-    storage: RunStorage,
     continue_parent: ContinueRun[R],
     **options: Unpack[_DelegationOptions],
 ) -> AsyncIterator[RunEvent]:
@@ -1499,7 +1511,6 @@ async def drive_delegation_stream[R: AnyRunRecord](
     async def drive(on_event: Callable[[object], None]) -> R:
         return await _drive_delegations(
             record,
-            storage=storage,
             continue_parent=continue_parent,
             on_event=on_event,
             **options,

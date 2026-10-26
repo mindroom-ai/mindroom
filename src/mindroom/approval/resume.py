@@ -11,7 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_loop.run import resume_agent
 from mindroom.agent_loop.spec import RunContext
@@ -27,7 +27,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     from mindroom.run_storage import RunStorage
 
 type ResumeEvents = Callable[[RunEvent], None]
-type ContinueRun[R: AnyRunRecord] = Callable[[R, ResumeDecisions, ResumeEvents | None], Awaitable[R]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +57,22 @@ class ResumeDecisions:
     approved: tuple[ApprovalCall, ...] = ()
     denied: Mapping[str, str | None] = field(default_factory=dict)
     external_results: Mapping[tuple[str | None, str], str] = field(default_factory=dict)
+
+
+class ContinueRun[R: AnyRunRecord](Protocol):
+    """How the delegation driver continues a paused parent run with its children's results.
+
+    ``storage`` is where the run's row lives, which the driver also writes the run's delegation state to.
+    """
+
+    @property
+    def storage(self) -> RunStorage:
+        """Where the paused run's row lives."""
+        ...
+
+    def events(self, paused: R, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` and the run's terminal record."""
+        ...
 
 
 def approval_decisions(
@@ -220,15 +235,6 @@ class ResumeRunner:
             model_name=self.model_name,
         )
         return with_resumed_turn_log_context(events)
-
-    async def continue_run(
-        self,
-        paused: RunRecord,
-        decisions: ResumeDecisions,
-        on_event: ResumeEvents | None,
-    ) -> RunRecord:
-        """Resume ``paused`` with ``decisions``, forwarding its events, and return its terminal record."""
-        return await forward_resume(self.events(paused, decisions), on_event, paused=paused)
 
 
 __all__ = [

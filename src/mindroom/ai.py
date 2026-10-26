@@ -20,7 +20,7 @@ from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
-from mindroom.approval.resume import forward_resume, resume_from_session
+from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream
 from mindroom.delegation.lifecycle import (
@@ -115,7 +115,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.ai_turn_state import AITurnState
-    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
+    from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
@@ -700,7 +700,7 @@ async def _start_agent_run(
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
     A run that pauses on delegations is driven on: its children run, and the run continues with their results
-    through ``_continue_turn_run`` until it completes or waits for an approval. An agent whose shell reaches its
+    through ``_TurnRunContinuation`` until it completes or waits for an approval. An agent whose shell reaches its
     other tools through `mindroom-agent` binds this attempt's CLI first; a minimal turn then offers only Bash, and
     the hidden calls' tool events join the run's own.
     """
@@ -748,15 +748,7 @@ async def _start_agent_run(
     driven = drive_delegation_stream(
         events,
         record_type=RunRecord,
-        storage=storage,
-        continue_parent=partial(
-            _continue_turn_run,
-            run_context,
-            spec=spec,
-            hooks=hooks,
-            storage=storage,
-            terminal=terminal,
-        ),
+        continue_parent=_TurnRunContinuation(run_context, spec=spec, hooks=hooks, storage=storage, terminal=terminal),
         agent_name=run_context.agent_name,
         run_child=run_delegated_child_response,
         config=run_context.config,
@@ -772,38 +764,37 @@ async def _start_agent_run(
             yield event
 
 
-async def _continue_turn_run(
-    run_context: _AgentRunContext,
-    paused: RunRecord,
-    decisions: ResumeDecisions,
-    on_event: ResumeEvents | None,
-    *,
-    spec: AgentSpec,
-    hooks: LoopHooks,
-    storage: RunStorage,
-    terminal: TerminalRecord[RunRecord],
-) -> RunRecord:
-    """Continue this attempt's paused run with its delegations' results, as the spec and hooks it ran with.
+@dataclass(frozen=True)
+class _TurnRunContinuation:
+    """Continues one attempt's paused run with its delegations' results, as the spec and hooks it ran with.
 
     The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
     compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
     and reuses the paused run's stored system message.
     """
-    prepared = run_context.prepared_run
-    events = resume_from_session(
-        spec,
-        paused,
-        decisions,
-        storage=storage,
-        settings=prepared.build.history_settings,
-        plan=prepared.prepared_history.replay_plan,
-        user_id=run_context.turn.requester_id,
-        model_name=prepared.runtime_model_name,
-        hooks=hooks,
-        persist=persist_into(terminal, storage),
-        request_template=run_context.request_template,
-    )
-    return await forward_resume(events, on_event, paused=paused)
+
+    run_context: _AgentRunContext
+    spec: AgentSpec
+    hooks: LoopHooks
+    storage: RunStorage
+    terminal: TerminalRecord[RunRecord]
+
+    def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends as ``resume_from_session``'s does."""
+        prepared = self.run_context.prepared_run
+        return resume_from_session(
+            self.spec,
+            paused,
+            decisions,
+            storage=self.storage,
+            settings=prepared.build.history_settings,
+            plan=prepared.prepared_history.replay_plan,
+            user_id=self.run_context.turn.requester_id,
+            model_name=prepared.runtime_model_name,
+            hooks=self.hooks,
+            persist=persist_into(self.terminal, self.storage),
+            request_template=self.run_context.request_template,
+        )
 
 
 @timed("model_request_to_completion")

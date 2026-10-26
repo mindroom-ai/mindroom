@@ -19,7 +19,7 @@ from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
-from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
+from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import ApprovedCall
-    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
+    from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
@@ -159,7 +159,7 @@ def _route_decisions(
 
 @dataclass(frozen=True)
 class TeamResume:
-    """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver calls.
+    """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver uses.
 
     ``built`` is the team the run resumes as. ``plan`` selects the stored history the leader's resume request
     replays: the turn's own plan within a turn, the configured policy for a saved approval. ``model_name`` is the
@@ -176,12 +176,13 @@ class TeamResume:
     toolkit_owners: Mapping[tuple[str, str], str]
     model_name: str
 
-    def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
+    def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
 
         Routing and the loop's own coverage check run here, before the stream starts, so a resume that no longer fits
         is refused before anything runs. A member run whose own paused call an approval decided reads that approval's
-        receipt.
+        receipt. The stream carries the members' events too: the driver forwards a parent's events without reading
+        them, so member events ride along.
         """
         routed = _route_decisions(paused, decisions, toolkit_owners=self.toolkit_owners)
         decided = {*routed.approved, *routed.denied}
@@ -195,7 +196,7 @@ class TeamResume:
         session = self.storage.session
         # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
         history, summary = replayed_history(session, self.storage.scope, self.built.history_settings, self.plan)
-        return continue_team(
+        events = continue_team(
             self.built.spec,
             paused,
             build_resume_request(paused=paused.messages, summary=summary, history=history),
@@ -212,19 +213,7 @@ class TeamResume:
             persist=persist_into(self.records, self.storage),
             request_template=self.request_template,
         )
-
-    async def __call__(
-        self,
-        paused: TeamRunRecord,
-        decisions: ResumeDecisions,
-        on_event: ResumeEvents | None,
-    ) -> TeamRunRecord:
-        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record.
-
-        The driver forwards a parent's events without reading them, so member events ride along.
-        """
-        events = cast("AsyncIterator[RunEvent]", self.events(paused, decisions))
-        return await forward_resume(events, on_event, paused=paused)
+        return cast("AsyncIterator[RunEvent]", events)
 
 
 def _member_call_event(requirement: RunRequirement, event: ToolStarted | ToolCompleted) -> RunEvent:
@@ -261,7 +250,6 @@ def drive_team_delegations(
     driven = drive_delegation_stream(
         cast("AsyncIterator[RunEvent]", events),
         record_type=TeamRunRecord,
-        storage=resume.storage,
         continue_parent=resume,
         agent_name=team_name,
         run_child=run_delegated_child_response,

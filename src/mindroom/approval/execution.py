@@ -201,8 +201,7 @@ async def _continue_persisted_agent(
     events = drive_delegation_stream(
         native_events,
         record_type=RunRecord,
-        storage=storage,
-        continue_parent=runner.continue_run,
+        continue_parent=runner,
         run_child=run_delegated_child_response,
         agent_name=continuation.entity_name,
         config=config,
