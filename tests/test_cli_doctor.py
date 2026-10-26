@@ -471,24 +471,26 @@ def test_homeserver_check_requires_advertised_sliding_support(
 
 
 @pytest.mark.parametrize(
-    ("env_file", "expected"),
-    [("OLLAMA_API_KEY=env-key\n", (1, 0, 0)), ("", (0, 1, 0))],
+    ("env_file", "authorization", "expected"),
+    [("OLLAMA_API_KEY=env-key\n", "Bearer env-key", (1, 0, 0)), ("", None, (0, 1, 0))],
     ids=["env_file_key", "no_key"],
 )
 def test_ollama_reachability_check_sends_the_key_the_runtime_sends(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     env_file: str,
+    authorization: str | None,
     expected: tuple[int, int, int],
 ) -> None:
     """A server that requires a key is checked with ``OLLAMA_API_KEY``, read from ``.env`` as Ollama models read it."""
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     (tmp_path / ".env").write_text(env_file, encoding="utf-8")
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sent: list[str | None] = []
 
     def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
-        authorized = httpx.Headers(headers).get("authorization") == "Bearer env-key"
-        return httpx.Response(200 if authorized else 401, request=httpx.Request("GET", url))
+        sent.append(httpx.Headers(headers).get("authorization"))
+        return httpx.Response(200 if sent[-1] == "Bearer env-key" else 401, request=httpx.Request("GET", url))
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
     config = Config(
@@ -497,3 +499,4 @@ def test_ollama_reachability_check_sends_the_key_the_runtime_sends(
     )
 
     assert _check_providers(config, runtime_paths) == expected
+    assert sent == [authorization]
