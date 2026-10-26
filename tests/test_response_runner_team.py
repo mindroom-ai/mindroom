@@ -65,6 +65,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     delivered_matrix_event,
     delivered_matrix_side_effect,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
     replace_delivery_gateway_deps,
@@ -658,6 +659,64 @@ class TestAgentBot(AgentBotTestBase):
         assert _handled_response_event_id(resolution) == "$team"
         prepared_message = mock_team_response.await_args.kwargs["message"]
         assert prepared_message == timestamped_prompt
+
+    @pytest.mark.asyncio
+    async def test_generate_team_response_helper_timestamps_history_in_the_running_agents_timezone(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An ad hoc team's history uses the timezone of the agent whose bot runs it, not the global one."""
+        config = self._config_for_storage(tmp_path)
+        config.timezone = "UTC"
+        config.agents["calculator"].timezone = "America/Los_Angeles"
+        config.defaults.show_stop_button = False
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(
+            current_config=config,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        matrix_ids = entity_ids(config, runtime_paths_for(config))
+        mock_team_response = AsyncMock(return_value="Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch(
+                "mindroom.delivery_gateway.edit_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=mock_team_response,
+            ),
+        ):
+            await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[
+                        make_visible_message(sender="@user:localhost", body="older text", timestamp=1_774_018_800_000),
+                    ],
+                    user_id="@user:localhost",
+                    prompt="What changed?",
+                    response_envelope=_hook_envelope(body="What changed?", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        [older] = mock_team_response.await_args.kwargs["thread_history"]
+        assert older.body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_uses_resolved_thread_root_for_placeholder_and_edit(

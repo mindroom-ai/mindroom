@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import AfterValidator
+
 
 def duplicate_items(values: list[str]) -> list[str]:
     """Return duplicate items while preserving first duplicate order."""
@@ -32,3 +37,16 @@ def non_empty_stripped(value: str, *, field_name: str) -> str:
         msg = f"{field_name} must not be empty"
         raise ValueError(msg)
     return stripped
+
+
+def _validate_timezone_name(value: str) -> str:
+    """Return ``value`` when it names an IANA timezone, such as ``Europe/Amsterdam``."""
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        msg = f"Unknown timezone {value!r}; use an IANA name such as 'America/New_York'"
+        raise ValueError(msg) from None
+    return value
+
+
+TimezoneName = Annotated[str, AfterValidator(_validate_timezone_name)]

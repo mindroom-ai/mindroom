@@ -83,6 +83,7 @@ agents:
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](../knowledge-graph.md) from this agent's conversations and give it the `knowledge_graph` tool |
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](../knowledge-graph.md#letting-the-agent-fix-its-graph) |
+| `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](../scheduling.md#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](../memory.md) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](../memory.md#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](../scheduling.md#automations) |

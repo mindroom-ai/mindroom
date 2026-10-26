@@ -222,11 +222,22 @@ Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
-The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
+The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](configuration/teams.md#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
+An unknown timezone name fails config validation.
 
 ```yaml
 timezone: America/Los_Angeles
+agents:
+  atlas:
+    display_name: Atlas
+    timezone: Europe/Amsterdam
 ```
+
+A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
+The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
+Schedules created before agents had their own timezone keep following the top-level setting.
 
 Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
 Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
@@ -291,7 +302,7 @@ agents:
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
-- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `cron` is a five-field expression in the agent's [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.

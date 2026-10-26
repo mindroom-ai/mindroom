@@ -431,6 +431,7 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             model_name=model_name,
             configured_team_name=team_name,
+            timezone=config.get_entity_timezone(configured_team_name),
         )
         toolkit_owners = tool_owners_by_agent(*members.builds)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)

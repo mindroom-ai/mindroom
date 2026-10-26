@@ -795,6 +795,7 @@ async def _schedule_parse(config: Config, runtime_paths: RuntimePaths) -> None:
         runtime_paths,
         [responders["assistant"], responders["researcher"]],
         current_time=datetime(2026, 9, 21, 14, 14, tzinfo=UTC),
+        timezone="UTC",
     )
     assert isinstance(workflow, ScheduledWorkflow), workflow
 

@@ -608,6 +608,7 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         config_provider=lambda: (
             context.orchestrator.config if context.orchestrator is not None else context.current_config
         ),
+        agent_name=context.agent_name,
     )
 
 

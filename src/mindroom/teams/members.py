@@ -384,11 +384,13 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
 class BuiltTeam:
     """One team ready to run: its spec, its history settings, the tool-call policy the leader's own tools run under, and the team's jobs.
 
-    ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner.
+    ``leader_jobs`` is the team as tool jobs see it while the instance runs them for a Matrix owner. ``timezone``
+    dates the turn: the leader's date line and the current message's time.
     """
 
     spec: TeamSpec
     history_settings: ResolvedHistorySettings
+    timezone: str
     leader_middleware: tuple[ToolMiddleware, ...]
     leader_jobs: JobActor | None
 
@@ -403,15 +405,16 @@ def build_team_spec(
     execution_identity: ToolExecutionIdentity | None,
     model_name: str,
     configured_team_name: str | None,
+    timezone: str,
     system_enrichment: str = "",
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the team's history scope,
     or by that label for a team that names no member and so has no scope. The leader prompt holds each member's
-    roster role, the leader's tool instructions in offer order, the provider family's note, and the date context with
-    ``system_enrichment`` appended; the team's own history settings and call budget come from the configured team
-    ``configured_team_name``, or the defaults when it is None for an ad hoc one.
+    roster role, the leader's tool instructions in offer order, the provider family's note, and the date context in
+    ``timezone`` with ``system_enrichment`` appended; the team's own history settings and call budget come from the
+    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -451,7 +454,7 @@ def build_team_spec(
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
     additional_context = appended_context(
-        render_date_context(config.timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
+        render_date_context(timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
         system_enrichment,
     )
     system_message = render_leader_system_message(
@@ -465,6 +468,7 @@ def build_team_spec(
     return BuiltTeam(
         spec=TeamSpec(leader=replace(leader, system_message=system_message), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
+        timezone=timezone,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,
     )

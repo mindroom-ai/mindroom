@@ -372,6 +372,7 @@ def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enr
         execution_identity=None,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
         system_enrichment=system_enrichment,
     )
 
