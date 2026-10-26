@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import ApprovalCall, MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.teams.envelope import TeamStreamChunk
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
@@ -1267,9 +1268,7 @@ async def test_a_resume_that_pauses_on_another_member_s_call_shows_no_paused_not
 
     repaused = await team.resume(raised.paused, approved=True, approvals=(member_approval("call-touch", "dangerous"),))
     assert isinstance(repaused, PausedAttempt)
-    assert repaused.response_text == (
-        f"{HEADER}**Checker**: Touched.\n\n\n*No team consensus - showing individual responses only*"
-    )
+    assert repaused.response_text == f"{HEADER}**Checker**: Touched."
     writer_call = replace(member_approval("call-touch-2", "risky"), invoking_agent="writer")
     result = await team.resume(repaused, approved=True, approvals=(writer_call,))
 
@@ -1464,10 +1463,92 @@ async def test_a_team_pause_shows_a_failed_member_run_s_reason_after_the_text_it
 
     paused = raised.value.paused
     slot = "Checking it\n\nChecker unavailable: api_key=***redacted***"
-    assert paused.response_text == (
-        f"{HEADER}**Checker**: {slot}\n\n\n*No team consensus - showing individual responses only*"
-    )
+    # The leader has not answered yet, so the pause shows no no-consensus note.
+    assert paused.response_text == f"{HEADER}**Checker**: {slot}"
     assert [member["content"] for member in paused.response_presentation_state["members"]] == ["", slot]
+
+
+_NO_CONSENSUS = "*No team consensus - showing individual responses only*"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_team_reply_shows_the_no_consensus_note_only_once_it_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """Live chunks, the pause, and the resume's progress show no no-consensus note; the finished reply ends with it.
+
+    The checker writes before its gated call and the leader has not answered when the team pauses, so every
+    unfinished view shows member text without a consensus. After the approval the leader says nothing, so the reply
+    finishes without one. A blocking turn sends no live chunks.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), content="Let me touch it.")],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    live: list[TeamStreamChunk] = []
+    reply = team.stream(show_tool_calls=False, chunks=live) if stream else team.respond(show_tool_calls=False)
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await reply
+    paused = raised.value.paused
+    team.models["default"] = ScriptedModel([answer("")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    progress: list[StructuredStreamChunk] = []
+
+    async def publish(chunk: StructuredStreamChunk) -> None:
+        progress.append(chunk)
+
+    result = await team.resume(
+        paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+        progress=publish,
+    )
+
+    assert (len(live) > 0) is stream
+    assert progress
+    unfinished = [*(rendered(chunk) for chunk in live), paused.response_text, *(chunk.content for chunk in progress)]
+    assert all("Let me touch it." in text and _NO_CONSENSUS not in text for text in unfinished)
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == f"{HEADER}**Checker**: Let me touch it.\n\nTouched.\n\n\n{_NO_CONSENSUS}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_completed_team_reply_in_which_only_members_spoke_ends_with_the_no_consensus_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """A streamed reply's live chunks show no note and its last chunk, the finished reply, adds it, as a blocking one shows it.
+
+    Either turn records the reply it ends with, note included.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-write", "writer", "Write it"), answer("")],
+        writer=[answer("Written.")],
+    )
+
+    if stream:
+        chunks = await team.stream(show_tool_calls=False)
+        *live, last = [rendered(chunk) for chunk in chunks]
+        assert live
+        assert all(_NO_CONSENSUS not in text for text in live)
+        text = last
+    else:
+        text = await team.respond(show_tool_calls=False)
+
+    assert text == f"{HEADER}**Writer**: Written.\n\n\n{_NO_CONSENSUS}"
+    assert team.recorder.assistant_text == text
 
 
 async def _pause_after_the_checker_wrote(
@@ -2324,9 +2405,7 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     [leader_usage] = _usage_rows(team.storage, record.run_id)
     assert leader_usage["metrics"]["input_tokens"] == 40
     assert team.recorder.outcome == "interrupted"
-    assert (
-        team.recorder.assistant_text == "**Writer**: Dra\n\n\n*No team consensus - showing individual responses only*"
-    )
+    assert team.recorder.assistant_text == "**Writer**: Dra"
 
 
 @pytest.mark.asyncio
@@ -2355,10 +2434,7 @@ async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_configure
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == (
-        "**Writer**: Drafting.\n\n**Checker**: Checker overloaded\n\n\n"
-        "*No team consensus - showing individual responses only*"
-    )
+    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
 
 
 @pytest.mark.asyncio
@@ -2474,10 +2550,7 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.paused, RunStatus.error, RunStatus.paused]
     assert (team.recorder.outcome, team.recorder.original_status) == ("interrupted", RunStatus.error)
-    assert team.recorder.assistant_text == (
-        "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded\n\n\n"
-        "*No team consensus - showing individual responses only*"
-    )
+    assert team.recorder.assistant_text == "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded"
 
 
 def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:

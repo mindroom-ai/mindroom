@@ -95,11 +95,15 @@ class TeamAttempt:
 
         A streamed attempt records its document's text without tool markers; a blocking one its stored runs' document,
         stripped, or nothing before the run stored a record. A stopped leader that wrote nothing
-        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted.
+        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted. Either text
+        ends with the no-consensus note only once the team run completed, so it matches the message a stopped
+        streamed reply shows.
         """
-        if self.stream:
-            return self.presentation.text_without_tool_markers()
         record = self.records.record
+        if self.stream:
+            return self.presentation.text_without_tool_markers(
+                finished=record is not None and record.status is RunStatus.completed,
+            )
         return format_team_response(record, self.presentation).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
@@ -156,9 +160,12 @@ class TeamAttempt:
                 shown = self.show_unshown_handover(member) or shown
         return shown
 
-    def chunk(self) -> StructuredStreamChunk | None:
-        """Return the rendered document as a stream chunk, or None while it is still empty."""
-        rendered_body = self.presentation.render_body()
+    def chunk(self, *, finished: bool) -> StructuredStreamChunk | None:
+        """Return the rendered document as a stream chunk, or None while it is still empty.
+
+        A live chunk shows the run still running; the ``finished`` one shows the reply its completed run ends with.
+        """
+        rendered_body = self.presentation.render_body(finished=finished)
         if not rendered_body:
             return None
         return StructuredStreamChunk(

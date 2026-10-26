@@ -73,17 +73,18 @@ from tests.team_turn_helpers import (
     build_team_turn,
     delegate,
     registered_probe,
+    rendered,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.teams.envelope import TeamStreamChunk
     from mindroom.tool_system.events import StructuredStreamChunk
 
 
 HEADER = "🤝 **Team Response** (GeneralAgent):\n\n"
-NO_CONSENSUS = "*No team consensus - showing individual responses only*"
 GATED = ApprovalRuleConfig(match="touch", action="require_approval")
 
 
@@ -1028,9 +1029,19 @@ async def test_a_notice_delivered_before_the_team_run_failed_is_not_left_live(
 # ---------------------------------------------------------------------------
 
 
-async def _stopped(team: TeamTurn, ready: asyncio.Event, *, stream: bool, **kwargs: Any) -> None:  # noqa: ANN401
-    """Stop the reply once ``ready`` is set, as the Stop button cancels the reply's task."""
-    task = asyncio.create_task(team.reply(stream=stream, **kwargs))
+async def _stopped(
+    team: TeamTurn,
+    ready: asyncio.Event,
+    *,
+    stream: bool,
+    chunks: list[TeamStreamChunk] | None = None,
+    **kwargs: Any,  # noqa: ANN401
+) -> None:
+    """Stop the reply once ``ready`` is set, as the Stop button cancels the reply's task.
+
+    ``chunks`` collects a streamed reply's chunks; the last one is the message the stopped reply leaves.
+    """
+    task = asyncio.create_task(team.stream(chunks=chunks, **kwargs) if stream else team.respond(**kwargs))
     await asyncio.wait_for(ready.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1066,7 +1077,8 @@ async def test_a_stop_after_a_member_s_finished_call_records_its_text_and_both_c
 ) -> None:
     """The interrupted turn keeps the member's text, its finished call, the leader's running delegation, and the reads.
 
-    The loop stores the cancelled rows; the interrupted record is the runner's to write, not the envelope's.
+    The loop stores the cancelled rows; the interrupted record is the runner's to write, not the envelope's. The team
+    run did not complete, so the recorded text shows no no-consensus note, as a streamed reply's message shows none.
     """
     ready = asyncio.Event()
     team = _team(
@@ -1080,12 +1092,16 @@ async def test_a_stop_after_a_member_s_finished_call_records_its_text_and_both_c
         make_visible_message(event_id=EVENT_ID, sender=REQUESTER_ID, body="Hello"),
     ]
 
-    await _stopped(team, ready, stream=stream, show_tool_calls=False, thread_history=thread_history)
+    live: list[TeamStreamChunk] = []
+
+    await _stopped(team, ready, stream=stream, chunks=live, show_tool_calls=False, thread_history=thread_history)
 
     snapshot = team.recorder.interrupted_snapshot()
     assert snapshot.user_message == "Hello"
+    assert snapshot.partial_text == "**GeneralAgent**: Half done"
+    assert [rendered(chunk) for chunk in live[-1:]] == ([f"{HEADER}{snapshot.partial_text}"] if stream else [])
     assert _render_interrupted_replay_content(snapshot) == (
-        f"**GeneralAgent**: Half done\n\n\n{NO_CONSENSUS}\n\n"
+        "**GeneralAgent**: Half done\n\n"
         "(turn stopped before completion; 1 tool call(s) had finished; 1 tool call(s) were still running)\n\n"
         f"{_RETAINED}\n"
         '- The `touch` tool finished with input preview "label=pwd" and output preview "touched pwd".\n'
@@ -1117,7 +1133,7 @@ async def test_a_stop_during_a_member_s_call_records_the_call_as_still_running(
 
     snapshot = team.recorder.interrupted_snapshot()
     assert _render_interrupted_replay_content(snapshot) == (
-        f"**GeneralAgent**: Half done\n\n\n{NO_CONSENSUS}\n\n"
+        "**GeneralAgent**: Half done\n\n"
         "(turn stopped before completion; 2 tool call(s) were still running)\n\n"
         f"{_RETAINED}\n"
         f"{_DELEGATION_RUNNING}\n"
