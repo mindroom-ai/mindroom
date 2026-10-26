@@ -152,7 +152,7 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
 
     assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
     team = TeamRunRecord(run_id="team-run", content="Five in all.", ended_member_runs=[scout], team_id=None)
-    assert format_team_response(team) == (
+    assert format_team_response(team, TeamStreamPresentation.new(["scout"], ["Scout"], show_tool_calls=False)) == (
         "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
 
@@ -179,6 +179,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
 
     document = format_team_response(
         TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
+        TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False),
     )
 
     assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."

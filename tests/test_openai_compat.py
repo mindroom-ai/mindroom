@@ -3623,12 +3623,13 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert scopes == [HistoryScope(kind="team", scope_id="super_team")]
 
-    def test_team_non_streaming_is_the_blocking_team_document(self, team_app_client: TestClient) -> None:
-        """The completion is the document a blocking Matrix reply delivers, rendered from the runs that ended.
+    def test_team_non_streaming_is_the_leader_s_answer_as_a_streamed_completion_sends_it(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """The completion is the leader's answer, the text a streamed team completion sends, whatever the members did.
 
-        The members come in the order their runs ended: one that failed before any text shows its error, and one
-        delegated twice shows twice, then the consensus follows. Agno's blocking team reply rendered the finished team
-        output this way, and API clients replay the text as history.
+        The members' results reach the client through the leader, as they do when the completion streams.
         """
 
         async def overloaded() -> None:
@@ -3662,10 +3663,7 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert response.json()["choices"][0]["message"]["content"] == (
-            "**Checker**: Checker overloaded\n\n**Writer**: Draft one.\n\n**Writer**: Draft two."
-            "\n\n\n**Team Consensus**:\n\nAll three done."
-        )
+        assert response.json()["choices"][0]["message"]["content"] == "All three done."
 
     def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:
         """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""

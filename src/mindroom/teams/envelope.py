@@ -787,11 +787,11 @@ class _TeamTurn:
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs (``format_team_response``); a
-        # streamed one records the document its events built and its failed member runs' reasons, in the configured
-        # order. The "No team response generated." fallback is display chrome, not replayable assistant text.
+        # its trace through its chunks. A blocking reply renders the finished runs and a streamed one records the
+        # document its events built and its failed member runs' reasons, both in the configured member order.
+        # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
-            body_text = format_team_response(record)
+            body_text = format_team_response(record, attempt.presentation)
             leader_text = finished_run_text(record)
             has_visible_output = bool(body_text) or bool(leader_text.strip())
             rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)

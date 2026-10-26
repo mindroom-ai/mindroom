@@ -263,12 +263,12 @@ async def test_a_blocking_team_reply_is_the_marker_free_member_and_consensus_doc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
-async def test_a_blocking_team_reply_lists_the_members_as_they_finished_and_a_streamed_one_as_configured(
+async def test_a_team_reply_lists_the_members_as_configured_on_either_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """The checker finishes before the writer; only the blocking reply puts it first, and it records what it sent."""
+    """The checker finishes before the writer; both replies list the writer first, and each records what it sent."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -283,10 +283,7 @@ async def test_a_blocking_team_reply_lists_the_members_as_they_finished_and_a_st
 
     text = await team.reply(stream=stream, show_tool_calls=False)
 
-    slots = (
-        "**Writer**: Written.\n\n**Checker**: Checked." if stream else "**Checker**: Checked.\n\n**Writer**: Written."
-    )
-    assert text == f"{HEADER}{slots}\n\n\n**Team Consensus**:\n\nBoth done."
+    assert text == f"{HEADER}**Writer**: Written.\n\n**Checker**: Checked.\n\n\n**Team Consensus**:\n\nBoth done."
     assert team.recorder.assistant_text == text
 
 
@@ -328,14 +325,14 @@ async def _checker_overloaded() -> None:
             ],
             [answer("Draft one."), answer("Draft two.")],
             [],
-            "**Writer**: Draft one.\n\n**Writer**: Draft two.\n\n\n**Team Consensus**:\n\nBoth drafts done.",
+            "**Writer**: Draft one.\n\nDraft two.\n\n\n**Team Consensus**:\n\nBoth drafts done.",
             id="member-delegated-twice",
         ),
         pytest.param(
             [delegate("call-write", "writer", "Write"), answer("")],
             [answer("Written.\n")],
             [],
-            "**Writer**: Written.\n\n\n\n*No team consensus - showing individual responses only*",
+            "**Writer**: Written.\n\n\n*No team consensus - showing individual responses only*",
             id="no-consensus",
         ),
     ],
@@ -348,11 +345,10 @@ async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_c
     checker: list[list[ScriptStep]],
     body: str,
 ) -> None:
-    """Each member run that ended shows its own text, then the leader's text, and the turn records the reply.
+    """Each member's slot shows the text of its runs that ended, then the leader's text, and the turn records the reply.
 
-    The bodies are what the Agno-backed blocking reply rendered for the same runs: a member that failed before any
-    text shows its error, one without text shows nothing, a member delegated twice shows twice, and text keeps its
-    whitespace.
+    A member that failed before any text shows its error, one without text shows nothing, and a member delegated
+    twice shows both runs' text in its one slot, as a streamed reply does.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, writer=writer, checker=checker)
 
@@ -2152,14 +2148,14 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_the_order_they_ended(
+async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_configured_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Stop of a blocking turn records the stopped team run's records, as the Agno-backed blocking turn did.
+    """A Stop of a blocking turn records the stopped team run's records, each member in its configured slot.
 
-    The members are listed as their runs ended: the checker failed before any text and shows its error, then the
-    writer, stopped while its call ran, shows what it wrote before.
+    The writer, stopped while its call ran, shows what it wrote before; the checker failed before any text and shows
+    its error.
     """
     team = squad_turn(
         tmp_path,
@@ -2178,7 +2174,7 @@ async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_the_order
     assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == (
-        "**Checker**: Checker overloaded\n\n**Writer**: Drafting.\n\n\n"
+        "**Writer**: Drafting.\n\n**Checker**: Checker overloaded\n\n\n"
         "*No team consensus - showing individual responses only*"
     )
 
@@ -2297,7 +2293,7 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
     assert [run.status for run in (record, *members)] == [RunStatus.paused, RunStatus.error, RunStatus.paused]
     assert (team.recorder.outcome, team.recorder.original_status) == ("interrupted", RunStatus.error)
     assert team.recorder.assistant_text == (
-        "**Checker**: Checker overloaded\n\n**Writer**: Let me touch it.\n\n\n"
+        "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded\n\n\n"
         "*No team consensus - showing individual responses only*"
     )
 

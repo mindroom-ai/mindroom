@@ -5,7 +5,7 @@
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
 run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
-instead, as a blocking reply shows it.
+instead, as a blocking reply shows it, in the same slots.
 """
 
 from __future__ import annotations
@@ -108,24 +108,28 @@ def finished_run_text(record: AnyRunRecord) -> str:
     return record.handover_content or "\n\n".join(own_answers(record))
 
 
-def format_team_response(record: TeamRunRecord) -> str:
+def format_team_response(record: TeamRunRecord, presentation: TeamStreamPresentation) -> str:
     """Return a finished team run's text as a blocking team reply shows it, without the header.
 
-    Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
-    so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
-    credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
-    the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
-    empty text.
+    It has the slots a streamed reply shows (``presentation``): one per member, in configured order, each holding the
+    ``finished_run_text`` of every run of that member that ended, a blank line apart, so a member whose run failed shows
+    the reason its run recorded, credentials redacted, even when it wrote text first. What the leader's run hands over
+    (``handover_content``) is the consensus, so a leader that failed shows that reason too. A run in which nobody wrote
+    anything renders as empty text.
     """
-    # TODO(simplify): A blocking reply lists member runs in the order they ended, one entry per delegation, while a
-    # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
-    # order. Users, API clients, and replayed history would notice.
-    contributions = [
-        _format_member_contribution(member.agent_display_name or "Team Member", text)
-        for member in record.ended_member_runs
-        if (text := finished_run_text(member)).strip()
-    ]
-    return "\n\n".join(_with_consensus(contributions, record.handover_content or ""))
+    per_member = dict.fromkeys(presentation.member_ids, "")
+    for member in record.ended_member_runs:
+        if (text := finished_run_text(member)).strip():
+            member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
+            per_member[member_id] = append_stream_text(per_member[member_id], text.strip(), separate=True)
+    return "\n\n".join(
+        render_team_member_slots(
+            presentation.member_ids,
+            display_names_by_id=presentation.display_names_by_id,
+            per_member=per_member,
+            consensus=record.handover_content or "",
+        ),
+    )
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"

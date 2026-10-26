@@ -152,7 +152,7 @@ class TeamAttempt:
         if self.stream:
             return self.reply.canonical_text()
         record = self.records.record
-        return format_team_response(record).strip() if record is not None else ""
+        return format_team_response(record, self.presentation).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""

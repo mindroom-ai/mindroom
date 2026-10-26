@@ -6387,7 +6387,7 @@ expose = [
     "members.materialize_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
-    "presentation.format_team_response",
+    "presentation.finished_run_text",
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",
