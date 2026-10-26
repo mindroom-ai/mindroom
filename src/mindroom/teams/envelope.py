@@ -627,7 +627,6 @@ class _TeamTurn:
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state, stream=True)
-        emitted_output = False
         shown: str | None = None
         try:
             async with closing_async_stream(events):
@@ -637,7 +636,6 @@ class _TeamTurn:
                     self.sync_live_turn_recorder(run, attempt)
                     chunk = attempt.chunk(finished=False)
                     if chunk is not None:
-                        emitted_output = True
                         shown = chunk.content
                         yield chunk
         except Exception as error:
@@ -664,12 +662,12 @@ class _TeamTurn:
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
         if (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
-            emitted_output = True
+            shown = chunk.content
             yield chunk
         # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
         # carries the trigger either, so the next turn still reads it.
         yield AttemptResolved(
-            await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=emitted_output),
+            await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=shown is not None),
         )
 
     def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
@@ -757,7 +755,7 @@ class _TeamTurn:
             response_text = leader_text.strip() if silent else rendered
             replayable_text = response_text if has_visible_output else ""
         else:
-            body_text = attempt.reply.canonical_text()
+            body_text = attempt.reply.canonical_text(finished=True)
             has_visible_output = bool(body_text)
             rendered = header + (body_text or NO_TEAM_RESPONSE)
             response_text = ""

@@ -2347,9 +2347,7 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
     [leader_usage] = _usage_rows(team.storage, record.run_id)
     assert leader_usage["metrics"]["input_tokens"] == 40
     assert team.recorder.outcome == "interrupted"
-    assert (
-        team.recorder.assistant_text == "**Writer**: Dra\n\n\n*No team consensus - showing individual responses only*"
-    )
+    assert team.recorder.assistant_text == "**Writer**: Dra"
 
 
 @pytest.mark.asyncio
@@ -2378,10 +2376,7 @@ async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_the_order
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == (
-        "**Checker**: Checker overloaded\n\n**Writer**: Drafting.\n\n\n"
-        "*No team consensus - showing individual responses only*"
-    )
+    assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n**Writer**: Drafting."
 
 
 @pytest.mark.asyncio
@@ -2497,10 +2492,7 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.paused, RunStatus.error, RunStatus.paused]
     assert (team.recorder.outcome, team.recorder.original_status) == ("interrupted", RunStatus.error)
-    assert team.recorder.assistant_text == (
-        "**Checker**: Checker overloaded\n\n**Writer**: Let me touch it.\n\n\n"
-        "*No team consensus - showing individual responses only*"
-    )
+    assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n**Writer**: Let me touch it."
 
 
 def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:

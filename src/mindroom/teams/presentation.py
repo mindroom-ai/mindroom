@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.runs import RunStatus
 from mindroom.matrix.message_builder import opens_with_markdown_block
 from mindroom.teams.runtime import MemberEvent
 from mindroom.tool_system.events import (
@@ -117,13 +118,14 @@ def finished_run_text(record: AnyRunRecord) -> str:
 
 
 def format_team_response(record: TeamRunRecord) -> str:
-    """Return a finished team run's text as a blocking team reply shows it, without the header.
+    """Return a team run's text as a blocking team reply shows it, without the header.
 
     Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
     so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
     credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
     the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
-    empty text.
+    empty text. Only a completed run is a finished reply, so a stopped, failed, or paused one shows no no-consensus
+    note.
     """
     # TODO(simplify): A blocking reply lists member runs in the order they ended, one entry per delegation, while a
     # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
@@ -133,7 +135,8 @@ def format_team_response(record: TeamRunRecord) -> str:
         for member in record.ended_member_runs
         if (text := finished_run_text(member)).strip()
     ]
-    return "\n\n".join(_with_consensus(contributions, record.handover_content or "", finished=True))
+    finished = record.status is RunStatus.completed
+    return "\n\n".join(_with_consensus(contributions, record.handover_content or "", finished=finished))
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"

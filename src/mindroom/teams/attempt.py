@@ -89,15 +89,18 @@ class TeamReplyText:
         elif isinstance(event, TextDelta):
             self.consensus += event.text
 
-    def canonical_text(self) -> str:
-        """Return the text in the configured member order, then the consensus: what a streamed reply records."""
+    def canonical_text(self, *, finished: bool) -> str:
+        """Return the text in the configured member order, then the consensus: what a streamed reply records.
+
+        Only a ``finished`` reply, one whose team run completed, ends with the no-consensus note.
+        """
         return "\n\n".join(
             render_team_member_slots(
                 self.presentation.member_ids,
                 display_names_by_id=self.presentation.display_names_by_id,
                 per_member=self.per_member,
                 consensus=self.consensus,
-                finished=True,
+                finished=finished,
             ),
         )
 
@@ -143,11 +146,13 @@ class TeamAttempt:
 
         A streamed attempt records its reply's text (``TeamReplyText``); a blocking one its stored runs' document,
         stripped, or nothing before the run stored a record. A stopped leader that wrote nothing
-        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted.
+        contributes nothing; a failed one contributes the reason its run recorded, credentials redacted. Either text
+        ends with the no-consensus note only once the team run completed, so it matches the message a stopped
+        streamed reply shows.
         """
-        if self.stream:
-            return self.reply.canonical_text()
         record = self.records.record
+        if self.stream:
+            return self.reply.canonical_text(finished=record is not None and record.status is RunStatus.completed)
         return format_team_response(record).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
