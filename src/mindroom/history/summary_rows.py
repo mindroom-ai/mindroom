@@ -19,7 +19,7 @@ import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from time import time
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.session_storage.store import (
@@ -36,7 +36,7 @@ from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
     import sqlite3
-    from collections.abc import Collection, Iterator, Sequence
+    from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
@@ -207,10 +207,24 @@ def folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id:
             "WHERE run.session_id = ? AND run.parent_run_id = ? AND run.folded_by IS NOT NULL",
             (session_id, run_id),
         ).fetchall()
-    folded = [json.loads(data) for (data,) in messages]
-    call_ids = {call.get("id") for message in folded for call in message.get("tool_calls") or []}
-    call_ids |= {message.get("tool_call_id") for message in folded}
-    call_ids |= {json.loads(data).get("tool_call_id") for (data,) in member_tools}
+    return summarized_tool_call_ids(
+        [json.loads(data) for (data,) in messages],
+        [json.loads(data) for (data,) in member_tools],
+    )
+
+
+def summarized_tool_call_ids(
+    messages: Iterable[Mapping[str, Any]],
+    member_tools: Iterable[Mapping[str, Any]],
+) -> set[str]:
+    """Return the tool calls a fold summarized, from the stored dicts of its messages and its members' tool executions.
+
+    They are the messages' calls and results and the members' calls. The turn recorder reads a live fold through it
+    and ``folded_tool_call_ids`` the rows folds flagged, so an interrupted record leaves out the same calls either way.
+    """
+    call_ids = {call.get("id") for message in messages for call in message.get("tool_calls") or []}
+    call_ids |= {message.get("tool_call_id") for message in messages}
+    call_ids |= {tool.get("tool_call_id") for tool in member_tools}
     return {call_id for call_id in call_ids if isinstance(call_id, str)}
 
 

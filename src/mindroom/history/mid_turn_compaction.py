@@ -37,7 +37,7 @@ from mindroom.history.summary_message import (
     is_scope_summary,
     mark_summary_follows,
 )
-from mindroom.history.summary_rows import Fold
+from mindroom.history.summary_rows import Fold, summarized_tool_call_ids
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -372,11 +372,12 @@ def _fold(record: AnyRunRecord, layout: _Layout) -> Fold:
 
 
 def _folded_calls(fold: Fold) -> set[str]:
-    """Return the tool calls ``fold`` summarizes: its messages' calls and the tools of the run's ended member runs."""
+    """Return the tool calls ``fold`` summarizes, as the store reads them back from the rows the fold flags."""
     members = fold.run.ended_member_runs if isinstance(fold.run, TeamRunRecord) else []
-    calls = {call.get("id") for message in fold.messages for call in message.tool_calls or []}
-    calls |= {tool.tool_call_id for member in members for tool in member.tools or []}
-    return {call for call in calls if isinstance(call, str)}
+    return summarized_tool_call_ids(
+        [message.to_dict() for message in fold.messages],
+        [tool.to_dict() for member in members if member.run_id in fold.member_run_ids for tool in member.tools or []],
+    )
 
 
 def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
