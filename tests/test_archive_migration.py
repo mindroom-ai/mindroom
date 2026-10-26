@@ -13,11 +13,13 @@ import pytest
 
 from mindroom import constants
 from mindroom.history import summary_rows
+from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.history_helpers import folded_run_ids, stored_run_ids
@@ -521,6 +523,53 @@ def test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text(tmp_path: 
     for kind in ("all", "seen"):
         assert summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind=kind) == expected
     assert _replay(tmp_path).loaded == ["r1"]
+
+
+def test_archive_text_that_is_not_utf8_reads_with_replacement_characters(tmp_path: Path) -> None:
+    """Worker code can write archive text that is not UTF-8, or JSON that escapes a lone surrogate; the database converts."""
+    _main_database(
+        tmp_path,
+        live=[_run("r1")],
+        generations=[
+            _Generation("legacy summary", legacy=True, legacy_event_ids=("$legacy",)),
+            _Generation("summary of r0", [_run("r0")]),
+        ],
+    )
+    run_data = json.dumps(_run("r0").to_dict()).encode().replace(b'"answer r0"', b'"answer r0 \x80"')
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        for table, column, value in (
+            ("code_sessions_compacted_runs", "run_data", run_data),
+            ("code_sessions_compacted_runs", "event_ids", b'["$r0", "$\xff"]'),
+            ("code_sessions_compacted_runs", "seen_event_ids", b'["$r0", "$\\ud800"]'),
+            ("code_sessions_compactions", "summary", b"summary \xfe"),
+            ("code_sessions_compactions", "summary_model", b"model \xfe"),
+            ("code_sessions_compactions", "legacy_event_ids", b'["$legacy\xfe"]'),
+        ):
+            connection.execute(f"UPDATE {table} SET {column} = CAST(? AS TEXT)", (value,))  # noqa: S608
+
+    storage = _open(tmp_path)
+    restored = storage.get_run("r0")
+    candidates = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="all")
+    seen = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="seen")
+    replay = _replay(tmp_path)
+
+    assert isinstance(restored, RunRecord)
+    assert restored.content == "answer r0 \ufffd"
+    assert (replay.loaded, replay.stored, replay.summary) == (["r1"], ["r0", "r1"], "summary \ufffd")
+    assert candidates == {"$legacy\ufffd", "$r0", "$\ufffd"}
+    assert seen == {"$legacy\ufffd", "$r0", "$\ufffd\ufffd\ufffd"}
+
+
+def test_the_archive_step_leaves_text_reads_to_the_steps_after_it(tmp_path: Path) -> None:
+    """Replacement characters stay the archive's rule: the connection reads text as it did once the step ends."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        adopt_summary_rows(connection, AgnoTableNames("code"))
+
+        assert connection.text_factory is str
+        assert "code_sessions_compactions" not in {
+            name for (name,) in connection.execute("SELECT name FROM sqlite_master")
+        }
 
 
 @pytest.mark.parametrize(
