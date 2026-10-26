@@ -10,7 +10,7 @@ from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import list_knowledge_files
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import DISTANCE_KEY, SOURCE_PATH_KEY
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
@@ -97,7 +97,7 @@ def _memory_results_from_hits(
                 memory=content,
                 user_id=scope_user_id,
                 # The cosine similarity, which merged keyword matches' word-overlap scores rank against.
-                score=1.0 - hit.meta_data["distances"],
+                score=1.0 - hit.meta_data[DISTANCE_KEY],
                 metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )
