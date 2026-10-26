@@ -2,9 +2,9 @@
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
 Each adapter renders a request's output schema in its provider's wire format: a ``forced_tool`` route as a forced
-call of ``structured_output_tool``, whose arguments are the answer. A route that only offers JSON mode also needs a
-JSON prompt, derived from the schema, at the end of the system message. An answer from a route that enforces the
-schema is parsed strictly; only a JSON-mode answer gets the lenient repairs.
+call of the ``structured_output_tools`` tool, whose arguments are the answer. A route that only offers JSON mode also
+needs a JSON prompt, derived from the schema, at the end of the system message. An answer from a route that enforces
+the schema is parsed strictly; only a JSON-mode answer gets the lenient repairs.
 """
 
 from __future__ import annotations

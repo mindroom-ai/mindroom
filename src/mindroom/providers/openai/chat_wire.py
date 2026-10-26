@@ -24,7 +24,7 @@ from mindroom.llm.provider import (
     StructuredOutput,
     TextDelta,
     UsageReported,
-    structured_output_tool,
+    structured_output_tools,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
@@ -436,11 +436,7 @@ def chat_request_kwargs(
     """
     response_format = _response_format(output_schema, structured_output, strict=settings.strict_output)
     params = _dialect_params(settings, wire, response_format)
-    output_tool = (
-        (structured_output_tool(output_schema),)
-        if output_schema is not None and structured_output == "forced_tool"
-        else ()
-    )
+    output_tool = structured_output_tools(structured_output, output_schema)
     _add_tools(
         params,
         _chat_tools((*tools, *output_tool), wire),

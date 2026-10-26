@@ -48,7 +48,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
     hosted_tool_started,
-    structured_output_tool,
+    structured_output_tools,
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
@@ -105,7 +105,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import NativeHistoryRoute, StructuredOutput, ToolSpec
+    from mindroom.llm.provider import NativeHistoryRoute, StructuredOutput
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -318,12 +318,6 @@ class ClaudeProvider:
             return None
         return {"type": "json_schema", "schema": anthropic.transform_schema(schema.model_json_schema())}
 
-    def _output_tool(self, schema: type[BaseModel] | None) -> tuple[ToolSpec, ...]:
-        """Return the tool a ``forced_tool`` route must call to answer ``schema``, or nothing."""
-        if schema is None or self.capabilities.structured_output != "forced_tool":
-            return ()
-        return (structured_output_tool(schema),)
-
     def _authored_params(self, request: ModelRequest) -> dict[str, Any]:
         """Return the model's authored request parameters with the request's overrides applied."""
         settings, overrides = self.settings, request.overrides
@@ -399,7 +393,7 @@ class ClaudeProvider:
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
         )
         output_format = self._output_format(request.output_schema)
-        output_tool = self._output_tool(request.output_schema)
+        output_tool = structured_output_tools(self.capabilities.structured_output, request.output_schema)
         thinking_enabled = settings.thinking_enabled() and not overrides.disable_thinking
         conversation = format_claude_messages(
             projected,

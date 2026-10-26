@@ -24,7 +24,7 @@ type MediaKind = Literal["audio", "image", "file", "video"]
 type StopReason = Literal["end", "tool_use", "output_limit", "refusal", "content_filter", "incomplete"]
 type ToolChoice = Literal["none"]
 # How a route enforces an output schema: natively, by a JSON-schema response format, by a forced call of the
-# ``structured_output_tool`` whose arguments are the answer, or only by JSON mode.
+# ``structured_output_tools`` tool, whose arguments are the answer, or only by JSON mode.
 type StructuredOutput = Literal["native", "json_schema", "forced_tool", "json_mode"]
 
 
@@ -78,13 +78,24 @@ class ToolSpec:
 STRUCTURED_OUTPUT_TOOL = "structured_output"
 
 
-def structured_output_tool(schema: type[BaseModel]) -> ToolSpec:
-    """Return the tool a ``forced_tool`` route must call to answer: its arguments are the answer, in ``schema``."""
-    return ToolSpec(
-        name=STRUCTURED_OUTPUT_TOOL,
-        description="Give your answer as this tool's arguments.",
-        parameters=schema.model_json_schema(),
-        strict=None,
+def structured_output_tools(
+    structured_output: StructuredOutput,
+    schema: type[BaseModel] | None,
+) -> tuple[ToolSpec, ...]:
+    """Return the tools a request adds for its output ``schema`` on a route that enforces it as ``structured_output``.
+
+    A ``forced_tool`` route gets the one tool it must call to answer, whose arguments are the answer in ``schema``;
+    any other route, and a request without a schema, gets none.
+    """
+    if schema is None or structured_output != "forced_tool":
+        return ()
+    return (
+        ToolSpec(
+            name=STRUCTURED_OUTPUT_TOOL,
+            description="Give your answer as this tool's arguments.",
+            parameters=schema.model_json_schema(),
+            strict=None,
+        ),
     )
 
 
@@ -409,5 +420,5 @@ __all__ = [
     "UsageReported",
     "complete",
     "hosted_tool_started",
-    "structured_output_tool",
+    "structured_output_tools",
 ]
