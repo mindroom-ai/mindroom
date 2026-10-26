@@ -3639,6 +3639,7 @@ def test_pre_replay_crash_recovery_preserves_prior_persisted_and_active_live_not
                 storage=store,
                 session=session,
                 session_id=session.session_id,
+                storage_factory=lambda: store,
             ),
             entity_name="general",
         )

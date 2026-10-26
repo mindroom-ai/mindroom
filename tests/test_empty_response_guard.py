@@ -137,6 +137,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         storage=storage,
         session=session,
         session_id="session-1",
+        storage_factory=lambda: storage,
     )
 
     discard_empty_completed_run(
@@ -174,6 +175,7 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
             storage=storage,
             session=live_session,
             session_id="session-1",
+            storage_factory=lambda: storage,
         ),
         session_id="session-1",
         run_id="run-empty",
@@ -207,6 +209,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
         storage=storage,
         session=session,
         session_id="session-1",
+        storage_factory=lambda: storage,
     )
 
     discard_empty_completed_run(

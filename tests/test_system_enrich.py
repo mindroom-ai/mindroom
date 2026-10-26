@@ -53,6 +53,7 @@ from tests.conftest import (
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    unstored_team_scope_context,
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -368,7 +369,7 @@ def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enr
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        scope_context=None,
+        scope_context=unstored_team_scope_context(config, members.requested_agent_names, team_name=None),
         execution_identity=None,
         model_name="default",
         configured_team_name=None,
@@ -407,7 +408,11 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
             transient_enrichment_items=transient_items,
             system_enrichment_items=system_items,
         ),
-        scope_context=None,
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.spec.id for member in built.spec.members],
+            team_name=None,
+        ),
         built=built,
         message="Coordinate",
         thread_history=[],
@@ -436,7 +441,11 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
 
     prepared = await prepare_materialized_team_execution(
         make_turn_context(room_id=None, thread_id=None, requester_id=None, reply_to_event_id="$event"),
-        scope_context=None,
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.spec.id for member in built.spec.members],
+            team_name=None,
+        ),
         built=built,
         message="Coordinate",
         thread_history=[],

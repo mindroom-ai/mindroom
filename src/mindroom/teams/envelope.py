@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.agent_loop.spec import RunContext, UnstoredSession
+from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
@@ -158,7 +158,7 @@ class PreparedTeamExecution:
 async def prepare_materialized_team_execution(
     ctx: ResponseTurnContext,
     *,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     built: BuiltTeam,
     message: str,
     thread_history: Sequence[ResolvedVisibleMessage] | None,
@@ -221,15 +221,11 @@ async def prepare_materialized_team_execution(
         pipeline_timing.mark("history_ready")
         note_prepared_history_timing(pipeline_timing, prepared_history)
     # The stored team history this request replays under the resolved plan, and the scope summary.
-    history, summary = (
-        replayed_history(
-            scope_context.session,
-            scope_context.scope,
-            built.history_settings,
-            prepared_history.replay_plan,
-        )
-        if scope_context is not None
-        else ([], None)
+    history, summary = replayed_history(
+        scope_context.session,
+        scope_context.scope,
+        built.history_settings,
+        prepared_history.replay_plan,
     )
     run_extra_content = build_prepared_history_metadata_content(prepared_history)
     run_metadata = build_matrix_run_metadata(
@@ -266,7 +262,7 @@ class _LeaderRun:
     """
 
     spec: TeamSpec
-    storage: RunStorage | None
+    storage: RunStorage
     hooks: LoopHooks
     request_template: ModelRequest
     stream: bool
@@ -278,7 +274,6 @@ class _LeaderRun:
         run_input: Sequence[Message],
         *,
         run_id: str,
-        session_id: str,
         user_id: str | None,
         records: TerminalRecord[TeamRunRecord] | None,
     ) -> AsyncIterator[TeamRunEvent]:
@@ -288,10 +283,10 @@ class _LeaderRun:
             run_input,
             ctx=RunContext(
                 run_id=run_id,
-                session=self.storage.session if self.storage is not None else UnstoredSession(session_id),
+                session=self.storage.session,
                 user_id=user_id,
                 metadata=self.metadata,
-                history_scope=self.storage.scope if self.storage is not None else None,
+                history_scope=self.storage.scope,
                 model_name=self.model_name,
             ),
             hooks=self.hooks,
@@ -307,7 +302,7 @@ def _leader_run(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    storage: RunStorage | None,
+    storage: RunStorage,
     configured_team_name: str | None,
     stream: bool,
     compaction_lifecycle: CompactionLifecycle | None,
@@ -345,9 +340,8 @@ def run_prepared_team(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
     team_name: str,
-    session_id: str,
     user_id: str | None,
     stream: bool,
 ) -> AsyncIterator[TeamRunEvent]:
@@ -355,7 +349,7 @@ def run_prepared_team(
 
     The run and its usage are stored in the team scope, a scope without a stored session getting its first one.
     """
-    storage = scope_run_storage(scope_context) if scope_context is not None else None
+    storage = scope_run_storage(scope_context)
     leader = _leader_run(
         built,
         prepared,
@@ -370,20 +364,17 @@ def run_prepared_team(
     return leader.start(
         prepared.run_input(MediaInputs()),
         run_id=str(uuid4()),
-        session_id=session_id,
         user_id=user_id,
         records=None,
     )
 
 
-async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext | None, event_ids: list[str]) -> None:
+async def _persist_bound_seen_event_ids(*, scope_context: ScopeSessionContext, event_ids: list[str]) -> None:
     """Record the Matrix events this team turn consumed on the stored session row, creating the row if needed.
 
     The ids merge into the metadata the row holds, so nothing the run or another writer stored is put back or lost.
     The write runs in the database's lane, as the session's other writes do.
     """
-    if scope_context is None:
-        return
     storage = scope_context.storage
     # A new session names the row to merge into, so the run's loaded session never writes its stale state back.
     record = partial(
@@ -528,7 +519,7 @@ class _TeamTurn:
             mode=self.mode,
             config=config,
             runtime_paths=self.runtime_paths,
-            scope_context=run.scope_context,
+            scope_context=run.scope,
             execution_identity=self.execution_identity,
             model_name=runtime_model.model_name,
             configured_team_name=self.configured_team_name,
@@ -536,7 +527,7 @@ class _TeamTurn:
         )
         prepared = await prepare_materialized_team_execution(
             self.ctx,
-            scope_context=run.scope_context,
+            scope_context=run.scope,
             built=built,
             message=continuation_state.active_prompt,
             thread_history=self.thread_history,
@@ -579,7 +570,6 @@ class _TeamTurn:
             agents=members.display_names,
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
-        # A team without a bound scope stores nothing.
         storage = bind_turn_session(run)
         leader = _leader_run(
             built,
@@ -605,30 +595,28 @@ class _TeamTurn:
             events = leader.start(
                 run_input,
                 run_id=attempt.run_id,
-                session_id=self.session_id,
                 user_id=self.user_id,
                 records=attempt.records,
             )
-        if storage is not None:
-            events = drive_team_delegations(
-                events,
-                TeamResume(
-                    built=built,
-                    storage=storage,
-                    records=attempt.records,
-                    hooks=leader.hooks,
-                    request_template=leader.request_template,
-                    plan=prepared.prepared_history.replay_plan,
-                    user_id=self.user_id,
-                    toolkit_owners=tool_owners_by_agent(*members.builds),
-                    model_name=prepared.runtime_model_name,
-                ),
-                team_name=self.entity_name,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                execution_identity=self.execution_identity,
-                refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
-            )
+        events = drive_team_delegations(
+            events,
+            TeamResume(
+                built=built,
+                storage=storage,
+                records=attempt.records,
+                hooks=leader.hooks,
+                request_template=leader.request_template,
+                plan=prepared.prepared_history.replay_plan,
+                user_id=self.user_id,
+                toolkit_owners=tool_owners_by_agent(*members.builds),
+                model_name=prepared.runtime_model_name,
+            ),
+            team_name=self.entity_name,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=self.execution_identity,
+            refresh_scheduler=self.orchestrator.knowledge_refresh_scheduler,
+        )
         return attempt, stream_with_llm_request_log_context(events, request_context=request_context)
 
     async def run_blocking_attempt(
@@ -783,7 +771,7 @@ class _TeamTurn:
         """
         if mark_seen and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
-                scope_context=run.scope_context,
+                scope_context=run.scope,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
         tool_executions = team_tool_executions(record)
@@ -845,7 +833,7 @@ class _TeamTurn:
             output_tokens=discard.output_tokens,
         )
 
-    def load_scope(self) -> ScopeSessionContext | None:
+    def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
             member_names=self.requested_agent_names,
             session_id=self.session_id,

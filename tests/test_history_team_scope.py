@@ -35,7 +35,6 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
     BuiltTeam,
-    ResolvedExactTeamMembers,
     build_team_spec,
     materialize_exact_team_members,
 )
@@ -99,6 +98,19 @@ def _build_pair(
         active_model_names=None,
     )
     assert members.failed_agent_names == []
+    if scope_context is None:
+        storage = MagicMock()
+        scope_context = ScopeSessionContext(
+            scope=resolve_bound_team_scope(
+                member_names=["zeta", "alpha"],
+                config=config,
+                team_name=configured_team_name,
+            ),
+            storage=storage,
+            session=None,
+            session_id="session-1",
+            storage_factory=lambda: storage,
+        )
     return build_team_spec(
         members=members,
         mode=TeamMode.COORDINATE,
@@ -285,20 +297,16 @@ def test_the_team_build_names_its_leader_by_the_members_label_and_identifies_it_
     config, runtime_paths = _pair_config(tmp_path)
 
     ad_hoc = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
-    # A team that names no member has no history scope, so its label identifies it.
-    memberless = build_team_spec(
-        members=ResolvedExactTeamMembers(requested_agent_names=[], builds=[], display_names=[], failed_agent_names=[]),
-        mode=TeamMode.COORDINATE,
-        config=config,
-        runtime_paths=runtime_paths,
-        scope_context=None,
-        execution_identity=None,
-        model_name="default",
-        configured_team_name=None,
-    )
 
     assert (ad_hoc.spec.leader.id, ad_hoc.spec.leader.name) == ("team_alpha+zeta", "Team (Zeta, Alpha)")
-    assert (memberless.spec.leader.id, memberless.spec.leader.name) == ("Team ()", "Team ()")
+
+
+def test_an_ad_hoc_team_that_names_no_member_has_no_history_scope(tmp_path: Path) -> None:
+    """Every team run names a member, so an ad hoc team that names none is refused rather than run without history."""
+    config, _runtime_paths = _pair_config(tmp_path)
+
+    with pytest.raises(ValueError, match="names no member"):
+        resolve_bound_team_scope(member_names=[], config=config, team_name=None)
 
 
 _PAST_2_ONLY = ["past-2 team question", "past-2 team answer"]
@@ -435,6 +443,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
         storage=MagicMock(),
         session=None,
         session_id="session-1",
+        storage_factory=lambda: MagicMock(),
     )
 
     with patch(

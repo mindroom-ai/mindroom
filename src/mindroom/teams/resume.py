@@ -27,9 +27,7 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.request_messages import build_resume_request, replayed_history
-from mindroom.history.session_context import load_scope_session
-from mindroom.history.team_scope import ad_hoc_team_scope_id
-from mindroom.history.types import HistoryScope
+from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
 from mindroom.llm.events import RunFinished
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
@@ -65,7 +63,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.history.types import ResolvedReplayPlan
+    from mindroom.history.types import HistoryScope, ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.runs import RunRequirement
@@ -77,24 +75,6 @@ if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMode
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def _approval_history_scope(
-    member_names: tuple[str, ...],
-    team_name: str | None,
-    config: Config,
-    execution_identity: ToolExecutionIdentity,
-    retained_scope: HistoryScope | None,
-) -> HistoryScope | None:
-    """Resolve retained team storage before reconstructing member executables; ``team_name`` is None for an ad hoc team."""
-    if retained_scope is not None:
-        return retained_scope
-    scope_id = (
-        team_name
-        if team_name is not None
-        else ad_hoc_team_scope_id(member_names, config.agents, requester_user_id=execution_identity.requester_id)
-    )
-    return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
 def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
@@ -370,16 +350,21 @@ async def continue_paused_team_run(
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
+    # The approval's retained team storage, else the scope its team resolves to before members are rebuilt.
     scope = load_scope_session(
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        scope=_approval_history_scope(member_names, team_name, config, execution_identity, history_scope),
+        scope=history_scope
+        or resolve_bound_team_scope(
+            member_names=member_names,
+            config=config,
+            team_name=team_name,
+            execution_identity=execution_identity,
+        ),
     )
     try:
-        # Named members always resolve a team scope, and the approval names its session.
-        assert scope is not None
         set_consumption_storage(scope.storage_factory)
         persisted = _stored_paused_team_run(scope, run_id)
         delegated = has_delegation_state(persisted)

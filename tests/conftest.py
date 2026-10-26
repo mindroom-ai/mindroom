@@ -123,6 +123,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import (
     ScopeSessionContext,
     load_scope_session,
+    resolve_bound_team_scope,
 )
 from mindroom.history.types import (
     CompactionLifecycle,
@@ -743,15 +744,20 @@ async def prepare_history_for_run_for_test(
             storage=storage,
             session=persisted_session,
             session_id=session_id,
+            storage_factory=lambda: storage,
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     else:
-        scope_context = load_scope_session(
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            scope=resolved_scope,
+        scope_context = (
+            load_scope_session(
+                session_id=session_id,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                scope=resolved_scope,
+            )
+            if session_id is not None
+            else None
         )
         prepared_scope_history = await prepare_scope_history(scope_context=scope_context, **scope_history_kwargs)
     return finalize_history_preparation(
@@ -3707,6 +3713,23 @@ def squad_probe() -> Iterator[type["ProbeToolkit"]]:
 
     with registered_probe() as toolkit:
         yield toolkit
+
+
+def unstored_team_scope_context(
+    config: Config,
+    member_names: Sequence[str],
+    *,
+    team_name: str | None,
+) -> ScopeSessionContext:
+    """Return the scope context of a team with no stored session, whose store keeps nothing, for building a team."""
+    storage = MagicMock()
+    return ScopeSessionContext(
+        scope=resolve_bound_team_scope(member_names=member_names, config=config, team_name=team_name),
+        storage=storage,
+        session=None,
+        session_id="session-1",
+        storage_factory=lambda: storage,
+    )
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

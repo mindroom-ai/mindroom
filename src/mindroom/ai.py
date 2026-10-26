@@ -41,7 +41,6 @@ from mindroom.history.replay import compaction_marker
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
 from mindroom.history.session_context import ScopeSessionContext, load_scope_session
-from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
@@ -289,7 +288,7 @@ class _StreamingAttemptState:
 class _AgentTurnCallbacks:
     """Adapter callbacks shared by the blocking and streaming agent turns."""
 
-    load_scope: Callable[[], ScopeSessionContext | None]
+    load_scope: Callable[[], ScopeSessionContext]
     on_scope_loaded: Callable[[ScopeSessionContext | None], None]
     discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     persist_standalone_replay: Callable[[ScopeSessionContext | None, StandaloneReplaySnapshot], None]
@@ -307,7 +306,7 @@ def _build_agent_turn_callbacks(
 ) -> _AgentTurnCallbacks:
     """Build the entity-specific turn-driver callbacks for one agent response."""
 
-    def _load_scope() -> ScopeSessionContext | None:
+    def _load_scope() -> ScopeSessionContext:
         return load_scope_session(
             scope=HistoryScope(kind="agent", scope_id=agent_name),
             session_id=session_id,
@@ -636,24 +635,11 @@ def _begin_attempt(
     *,
     stream_state: _StreamingAttemptState | None = None,
 ) -> tuple[RunStorage, _AgentAttempt]:
-    """Record one prepared attempt on the turn's run state, and return where its run is stored and its request.
-
-    A turn without a scope context stores its run in its build's store, in a session of its own outside any scope.
-    """
+    """Record one prepared attempt on the turn's run state, and return where its run is stored and its request."""
     prepared_run = run_context.prepared_run
     run.unseen_event_ids = prepared_run.unseen_event_ids
     run.run_metadata = run_context.metadata
     storage = bind_turn_session(run)
-    if storage is None:
-        storage = RunStorage(
-            store=prepared_run.build.store,
-            session=new_scope_session(
-                session_id=run_context.session_id,
-                scope_id=run_context.agent_name,
-                is_team=False,
-            ),
-            scope=None,
-        )
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),

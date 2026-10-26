@@ -393,6 +393,7 @@ class TurnRunState:
     """
 
     turn_state: AITurnState = field(default_factory=AITurnState)
+    # None until the driver loads the turn's scope, which it does before the turn's first attempt.
     scope_context: ScopeSessionContext | None = None
     run_metadata: dict[str, Any] | None = None
     unseen_event_ids: list[str] = field(default_factory=list)
@@ -403,6 +404,12 @@ class TurnRunState:
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return the running attempt's partial output, empty while no attempt runs."""
         return self.attempt.partial_snapshot() if self.attempt is not None else TurnPartialSnapshot()
+
+    @property
+    def scope(self) -> ScopeSessionContext:
+        """Return the turn's scope context, which an attempt body reads once the driver loaded it."""
+        assert self.scope_context is not None, "the driver loads the turn's scope before its first attempt"
+        return self.scope_context
 
 
 @dataclass(frozen=True)
@@ -690,7 +697,7 @@ class StandaloneReplaySnapshot:
 class BlockingTurnAdapter:
     """Entity-specific callbacks for one blocking response turn."""
 
-    load_scope: Callable[[], ScopeSessionContext | None]
+    load_scope: Callable[[], ScopeSessionContext]
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
         Awaitable[BlockingAttemptResolution],
@@ -706,7 +713,7 @@ class BlockingTurnAdapter:
 class StreamingTurnAdapter[ChunkT]:
     """Entity-specific callbacks for one streaming response turn."""
 
-    load_scope: Callable[[], ScopeSessionContext | None]
+    load_scope: Callable[[], ScopeSessionContext]
     run_attempt: Callable[
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[ChunkT | AttemptResolved],
@@ -923,7 +930,7 @@ def _advance_turn_continuation(
 
 async def _remove_history_of_redacted_events(
     ctx: ResponseTurnContext,
-    scope_context: ScopeSessionContext | None,
+    scope_context: ScopeSessionContext,
 ) -> None:
     """Remove persisted history derived from events since redacted, before the history is used.
 
@@ -932,7 +939,7 @@ async def _remove_history_of_redacted_events(
     response opens it, which also covers a message no turn answered but a later turn read
     as context.
     """
-    if ctx.redacted_history_events is None or scope_context is None or scope_context.session is None:
+    if ctx.redacted_history_events is None or scope_context.session is None:
         return
     removed_event_ids = await remove_history_of_redacted_events(
         scope_context.storage,
@@ -953,12 +960,12 @@ async def _load_scope_session(
     ctx: ResponseTurnContext,
     adapter: _TurnAdapter,
     run: TurnRunState,
-) -> ScopeSessionContext | None:
+) -> ScopeSessionContext:
     """Load the turn's scope session off the event loop, without the history of events since redacted."""
     scope_context = await run_blocking_until_complete(adapter.load_scope)
     await _remove_history_of_redacted_events(ctx, scope_context)
     run.scope_context = scope_context
-    set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
+    set_consumption_storage(scope_context.storage_factory)
     if adapter.on_scope_loaded is not None:
         adapter.on_scope_loaded(scope_context)
     return scope_context

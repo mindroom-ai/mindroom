@@ -420,6 +420,7 @@ def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(t
         storage=storage,
         session=storage.load_session("session-1", "agent"),
         session_id="session-1",
+        storage_factory=lambda: storage,
     )
 
     persist_interrupted_replay(
@@ -454,6 +455,7 @@ def test_a_team_scopes_first_interrupted_replay_is_a_team_run(tmp_path: Path) ->
         storage=storage,
         session=None,
         session_id="session-1",
+        storage_factory=lambda: storage,
     )
 
     persist_interrupted_replay(

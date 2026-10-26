@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,6 +27,8 @@ from mindroom.delivery_gateway import (
     StreamingDeliveryRequest,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import ToolExecution
 from mindroom.response_turn import (
     AttemptResolved,
@@ -47,7 +49,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
 
 
@@ -74,8 +75,15 @@ def _completed_outcome(event_id: str, body: str) -> FinalDeliveryOutcome:
     )
 
 
-def _load_scope() -> ScopeSessionContext | None:
-    return None
+def _load_scope() -> ScopeSessionContext:
+    storage = MagicMock()
+    return ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=storage,
+        session=None,
+        session_id="session-1",
+        storage_factory=lambda: storage,
+    )
 
 
 def _noop(*_args: object) -> None:

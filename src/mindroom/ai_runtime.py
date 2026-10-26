@@ -372,10 +372,10 @@ def _finalize_queued_notice_in_new_session_storage(
 def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
     """Register the scope one response ran in for queued-notice finalization; the first registration wins.
 
-    A response without a scope, or whose scope context opens no storage of its own, registers none.
+    A response without a scope registers none.
     """
     notice_context = _queued_message_notice_context.get()
-    if notice_context is None or scope_context is None or scope_context.storage_factory is None:
+    if notice_context is None or scope_context is None:
         return
     session_id = scope_context.session_id
     session_kind = scope_context.scope.kind

@@ -830,6 +830,27 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
 
 
 @pytest.mark.asyncio
+async def test_a_saved_team_approval_resumes_the_run_in_the_scope_its_approval_retained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team no longer configured resumes from the storage its approval retained, not the scope it resolves to now."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([answer("The checker touched it.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    del team.config.teams["squad"]
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous"]
+
+
+@pytest.mark.asyncio
 async def test_a_resume_runs_each_member_on_the_model_its_pause_pinned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
