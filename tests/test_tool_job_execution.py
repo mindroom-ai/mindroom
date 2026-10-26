@@ -1212,18 +1212,24 @@ async def test_a_call_that_ran_never_reads_as_one_that_did_not(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["waited", "released", "stopped"])
+@pytest.mark.parametrize("case", ["waited", "failed", "released", "stopped"])
 async def test_reply_records_a_managed_call_before_its_job_starts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
 ) -> None:
-    """A restart's account names a job's call as it names an inline one, and a Stop committed first refuses it."""
+    """A restart's account names a job's call as it names an inline one, and a Stop committed first refuses it.
+
+    A call whose job failed is recorded as a failed outcome with the text the model read, as an inline call is.
+    """
     reply_returned = _hold_job_outcomes(monkeypatch) if case == "released" else threading.Event()
     ran: list[str] = []
 
     async def write_note(text: str) -> str:
         ran.append(text)
+        if case == "failed":
+            msg = "the notes are read-only"
+            raise PermissionError(msg)
         return f"noted {text}"
 
     context, runtime = await _managed_context(tmp_path)
@@ -1243,15 +1249,20 @@ async def test_reply_records_a_managed_call_before_its_job_starts(
                     assert (ran, recorder.records, await runtime.list_jobs(owner=owner, depth=0)) == ([], [], [])
                     return
                 record = await run_job_turn(actor, model, "Note")
-        result = record.tools[0].result
+        [tool] = record.tools
+        result = tool.result
         # The record keeps the call's application arguments, never the reserved wait budget.
         assert recorder.records[0] == ("started", "write_note", {"text": "hello"}, None)
-        assert recorder.records[1] == ("finished", "write_note", {"text": "hello"}, result)
+        returned = ToolOutcome(content=str(result), is_error=True) if case == "failed" else result
+        assert recorder.records[1] == ("finished", "write_note", {"text": "hello"}, returned)
+        assert tool.is_error is (case == "failed")
         if case == "released":
             handle = json.loads(str(result))
             assert handle["tool"] == "write_note"
             reply_returned.set()
             await wait_for_status(runtime, handle["job_id"], "completed")
+        elif case == "failed":
+            assert result == "the notes are read-only"
         else:
             assert result == "noted hello"
         assert ran == ["hello"]
@@ -1344,10 +1355,19 @@ async def test_a_refused_job_fails_its_call_not_the_reply(
             assert defer_execution_cleanup(cleanup) is False
         assert record.status is RunStatus.completed
         assert record.content == "done"
-        assert record.tools[0].is_error
+        [tool] = record.tools
+        assert tool.is_error
         assert ran == []
-        # A job the runtime refused finishes the record its call opened; a call refused before admission opens none.
-        assert [entry[0] for entry in recorder.records] == (["started", "finished"] if refusal == "start" else [])
+        # A job the runtime refused finishes the record its call opened as failed; a call refused before admission
+        # opens none.
+        assert recorder.records == (
+            [
+                ("started", "write_note", {}, None),
+                ("finished", "write_note", {}, ToolOutcome(content=str(tool.result), is_error=True)),
+            ]
+            if refusal == "start"
+            else []
+        )
     finally:
         await runtime.shutdown()
 

@@ -430,11 +430,12 @@ async def _run_managed_call(
             retained = True
             # Every outcome but completion tells the model why, such as the reason an approval was denied.
             error = None if waited.job.status == "completed" else job_failure_text(value, payload)
-        # A released wait's call returned its job handle, which names the job a restart's account points to.
-        await record_return(value if error is None else error)
+        # A released wait's call returned its job handle, which names the job a restart's account points to. A
+        # failed call is recorded as failed, with the text the model reads.
+        await record_return(value if error is None else ToolOutcome(content=error, is_error=True))
     except JobAccessError as refused:
         # The runtime refused the job, or this caller's wait for it: the call fails, not the reply's run.
-        await record_return(str(refused))
+        await record_return(ToolOutcome(content=str(refused), is_error=True))
         raise
     finally:
         if not retained:

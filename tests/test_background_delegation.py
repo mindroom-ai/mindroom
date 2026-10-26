@@ -58,6 +58,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
@@ -457,11 +458,16 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 started, finished = recorder.records[:2]
                 assert started == ("started", "run_subagent", {"task": "Report", "agent_name": "code"}, None)
                 assert finished[:2] == ("finished", "run_subagent")
-                returned = str(finished[3])
+                returned = finished[3]
                 if detach:
-                    assert json.loads(returned)["job_id"] == child.delegation_id
+                    assert json.loads(str(returned))["job_id"] == child.delegation_id
+                elif approval == "cancelled":
+                    # A child that did not complete fails its parent's call, which the reply records as failed.
+                    assert isinstance(returned, ToolOutcome)
+                    assert returned.is_error
+                    assert "cancelled" in returned.content
                 else:
-                    assert ("cancelled" if approval == "cancelled" else "Exact child result") in returned
+                    assert "Exact child result" in str(returned)
                 assert "write_report" not in {record[1] for record in recorder.records}
                 saved = await lookup(runtime, child.delegation_id, owner=identity, depth=0)
                 assert saved.adapter["child"]["status"] == saved.status
@@ -843,10 +849,12 @@ async def _drive_background_child(
     *,
     while_waiting: Callable[[], Awaitable[None]] | None = None,
     child_model: ScriptedModel | None = None,
+    recorder: SpanRecorder | None = None,
 ) -> RunRecord:
     """Drive one parent delegation whose child runs as a managed job, acting once the child starts.
 
-    ``child_model`` answers a child that ``run_child`` runs as a real child turn.
+    ``child_model`` answers a child that ``run_child`` runs as a real child turn; ``recorder`` records the reply's
+    tool calls.
     """
     paths = _runtime_paths(tmp_path)
     config = _config(jobs=False)
@@ -856,7 +864,10 @@ async def _drive_background_child(
     agents.install(monkeypatch)
     leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents)
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)):
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)),
+            recording_tool_calls(recorder),
+        ):
             paused = await leader.turn(
                 calls(tool_call("run_subagent", "waiting", agent_name="code", task="Research")),
                 answer("Parent done"),
@@ -973,7 +984,7 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
 ) -> None:
     """Losing access while the parent waits on its background child fails the call, not the parent's reply.
 
-    The call answers as failed, as an ordinary job's call does when its wait is refused.
+    The call answers as failed, as an ordinary job's call does when its wait is refused, and the reply records it so.
     """
     allowed = True
     runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
@@ -985,11 +996,25 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
         allowed = False
         await runtime.cancel_revoked(denied=lambda _job: True)
 
-    response = await _drive_background_child(tmp_path, monkeypatch, runtime, child, while_waiting=revoke)
+    recorder = SpanRecorder(stopped=False)
+    response = await _drive_background_child(
+        tmp_path,
+        monkeypatch,
+        runtime,
+        child,
+        while_waiting=revoke,
+        recorder=recorder,
+    )
     assert response.status is RunStatus.completed
     [answered] = [message for message in response.messages or () if message.tool_call_id == "waiting"]
     assert answered.content == "Tool job is not available in this conversation."
     assert answered.tool_call_error is True
+    assert recorder.records[-1] == (
+        "finished",
+        "run_subagent",
+        {"agent_name": "code", "task": "Research"},
+        ToolOutcome(content="Tool job is not available in this conversation.", is_error=True),
+    )
     state = DelegationState.from_metadata(response.metadata)
     assert state.children == []
     assert all(hook.after_called for hook in state.hooks.values())
@@ -1106,10 +1131,12 @@ async def test_a_child_that_ran_and_did_not_complete_answers_its_parent_s_call_a
 ) -> None:
     """A child that failed or was cancelled answers its parent's call as failed, which Claude and Gemini read as one.
 
-    The parent's model reads the same text either way; a child that completed answers as an ordinary result.
+    The parent's model reads the same text either way; a child that completed answers as an ordinary result. The reply
+    records a background child's call as the model read it, failed when the child did not complete.
     """
     child_model = ScriptedModel([answer("Child finished")])
     blocking = _BlockingChild()
+    recorder = SpanRecorder(stopped=False)
 
     async def run_child(child: DelegationChild, **kwargs: Any) -> str:  # noqa: ANN401
         if outcome == "failed":
@@ -1133,6 +1160,7 @@ async def test_a_child_that_ran_and_did_not_complete_answers_its_parent_s_call_a
             run_child,
             while_waiting=cancel_child if outcome == "cancelled" else None,
             child_model=child_model,
+            recorder=recorder,
         )
     else:
         response = await _drive_inline_child(tmp_path, monkeypatch, run_child, child_model=child_model)
@@ -1144,6 +1172,15 @@ async def test_a_child_that_ran_and_did_not_complete_answers_its_parent_s_call_a
     }[outcome]
     assert str(answered.content).startswith(expected)
     assert bool(answered.tool_call_error) is (outcome != "completed")
+    if background:
+        content = str(answered.content)
+        returned = content if outcome == "completed" else ToolOutcome(content=content, is_error=True)
+        assert recorder.records[-1] == (
+            "finished",
+            "run_subagent",
+            {"agent_name": "code", "task": "Research"},
+            returned,
+        )
 
 
 async def _drive_inline_child(

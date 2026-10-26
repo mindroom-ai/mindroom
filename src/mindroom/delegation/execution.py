@@ -102,6 +102,7 @@ from mindroom.tool_system.output_files import (
     prepare_tool_output_file,
 )
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
@@ -771,7 +772,7 @@ async def _await_background_child(
 
     Returns what the parent's call returns: the child's result, or its job handle while the job keeps working.
     ``settle`` closes the parent call with that text, failed when its second argument is true, and returns it as the
-    model reads it; ``record_return`` records it on the reply.
+    model reads it; ``record_return`` records it on the reply, as a failed outcome when the call failed.
 
     The parent's liveness claim ends once the job owns the child: the job claims liveness itself while it runs the
     child, and a parent claim held across the wait would block cancel cleanup.
@@ -798,7 +799,7 @@ async def _await_background_child(
             raise
         # Revoked access or a closed runtime ends this wait; the parent's call fails with it, as an ordinary job's does.
         settled = await settle(str(error), True)
-        await record_return(str(error))
+        await record_return(ToolOutcome(content=str(error), is_error=True))
         return settled
     except BaseException:
         await background.release_wait(child.delegation_id, claim)
@@ -807,8 +808,9 @@ async def _await_background_child(
         result = await delegation_result(background, waited.job) if waited.claim is not None else None
         returned = result or format_job_handle(waited.job)
         # A child that ended any other way than completed fails the call, as an ordinary job's call does.
-        settled = await settle(returned, waited.claim is not None and waited.job.status != "completed")
-        await record_return(returned)
+        failed = waited.claim is not None and waited.job.status != "completed"
+        settled = await settle(returned, failed)
+        await record_return(ToolOutcome(content=returned, is_error=True) if failed else returned)
         if waited.claim is not None:
             # The outcome counts as read once the parent run saves this call's result, as a native call's does.
             await retain_parent_call_claim(
