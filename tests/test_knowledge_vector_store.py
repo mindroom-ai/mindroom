@@ -382,3 +382,34 @@ def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatc
 
     assert loads == ["load"]
     assert [Path(key[0]).name for key in vector_store_module._index_cache] == ["live.sqlite3"]
+
+
+@pytest.mark.parametrize("change", ["rewrite", "delete"])
+def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
+    collection: KnowledgeCollection,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """A retired collection taken over and rewritten in place never serves the matrix cached before the rewrite.
+
+    The file's identity and timestamps are pinned, as on a filesystem whose timestamps are too coarse to tell the two
+    versions apart, so only the file's write generation can.
+    """
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    monkeypatch.setattr(
+        vector_store_module,
+        "_file_version",
+        lambda file: (str(file), 0, 0, 0, 0) if file.exists() else None,
+    )
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0])])
+    collection.write_source_rows("b.md", [_row("b1", "b.md", "beta", [0.0, 1.0])])
+    assert [hit.content for hit in collection.search([1.0, 0.0], limit=2)] == ["alpha", "beta"]
+
+    if change == "rewrite":
+        collection.write_source_rows("a.md", [_row("a2", "a.md", "alpha again", [1.0, 0.1])])
+        expected = ["alpha again", "beta"]
+    else:
+        collection.delete_source_paths(["a.md"])
+        expected = ["beta"]
+
+    assert [hit.content for hit in collection.search([1.0, 0.0], limit=2)] == expected

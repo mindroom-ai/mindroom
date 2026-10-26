@@ -4176,7 +4176,6 @@ async def test_every_publication_stays_exact_as_two_collections_take_turns(
 ) -> None:
     """Edits, additions, removals and mtime-only touches never lose, duplicate or keep stale rows."""
     docs_path = tmp_path / "docs"
-    # Large enough that no collection reaches the dead-entry bound within these refreshes.
     names = _write_corpus(docs_path, 40)
     config = _config(tmp_path, docs_path)
     await _refresh_and_check(config, docs_path)

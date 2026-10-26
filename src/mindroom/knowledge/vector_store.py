@@ -1,8 +1,8 @@
 """One knowledge collection stored as one SQLite file: chunk rows, their vectors, and a keyword index.
 
-A refresh builds a separate candidate file and publication only changes which file the base's metadata names, so a
-published file is never written again. Readers therefore never wait on a writer, and a vector matrix loaded from a
-file stays valid for as long as that file exists.
+Publication only changes which file the base's metadata names, so readers never wait on a writer. A file is written
+again only once it is no longer published and its readers have drained: a refresh may take a retired collection over
+as its next candidate. Loaded vector matrices are therefore keyed by the file's write generation, not only its path.
 """
 
 from __future__ import annotations
@@ -62,11 +62,17 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
     tokenize='{_TOKENIZER}'
 );
 CREATE VIRTUAL TABLE chunks_vocab USING fts5vocab(chunks_fts, row);
+-- Changes with every row written or deleted, from a random start, so a cached matrix never outlives the rows it holds
+-- even where file timestamps are too coarse to tell two writes apart.
+CREATE TABLE generation (value INTEGER NOT NULL);
+INSERT INTO generation (value) VALUES (random());
 CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, document) VALUES (new.rowid, new.document);
+    UPDATE generation SET value = value + 1;
 END;
 CREATE TRIGGER chunks_fts_delete AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, document) VALUES ('delete', old.rowid, old.document);
+    UPDATE generation SET value = value + 1;
 END;
 """  # noqa: S608 - fixed DDL; the only substitution is the constant tokenizer
 
@@ -423,14 +429,14 @@ class _VectorIndex:
         return int(self.rowids.nbytes + self.matrix.nbytes)
 
 
-_index_cache: OrderedDict[tuple[str, int, int, int, int], _VectorIndex] = OrderedDict()
+_index_cache: OrderedDict[tuple[str, int, int, int, int, int], _VectorIndex] = OrderedDict()
 _index_cache_lock = threading.Lock()
 #: Held while a matrix loads, so concurrent cold searches load it once instead of each allocating a copy.
 _index_load_lock = threading.Lock()
 
 
 def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
-    """Return the cache key of the file's current version, or None once the file is gone."""
+    """Return the file's identity and timestamps, or None once the file is gone."""
     try:
         status = file.stat()
     except FileNotFoundError:
@@ -440,10 +446,11 @@ def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
 
 def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
     """Return the file's vectors, loading them once per file version and keeping recent ones within the cache budget."""
-    key = _file_version(file)
-    if key is None:
+    version = _file_version(file)
+    if version is None:
         message = f"Knowledge collection file {file} disappeared"
         raise FileNotFoundError(message)
+    key = (*version, connection.execute("SELECT value FROM generation").fetchone()[0])
     with _index_cache_lock:
         index = _index_cache.get(key)
         if index is not None:
@@ -456,8 +463,9 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
             return index
         index = _load_vector_index(connection)
         with _index_cache_lock:
-            # Superseded publications are deleted and republished ones are new files; their matrices go first.
-            for stale in [cached for cached in _index_cache if _file_version(Path(cached[0])) != cached]:
+            # Matrices of deleted or visibly rewritten files go first; one rewritten within a timestamp tick is never
+            # served again, because its generation changed, and ages out under the budget.
+            for stale in [cached for cached in _index_cache if _file_version(Path(cached[0])) != cached[:-1]]:
                 del _index_cache[stale]
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every

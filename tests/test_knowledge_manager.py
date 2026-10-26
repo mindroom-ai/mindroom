@@ -4309,7 +4309,7 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
 
 
 @pytest.mark.asyncio
-async def test_successful_refreshes_keep_only_published_index(tmp_path: Path) -> None:
+async def test_successful_refreshes_keep_the_published_index_and_the_one_it_retired(tmp_path: Path) -> None:
     """Repeated publishes keep the published index and the one it retired, and clean older generations."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
