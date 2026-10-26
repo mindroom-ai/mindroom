@@ -150,7 +150,8 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     assert isinstance(leader_system, str)
     assert '<member id="writer" name="Writer">' in leader_system
     assert "coordinate mode" in leader_system
-    assert [message.content for message in team.models["writer-model"].requests[0].messages[1:]] == ["Report"]
+    member_request = team.models["writer-model"].requests[0].messages
+    assert [message.content for message in member_request if message.role != "system"] == ["Report"]
     assert team.models["checker-model"].requests == []
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None

@@ -182,20 +182,19 @@ def build_resume_request(
     summary: ScopeSummary | None,
     history: Sequence[Message],
 ) -> list[Message]:
-    """Return the request that resumes a paused run: its stored system message, the summary, history, then the rest.
+    """Return the request that resumes a paused run: its stored system messages, the summary, history, then the rest.
 
     ``paused`` holds the paused run's stored messages, which never include history copies; their tool calls are read in
     the shape current releases store, as history's are. The resumed run stores this request, so a legacy paused run is
-    stored in that shape too. Its stored system message is reused, so a signed reasoning block in the paused request
-    stays valid against an unchanged prefix. A run paused while Agno rendered the summary inside that system message
+    stored in that shape too. Its stored system messages are reused, so a signed reasoning block in the paused request
+    stays valid against an unchanged prefix. A run paused while Agno rendered the summary inside its system message
     keeps that single summary.
     """
     paused = repair_legacy_tool_calls(paused)
-    system = next((message for message in paused if message.role == "system"), None)
     messages = [
-        *([] if system is None else [system]),
+        *(message for message in paused if message.role == "system"),
         *history,
-        *(message for message in paused if message is not system),
+        *(message for message in paused if message.role != "system"),
     ]
     if system_message_embeds_summary(messages):
         return messages

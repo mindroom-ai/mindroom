@@ -1385,21 +1385,21 @@ def _markers(payload: object) -> list[dict[str, Any]]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
 @pytest.mark.parametrize("cache", ["extended", "short", "disabled"])
-async def test_the_shared_instructions_stay_cacheable_when_the_session_context_changes(
+async def test_the_stable_prompt_stays_cacheable_when_the_turn_context_changes(
     tmp_path: Path,
     route: str,
     cache: str,
 ) -> None:
-    """The instructions before the session context keep one marked block, so a new date reuses the cached prefix."""
+    """The stable system message is its own marked block, so a new date in the turn part reuses the cached prefix."""
     settings = {"extended_cache_time": cache == "extended", "cache_system_prompt": cache != "disabled"}
     bodies = []
     for day in ("Monday", "Tuesday"):
         wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
         (tmp_path / day).mkdir()
         provider = route_provider(route, tmp_path / day, wire, extra_kwargs=settings)
-        system = "Shared instructions.\n\n" + render_session_context(f"Current date: {day}")
         messages = [
-            Message(role="system", content=system),
+            Message(role="system", content="Shared instructions."),
+            Message(role="system", content=render_session_context(f"Current date: {day}")),
             Message(role="user", content="First request."),
             Message(role="assistant", content="First answer."),
             Message(role="user", content="Follow-up request."),
@@ -1413,7 +1413,7 @@ async def test_the_shared_instructions_stay_cacheable_when_the_session_context_c
         return
     cache_control = {"type": "ephemeral", **({"ttl": "1h"} if cache == "extended" else {})}
     assert monday["system"][0] == tuesday["system"][0]
-    assert monday["system"][0] == {"type": "text", "text": "Shared instructions.\n\n", "cache_control": cache_control}
+    assert monday["system"][0] == {"type": "text", "text": "Shared instructions.", "cache_control": cache_control}
     assert "cache_control" not in monday["system"][1]
     assert monday["system"][1] != tuesday["system"][1]
     assert monday["messages"][-1]["content"][-1]["cache_control"] == cache_control

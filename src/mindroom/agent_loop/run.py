@@ -97,7 +97,7 @@ def run_agent(
         agent_id=spec.id,
         agent_display_name=spec.name,
     )
-    messages = [*([] if spec.system_message is None else [spec.system_message]), *run_input]
+    messages = [*spec.system_messages, *run_input]
     return drive_run(
         spec,
         record,

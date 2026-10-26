@@ -264,7 +264,7 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
         make_turn_context("test_agent"),
         scope_context=None,
         build=build,
-        system_message=prompt_for_turn(build),
+        system_messages=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,
@@ -304,7 +304,7 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
         make_turn_context("test_agent"),
         scope_context=None,
         build=build,
-        system_message=prompt_for_turn(build),
+        system_messages=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,
@@ -760,7 +760,7 @@ async def test_prepare_agent_execution_context_sizes_history_against_the_model_t
         make_turn_context("test_agent"),
         scope_context=None,
         build=build,
-        system_message=prompt_for_turn(build),
+        system_messages=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,
@@ -780,7 +780,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     """History is sized by the request's system message and offered tools, the same estimate the prepared turn records."""
     config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
     build = _build(config, runtime_paths)
-    system_message = prompt_for_turn(build)
+    system_messages = prompt_for_turn(build)
     prepare_scope_history = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
     monkeypatch.setattr(
@@ -799,7 +799,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
         ),
         scope_context=None,
         build=build,
-        system_message=system_message,
+        system_messages=system_messages,
         prompt="Current request",
         thread_history=[
             make_visible_message(sender="@alice:localhost", body="Earlier context", event_id="$older"),
@@ -813,7 +813,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
 
     tools = PreparedTools(functions=build.spec.functions).specs()
     assert tools
-    estimator = build_static_token_estimator(system_message, tools, build.request_template.deferred_tools.names)
+    estimator = build_static_token_estimator(system_messages, tools, build.request_template.deferred_tools.names)
     assert prepared.prepared_history.prepared_context_tokens == estimator.estimate(
         render_prepared_messages_text(prepared.turn.in_request_order()),
     )
@@ -821,7 +821,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
     assert prepare_scope_history.await_args.kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
     assert (
         estimator.non_prompt_tokens()
-        > build_static_token_estimator(system_message, (), frozenset()).non_prompt_tokens()
+        > build_static_token_estimator(system_messages, (), frozenset()).non_prompt_tokens()
     )
 
 
@@ -832,7 +832,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
 ) -> None:
     """Team history sized from the previous request takes off only the static estimate's system prompt and tools."""
     config, runtime_paths = _bound_agent_config(tmp_path)
-    leader_system_message = Message(role="system", content="You lead the team.")
+    leader_system_messages = (Message(role="system", content="You lead the team."),)
     leader_tools = PreparedTools(functions=_build(config, runtime_paths).spec.functions).specs()
     prepare_bound_scope_history = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", prepare_bound_scope_history)
@@ -846,7 +846,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=None,
         member_names=["test_agent"],
-        leader_system_message=leader_system_message,
+        leader_system_messages=leader_system_messages,
         leader_tools=leader_tools,
         model=ScriptedModel([]),
         prompt="Current request",
@@ -860,7 +860,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     )
 
     kwargs = prepare_bound_scope_history.await_args.kwargs
-    estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
+    estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
     assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
 
 
@@ -873,7 +873,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
 ) -> None:
     """A team turn's history is sized by the messages the leader receives, as an agent turn's is."""
     config, runtime_paths = _bound_agent_config(tmp_path)
-    leader_system_message = Message(role="system", content="You lead the team.")
+    leader_system_messages = (Message(role="system", content="You lead the team."),)
     monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", AsyncMock(return_value=MagicMock()))
     static_prompt_tokens: list[object] = []
 
@@ -894,7 +894,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         ),
         scope_context=None,
         member_names=["test_agent"],
-        leader_system_message=leader_system_message,
+        leader_system_messages=leader_system_messages,
         leader_tools=(),
         model=ScriptedModel([]),
         prompt="Current request",
@@ -914,7 +914,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     )
 
     assert [message.role for message in prepared.turn.context] == ["user", "assistant"]
-    estimator = build_static_token_estimator(leader_system_message, (), frozenset())
+    estimator = build_static_token_estimator(leader_system_messages, (), frozenset())
     # Persisted replay is budgeted around the turn's estimate; fallback replay records the estimate of its own turn.
     sized = static_prompt_tokens[0] if replays_persisted_history else prepared.prepared_history.prepared_context_tokens
     assert sized == estimator.estimate(render_prepared_messages_text(prepared.turn.in_request_order()))
@@ -947,7 +947,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
         ),
         scope_context=None,
         build=build,
-        system_message=prompt_for_turn(build),
+        system_messages=prompt_for_turn(build),
         prompt="Current request",
         thread_history=[
             make_visible_message(
@@ -1010,7 +1010,7 @@ async def test_prepare_agent_execution_context_names_the_current_prompts_sender_
         make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
         scope_context=None,
         build=build,
-        system_message=prompt_for_turn(build),
+        system_messages=prompt_for_turn(build),
         prompt="Current request",
         thread_history=None,
         runtime_paths=runtime_paths,

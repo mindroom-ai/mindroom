@@ -28,6 +28,7 @@ from mindroom.desktop.credentials import (
     save_desktop_credentials,
 )
 from mindroom.history.prompt_tokens import build_static_token_estimator
+from mindroom.llm.messages import system_text
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
@@ -93,7 +94,7 @@ def _tool_payload(result: str) -> dict[str, object]:
 
 
 def _build_prompt(build: AgentBuild) -> str:
-    return str(prompt_for_turn(build).content)
+    return system_text(prompt_for_turn(build))
 
 
 def _toolkit_names(build: AgentBuild) -> set[str]:

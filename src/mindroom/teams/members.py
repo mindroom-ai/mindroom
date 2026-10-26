@@ -10,7 +10,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.build import appended_context, prompt_for_turn
-from mindroom.agent_loop.prompt import model_note_for
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
@@ -346,7 +345,7 @@ def _team_member(
         msg = f"Team member {build.spec.id!r} has no role for the leader's roster"
         raise ValueError(msg)
     return TeamMember(
-        spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
+        spec=replace(build.spec, system_messages=prompt_for_turn(build, system_enrichment)),
         role=build.prompt.role,
         new_hooks=new_hooks,
         request_template=build.request_template,
@@ -446,7 +445,7 @@ def build_team_spec(
         id=team_id,
         name=label,
         model=model,
-        system_message=None,
+        system_messages=(),
         toolkits=() if jobs is None else (jobs.controls,),
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
@@ -458,12 +457,10 @@ def build_team_spec(
         team_members,
         mode,
         tool_instructions=toolkit_instructions(leader.toolkits),
-        # The delegation tool is always offered, so every leader request offers tools.
-        model_note=model_note_for(model.capabilities, offers_tools=True),
         additional_context=additional_context,
     )
     return BuiltTeam(
-        spec=TeamSpec(leader=replace(leader, system_message=system_message), mode=mode, members=team_members),
+        spec=TeamSpec(leader=replace(leader, system_messages=(system_message,)), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,

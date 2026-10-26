@@ -16,6 +16,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
+from mindroom.llm.messages import system_text
 from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members
@@ -105,13 +106,14 @@ def test_agent_prompt_includes_datetime(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert "General assistant" in role
     assert "## Current Date and Time" not in role
-    message = prompt_for_turn(build)
-    assert isinstance(message.content, str)
-    assert "## Current Date and Time" in message.content
-    assert "Today is Friday, March 20, 2026." in message.content
-    assert "Timezone: America/Los_Angeles (PDT)" in message.content
-    assert "The current time is" not in message.content
-    assert message.content.index("General assistant") < message.content.index("## Current Date and Time")
+    stable, turn = prompt_for_turn(build)
+    assert isinstance(turn.content, str)
+    assert "## Current Date and Time" in turn.content
+    assert "Today is Friday, March 20, 2026." in turn.content
+    assert "Timezone: America/Los_Angeles (PDT)" in turn.content
+    assert "The current time is" not in turn.content
+    assert "General assistant" in str(stable.content)
+    assert "## Current Date and Time" not in str(stable.content)
 
 
 def test_agent_prompt_datetime_changes_with_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,8 +184,6 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     [member] = members.builds
     assert member.prompt.role is not None
     assert "## Current Date and Time" not in member.prompt.role
-    message = team.spec.leader.system_message
-    assert message is not None
-    assert isinstance(message.content, str)
-    assert "Today is Friday, March 20, 2026." in message.content
-    assert "Timezone: UTC (UTC)" in message.content
+    leader_prompt = system_text(team.spec.leader.system_messages)
+    assert "Today is Friday, March 20, 2026." in leader_prompt
+    assert "Timezone: UTC (UTC)" in leader_prompt

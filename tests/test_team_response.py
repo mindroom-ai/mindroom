@@ -31,7 +31,7 @@ from mindroom.history.storage import read_scope_seen_event_ids, update_scope_see
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunStatus, TeamRunRecord
@@ -586,8 +586,8 @@ async def test_system_enrichment_follows_the_leader_s_and_each_member_s_configur
 
     await team.respond(ctx=team.ctx(system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),)))
 
-    leader_system = str(_leader(team).requests[0].messages[0].content)
-    member_system = str(team.models["general-model"].requests[0].messages[0].content)
+    leader_system = system_text(_leader(team).requests[0].messages)
+    member_system = system_text(team.models["general-model"].requests[0].messages)
     for system in (leader_system, member_system):
         assert system.index("Timezone: UTC") < system.index('<item key="weather"') < system.index("72F and sunny")
 

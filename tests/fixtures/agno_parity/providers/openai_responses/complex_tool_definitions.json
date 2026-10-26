@@ -312,7 +312,15 @@
       "input": [
         {
           "role": "developer",
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          "content": [
+            {
+              "type": "input_text",
+              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+              "prompt_cache_breakpoint": {
+                "mode": "explicit"
+              }
+            }
+          ]
         },
         {
           "role": "user",

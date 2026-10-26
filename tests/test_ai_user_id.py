@@ -1163,12 +1163,12 @@ class TestUserIdPassthrough:
         assert transient.add_to_agent_memory is False
         build_context = prepared_run.build.prompt.turn_context
         assert build_context is not None
-        system = prepared_run.spec.system_message
-        assert system is not None
-        assert isinstance(system.content, str)
+        stable, turn_part = prepared_run.spec.system_messages
+        assert isinstance(turn_part.content, str)
         rendered = render_system_enrichment_block(list(enrichment)).strip()
-        assert system.content.rstrip().endswith(f"session preamble\n\n{rendered}")
-        assert system.content.index(build_context.strip()) < system.content.index("session preamble")
+        assert turn_part.content.rstrip().endswith(f"session preamble\n\n{rendered}")
+        assert turn_part.content.index(build_context.strip()) < turn_part.content.index("session preamble")
+        assert "session preamble" not in str(stable.content)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("include_openai_compat_guidance", [True, False])

@@ -28,7 +28,7 @@ from google.genai.types import (
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, image_mime_type
-from mindroom.llm.messages import tool_result_view
+from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -124,17 +124,15 @@ class MediaRoute:
 async def format_contents(
     messages: Sequence[Message],
     route: MediaRoute,
-) -> tuple[list[dict[str, Any]], str | list[Any] | None]:
-    """Return the request contents and the system instruction for ``messages``.
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return the request contents and the system instruction for ``messages``, their system prompt as one text.
 
     Local media is read off the event loop and remote media downloaded; media that cannot be sent raises
     ``InvalidRequest``, so the media fallback replaces it with its note instead of the model never seeing it.
     """
     contents: list[dict[str, Any]] = []
-    system_instruction: str | list[Any] | None = None
     for message in messages:
         if message.role == "system":
-            system_instruction = message.content
             continue
         role = _ROLE_MAP.get(message.role, message.role)
         parts = _message_parts(message, role)
@@ -149,7 +147,7 @@ async def format_contents(
         # Gemini 4 rejects a last user turn that ends with anything but its function responses, as a request ending
         # with a model turn, so the text and media that follow tool results go before them.
         content["parts"].sort(key=lambda part: "function_response" in part)
-    return contents, system_instruction
+    return contents, system_text(messages) or None
 
 
 def _is_tool_result(message: Message) -> bool:

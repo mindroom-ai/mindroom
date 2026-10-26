@@ -20,7 +20,7 @@ from mindroom.agent_loop.build import (
     prompt_for_turn,
     tool_owners_by_agent,
 )
-from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
+from mindroom.agent_loop.prompt import render_system_messages
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -136,7 +136,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
         "Assistant",
         "claude-sonnet-5-5",
     )
-    assert build.spec.system_message is None
+    assert build.spec.system_messages == ()
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "search_knowledge_base", "skills"]
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"search_knowledge_base"} | SKILL_FUNCTION_NAMES
     assert build.spec.max_tool_calls_per_turn == config.resolve_entity("assistant").max_tool_calls_per_turn
@@ -148,7 +148,6 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.prompt.skills_block is not None
     assert "<name>expense-report</name>" in build.prompt.skills_block
     assert build.prompt.tool_instructions == ()
-    assert build.prompt.model_note == CLAUDE_TOOLS_NOTE
     assert build.prompt.turn_context is not None
     assert build.prompt.turn_context.startswith("<mindroom_session_context>")
     assert build.request_template == ModelRequest(messages=())
@@ -182,7 +181,7 @@ def test_a_build_without_runtime_state_has_no_store_tools_or_context(tmp_path: P
 
     assert build.store is None
     assert build.spec.toolkits == ()
-    assert (build.prompt.skills_block, build.prompt.knowledge_block, build.prompt.model_note) == (None, None, None)
+    assert (build.prompt.skills_block, build.prompt.knowledge_block) == (None, None)
     assert "SOUL.md" not in build.prompt.role
     assert (build.surface.context_documents, build.surface.knowledge_sources) == ((), ())
 
@@ -261,9 +260,11 @@ def test_prompt_for_turn_appends_the_turns_context_blocks(tmp_path: Path) -> Non
     base = build.prompt.turn_context
     assert base is not None
 
-    assert prompt_for_turn(build).content == render_system_message(build.prompt).content
-    expected = replace(build.prompt, turn_context=f"{base.strip()}\n\nmemory\n\n<ctx>")
-    assert prompt_for_turn(build, "memory\n", "", "<ctx>").content == render_system_message(expected).content
+    rendered = [message.content for message in render_system_messages(build.prompt)]
+    assert [message.content for message in prompt_for_turn(build)] == rendered
+    stable, turn = prompt_for_turn(build, "memory\n", "", "<ctx>")
+    assert stable.content == rendered[0]
+    assert turn.content == f"{base.strip()}\n\nmemory\n\n<ctx>"
 
 
 @pytest.mark.parametrize(

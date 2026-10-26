@@ -37,7 +37,7 @@ from mindroom.error_handling import MinimalModeUnavailableError, get_user_friend
 from mindroom.hooks import EnrichmentItem
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.memory.functions import MemoryPromptParts
 from mindroom.run_storage import RunStorage
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -82,7 +82,7 @@ async def _attempt(build, runtime, session: ConversationSession, *, run_id: str 
     )
     spec, hooks = await minimal_attempt(
         build,
-        replace(build.spec, system_message=_turn(build).system_message),
+        replace(build.spec, system_messages=_turn(build).system_messages),
         NO_HOOKS,
         run=run,
         storage=RunStorage(build.store, session, None),
@@ -150,7 +150,7 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
     assert standard.surface.mode == "standard"
     assert standard.surface.minimal_instructions == ()
     turn = _turn(minimal)
-    system = turn.system_message.get_content_string()
+    system = system_text(turn.system_messages)
     assert "Required short rule" in system
     assert "Long authored role" not in system
     assert "Long authored instruction" not in system
@@ -286,7 +286,7 @@ def test_context_files_remain_complete_and_notes_untouched(
         active_model_name=None,
     )
     turn = _turn(minimal)
-    system = turn.system_message.get_content_string()
+    system = system_text(turn.system_messages)
     policy = minimal.surface.output_file_policy
     if memory_backend == "file":
         assert policy is not None
@@ -614,9 +614,9 @@ async def test_prepared_minimal_prompt_moves_optional_enrichment_to_context(
     assert is_transient_context(turn_context.get_content_string())
     assert "optional memory" not in prepared.prompt_text
     assert "optional plugin" not in prepared.prompt_text
-    assert prepared.spec.system_message is not None
-    assert "optional system" not in prepared.spec.system_message.get_content_string()
-    assert "optional preamble" not in prepared.spec.system_message.get_content_string()
+    assert prepared.spec.system_messages
+    assert "optional system" not in system_text(prepared.spec.system_messages)
+    assert "optional preamble" not in system_text(prepared.spec.system_messages)
     documents = "\n".join(prepared.cli_context.values())
     assert "optional memory" in documents
     assert "optional preamble" in documents
@@ -856,7 +856,10 @@ async def test_every_cli_toolkit_answers_to_its_own_tool_name(
         )
     assert "done" in str(result)
     assert offered_tools(provider.requests[0]) == ["bash"]
-    assert f"Toolkits callable through mindroom-agent: {roster}\n" in str(provider.requests[0].messages[0].content)
+    assert (
+        f"Toolkits callable through mindroom-agent: {roster}"
+        in str(provider.requests[0].messages[0].content).splitlines()
+    )
     assert set(roster.split(", ")) <= offered
     # A preset offers no functions of its own.
     assert "openclaw_compat" not in offered

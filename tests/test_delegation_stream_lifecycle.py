@@ -249,7 +249,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id="leader", is_team=False)
     ctx = RunContext(run_id="parent-run", session=UnstoredSession(session.session_id), user_id=identity.requester_id)
-    request = [prompt_for_turn(build), Message(role="user", content="Delegate")]
+    request = [*prompt_for_turn(build), Message(role="user", content="Delegate")]
 
     async def unused_child(**_kwargs: object) -> str:
         pytest.fail("Rejected delegation must not execute a child")

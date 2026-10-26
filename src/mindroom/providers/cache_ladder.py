@@ -1,9 +1,10 @@
-"""The Claude prompt-cache ladder: breakpoint markers, message rungs, the tools marker, and the shared system prefix.
+"""The Claude prompt-cache ladder: breakpoint markers, message rungs, and the tools marker.
 
 Anthropic prompt caching reuses the request prefix (tools, system, messages) up to explicit ``cache_control``
 breakpoints, and only probes the last twenty or so blocks before each one. The ladder marks the newest
-cacheable content block, one earlier fallback boundary, the last tool definition, and the shared system
-prefix ahead of the session context, all under one TTL, within the API limit of four markers.
+cacheable content block, one earlier fallback boundary, and the last tool definition; each route also marks its
+stable system prompt, the request's first system message (``agent_loop.prompt``), all under one TTL, within the API
+limit of four markers.
 
 The Claude adapter (``providers/anthropic/prompt_cache.py``) and the OpenRouter Claude ladder
 (``providers/openai/openrouter_cache.py``) compose these primitives, so neither provider family depends on the other.
@@ -15,7 +16,6 @@ from typing import Any
 
 from mindroom.hooks.enrichment import is_transient_context
 from mindroom.providers.claude_wire_blocks import TOOL_SEARCH_TOOL_TYPE, as_dict
-from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 __all__ = [
     "MAX_CACHE_MARKERS",
@@ -24,7 +24,6 @@ __all__ = [
     "mark_last_tool",
     "mark_message_cache_rungs",
     "prompt_cache_control",
-    "split_shared_system_prefix",
 ]
 
 # The Anthropic API allows at most four cache_control markers per request.
@@ -126,27 +125,3 @@ def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object
         marked_tools[tool_index] = {**tool_dict, "cache_control": dict(cache_control)}
         return marked_tools, 1
     return tools, 0
-
-
-def split_shared_system_prefix(system: list[Any]) -> list[Any]:
-    """Move a marked first system text block's cache marker to the shared instructions.
-
-    The session-context suffix becomes a separate unmarked block, so the session context can change without
-    invalidating the shared prefix. Returns the input list unchanged when there is no marked boundary to split.
-    """
-    if not system:
-        return system
-    first_block = system[0]
-    if not isinstance(first_block, dict) or first_block.get("type") != "text":
-        return system
-    text = first_block.get("text")
-    if not isinstance(text, str) or "cache_control" not in first_block:
-        return system
-    shared_text, boundary, session_text = text.partition(SESSION_CONTEXT_BOUNDARY)
-    if not boundary or not shared_text.strip():
-        return system
-
-    shared_block = {**first_block, "text": shared_text}
-    session_block = {key: value for key, value in first_block.items() if key != "cache_control"}
-    session_block["text"] = boundary + session_text
-    return [shared_block, session_block, *system[1:]]

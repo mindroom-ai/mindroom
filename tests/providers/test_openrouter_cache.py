@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.hooks.enrichment import render_transient_context
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, TurnCompleted
 from mindroom.system_prompt import render_session_context
 from tests.providers.openai_family_support import golden_provider
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 _ONE_HOUR = {"type": "ephemeral", "ttl": "1h"}
 _FIVE_MINUTES = {"type": "ephemeral"}
-_SHARED = "Shared agent instructions.\n"
+_SHARED = "Shared agent instructions."
 _TOOLS = [
     ToolSpec(
         name="first",
@@ -81,7 +81,8 @@ async def _send(
 
 def _conversation(day: str = "Monday") -> list[Message]:
     return [
-        Message(role="system", content=_SHARED + render_session_context(f"Current day: {day}.")),
+        Message(role="system", content=_SHARED),
+        Message(role="system", content=render_session_context(f"Current day: {day}.")),
         Message(role="user", content="Look something up."),
         Message(
             role="assistant",
@@ -106,7 +107,10 @@ def _markers(payload: object) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_an_anthropic_route_gets_the_claude_ladder(tmp_path: Path) -> None:
-    """The shared system prefix, the two newest message parts, and the last tool carry one TTL within the limit."""
+    """The stable system prompt, the two newest message parts, and the last tool carry one TTL within the limit.
+
+    The Chat wire sends the system prompt as one message, its stable and turn parts as separate text parts.
+    """
     payload, _ = await _send(tmp_path, _conversation(), tools=_TOOLS)
 
     messages = payload["messages"]
@@ -142,7 +146,7 @@ async def test_an_agent_without_instructions_still_caches_its_conversation_and_t
 @pytest.mark.asyncio
 async def test_a_tool_loop_request_extends_the_previous_boundary(tmp_path: Path) -> None:
     """A tool result takes the newest rung so the next loop iteration reads the previous prefix."""
-    payload, _ = await _send(tmp_path, _conversation()[:4])
+    payload, _ = await _send(tmp_path, _conversation()[:5])
 
     assert payload["messages"][3] == {
         "role": "tool",
@@ -174,7 +178,7 @@ async def test_an_authored_tool_marker_turns_the_automatic_markers_off(
     payload, _ = await _send(tmp_path, messages, tools=_TOOLS, **{authored: {"tools": deepcopy(tools)}})
 
     assert _markers(payload) == [marker]
-    assert payload["messages"][0]["content"] == messages[0].content
+    assert payload["messages"][0]["content"] == system_text(messages)
 
 
 @pytest.mark.asyncio
@@ -193,8 +197,8 @@ async def test_requests_send_markers_and_a_request_can_opt_out(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_the_shared_prefix_is_independent_of_the_session_context(tmp_path: Path) -> None:
-    """Changing the date leaves the marked shared system part byte-identical."""
+async def test_the_stable_prompt_is_independent_of_the_turn_context(tmp_path: Path) -> None:
+    """Changing the date leaves the marked stable system part byte-identical."""
     first, _ = await _send(tmp_path / "monday", _conversation("Monday"))
     second, _ = await _send(tmp_path / "tuesday", _conversation("Tuesday"))
 
@@ -250,7 +254,7 @@ async def test_other_model_families_keep_the_plain_request(tmp_path: Path, model
     payload, _ = await _send(tmp_path, messages, tools=_TOOLS, model_id=model_id)
 
     assert _markers(payload) == []
-    assert payload["messages"][0]["content"] == messages[0].content
+    assert payload["messages"][0]["content"] == system_text(messages)
 
 
 @pytest.mark.asyncio

@@ -97,7 +97,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         id="helper",
         name="Helper",
         model=ScriptedModel([calls(tool_call("bash", "outer", command="generate")), answer("done")]),
-        system_message=None,
+        system_messages=(),
         toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
     )
     finished = False

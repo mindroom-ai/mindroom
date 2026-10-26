@@ -456,7 +456,7 @@ async def test_a_failing_store_fails_a_completed_run_but_not_an_interrupted_one(
 @pytest.mark.asyncio
 async def test_a_run_without_a_system_message_sends_only_its_input() -> None:
     model = ScriptedModel([answer("ok")])
-    agent = replace(spec(model), system_message=None)
+    agent = replace(spec(model), system_messages=())
 
     _, record = await collect(run_agent(agent, _prompt(), ctx=context(), persist=None, request_template=EMPTY_REQUEST))
 
@@ -520,7 +520,7 @@ def _agent(
     agent_id: str = "code",
     name: str = "Code",
 ) -> AgentSpec:
-    return AgentSpec(id=agent_id, name=name, model=model, system_message=None, toolkits=tuple(toolkits))
+    return AgentSpec(id=agent_id, name=name, model=model, system_messages=(), toolkits=tuple(toolkits))
 
 
 def _model(model_id: str, *turns: list[Any]) -> ScriptedModel:

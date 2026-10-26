@@ -42,7 +42,6 @@ from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
-from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -253,25 +252,19 @@ def _input_items(replay: ResponsesReplay) -> list[Any]:
     return items
 
 
-def _with_shared_system_prefix(formatted_input: list[Any], *, explicit_breakpoint: bool) -> list[Any]:
-    """Split MindRoom's initial system text so the shared agent instructions stay a cacheable prefix."""
+def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
+    """Put an explicit cache breakpoint after the first system message, the stable prompt (``agent_loop.prompt``).
+
+    The turn's context follows in its own system message, so it can change without invalidating the prefix.
+    """
     first_message = formatted_input[0] if formatted_input else None
     if not isinstance(first_message, dict) or first_message.get("role") not in {"system", "developer"}:
         return formatted_input
     content = first_message.get("content")
-    if not isinstance(content, str):
+    if not isinstance(content, str) or not content.strip():
         return formatted_input
-    shared_text, boundary, session_text = content.partition(SESSION_CONTEXT_BOUNDARY)
-    if not boundary or not shared_text.strip():
-        return formatted_input
-    shared_block: dict[str, Any] = {"type": "input_text", "text": shared_text}
-    if explicit_breakpoint:
-        shared_block["prompt_cache_breakpoint"] = {"mode": "explicit"}
-    return [
-        {**first_message, "content": [shared_block]},
-        {**first_message, "content": boundary + session_text},
-        *formatted_input[1:],
-    ]
+    prefix_block = {"type": "input_text", "text": content, "prompt_cache_breakpoint": {"mode": "explicit"}}
+    return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
 
 
 def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
@@ -287,8 +280,8 @@ def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, expli
         native_route=replay.native_route,
         replay_reasoning=replay.replay_reasoning,
     )
-    if cache_system_prompt:
-        formatted = _with_shared_system_prefix(formatted, explicit_breakpoint=explicit_breakpoint)
+    if cache_system_prompt and explicit_breakpoint:
+        formatted = _with_system_prefix_breakpoint(formatted)
     return formatted
 
 

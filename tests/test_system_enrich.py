@@ -29,6 +29,7 @@ from mindroom.hooks import (
     render_system_enrichment_block,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.llm.messages import system_text
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -303,11 +304,12 @@ async def test_a_reply_renders_system_enrichment_into_its_system_message(
     )
 
     [request] = model.requests
-    system = request.messages[0]
-    assert system.role == "system"
-    assert isinstance(system.content, str)
-    assert system.content.rstrip().endswith(rendered.strip())
-    assert system.content.index("Write code") < system.content.index(rendered.strip())
+    stable, turn = request.messages[:2]
+    assert (stable.role, turn.role) == ("system", "system")
+    assert isinstance(turn.content, str)
+    assert turn.content.rstrip().endswith(rendered.strip())
+    assert "Write code" in str(stable.content)
+    assert rendered.strip() not in str(stable.content)
 
 
 @pytest.mark.asyncio
@@ -392,11 +394,8 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     built = _built_team(config, _team_members(config, monkeypatch), system_enrichment=rendered)
     spec = built.spec
 
-    leader_system = spec.leader.system_message
-    assert leader_system is not None
-    assert rendered.strip() in str(leader_system.content)
-    member_systems = [member.spec.system_message for member in spec.members]
-    assert all(message is not None and rendered.strip() in str(message.content) for message in member_systems)
+    assert rendered.strip() in system_text(spec.leader.system_messages)
+    assert all(rendered.strip() in system_text(member.spec.system_messages) for member in spec.members)
     prepared = await prepare_materialized_team_execution(
         make_turn_context(
             room_id="!room:localhost",
@@ -422,7 +421,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     [transient] = prepared.turn.transient
     assert transient.add_to_agent_memory is False
     assert "Current location" in str(transient.content)
-    assert "Current location" not in str(leader_system.content)
+    assert "Current location" not in system_text(spec.leader.system_messages)
 
 
 @pytest.mark.asyncio

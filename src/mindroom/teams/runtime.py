@@ -104,7 +104,7 @@ def run_team(
         metadata=ctx.metadata,
         team_id=leader.id,
     )
-    messages = [*([] if leader.system_message is None else [leader.system_message]), *run_input]
+    messages = [*leader.system_messages, *run_input]
     return _drive_team(
         spec,
         record,

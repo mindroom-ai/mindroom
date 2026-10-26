@@ -4,7 +4,11 @@
     "deferred_tool_search": null,
     "messages": [
       {
-        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>",
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>",
         "role": "system"
       },
       {
@@ -112,7 +116,7 @@
           "content": [
             {
               "type": "text",
-              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n",
+              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
               "cache_control": {
                 "type": "ephemeral",
                 "ttl": "1h"

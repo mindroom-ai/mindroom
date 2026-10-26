@@ -143,7 +143,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         callback = cast("Callable[[str, str], None]", kwargs["on_attempt_start"])
         callback("real-child-run", ctx.active_model_name)
         model = ScriptedModel([calls(scripted_call("lookup", "actual-call", query="full query")), [Await(fail)]])
-        spec = AgentSpec(id="child", name="child", model=model, system_message=None, toolkits=(toolkit(lookup),))
+        spec = AgentSpec(id="child", name="child", model=model, system_messages=(), toolkits=(toolkit(lookup),))
         stored: list[RunRecord] = []
 
         async def persist(record: RunRecord) -> None:
@@ -246,7 +246,7 @@ async def _deny_through_the_loop(tools: DelegateTools) -> None:
             answer("parent complete"),
         ],
     )
-    spec = AgentSpec(id="leader", name="leader", model=parent, system_message=None, toolkits=(adapt_toolkit(tools),))
+    spec = AgentSpec(id="leader", name="leader", model=parent, system_messages=(), toolkits=(adapt_toolkit(tools),))
     _events, record = await collect(
         run_agent(
             spec,

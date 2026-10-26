@@ -179,7 +179,6 @@ async def prepare_materialized_team_execution(
     spec = built.spec
     leader = spec.leader
     # ``build_team_spec`` renders the leader prompt, which sizes the static part of every leader request.
-    assert leader.system_message is not None
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -191,7 +190,7 @@ async def prepare_materialized_team_execution(
         ctx,
         scope_context=scope_context,
         member_names=[member.spec.id for member in spec.members],
-        leader_system_message=leader.system_message,
+        leader_system_messages=leader.system_messages,
         leader_tools=leader_tool_specs(spec),
         model=leader.model,
         prompt=message,

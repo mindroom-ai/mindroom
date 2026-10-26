@@ -105,7 +105,7 @@ def member(
         id=agent_id,
         name=name,
         model=model,
-        system_message=Message(role="system", content=system or f"You are {name}."),
+        system_messages=(Message(role="system", content=system or f"You are {name}."),),
         toolkits=toolkits,
     )
     return TeamMember(spec=spec, role=f"{name} role.", new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST)
@@ -126,7 +126,7 @@ def team_spec(
         id=team_id,
         name=name,
         model=model,
-        system_message=Message(role="system", content=system),
+        system_messages=(Message(role="system", content=system),),
         toolkits=tuple(toolkits),
     )
     return TeamSpec(leader=leader, mode=mode, members=tuple(members))

@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""The team leader's system message: the ``<team>`` block, the tool instructions, the model note, and the context.
+"""The team leader's system message: the ``<team>`` block, the tool instructions, and the context.
 
 A team has no description, role, or instructions of its own, so the ``<team>`` block (the capability sentence, the
 member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are part of every leader
@@ -82,14 +82,12 @@ def render_leader_system_message(
     mode: TeamMode,
     *,
     tool_instructions: Sequence[str],
-    model_note: str | None,
     additional_context: str,
 ) -> Message:
     """Return the leader's system message for ``members`` in ``mode``.
 
-    ``tool_instructions`` are the leader's toolkit instructions in offer order, ``model_note`` the provider family's
-    text (``agent_loop.prompt.model_note_for``), and ``additional_context`` the per-turn context MindRoom adds: the
-    date context and any appended system enrichment.
+    ``tool_instructions`` are the leader's toolkit instructions in offer order, and ``additional_context`` the
+    per-turn context MindRoom adds: the date context and any appended system enrichment.
     """
     delegation = (
         _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
@@ -106,7 +104,6 @@ def render_leader_system_message(
         "</team>\n\n"
     )
     content += "".join(f"{instruction}\n" for instruction in tool_instructions)
-    content += model_note or ""
     content += f"<additional_context>\n{additional_context.strip()}\n</additional_context>\n\n"
     return Message(role="system", content=content.strip())
 

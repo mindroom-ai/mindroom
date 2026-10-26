@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.error_handling import MinimalModeUnavailableError
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.search import KnowledgeSourceDescription
+from mindroom.llm.messages import system_text
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
@@ -65,7 +66,7 @@ def test_only_the_bootstrap_and_required_context_reach_the_provider(tmp_path: Pa
         ),
     )
 
-    system = turn.system_message.get_content_string()
+    system = system_text(turn.system_messages)
     assert system.startswith("You are Helper (helper) in minimal mode.\nBash starts in your workspace.")
     assert "Assigned task: rotate the logs." in system
     # The build's turn context, such as the current date, stays inline.
@@ -99,7 +100,7 @@ def test_a_toolkit_s_instructions_are_a_context_document_not_part_of_the_bootstr
     assert guidance is not None
     assert "per-thread work plan" in guidance
     assert guidance in turn.context_documents.values()
-    assert guidance not in turn.system_message.get_content_string()
+    assert guidance not in system_text(turn.system_messages)
 
 
 def test_the_knowledge_document_lists_each_base_the_agent_s_search_reaches(tmp_path: Path) -> None:

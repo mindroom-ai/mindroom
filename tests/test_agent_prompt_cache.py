@@ -17,7 +17,7 @@ from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.history.request_messages import TurnMessages, build_request
 from mindroom.history.types import ScopeSummary
 from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest
 from mindroom.media_inputs import MediaInputs
 from mindroom.providers.anthropic.messages import ClaudeProvider
@@ -77,7 +77,7 @@ def _agent_request(
         )
     system = prompt_for_turn(build, system_enrichment)
     messages = [
-        system,
+        *system,
         *build_request(
             summary=None if summary is None else ScopeSummary(text=summary, updated_at=datetime.now(UTC)),
             history=(),
@@ -88,8 +88,7 @@ def _agent_request(
     claude = bare_adapter(build.spec.model)
     assert isinstance(claude, ClaudeProvider)
     body = claude._prepare(ModelRequest(messages=tuple(messages))).kwargs
-    assert isinstance(system.content, str)
-    return system.content, body
+    return system_text(system), body
 
 
 def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path: Path) -> None:
@@ -116,8 +115,8 @@ def test_agent_cache_prefix_survives_date_and_compaction_changes(tmp_path: Path)
     assert "The user approved chapter one." in str(compacted["messages"])
     assert "Editing chapter two." in compacted["system"][1]["text"]
     assert "cache_control" not in compacted["system"][1]
-    assert "".join(block["text"] for block in original["system"]) == original_text
-    assert "".join(block["text"] for block in compacted["system"]) == compacted_text
+    assert "\n\n".join(block["text"] for block in original["system"]) == original_text
+    assert "\n\n".join(block["text"] for block in compacted["system"]) == compacted_text
     assert _count_cache_markers(compacted) <= 4
 
 
@@ -138,22 +137,20 @@ def test_changed_agent_instructions_change_the_cache_prefix(tmp_path: Path) -> N
 @pytest.mark.parametrize("route", ["anthropic", "bedrock_claude", "vertexai_claude"])
 @pytest.mark.parametrize("extended_cache_time", [False, True])
 @pytest.mark.parametrize("cache_enabled", [False, True])
-def test_system_boundary_preserves_custom_blocks_and_cache_budget(
+def test_authored_system_blocks_go_as_authored_within_the_cache_budget(
     route: ClaudeRouteKind,
     *,
     extended_cache_time: bool,
     cache_enabled: bool,
 ) -> None:
-    """Splitting must preserve custom blocks, TTL, input ownership, and the API marker limit."""
+    """Authored system blocks keep their text and markers, the input is untouched, and markers stay within the limit."""
     cache_control = {"type": "ephemeral", **({"ttl": "1h"} if extended_cache_time else {})}
-    original_system = {
-        "type": "text",
-        "text": "Shared instructions.\n\n" + render_session_context("Current date: Monday"),
-        **({"cache_control": cache_control} if cache_enabled else {}),
-    }
-    custom_block = {"type": "text", "text": "Custom system block.", "cache_control": cache_control}
+    authored_system = [
+        {"type": "text", "text": "Shared instructions.\n\n" + render_session_context("Current date: Monday")},
+        {"type": "text", "text": "Custom system block.", "cache_control": cache_control},
+    ]
     request = {
-        "system": [original_system, custom_block],
+        "system": authored_system,
         "tools": [{"name": "demo", "input_schema": {"type": "object"}}],
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "First request."}]},
@@ -166,7 +163,7 @@ def test_system_boundary_preserves_custom_blocks_and_cache_budget(
     def prepare(body: dict[str, Any]) -> dict[str, Any]:
         return prepare_request_body(
             body,
-            system="",
+            system=(),
             route=route,
             deferred_tool_names=frozenset(),
             tool_choice=None,
@@ -177,17 +174,10 @@ def test_system_boundary_preserves_custom_blocks_and_cache_budget(
     prepared = prepare(request)
 
     assert request == original
-    assert prepared["system"][-1] == custom_block
+    assert prepared["system"] == authored_system
     assert _count_cache_markers(prepared) <= 4
     assert prepare(prepared) == prepared
     if cache_enabled:
-        assert len(prepared["system"]) == 3
-        assert prepared["system"][0] == {
-            "type": "text",
-            "text": "Shared instructions.\n\n",
-            "cache_control": cache_control,
-        }
-        assert "cache_control" not in prepared["system"][1]
         assert prepared["messages"][-1]["content"][0]["cache_control"] == cache_control
     else:
         assert prepared == request

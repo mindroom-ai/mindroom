@@ -1297,7 +1297,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
         id="code",
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
-        system_message=None,
+        system_messages=(),
         toolkits=(),
     )
 
@@ -1348,7 +1348,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         id="code",
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
-        system_message=None,
+        system_messages=(),
         toolkits=(),
     )
 

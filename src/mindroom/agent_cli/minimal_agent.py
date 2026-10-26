@@ -16,10 +16,11 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.response_owner import bind_response_owner, tool_catalog
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.prompt import join_sections
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
 from mindroom.hooks import render_enrichment_block, render_system_enrichment_block, render_transient_context
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 
@@ -51,9 +52,9 @@ __all__ = [
 
 @dataclass(frozen=True)
 class MinimalTurn:
-    """One minimal turn's prompt: the system message, the transient context, and the documents Bash can read."""
+    """One minimal turn's prompt: the system messages, the transient context, and the documents Bash can read."""
 
-    system_message: Message
+    system_messages: tuple[Message, ...]
     transient_context: str
     context_documents: dict[str, str]
 
@@ -77,7 +78,7 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
     for index, toolkit in enumerate(build.spec.toolkits):
         if toolkit.guidance:
             documents[f"toolkit-{index + 1}"] = toolkit.guidance
-    documents["agent-context"] = prompt_for_turn(build).get_content_string()
+    documents["agent-context"] = system_text(prompt_for_turn(build))
     return documents
 
 
@@ -91,11 +92,12 @@ def minimal_turn(
 ) -> MinimalTurn:
     """Keep optional current context discoverable and trusted runtime assignments inline.
 
-    Only enrichment marked ``minimal_required`` reaches the model directly: system items after the bootstrap
-    message, transient ones in the transient context. Everything else, memory included, is a context document.
+    Only enrichment marked ``minimal_required`` reaches the model directly: system items in the turn part after the
+    date and session context, transient ones in the transient context. Everything else, memory included, is a context
+    document.
     """
     surface = build.surface
-    system_message = minimal_system_message(
+    bootstrap = minimal_system_message(
         agent_name=build.spec.id,
         display_name=build.spec.name,
         identity=surface.identity,
@@ -103,15 +105,15 @@ def minimal_turn(
         instructions=surface.minimal_instructions,
         context_files=surface.context_files,
         memory_root=surface.memory_root,
-        runtime_context=(build.prompt.turn_context or "") + surface.runtime_context,
+        runtime_context=surface.runtime_context,
     )
-    if required := [item for item in system_enrichment if item.minimal_required]:
-        system_message += "\n" + render_system_enrichment_block(required)
+    required = [item for item in system_enrichment if item.minimal_required]
+    turn = join_sections((build.prompt.turn_context, render_system_enrichment_block(required) if required else None))
     documents = minimal_context_documents(build)
     documents["memory"] = render_transient_context((session_preamble, transient_memory))
     documents["enrichment"] = render_enrichment_block([*system_enrichment, *transient_enrichment])
     return MinimalTurn(
-        system_message=Message(role="system", content=system_message),
+        system_messages=tuple(Message(role="system", content=text) for text in (bootstrap, turn) if text),
         transient_context=render_transient_context(
             (render_enrichment_block([item for item in transient_enrichment if item.minimal_required]),),
         ),

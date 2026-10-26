@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import httpx2
 
+from mindroom.llm.messages import system_texts
 from mindroom.llm.provider import StreamProgress, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
 from mindroom.providers.extra_kwargs import settings_params
@@ -93,7 +94,9 @@ class ChatAdapter:
             cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache,
             extended_cache_time=self.settings.extended_cache_time,
         )
-        return kwargs if cache_control is None else request_kwargs_with_prompt_cache(kwargs, cache_control)
+        if cache_control is None:
+            return kwargs
+        return request_kwargs_with_prompt_cache(kwargs, cache_control, system_texts(request.messages))
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Chat Completions request and yield its deltas, usage, and finished turn."""

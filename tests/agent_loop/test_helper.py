@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.helper import complete_prompt
-from mindroom.agent_loop.prompt import PromptSpec, render_system_message
+from mindroom.agent_loop.prompt import PromptSpec, render_system_messages
 from mindroom.agent_loop.structured import output_format_prompt
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.messages import Message
@@ -93,7 +93,7 @@ async def test_a_prompt_is_sent_under_its_rendered_system_message(structured_out
         output_format_prompt=output_format_prompt(capabilities, _Verdict),
     )
     assert [turn_message(message) for message in request.messages] == [
-        turn_message(render_system_message(spec)),
+        *(turn_message(message) for message in render_system_messages(spec)),
         turn_message(Message(role="user", content="Is it raining?")),
     ]
     assert request.output_schema is _Verdict

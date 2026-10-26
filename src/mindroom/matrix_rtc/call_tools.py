@@ -42,7 +42,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, model_provenance, system_text
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics
 from mindroom.logging_config import get_logger
@@ -864,8 +864,8 @@ def _call_agent_run_state(
 
 def _call_instructions(build: AgentBuild) -> str:
     """Return the system message a chat turn of the agent starts from, without the turn's own context."""
-    content = prompt_for_turn(build).content
-    if not isinstance(content, str) or not content.strip():
+    content = system_text(prompt_for_turn(build))
+    if not content.strip():
         msg = "Agent produced an empty system prompt for its voice session"
         raise ValueError(msg)
     return content

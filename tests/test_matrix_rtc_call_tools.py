@@ -35,6 +35,7 @@ from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
+from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ModelIdentity, ModelRequest
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
@@ -162,7 +163,7 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
             id=AGENT,
             name="Helper",
             model=ScriptedModel([]),
-            system_message=None,
+            system_messages=(),
             toolkits=offered_toolkits([adapt_toolkit(toolkit, key=toolkit.name) for toolkit in toolkits], agent=AGENT),
         ),
         prompt=PromptSpec(role=role, instructions=()),
@@ -315,7 +316,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     chat_functions = _functions(chat_build)
 
     assert list(call_functions) == list(chat_functions)
-    assert prompt_for_turn(call_build).content == prompt_for_turn(chat_build).content
+    assert system_text(prompt_for_turn(call_build)) == system_text(prompt_for_turn(chat_build))
     assert chat_functions["add"].approval_type == (JOB_APPROVAL_TYPE if jobs else POLICY_CONFIRMATION_APPROVAL_TYPE)
     add = call_functions["add"]
     assert (add.requires_confirmation, add.external_execution, add.approval_type) == (False, False, None)
@@ -577,7 +578,7 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
     )
 
     async def respond(_turn: ResponseTurnContext, **kwargs: object) -> str:
-        return cast("str", prompt_for_turn(cast("AgentBuild", kwargs["reusable_build"])).content)
+        return system_text(prompt_for_turn(cast("AgentBuild", kwargs["reusable_build"])))
 
     monkeypatch.setattr("mindroom.ai.ai_response", respond)
     for requester, name, other in (("@alice:example.org", "Alice", "Bob"), ("@bob:example.org", "Bob", "Alice")):

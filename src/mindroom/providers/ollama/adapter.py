@@ -20,7 +20,7 @@ from ollama import AsyncClient
 
 from mindroom.credentials.sync import get_ollama_host
 from mindroom.llm.errors import InvalidRequest
-from mindroom.llm.messages import tool_result_view
+from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -100,7 +100,10 @@ class OllamaProvider:
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed chat request and yield its events."""
-        messages = [await _format_message(message, self.identity.provider_name) for message in request.messages]
+        messages = [
+            await _format_message(message, self.identity.provider_name)
+            for message in with_joined_system(request.messages)
+        ]
         model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()

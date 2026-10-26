@@ -4,7 +4,11 @@
     "deferred_tool_search": null,
     "messages": [
       {
-        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>",
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "content": "<mindroom_session_context>\nToday is Tuesday, October 20, 2026 (UTC).\n</mindroom_session_context>",
         "role": "system"
       },
       {
@@ -87,7 +91,7 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "c0119184ddfc3badd66931660bde8b4960a8e1acd7e15713bce49f8c86701b43",
+        "mindroom_system_sha256": "6a150d055753c416f3726ed6066b947b858b48cbe69fda642602ff94f4de34f8",
         "response_id": "resp_parity"
       },
       "role": "assistant"
@@ -111,7 +115,7 @@
           "content": [
             {
               "type": "input_text",
-              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.\n\n",
+              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
               "prompt_cache_breakpoint": {
                 "mode": "explicit"
               }

@@ -23,7 +23,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.hooks import render_transient_context
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest
 from mindroom.memory import MemoryPromptParts
 from mindroom.memory._file_backend import FileMemoryBackend
@@ -206,7 +206,7 @@ def _prompt_preparation_config(memory_backend: str = "mem0") -> Config:
 def _build(turn_context: str | None = None) -> AgentBuild:
     """Return a minimal agent build whose prompt carries ``turn_context`` as the build's own context."""
     return AgentBuild(
-        spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_message=None, toolkits=()),
+        spec=AgentSpec(id="general", name="General", model=ScriptedModel([]), system_messages=(), toolkits=()),
         prompt=PromptSpec(role="test", turn_context=turn_context, instructions=()),
         request_template=ModelRequest(messages=()),
         history_settings=replay_settings(),
@@ -332,7 +332,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         assert agent_finished.is_set()
         assert kwargs["build"] is build
         assert kwargs["prompt"] == "raw prompt\n\nmodel metadata"
-        assert str(kwargs["system_message"].content).endswith("existing context\n\nsession memory")
+        assert system_text(kwargs["system_messages"]).endswith("existing context\n\nsession memory")
         assert len(kwargs["transient_context_messages"]) == 1
         assert kwargs["transient_context_messages"][0].content == render_transient_context(("turn memory",))
         assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
@@ -377,8 +377,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         agent_release.set()
 
     assert prepared_run.build is build
-    assert prepared_run.spec.system_message is not None
-    assert str(prepared_run.spec.system_message.content).endswith("existing context\n\nsession memory")
+    assert system_text(prepared_run.spec.system_messages).endswith("existing context\n\nsession memory")
     assert prepared_run.prompt_text.startswith("raw prompt\n\nmodel metadata")
     assert pipeline_timing.metadata["prompt_branches_parallel"] is True
     assert pipeline_timing.metadata["prompt_branches_memory_backend"] == memory_backend
@@ -530,8 +529,7 @@ async def test_prepare_agent_and_prompt_file_memory_preserves_reusable_build(
     )
 
     assert prepared.build is reusable_build
-    assert prepared.spec.system_message is not None
-    assert str(prepared.spec.system_message.content).endswith("caller context\n\nsession memory")
+    assert system_text(prepared.spec.system_messages).endswith("caller context\n\nsession memory")
     # The build's own prompt is never changed by a turn.
     assert reusable_build.prompt.turn_context == "caller context"
     assert prepared.unseen_event_ids == ["$memory"]
@@ -600,10 +598,9 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
     assert parallel.unseen_event_ids == sequential.unseen_event_ids == ["$one", "$two"]
     assert parallel.prepared_history == sequential.prepared_history
     assert parallel.runtime_model_name == sequential.runtime_model_name
-    assert parallel.spec.system_message is not None
-    assert sequential.spec.system_message is not None
-    assert parallel.spec.system_message.content == sequential.spec.system_message.content
-    assert str(parallel.spec.system_message.content).endswith("base context\n\nsession memory")
+    assert parallel.spec.system_messages
+    assert system_text(parallel.spec.system_messages) == system_text(sequential.spec.system_messages)
+    assert system_text(parallel.spec.system_messages).endswith("base context\n\nsession memory")
     assert history_inputs == [
         (
             "raw prompt\n\nmodel metadata",

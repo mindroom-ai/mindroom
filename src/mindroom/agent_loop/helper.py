@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.agent_loop.prompt import PromptSpec, render_system_message
+from mindroom.agent_loop.prompt import PromptSpec, render_system_messages
 from mindroom.agent_loop.structured import output_format_prompt, parse_structured
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
@@ -59,14 +59,14 @@ async def complete_prompt[T: BaseModel](
     Returns the answer with a completed run record. ``schema`` asks for structured output the way ``provider``
     supports it, so JSON-mode routes also get the JSON prompt at the end of the system message.
     """
-    system = render_system_message(
+    system = render_system_messages(
         PromptSpec(
             role=role,
             instructions=tuple(instructions),
             output_format_prompt=output_format_prompt(provider.capabilities, schema),
         ),
     )
-    messages = [system, Message(role="user", content=prompt)]
+    messages = [*system, Message(role="user", content=prompt)]
     started = perf_counter()
     turn = await complete(
         provider,

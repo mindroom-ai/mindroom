@@ -1552,7 +1552,7 @@ async def _answer(
         id="mind",
         name="Mind",
         model=model,
-        system_message=Message(role="system", content="You are Mind, a deployment assistant."),
+        system_messages=(Message(role="system", content="You are Mind, a deployment assistant."),),
         toolkits=(AdaptedToolkit(name="agent", functions=tuple(tools), instructions=None),),
     )
     hooks = LoopHooks(

@@ -13,7 +13,7 @@ from mindroom import constants
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, standard_cli_eligible, wrap_native_shell_window
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
-from mindroom.agent_loop.prompt import PromptSpec, model_note_for
+from mindroom.agent_loop.prompt import PromptSpec, join_sections
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
 from mindroom.approval.tool_approval import (
@@ -1568,32 +1568,37 @@ def _build_agent_role_context(
     worker_routed_tool_names: tuple[str, ...],
     include_identity: bool,
 ) -> _AgentRoleContext:
-    """Render the runtime facts, the identity, and preload context into the role.
+    """Render the identity, the runtime facts, the preloaded files, and the authored role into the role, as sections.
 
     Without ``include_identity``, as for an authored subagent whose prompt replaces it, the role holds only the
     runtime facts.
     """
-    runtime_facts = _get_mind_runtime_context(agent_name, runtime_paths)
-    if not disable_runtime_capabilities:
-        runtime_facts += "\n\n" + _render_tool_execution_environment(
-            runtime_paths=runtime_paths,
-            local_tool_names=local_tool_names,
-            worker_routed_tool_names=worker_routed_tool_names,
-            worker_scope=agent_runtime.execution.execution_scope,
-            file_access=config.resolve_entity(agent_name).file_access,
-            has_workspace=agent_runtime.tool_base_dir is not None,
-            unconfined_tool_names=_unconfined_tool_names(
-                (*local_tool_names, *worker_routed_tool_names),
-                requires_primary_runtime=False,
+    runtime_facts = join_sections(
+        (
+            _get_mind_runtime_context(agent_name, runtime_paths),
+            None
+            if disable_runtime_capabilities
+            else _render_tool_execution_environment(
+                runtime_paths=runtime_paths,
+                local_tool_names=local_tool_names,
+                worker_routed_tool_names=worker_routed_tool_names,
+                worker_scope=agent_runtime.execution.execution_scope,
+                file_access=config.resolve_entity(agent_name).file_access,
+                has_workspace=agent_runtime.tool_base_dir is not None,
+                unconfined_tool_names=_unconfined_tool_names(
+                    (*local_tool_names, *worker_routed_tool_names),
+                    requires_primary_runtime=False,
+                ),
+                primary_only_unconfined_tool_names=_unconfined_tool_names(
+                    (*local_tool_names, *worker_routed_tool_names),
+                    requires_primary_runtime=True,
+                ),
+                shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
             ),
-            primary_only_unconfined_tool_names=_unconfined_tool_names(
-                (*local_tool_names, *worker_routed_tool_names),
-                requires_primary_runtime=True,
-            ),
-            shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
-        )
+        ),
+    )
     if not include_identity:
-        return _AgentRoleContext(role=runtime_facts.lstrip(), context_documents=())
+        return _AgentRoleContext(role=runtime_facts, context_documents=())
 
     model_config = config.models.get(model_name)
     model_provider = model_config.provider.title() if model_config is not None else "AI"
@@ -1609,14 +1614,11 @@ def _build_agent_role_context(
             include_openai_compat_guidance=include_openai_compat_guidance,
         )
 
-    full_context = identity_context + runtime_facts
     context_documents: list[_PreloadChunk] = []
+    preloaded_files = None
     if not disable_runtime_capabilities:
         workspace = agent_runtime.workspace
-        # TODO(simplify): The tool-environment section ends without a newline, so the "## Personality Context"
-        # heading lands on its last line. End the section with a newline so the heading starts its own line.
-        # Models would notice: it changes system prompt bytes (#3075).
-        full_context += _render_preloaded_files(
+        preloaded_files = _render_preloaded_files(
             agent_name,
             agent_config,
             config.defaults.max_preload_chars,
@@ -1630,7 +1632,10 @@ def _build_agent_role_context(
             runtime_paths=runtime_paths,
         )
 
-    return _AgentRoleContext(role=full_context + agent_config.role, context_documents=tuple(context_documents))
+    return _AgentRoleContext(
+        role=join_sections((identity_context, runtime_facts, preloaded_files, agent_config.role)),
+        context_documents=tuple(context_documents),
+    )
 
 
 def _skill_usage_instructions(
@@ -2046,7 +2051,7 @@ def create_agent(
         id=agent_name,
         name=agent_config.display_name,
         model=provider,
-        system_message=None,
+        system_messages=(),
         toolkits=toolkits if windowed_toolkits is None else windowed_toolkits,
         max_tool_calls_per_turn=entity_view.max_tool_calls_per_turn,
     )
@@ -2064,7 +2069,6 @@ def create_agent(
         ),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
         knowledge_block=None if enabled_knowledge is None else enabled_knowledge.prompt_block(),
-        model_note=model_note_for(provider.capabilities, offers_tools=bool(spec.functions)),
     )
 
     surface = AgentSurface(

@@ -49,7 +49,7 @@ from mindroom.hooks import (
 )
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
     NativeCompactionReplay,
@@ -914,7 +914,7 @@ async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_re
 
     assert probe.calls == ["a"]
     first, *later = reply.model.requests
-    assert str(first.messages[0].content).endswith(RECEIPT_TEXT)
+    assert system_text(first.messages).endswith(RECEIPT_TEXT)
     assert len(later) == 2
     assert all(RECEIPT_TEXT not in str(message.content) for request in later for message in request.messages)
     session = reply.storage.load_session(SESSION_ID, "agent")

@@ -812,7 +812,7 @@ async def prepare_agent_execution_context(
     *,
     scope_context: ScopeSessionContext | None,
     build: AgentBuild,
-    system_message: Message,
+    system_messages: Sequence[Message],
     prompt: str,
     transient_context_messages: Sequence[Message],
     thread_history: Sequence[ResolvedVisibleMessage] | None,
@@ -829,7 +829,7 @@ async def prepare_agent_execution_context(
 ) -> _PreparedExecutionContext:
     """Prepare one agent's final prompt and replay plan for the current call.
 
-    ``system_message`` is the turn's rendered system message, which sizes the static part of every request, and
+    ``system_messages`` are the turn's rendered system messages, which size the static part of every request, and
     ``resolved_runtime_model`` the model the turn runs on, whose window bounds its history.
     """
     agent_name = ctx.entity_label
@@ -838,7 +838,7 @@ async def prepare_agent_execution_context(
         response_sender_id = entity_identity_registry(config, runtime_paths).current_ids.get(agent_name)
         response_sender = response_sender_id.full_id if response_sender_id is not None else None
     static_token_estimator = build_static_token_estimator(
-        system_message,
+        system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
@@ -900,7 +900,7 @@ async def _prepare_bound_team_execution_context(
     *,
     scope_context: ScopeSessionContext | None,
     member_names: Sequence[str],
-    leader_system_message: Message,
+    leader_system_messages: Sequence[Message],
     leader_tools: Sequence[ToolSpec],
     model: ModelProvider,
     prompt: str,
@@ -924,11 +924,11 @@ async def _prepare_bound_team_execution_context(
 ) -> _PreparedExecutionContext:
     """Prepare one bound team scope for the current call.
 
-    ``leader_system_message`` and ``leader_tools`` size the static part of every leader request; the delegation tool
+    ``leader_system_messages`` and ``leader_tools`` size the static part of every leader request; the delegation tool
     the run adds is among them. ``history_settings`` are the built team's, whose replay policy and compaction config
     the scope follows.
     """
-    static_token_estimator = build_static_token_estimator(leader_system_message, leader_tools, frozenset())
+    static_token_estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
     team_compaction_config = history_settings.compaction_config
 
     async def _prepare_team_scope_history(
@@ -985,7 +985,7 @@ async def prepare_bound_team_run_context(
     *,
     scope_context: ScopeSessionContext | None,
     member_names: Sequence[str],
-    leader_system_message: Message,
+    leader_system_messages: Sequence[Message],
     leader_tools: Sequence[ToolSpec],
     model: ModelProvider,
     prompt: str,
@@ -1015,7 +1015,7 @@ async def prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
         member_names=member_names,
-        leader_system_message=leader_system_message,
+        leader_system_messages=leader_system_messages,
         leader_tools=leader_tools,
         model=model,
         prompt=prompt,

@@ -2681,7 +2681,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.prompt_tokens"
-depends_on = ["mindroom.token_budget"]
+depends_on = ["mindroom.llm", "mindroom.token_budget"]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -8792,6 +8792,7 @@ visibility = [
 path = "mindroom.agent_cli.minimal_agent"
 depends_on = [
     "mindroom.agent_cli.bash",
+    "mindroom.agent_loop.prompt",
     "mindroom.agent_cli.context",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",

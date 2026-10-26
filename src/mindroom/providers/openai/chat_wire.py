@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.llm.messages import tool_result_view
+from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
@@ -188,6 +188,7 @@ def _cerebras_message(message: Message) -> dict[str, Any]:
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSettings) -> list[dict[str, Any]]:
+    messages = with_joined_system(messages)
     if wire.dialect == "groq":
         return [_groq_message(message) for message in messages]
     if wire.dialect == "cerebras":

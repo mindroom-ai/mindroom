@@ -1,11 +1,9 @@
-"""Explicit boundary between shared agent instructions and session context."""
+"""The date and session context, which opens the turn part of an agent's system prompt (``agent_loop.prompt``)."""
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from mindroom.prompt_templates import render_prompt_template
-
-SESSION_CONTEXT_BOUNDARY = "<mindroom_session_context>"
 
 
 def render_date_context(timezone_str: str, *, datetime_context_template: str) -> str:
@@ -20,9 +18,5 @@ def render_date_context(timezone_str: str, *, datetime_context_template: str) ->
 
 
 def render_session_context(date_context: str) -> str:
-    """Start the system suffix that may change between conversations or turns.
-
-    The system message renders the skills and knowledge blocks after ``turn_context``, so they stay behind this
-    boundary too.
-    """
-    return f"{SESSION_CONTEXT_BOUNDARY}\n{date_context}\n</mindroom_session_context>"
+    """Return the session context that opens the turn part of the system prompt, which changes between days."""
+    return f"<mindroom_session_context>\n{date_context.strip()}\n</mindroom_session_context>"
