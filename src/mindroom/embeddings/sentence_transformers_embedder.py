@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.embeddings.errors import embedder_request_error
@@ -41,6 +43,7 @@ class _SentenceTransformerModel(Protocol):
 #: embedding runs one call at a time. Nothing is lost by serializing, because
 #: the work already funnels through a single GPU queue.
 _LOCAL_EMBEDDING_LOCK = threading.RLock()
+_LOCAL_EMBEDDING_THREAD = ThreadPoolExecutor(1, thread_name_prefix="local-embedding")
 #: The model loaded last, shared by every embedder for that model; a new model replaces it.
 _SENTENCE_TRANSFORMER_CLIENT: tuple[str, _SentenceTransformerModel] | None = None
 
@@ -79,8 +82,15 @@ class _SentenceTransformersEmbedder:
         return vectors
 
     async def aembed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
-        """Embed off the event loop, because local models compute in-process."""
-        return await asyncio.to_thread(self.embed, texts, purpose=purpose)
+        """Embed off the event loop on the local embedding thread, because local models compute in-process.
+
+        Calls run one at a time anyway, so queueing them on their own thread keeps a burst from filling the event
+        loop's shared default executor with threads waiting on the model.
+        """
+        return await asyncio.get_running_loop().run_in_executor(
+            _LOCAL_EMBEDDING_THREAD,
+            partial(self.embed, texts, purpose=purpose),
+        )
 
 
 def create_sentence_transformers_embedder(

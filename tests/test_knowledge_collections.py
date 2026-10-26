@@ -1,31 +1,26 @@
-"""Real Chroma resource ownership at temporary knowledge collection boundaries."""
+"""Knowledge collection lifecycle at the store boundary: writes, resets, deletion, cleanup, and cold lookups."""
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from threading import Barrier, BoundedSemaphore
-from typing import TYPE_CHECKING, Never, cast
+from pathlib import Path
+from threading import Barrier
+from typing import TYPE_CHECKING, Any, Never
 
 import pytest
-from chromadb.api.client import Client
-from chromadb.api.models.Collection import Collection
-from chromadb.config import Settings
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge import read_process
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.collections import (
-    _COLLECTION_METADATA,
     CollectionSpace,
     KnowledgeChunk,
     cleanup_superseded_collections,
     delete_collection,
     open_collection,
-    reset_collection,
     write_source_rows,
 )
 from mindroom.knowledge.index_metadata import PublishedIndexState, save_published_index_state
@@ -38,10 +33,11 @@ from mindroom.knowledge.registry import (
     resolve_published_index_key,
 )
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
+from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
+from tests.knowledge_test_support import seed_collection, stored_rows
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
+    from collections.abc import Callable, Mapping
 
     from mindroom.constants import RuntimePaths
 
@@ -52,90 +48,78 @@ def space(tmp_path: Path) -> CollectionSpace:
     return CollectionSpace(
         base_id="docs",
         knowledge_path=tmp_path / "docs",
-        storage_path=tmp_path / "chroma",
+        storage_path=tmp_path / "storage",
     )
 
 
-def _assert_storage_released(space: CollectionSpace, expected_collections: set[str]) -> None:
-    # Different settings are accepted only after every previous client closes.
-    with Client(
-        settings=Settings(is_persistent=True, persist_directory=str(space.storage_path), allow_reset=True),
-    ) as client:
-        assert {collection.name for collection in client.list_collections()} == expected_collections
+def _fail_delete(self: KnowledgeCollection) -> Never:  # noqa: ARG001
+    message = "collection operation failed"
+    raise OSError(message)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_missing", [False, True])
-async def test_delete_collection_releases_owned_client(space: CollectionSpace, *, already_missing: bool) -> None:
-    """Both successful and already-absent deletion must release their temporary client."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(space.storage_path))) as seed:
-        seed.create_collection("retained")
-        if not already_missing:
-            seed.create_collection(space.default_collection)
+async def test_delete_collection_reports_present_and_absent_collections_deleted(
+    space: CollectionSpace,
+    *,
+    already_missing: bool,
+) -> None:
+    """Both successful and already-absent deletion report success and leave other collections alone."""
+    retained = f"{space.default_collection}_candidate_retained"
+    seed_collection(open_collection(space, retained), [{"content": "retained"}])
+    if not already_missing:
+        seed_collection(open_collection(space, space.default_collection), [{"content": "published"}])
 
     assert await delete_collection(space, space.default_collection) is True
 
-    _assert_storage_released(space, {"retained"})
+    assert list_collection_names(space.storage_path) == (retained,)
 
 
 @pytest.mark.asyncio
-async def test_delete_collection_failure_releases_owned_client(
+async def test_delete_collection_failure_keeps_the_collection(
     space: CollectionSpace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rejected deletion reports failure, keeps the collection, and leaves no unowned client."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(space.storage_path))) as seed:
-        seed.create_collection(space.default_collection)
-
-    def fail_operation(self: Client, name: str, **kwargs: object) -> Never:  # noqa: ARG001
-        message = "collection operation failed"
-        raise RuntimeError(message)
-
-    monkeypatch.setattr(Client, "delete_collection", fail_operation)
+    """A rejected deletion reports failure and keeps the collection."""
+    seed_collection(open_collection(space, space.default_collection), [{"content": "published"}])
+    monkeypatch.setattr(KnowledgeCollection, "delete", _fail_delete)
 
     assert await delete_collection(space, space.default_collection) is False
 
-    _assert_storage_released(space, {space.default_collection})
+    assert list_collection_names(space.storage_path) == (space.default_collection,)
 
 
 @pytest.mark.parametrize("deletion_fails", [False, True])
-def test_superseded_cleanup_releases_owned_clients_and_preserves_reader(
+def test_superseded_cleanup_preserves_retained_reader(
     space: CollectionSpace,
     monkeypatch: pytest.MonkeyPatch,
     *,
     deletion_fails: bool,
 ) -> None:
-    """Cleanup must preserve its borrowed reader and release temporary clients even on failure."""
+    """Cleanup keeps the preserved and unowned collections searchable and continues past a failed deletion."""
     retained_name = f"{space.default_collection}_candidate_current"
-    stale_candidate = f"{space.default_collection}_candidate_stale"
-    client = open_collection(space, retained_name).client
-    try:
-        retained = client.create_collection(retained_name)
-        retained.add(ids=["document"], embeddings=[[1.0, 0.0]])
-        client.create_collection(space.default_collection)
-        client.create_collection(stale_candidate)
-        client.create_collection("unowned")
-        if deletion_fails:
-            original_delete = Client.delete_collection
+    retained = open_collection(space, retained_name)
+    seed_collection(retained, [{"id": "document", "content": "document"}])
+    for name in (space.default_collection, f"{space.default_collection}_candidate_stale"):
+        seed_collection(open_collection(space, name), [])
+    seed_collection(KnowledgeCollection(path=space.storage_path, name="unowned"), [])
+    if deletion_fails:
+        original_delete = KnowledgeCollection.delete
 
-            def fail_one_deletion(self: Client, name: str) -> None:
-                if name == space.default_collection:
-                    message = "collection deletion failed"
-                    raise RuntimeError(message)
-                original_delete(self, name=name)
+        def fail_one_deletion(self: KnowledgeCollection) -> None:
+            if self.name == space.default_collection:
+                _fail_delete(self)
+            original_delete(self)
 
-            monkeypatch.setattr(Client, "delete_collection", fail_one_deletion)
+        monkeypatch.setattr(KnowledgeCollection, "delete", fail_one_deletion)
 
-        cleanup_superseded_collections(space, client=client, preserved=frozenset({retained_name}))
+    cleanup_superseded_collections(space, preserved=frozenset({retained_name}))
 
-        assert retained.query(query_embeddings=[[1.0, 0.0]], n_results=1)["ids"] == [["document"]]
-    finally:
-        client.close()
-
+    assert [hit.content for hit in retained.search([1.0], limit=1)] == ["document"]
     expected = {retained_name, "unowned"}
     if deletion_fails:
         expected.add(space.default_collection)
-    _assert_storage_released(space, expected)
+    assert set(list_collection_names(space.storage_path)) == expected
 
 
 _SIGNATURE = (1, 9, "digest")
@@ -157,108 +141,73 @@ def _rows(*texts_and_vectors: tuple[str, list[float]]) -> list[tuple[KnowledgeCh
 
 def test_write_source_rows_replaces_one_files_rows(space: CollectionSpace) -> None:
     """A write replaces its own file's rows, keeps other files', and stores what search results show."""
-    collection = open_collection(space, "rows")
-    try:
-        reset_collection(collection)
-        write_source_rows(
-            collection,
-            relative_path="other.md",
-            signature=_SIGNATURE,
-            rows=_rows(("other", [0.0, 1.0])),
-        )
-        write_source_rows(
-            collection,
-            relative_path="notes.md",
-            signature=(0, 9, "old"),
-            rows=_rows(("stale", [1.0, 0.0]), ("stale", [1.0, 0.0]), ("stale", [1.0, 0.0])),
-        )
-        write_source_rows(
-            collection,
-            relative_path="notes.md",
-            signature=_SIGNATURE,
-            rows=_rows(("first", [1.0, 0.0]), ("null\x00byte", [0.5, 0.5])),
-        )
+    collection = open_collection(space, space.default_collection)
+    collection.reset()
+    write_source_rows(
+        collection,
+        relative_path="other.md",
+        signature=_SIGNATURE,
+        rows=_rows(("other", [0.0, 1.0])),
+    )
+    write_source_rows(
+        collection,
+        relative_path="notes.md",
+        signature=(0, 9, "old"),
+        rows=_rows(("stale", [1.0, 0.0]), ("stale", [1.0, 0.0]), ("stale", [1.0, 0.0])),
+    )
+    write_source_rows(
+        collection,
+        relative_path="notes.md",
+        signature=_SIGNATURE,
+        rows=_rows(("first", [1.0, 0.0]), ("null\x00byte", [0.5, 0.5])),
+    )
 
-        stored = collection.collection().get(where={"source_path": "notes.md"}, include=["documents", "metadatas"])
-        assert collection.collection().metadata == _COLLECTION_METADATA
-        assert sorted(stored["documents"] or []) == ["first", "null\ufffdbyte"]
-        metadata = sorted(stored["metadatas"] or [], key=lambda row: row["chunk"])[0]
-        assert set(metadata) == {
-            "chunk",
-            "chunk_size",
-            "content_hash",
-            "content_id",
-            "linked_to",
-            "name",
-            "source_digest",
-            "source_mtime_ns",
-            "source_path",
-            "source_size",
-        }
-        assert (metadata["name"], metadata["linked_to"], metadata["chunk_size"]) == ("notes.md", "", 5)
-        assert collection.collection().get(where={"source_path": "other.md"}, include=[])["ids"]
-    finally:
-        collection.close()
+    rows = stored_rows(collection)
+    stored = [row for row in rows if row["metadata"]["source_path"] == "notes.md"]
+    assert sorted(row["content"] for row in stored) == ["first", "null\ufffdbyte"]
+    metadata = sorted((row["metadata"] for row in stored), key=lambda row: row["chunk"])[0]
+    assert set(metadata) == {
+        "chunk",
+        "chunk_size",
+        "content_hash",
+        "content_id",
+        "linked_to",
+        "name",
+        "source_digest",
+        "source_mtime_ns",
+        "source_path",
+        "source_size",
+    }
+    assert (metadata["name"], metadata["linked_to"], metadata["chunk_size"]) == ("notes.md", "", 5)
+    assert any(row["metadata"]["source_path"] == "other.md" for row in rows)
 
 
-def test_write_source_rows_pages_by_the_stores_batch_limit(
+def test_reset_raises_and_keeps_the_old_rows_when_the_swap_fails(
     space: CollectionSpace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A file with more chunks than one Chroma write accepts is written in pages."""
-    collection = open_collection(space, "rows")
-    pages: list[int] = []
-    original_upsert = Collection.upsert
+    """A reset that cannot swap in the empty file raises and leaves the old rows, never a half-built collection."""
+    collection = open_collection(space, space.default_collection)
+    collection.reset()
+    write_source_rows(
+        collection,
+        relative_path="notes.md",
+        signature=_SIGNATURE,
+        rows=_rows(("old", [1.0, 0.0])),
+    )
 
-    def _record_upsert(self: Collection, **kwargs: list[object]) -> None:
-        pages.append(len(kwargs["ids"]))
-        original_upsert(self, **kwargs)
+    def fail_replace(_path: Path, _target: Path) -> Never:
+        msg = "collection operation failed"
+        raise OSError(msg)
 
-    try:
-        reset_collection(collection)
-        monkeypatch.setattr(type(collection.client), "get_max_batch_size", lambda _self: 2)
-        monkeypatch.setattr(Collection, "upsert", _record_upsert)
-        write_source_rows(
-            collection,
-            relative_path="notes.md",
-            signature=_SIGNATURE,
-            rows=_rows(*((text, [1.0, float(index)]) for index, text in enumerate("abcde"))),
-        )
-
-        assert pages == [2, 2, 1]
-        assert collection.collection().count() == 5
-    finally:
-        collection.close()
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="collection operation failed"):
+        collection.reset()
+    monkeypatch.undo()
+    assert [row["content"] for row in stored_rows(collection)] == ["old"]
 
 
-def test_reset_collection_raises_when_the_old_collection_cannot_be_dropped(
-    space: CollectionSpace,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed drop surfaces instead of leaving the old rows in a collection reported as emptied."""
-    collection = open_collection(space, "rows")
-    try:
-        reset_collection(collection)
-        write_source_rows(
-            collection,
-            relative_path="notes.md",
-            signature=_SIGNATURE,
-            rows=_rows(("old", [1.0, 0.0])),
-        )
-
-        def fail_operation(self: Client, name: str, **kwargs: object) -> Never:  # noqa: ARG001
-            message = "collection operation failed"
-            raise RuntimeError(message)
-
-        monkeypatch.setattr(Client, "delete_collection", fail_operation)
-        with pytest.raises(RuntimeError, match="collection operation failed"):
-            reset_collection(collection)
-    finally:
-        collection.close()
-
-
-@contextmanager
-def _candidate_manager(tmp_path: Path) -> Iterator[KnowledgeManager]:
+def _candidate_manager(tmp_path: Path) -> KnowledgeManager:
     config = Config(
         agents={},
         models={},
@@ -270,65 +219,42 @@ def _candidate_manager(tmp_path: Path) -> Iterator[KnowledgeManager]:
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    published = manager._published_collection
-    assert published is not None
-    try:
-        yield manager
-    finally:
-        published.close()
+    return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
 
 
 @pytest.mark.parametrize(
     ("candidate_state", "expected"),
     [("missing", False), ("empty", False), ("unclaimed", True), ("claimed", False)],
 )
-def test_candidate_inspection_releases_owned_client(tmp_path: Path, candidate_state: str, *, expected: bool) -> None:
-    """Every candidate-shape result must release only the temporary inspection client."""
-    with _candidate_manager(tmp_path) as manager:
-        space = manager._collections
-        assert manager._published_collection is not None
-        reader = manager._published_collection.client
-        candidate_name = f"{space.default_collection}_candidate_test"
-        expected_collections: set[str] = set()
-        if candidate_state != "missing":
-            candidate = reader.create_collection(candidate_name)
-            expected_collections.add(candidate_name)
-            if candidate_state != "empty":
-                candidate.add(ids=["document"], embeddings=[[1.0, 0.0]])
-        checkpoint = CandidateCheckpoint(
-            collection=candidate_name,
-            settings=manager._indexing_settings,
-            completed={"document.md": (1, 1, "digest")} if candidate_state == "claimed" else {},
-        )
+def test_candidate_inspection_reports_unclaimed_rows(tmp_path: Path, candidate_state: str, *, expected: bool) -> None:
+    """Only a non-empty candidate without completed claims reports an interrupted bulk copy."""
+    manager = _candidate_manager(tmp_path)
+    candidate = open_collection(manager._collections, f"{manager._collections.default_collection}_candidate_test")
+    if candidate_state != "missing":
+        seed_collection(candidate, [] if candidate_state == "empty" else [{"content": "document"}])
+    checkpoint = CandidateCheckpoint(
+        collection=candidate.name,
+        settings=manager._indexing_settings,
+        completed={"document.md": (1, 1, "digest")} if candidate_state == "claimed" else {},
+    )
 
-        assert manager._candidate_holds_unclaimed_rows(checkpoint) is expected
-        # The manager's own client keeps working after the inspection client closed.
-        assert reader.count_collections() == len(expected_collections)
-
-    _assert_storage_released(space, expected_collections)
+    assert manager._candidate_holds_unclaimed_rows(checkpoint) is expected
 
 
-def test_candidate_inspection_error_releases_owned_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed candidate row lookup must propagate and release the inspection client."""
-    with _candidate_manager(tmp_path) as manager:
-        space = manager._collections
-        assert manager._published_collection is not None
-        reader = manager._published_collection.client
-        candidate_name = f"{space.default_collection}_candidate_test"
-        reader.create_collection(candidate_name)
-        checkpoint = CandidateCheckpoint(collection=candidate_name, settings=manager._indexing_settings)
+def test_candidate_inspection_error_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed candidate row lookup must propagate to the caller."""
+    manager = _candidate_manager(tmp_path)
+    candidate = open_collection(manager._collections, f"{manager._collections.default_collection}_candidate_test")
+    seed_collection(candidate, [])
+    checkpoint = CandidateCheckpoint(collection=candidate.name, settings=manager._indexing_settings)
 
-        def fail_get(self: Collection, **kwargs: object) -> Never:  # noqa: ARG001
-            message = "candidate row lookup failed"
-            raise RuntimeError(message)
+    def fail_has_rows(self: KnowledgeCollection) -> Never:  # noqa: ARG001
+        message = "candidate row lookup failed"
+        raise RuntimeError(message)
 
-        monkeypatch.setattr(Collection, "get", fail_get)
-        with pytest.raises(RuntimeError, match="candidate row lookup failed"):
-            manager._candidate_holds_unclaimed_rows(checkpoint)
-        assert reader.count_collections() == 1
-
-    _assert_storage_released(space, {candidate_name})
+    monkeypatch.setattr(KnowledgeCollection, "has_rows", fail_has_rows)
+    with pytest.raises(RuntimeError, match="candidate row lookup failed"):
+        manager._candidate_holds_unclaimed_rows(checkpoint)
 
 
 @pytest.fixture
@@ -353,8 +279,7 @@ def published_lookup(
     )
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     storage_path = published_index_storage_path(key)
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path))) as seed:
-        seed.create_collection("present")
+    seed_collection(KnowledgeCollection(path=storage_path, name="present"), [])
     save_published_index_state(
         published_index_metadata_path(key),
         PublishedIndexState(
@@ -371,10 +296,8 @@ def published_lookup(
 def test_concurrent_cold_lookups_keep_returned_readers_queryable(
     published_lookup: tuple[Config, RuntimePaths],
 ) -> None:
-    """Concurrent published handles remain usable without retaining parent native clients."""
+    """Concurrent cold lookups each return a published handle that still finds its collection."""
     config, runtime_paths = published_lookup
-    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    storage_path = published_index_storage_path(key)
     barrier = Barrier(2)
 
     def lookup() -> _PublishedIndexHandle:
@@ -389,60 +312,45 @@ def test_concurrent_cold_lookups_keep_returned_readers_queryable(
         indexes = [first.result(timeout=10), second.result(timeout=10)]
     for index in indexes:
         assert index.reader.exists() is True
-    # A native client with different settings can open immediately: none of
-    # the published handles retain a system in this process.
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path), allow_reset=True)) as client:
-        assert client.count_collections() == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cached", [False, True])
-async def test_published_metadata_lookup_does_not_consume_search_capacity(
+async def test_published_lookup_is_not_blocked_by_a_running_search(
     published_lookup: tuple[Config, RuntimePaths],
-    monkeypatch: pytest.MonkeyPatch,
     cached: bool,
 ) -> None:
-    """Search-worker saturation does not make fresh published metadata unavailable."""
-    # Exercise saturation independently of the production reader capacity.
-    slots = BoundedSemaphore(1)
-    monkeypatch.setattr(read_process, "_read_slots", slots)
+    """A search holding its shared collection lease does not make fresh published metadata unavailable."""
     config, runtime_paths = published_lookup
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     if cached:
         assert (
             await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
         ).knowledge is not None
 
-    # A running search holds the only reader slot.
-    assert slots.acquire(blocking=False)
-    try:
+    with collection_lifetime_lock(published_index_storage_path(key), exclusive=False):
         available = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
-        assert available.knowledge is not None
-        assert available.availability is KnowledgeAvailability.READY
-    finally:
-        slots.release()
-
-    recovered = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
-    assert recovered.knowledge is not None
-    assert recovered.availability is KnowledgeAvailability.READY
+    assert available.knowledge is not None
+    assert available.availability is KnowledgeAvailability.READY
 
 
 @pytest.mark.asyncio
-async def test_cached_published_lookup_reports_probe_timeout(
+async def test_cached_published_lookup_reports_probe_failure(
     published_lookup: tuple[Config, RuntimePaths],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cached probe timeout must not escape knowledge availability resolution."""
+    """A cached probe failure must not escape knowledge availability resolution."""
     config, runtime_paths = published_lookup
     assert (
         await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
     ).knowledge is not None
 
-    def timeout(*args: object, **kwargs: object) -> Never:  # noqa: ARG001
-        message = "Knowledge read timed out"
-        raise TimeoutError(message)
+    def fail_probe(self: KnowledgeCollection) -> Never:  # noqa: ARG001
+        message = "Knowledge probe failed"
+        raise OSError(message)
 
     with monkeypatch.context() as patch:
-        patch.setattr("mindroom.knowledge.read_proxy.collection_exists", timeout)
+        patch.setattr(KnowledgeCollection, "exists", fail_probe)
         unavailable = await resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None)
         assert unavailable.knowledge is None
         assert unavailable.availability is KnowledgeAvailability.REFRESH_FAILED
@@ -470,33 +378,35 @@ async def test_real_refreshes_resume_the_retired_collection_and_serve_exactly_th
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Against real Chroma, the collection a publication retired is resumed and written only where files changed."""
+    """Against the real store, the collection a publication retired is resumed and written only where files changed."""
     monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_a, **_k: _LengthEmbedder())
-    copied: list[int] = []
-    original_add = Collection.add
+    copied: list[str] = []
+    original_copy = KnowledgeCollection.copy_rows
 
-    def _counting_add(self: Collection, *args: object, **kwargs: object) -> None:
-        copied.append(len(cast("list[str]", kwargs["ids"])))
-        original_add(self, *args, **kwargs)  # type: ignore[arg-type]
+    def _counting_copy(
+        self: KnowledgeCollection,
+        source: KnowledgeCollection,
+        *,
+        select: Callable[[Mapping[str, Any]], bool],
+        page_rows: int = 500,
+    ) -> None:
+        copied.append(source.name)
+        original_copy(self, source, select=select, page_rows=page_rows)
 
-    monkeypatch.setattr(Collection, "add", _counting_add)
+    monkeypatch.setattr(KnowledgeCollection, "copy_rows", _counting_copy)
     docs = tmp_path / "docs"
     docs.mkdir()
     for index in range(6):
         (docs / f"doc{index}.md").write_text(f"body {index}", encoding="utf-8")
 
     async def _refresh() -> str:
-        with _candidate_manager(tmp_path) as manager:
-            assert (await manager.reindex_all()).published
-            published = manager._published_collection
-            assert published is not None
-            rows = published.collection().get(include=["documents", "metadatas"])
-            served = sorted(
-                (str(metadata["source_path"]), document)
-                for metadata, document in zip(rows["metadatas"] or [], rows["documents"] or [], strict=True)
-            )
-            assert served == sorted((path.name, path.read_text(encoding="utf-8")) for path in docs.iterdir())
-            return published.name
+        manager = _candidate_manager(tmp_path)
+        assert (await manager.reindex_all()).published
+        published = manager._published_collection
+        assert published is not None
+        served = sorted((row["metadata"]["source_path"], row["content"]) for row in stored_rows(published))
+        assert served == sorted((path.name, path.read_text(encoding="utf-8")) for path in docs.iterdir())
+        return published.name
 
     cold = await _refresh()
     (docs / "doc0.md").write_text("first change", encoding="utf-8")

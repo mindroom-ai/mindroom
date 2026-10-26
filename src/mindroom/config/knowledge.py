@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.credentials.manager import validate_service_name
 from mindroom.path_globs import validate_safe_relative_pattern
 
 KnowledgeBaseMode = Literal["semantic", "files"]
@@ -14,6 +15,39 @@ KnowledgeBaseMode = Literal["semantic", "files"]
 
 def _validate_relative_patterns(value: list[str], *, field_name: str) -> list[str]:
     return [validate_safe_relative_pattern(pattern, field_name=field_name) for pattern in value]
+
+
+class KnowledgeRerankerConfig(BaseModel):
+    """Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["cohere", "sentence_transformers"] = Field(
+        description=(
+            "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); "
+            "'sentence_transformers' runs a cross-encoder locally"
+        ),
+    )
+    model: str = Field(description="Rerank model, such as 'rerank-v3.5' or 'BAAI/bge-reranker-v2-m3'")
+    url: str | None = Field(
+        default=None,
+        description="Rerank endpoint for the 'cohere' provider; defaults to https://api.cohere.com/v2/rerank",
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="API key for the 'cohere' provider; above credentials_service",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
+    credentials_service: str | None = Field(
+        default=None,
+        description="Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
+    )
+
+    @field_validator("credentials_service")
+    @classmethod
+    def _validate_credentials_service(cls, value: str | None) -> str | None:
+        """Normalize an optional named credential reference."""
+        return None if value is None else validate_service_name(value)
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -105,6 +139,13 @@ class KnowledgeBaseConfig(BaseModel):
         default=0,
         ge=0,
         description="Number of overlapping characters between adjacent chunks",
+    )
+    chunk_context_model: str | None = Field(
+        default=None,
+        description=(
+            "Model that writes a short context for each chunk of a multi-chunk file before it is indexed "
+            "(contextual retrieval); costs one model call per chunk of each changed file"
+        ),
     )
     include_extensions: list[str] | None = Field(
         default=None,

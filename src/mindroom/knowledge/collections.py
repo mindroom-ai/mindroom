@@ -1,4 +1,4 @@
-"""Chroma collection lifecycle for one knowledge base.
+"""Collection lifecycle for one knowledge base.
 
 Naming, opening, probing, deleting and reclaiming the collections a knowledge
 base owns. None of that depends on the refresh advancing the base: a base's
@@ -12,19 +12,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import shutil
-import sqlite3
 import uuid
-from contextlib import closing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
 
-from chromadb.errors import InternalError, NotFoundError
-
-from mindroom.knowledge.chroma_client import KnowledgeCollection
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
+from mindroom.knowledge.legacy_chroma_storage import remove_legacy_chroma_storage
 from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
+from mindroom.knowledge.vector_store import (
+    KnowledgeCollection,
+    StoredRow,
+    list_collection_names,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -32,27 +32,16 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
-    from chromadb.api.client import Client
-    from chromadb.api.models.Collection import Collection
-    from chromadb.api.types import Metadata
-
     from mindroom.knowledge.candidate_checkpoint import FileSignature
 
 logger = get_logger(__name__)
 
+
 _COLLECTION_PREFIX = "mindroom_knowledge"
 
-#: Completed candidate entries whose vectors are confirmed in one Chroma query.
-#: Only a starting point: the query splits itself when the store refuses it,
-#: because the real limit is matched rows, which this cannot know up front.
-VECTOR_VERIFY_BATCH = 128
-#: Source paths whose vectors are dropped in one Chroma delete. Independent of
-#: the verify batch: a delete binds no variable per matched row, so this bounds
-#: only how much work one call does.
-_VECTOR_DELETE_BATCH = 128
-#: The distance every knowledge collection is created with; collections written before MindRoom owned this store
-#: carry the same setting, so they stay readable as they are.
-_COLLECTION_METADATA: Final = {"hnsw:space": "cosine"}
+#: Completed candidate entries whose vectors are confirmed per thread hop, so verifying a huge candidate still yields
+#: to the event loop and to cancellation.
+VECTOR_VERIFY_BATCH = 500
 
 
 @dataclass(frozen=True)
@@ -100,130 +89,12 @@ def candidate_collection_name(space: CollectionSpace) -> str:
 
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
     """Return a handle on one collection in this base's storage directory; nothing is opened yet."""
-    return KnowledgeCollection(path=str(space.storage_path), name=collection_name)
-
-
-def row_count(collection: KnowledgeCollection) -> int:
-    """Return how many rows one existing collection holds."""
-    return collection.collection().count()
+    return KnowledgeCollection(path=space.storage_path, name=collection_name)
 
 
 def readers_drained(space: CollectionSpace) -> AbstractContextManager[None]:
-    """Wait out every native reader of this base's collections, and admit none until released."""
+    """Wait out every reader of this base's collections, and admit none until released."""
     return collection_lifetime_lock(space.storage_path, exclusive=True)
-
-
-def _delete_if_present(client: Client, collection_name: str) -> None:
-    """Delete one collection, treating an already-absent one as deleted and raising any other failure."""
-    try:
-        client.delete_collection(name=collection_name)
-    except NotFoundError:
-        return
-
-
-def reset_collection(collection: KnowledgeCollection) -> None:
-    """Empty one collection by dropping and recreating it; a failed drop raises instead of keeping old rows."""
-    _delete_if_present(collection.client, collection.name)
-    collection.client.create_collection(name=collection.name, metadata=_COLLECTION_METADATA)
-
-
-def _collection_has_source_path(collection: Collection, relative_path: str) -> bool:
-    """Return whether one source path has any vector, at one row of cost.
-
-    Chroma binds one SQL variable per *returned* row, so an unbounded probe on
-    a heavily chunked file exceeds SQLite's ceiling and fails outright. One row
-    is all existence needs, and ``limit=1`` is what keeps this answerable at
-    any file size. Do not widen it.
-    """
-    result = collection.get(where={SOURCE_PATH_KEY: relative_path}, limit=1, include=[])
-    return bool(result.get("ids"))
-
-
-def _collection_paths_with_vectors(collection: Collection, relative_paths: Sequence[str]) -> set[str]:
-    """Return which of `relative_paths` have at least one vector in the collection.
-
-    Chroma binds one SQL variable per *matched row*, not one per queried path,
-    so a fixed batch of paths does not bound the query at all: whether it fits
-    under SQLite's ceiling depends on how many chunks those particular files
-    produced. That makes any batch size chosen up front a gamble. Small files
-    leave a batch of 128 far below the ceiling, a handful of large ones puts
-    the same batch over it, and once over, every verification query for that
-    base fails identically and the candidate is stranded for good.
-
-    So the batch is not guessed, it is *adapted*: ask for the whole thing, and
-    on refusal halve it and ask again. Each split halves the matched rows too,
-    so it converges, and a store that can answer the batch pays nothing.
-
-    A single path is the floor, where splitting can no longer help, so it is
-    asked for a single row instead, which stays under any ceiling however many
-    chunks the file has. That floor is what makes the recursion total, and it
-    is also where a failure that was never about query size finally surfaces.
-
-    No paths is answerable without asking: Chroma rejects an empty ``$in``
-    operand outright, so the empty case has to be a base case rather than a
-    query. Splitting never reaches it -- every half of a batch of two or more
-    is non-empty -- but a caller can.
-    """
-    if not relative_paths:
-        return set()
-
-    if len(relative_paths) == 1:
-        relative_path = relative_paths[0]
-        return {relative_path} if _collection_has_source_path(collection, relative_path) else set()
-
-    try:
-        result = collection.get(where={SOURCE_PATH_KEY: {"$in": list(relative_paths)}}, include=["metadatas"])
-    except NotFoundError:
-        # Splitting answers "the store refused this query for its size". A
-        # collection that is gone is not that, and stays gone however small the
-        # query gets, so descending would only cost log2(batch) + 1 doomed
-        # queries before raising exactly the same error from the first leaf.
-        raise
-    except InternalError as error:
-        if "too many SQL variables" not in str(error):
-            raise
-        # Splitting stays correct but multiplies the queries, and how far it
-        # degrades depends on chunk counts nothing here can see. Without a
-        # trace, a base whose files outgrew the ceiling just gets quietly
-        # slower -- the same invisibility that let the unsplit query strand
-        # candidates undiagnosed.
-        logger.debug("Split a refused knowledge vector verification query", paths=len(relative_paths))
-        midpoint = len(relative_paths) // 2
-        return _collection_paths_with_vectors(collection, relative_paths[:midpoint]) | _collection_paths_with_vectors(
-            collection,
-            relative_paths[midpoint:],
-        )
-
-    found: set[str] = set()
-    for metadata in result.get("metadatas") or []:
-        source_path = metadata.get(SOURCE_PATH_KEY)
-        if isinstance(source_path, str):
-            found.add(source_path)
-    return found
-
-
-def paths_with_vectors(collection: KnowledgeCollection, relative_paths: Sequence[str]) -> set[str]:
-    """Return which of the given source paths actually have vectors in one collection."""
-    if not relative_paths:
-        # Answered before resolving a handle: asking about no paths has one
-        # obvious answer, and resolving would raise if the collection is gone.
-        return set()
-    return _collection_paths_with_vectors(collection.collection(), relative_paths)
-
-
-def delete_source_path_vectors(collection: KnowledgeCollection, relative_paths: Sequence[str]) -> None:
-    """Delete vectors for many source paths in one vector-store round trip.
-
-    Unlike the ``$in`` the verification query issues, this one needs no
-    ceiling protection: a delete does not bind one SQL variable per matched
-    row, so the batch size alone bounds it. Measured on ChromaDB 1.5.8,
-    deleting 51,200 rows across 128 paths in one call succeeds, where the
-    equivalent read fails with ``too many SQL variables``.
-    """
-    chroma_collection = collection.collection()
-    for start in range(0, len(relative_paths), _VECTOR_DELETE_BATCH):
-        batch = list(relative_paths[start : start + _VECTOR_DELETE_BATCH])
-        chroma_collection.delete(where={SOURCE_PATH_KEY: {"$in": batch}})
 
 
 def _source_content_hash(source_metadata: Mapping[str, Any]) -> str:
@@ -241,12 +112,12 @@ def _row_metadata(
     *,
     source_metadata: Mapping[str, Any],
     content_hash: str,
-) -> Metadata:
+) -> dict[str, Any]:
     """Return one chunk's stored metadata, with the keys and values rows have always carried.
 
     New rows keep the set existing collections hold, the reader's own keys, the source signature, and ``linked_to``,
     ``content_hash``, and ``content_id``, so a collection reads the same whichever release wrote its rows. Search hits
-    leave out the keys that serve indexing (``knowledge.read_worker``).
+    leave out the keys that serve indexing (``knowledge.vector_store``).
     """
     metadata: dict[str, Any] = {key: value for key, value in chunk.metadata.items() if value is not None}
     metadata.update(source_metadata)
@@ -268,8 +139,8 @@ def write_source_rows(
     """Replace one source file's rows with its chunks, each paired with its vector.
 
     The caller embeds every chunk before it writes, so a failed embedding
-    never empties a file. Rows are written in pages of Chroma's largest
-    batch, and row ids are fixed by the file version and the chunk's position.
+    never empties a file. Row ids are fixed by the file version and the
+    chunk's position.
     """
     mtime_ns, size, digest = signature
     source_metadata = {
@@ -279,22 +150,18 @@ def write_source_rows(
         SOURCE_DIGEST_KEY: digest,
     }
     content_hash = _source_content_hash(source_metadata)
-    chroma_collection = collection.collection()
-    chroma_collection.delete(where={SOURCE_PATH_KEY: relative_path})
-    page_size = collection.client.get_max_batch_size()
-    for start in range(0, len(rows), page_size):
-        page = rows[start : start + page_size]
-        chroma_collection.upsert(
-            ids=[
-                hashlib.md5(f"{content_hash}_{index}".encode()).hexdigest()  # noqa: S324
-                for index in range(start, start + len(page))
-            ],
-            embeddings=[list(vector) for _, vector in page],
-            documents=[chunk.text.replace("\x00", "\ufffd") for chunk, _ in page],
-            metadatas=[
-                _row_metadata(chunk, source_metadata=source_metadata, content_hash=content_hash) for chunk, _ in page
-            ],
-        )
+    collection.write_source_rows(
+        relative_path,
+        [
+            StoredRow(
+                id=hashlib.md5(f"{content_hash}_{index}".encode()).hexdigest(),  # noqa: S324
+                document=chunk.text.replace("\x00", "\ufffd"),
+                metadata=_row_metadata(chunk, source_metadata=source_metadata, content_hash=content_hash),
+                embedding=vector,
+            )
+            for index, (chunk, vector) in enumerate(rows)
+        ],
+    )
 
 
 async def delete_collection(space: CollectionSpace, collection_name: str) -> bool:
@@ -313,62 +180,14 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 
 
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> None:
-    """Delete one collection, treating an already-absent one as deleted, then reclaim its storage."""
-    collection = open_collection(space, collection_name)
-    with collection_lifetime_lock(space.storage_path, exclusive=True), closing(collection):
-        _delete_if_present(collection.client, collection_name)
-        _reclaim_orphaned_segment_directories(space)
-
-
-def _reclaim_orphaned_segment_directories(space: CollectionSpace) -> None:
-    """Remove UUID-named Chroma directories that no live segment references."""
-    database_path = space.storage_path / "chroma.sqlite3"
-    if not database_path.is_file():
-        return
-    try:
-        database_uri = f"{database_path.resolve().as_uri()}?mode=ro"
-        with sqlite3.connect(database_uri, uri=True) as connection:
-            live_segment_ids = {row[0] for row in connection.execute("SELECT id FROM segments")}
-        entries = tuple(space.storage_path.iterdir())
-    except (OSError, sqlite3.Error):
-        logger.warning(
-            "Failed to inspect knowledge segment storage for cleanup",
-            base_id=space.base_id,
-            exc_info=True,
-        )
-        return
-
-    reclaimed = 0
-    for path in entries:
-        try:
-            is_segment_directory = not path.is_symlink() and path.is_dir() and str(uuid.UUID(path.name)) == path.name
-        except (OSError, ValueError):
-            continue
-        if not is_segment_directory or path.name in live_segment_ids:
-            continue
-        try:
-            shutil.rmtree(path)
-        except OSError:
-            logger.warning(
-                "Failed to reclaim orphaned knowledge segment directory",
-                base_id=space.base_id,
-                segment_id=path.name,
-                exc_info=True,
-            )
-        else:
-            reclaimed += 1
-    if reclaimed:
-        logger.info(
-            "Reclaimed orphaned knowledge segment directories",
-            base_id=space.base_id,
-            segments=reclaimed,
-        )
+    """Delete one collection, treating an already-absent one as deleted."""
+    with collection_lifetime_lock(space.storage_path, exclusive=True):
+        open_collection(space, collection_name).delete()
 
 
 def cleanup_superseded_collections(
     space: CollectionSpace,
     *,
-    client: Client,
     preserved: frozenset[str],
     candidates_only: bool = False,
 ) -> None:
@@ -384,7 +203,7 @@ def cleanup_superseded_collections(
     candidate_prefix = f"{default_collection}_candidate_"
 
     try:
-        collection_names = _listed_collection_names(client)
+        collection_names = list_collection_names(space.storage_path)
     except Exception:
         logger.warning(
             "Failed to list superseded knowledge collections for cleanup",
@@ -406,7 +225,7 @@ def cleanup_superseded_collections(
                     unowned.append(collection_name)
                 continue
             try:
-                _delete_if_present(client, collection_name)
+                open_collection(space, collection_name).delete()
             except Exception:
                 logger.warning(
                     "Failed to clean superseded knowledge collection",
@@ -414,14 +233,15 @@ def cleanup_superseded_collections(
                     collection=collection_name,
                     exc_info=True,
                 )
-        _reclaim_orphaned_segment_directories(space)
+        for leftover in space.storage_path.glob(f"{default_collection}*.sqlite3.building"):
+            # A reset killed before its rename; no collection is ever read from these.
+            leftover.unlink(missing_ok=True)
+        if not candidates_only:
+            # Only the sweep after a publication: until then the Chroma files are what a downgrade would read.
+            remove_legacy_chroma_storage(space.storage_path, base_id=space.base_id)
         if unowned:
             logger.info(
                 "Preserved knowledge collections with unprovable ownership",
                 base_id=space.base_id,
                 collections=sorted(unowned),
             )
-
-
-def _listed_collection_names(client: Client) -> tuple[str, ...]:
-    return tuple(collection.name for collection in client.list_collections())

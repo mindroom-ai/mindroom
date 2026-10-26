@@ -4,6 +4,35 @@
       "agent": "librarian",
       "documents": [
         {
+          "content": "city, cap",
+          "meta_data": {
+            "distance": 0.604523241519928,
+            "row_number": 1,
+            "source_path": "table.csv"
+          },
+          "name": "table.csv"
+        },
+        {
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
+          "meta_data": {
+            "chunk": 2,
+            "chunk_size": 128,
+            "distance": 1.1543808579444885,
+            "source_path": "guide.md"
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "g distance of the venue. The nightly cap is 180 EUR in most cities. ",
+          "meta_data": {
+            "chunk": 3,
+            "chunk_size": 68,
+            "distance": 1.362712413072586,
+            "source_path": "guide.md"
+          },
+          "name": "guide.md"
+        },
+        {
           "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
           "meta_data": {
             "chunk": 1,
@@ -12,15 +41,6 @@
             "source_path": "guide.md"
           },
           "name": "guide.md"
-        },
-        {
-          "content": "city, cap",
-          "meta_data": {
-            "distance": 0.6045231819152832,
-            "row_number": 1,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
         },
         {
           "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
@@ -47,7 +67,7 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 31,
-            "distance": 0.995894730091095,
+            "distance": 0.9958947077393532,
             "page": 1,
             "source_path": "records.json"
           },
@@ -58,7 +78,7 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 49,
-            "distance": 1.0876811742782593,
+            "distance": 1.0876812189817429,
             "page": 1,
             "source_path": "settings.json"
           },
@@ -69,35 +89,16 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "distance": 1.1320685148239136,
+            "distance": 1.1320684850215912,
             "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
         {
-          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
-          "meta_data": {
-            "chunk": 2,
-            "chunk_size": 128,
-            "distance": 1.1543807983398438,
-            "source_path": "guide.md"
-          },
-          "name": "guide.md"
-        },
-        {
           "content": "Paris, 200",
           "meta_data": {
-            "distance": 1.202522873878479,
+            "distance": 1.2025228589773178,
             "row_number": 3,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
-        },
-        {
-          "content": "Berlin, 180",
-          "meta_data": {
-            "distance": 1.2365418672561646,
-            "row_number": 2,
             "source_path": "table.csv"
           },
           "name": "table.csv"
@@ -109,24 +110,25 @@
       "agent": "librarian",
       "documents": [
         {
+          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 31,
+            "distance": 0.9332063496112823,
+            "page": 1,
+            "source_path": "records.json"
+          },
+          "name": "records.json"
+        },
+        {
           "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
           "meta_data": {
             "chunk": 2,
             "chunk_size": 128,
-            "distance": 0.5304011106491089,
+            "distance": 0.5304010808467865,
             "source_path": "guide.md"
           },
           "name": "guide.md"
-        },
-        {
-          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
-          "meta_data": {
-            "chunk": 1,
-            "chunk_size": 123,
-            "distance": 0.6581578254699707,
-            "source_path": "team/policies.txt"
-          },
-          "name": "policies.txt"
         },
         {
           "content": "before�after the null byte",
@@ -139,39 +141,48 @@
           "name": "control.txt"
         },
         {
-          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
           "meta_data": {
             "chunk": 1,
-            "chunk_size": 31,
-            "distance": 0.93320631980896,
-            "page": 1,
-            "source_path": "records.json"
+            "chunk_size": 123,
+            "distance": 0.6581577956676483,
+            "source_path": "team/policies.txt"
           },
-          "name": "records.json"
-        },
-        {
-          "content": "Paris, 200",
-          "meta_data": {
-            "distance": 0.9381505250930786,
-            "row_number": 3,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
+          "name": "policies.txt"
         },
         {
           "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
           "meta_data": {
             "chunk": 1,
             "chunk_size": 128,
-            "distance": 1.0069458484649658,
+            "distance": 1.006945788860321,
             "source_path": "guide.md"
           },
           "name": "guide.md"
         },
         {
+          "content": "g distance of the venue. The nightly cap is 180 EUR in most cities. ",
+          "meta_data": {
+            "chunk": 3,
+            "chunk_size": 68,
+            "distance": 1.3080187439918518,
+            "source_path": "guide.md"
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Paris, 200",
+          "meta_data": {
+            "distance": 0.9381504952907562,
+            "row_number": 3,
+            "source_path": "table.csv"
+          },
+          "name": "table.csv"
+        },
+        {
           "content": "city, cap",
           "meta_data": {
-            "distance": 1.0494847297668457,
+            "distance": 1.0494847148656845,
             "row_number": 1,
             "source_path": "table.csv"
           },
@@ -182,7 +193,7 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "distance": 1.0581741333007812,
+            "distance": 1.0581740736961365,
             "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
@@ -190,17 +201,8 @@
         {
           "content": "London, 220",
           "meta_data": {
-            "distance": 1.083837628364563,
+            "distance": 1.0838376134634018,
             "row_number": 5,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
-        },
-        {
-          "content": "Berlin, 180",
-          "meta_data": {
-            "distance": 1.1686739921569824,
-            "row_number": 2,
             "source_path": "table.csv"
           },
           "name": "table.csv"
@@ -212,14 +214,13 @@
       "agent": "researcher",
       "documents": [
         {
-          "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
+          "content": "city, cap",
           "meta_data": {
-            "chunk": 1,
-            "chunk_size": 128,
-            "distance": 0.5828447341918945,
-            "source_path": "guide.md"
+            "distance": 0.604523241519928,
+            "row_number": 1,
+            "source_path": "table.csv"
           },
-          "name": "guide.md"
+          "name": "table.csv"
         },
         {
           "content": "Remember to book the conference hotel early, because the venue fills up fast. ",
@@ -232,13 +233,34 @@
           "name": "notes.md"
         },
         {
-          "content": "city, cap",
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
           "meta_data": {
-            "distance": 0.6045231819152832,
-            "row_number": 1,
-            "source_path": "table.csv"
+            "chunk": 2,
+            "chunk_size": 128,
+            "distance": 1.1543808579444885,
+            "source_path": "guide.md"
           },
-          "name": "table.csv"
+          "name": "guide.md"
+        },
+        {
+          "content": "g distance of the venue. The nightly cap is 180 EUR in most cities. ",
+          "meta_data": {
+            "chunk": 3,
+            "chunk_size": 68,
+            "distance": 1.362712413072586,
+            "source_path": "guide.md"
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
+          "meta_data": {
+            "chunk": 1,
+            "chunk_size": 128,
+            "distance": 0.5828447341918945,
+            "source_path": "guide.md"
+          },
+          "name": "guide.md"
         },
         {
           "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
@@ -265,7 +287,7 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 31,
-            "distance": 0.995894730091095,
+            "distance": 0.9958947077393532,
             "page": 1,
             "source_path": "records.json"
           },
@@ -276,7 +298,7 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 49,
-            "distance": 1.0876811742782593,
+            "distance": 1.0876812189817429,
             "page": 1,
             "source_path": "settings.json"
           },
@@ -287,29 +309,10 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "distance": 1.1320685148239136,
+            "distance": 1.1320684850215912,
             "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
-        },
-        {
-          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
-          "meta_data": {
-            "chunk": 2,
-            "chunk_size": 128,
-            "distance": 1.1543807983398438,
-            "source_path": "guide.md"
-          },
-          "name": "guide.md"
-        },
-        {
-          "content": "Paris, 200",
-          "meta_data": {
-            "distance": 1.202522873878479,
-            "row_number": 3,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
         }
       ],
       "query": "hotel nightly cap"
@@ -318,14 +321,15 @@
       "agent": "researcher",
       "documents": [
         {
-          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
+          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
           "meta_data": {
-            "chunk": 2,
-            "chunk_size": 128,
-            "distance": 0.5304011106491089,
-            "source_path": "guide.md"
+            "chunk": 1,
+            "chunk_size": 31,
+            "distance": 0.9332063496112823,
+            "page": 1,
+            "source_path": "records.json"
           },
-          "name": "guide.md"
+          "name": "records.json"
         },
         {
           "content": "Remember to book the conference hotel early, because the venue fills up fast. ",
@@ -338,14 +342,14 @@
           "name": "notes.md"
         },
         {
-          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
+          "content": " class for flights under six hours, and keep every receipt you get. ## Hotels Pick a hotel within walking distance of the venue.",
           "meta_data": {
-            "chunk": 1,
-            "chunk_size": 123,
-            "distance": 0.6581578254699707,
-            "source_path": "team/policies.txt"
+            "chunk": 2,
+            "chunk_size": 128,
+            "distance": 0.5304010808467865,
+            "source_path": "guide.md"
           },
-          "name": "policies.txt"
+          "name": "guide.md"
         },
         {
           "content": "before�after the null byte",
@@ -358,39 +362,48 @@
           "name": "control.txt"
         },
         {
-          "content": "{\"name\": \"Ada\", \"role\": \"lead\"}",
+          "content": "Plain notes with tabs and double spaces. Expense reports are due within thirty days of the expense, and late reports need a",
           "meta_data": {
             "chunk": 1,
-            "chunk_size": 31,
-            "distance": 0.93320631980896,
-            "page": 1,
-            "source_path": "records.json"
+            "chunk_size": 123,
+            "distance": 0.6581577956676483,
+            "source_path": "team/policies.txt"
           },
-          "name": "records.json"
-        },
-        {
-          "content": "Paris, 200",
-          "meta_data": {
-            "distance": 0.9381505250930786,
-            "row_number": 3,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
+          "name": "policies.txt"
         },
         {
           "content": "# Travel guide Conference travel needs approval from your lead two weeks ahead of the trip. Book economy class for flights under",
           "meta_data": {
             "chunk": 1,
             "chunk_size": 128,
-            "distance": 1.0069458484649658,
+            "distance": 1.006945788860321,
             "source_path": "guide.md"
           },
           "name": "guide.md"
         },
         {
+          "content": "g distance of the venue. The nightly cap is 180 EUR in most cities. ",
+          "meta_data": {
+            "chunk": 3,
+            "chunk_size": 68,
+            "distance": 1.3080187439918518,
+            "source_path": "guide.md"
+          },
+          "name": "guide.md"
+        },
+        {
+          "content": "Paris, 200",
+          "meta_data": {
+            "distance": 0.9381504952907562,
+            "row_number": 3,
+            "source_path": "table.csv"
+          },
+          "name": "table.csv"
+        },
+        {
           "content": "city, cap",
           "meta_data": {
-            "distance": 1.0494847297668457,
+            "distance": 1.0494847148656845,
             "row_number": 1,
             "source_path": "table.csv"
           },
@@ -401,19 +414,10 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "distance": 1.0581741333007812,
+            "distance": 1.0581740736961365,
             "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
-        },
-        {
-          "content": "London, 220",
-          "meta_data": {
-            "distance": 1.083837628364563,
-            "row_number": 5,
-            "source_path": "table.csv"
-          },
-          "name": "table.csv"
         }
       ],
       "query": "who leads the team"

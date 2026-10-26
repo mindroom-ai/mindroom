@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from itertools import accumulate
 from typing import TYPE_CHECKING
 
 from mindroom.embeddings.errors import extract_classified_embedder_detail
@@ -91,8 +92,12 @@ def _memory_results_from_hits(
     *,
     scope_user_id: str,
 ) -> list[MemoryResult]:
+    # Hits arrive in hybrid rank order, which word matches can lift above closer vectors. Each score is the best cosine
+    # similarity at or below its rank, so scores stay on the cosine scale merged keyword matches rank against, and
+    # sorting by them keeps the hybrid order.
+    scores = list(accumulate((1.0 - hit.meta_data[DISTANCE_KEY] for hit in reversed(hits)), max))[::-1]
     results: list[MemoryResult] = []
-    for rank, hit in enumerate(hits, start=1):
+    for rank, (hit, score) in enumerate(zip(hits, scores, strict=True), start=1):
         source_file = hit.meta_data.get(SOURCE_PATH_KEY)
         if not isinstance(source_file, str):
             source_file = "memory"
@@ -104,8 +109,7 @@ def _memory_results_from_hits(
                 id=f"semantic:{source_file}:{rank}",
                 memory=content,
                 user_id=scope_user_id,
-                # The cosine similarity, which merged keyword matches' word-overlap scores rank against.
-                score=1.0 - hit.meta_data[DISTANCE_KEY],
+                score=score,
                 metadata={"source_file": source_file, "semantic": True, "search_mode": "semantic"},
             ),
         )

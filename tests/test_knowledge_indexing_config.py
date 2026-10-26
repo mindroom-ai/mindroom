@@ -1,4 +1,4 @@
-"""Tests for knowledge indexing-config identity and probe resource ownership.
+"""Tests for knowledge indexing-config identity.
 
 Storage keys and indexing-settings metadata are persisted cache/identity keys
 for vector collections, so their stability is the invariant pinned here.
@@ -9,69 +9,12 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from typing import TYPE_CHECKING
 
-import pytest
-from chromadb.api import ClientAPI
-from chromadb.api.client import Client
-from chromadb.config import Settings
+from mindroom.knowledge.indexing_config import _VECTOR_STORE_FORMAT, IndexingSettings, storage_key_for_base
 
-from mindroom.knowledge.chroma_client import KnowledgeCollection
-from mindroom.knowledge.indexing_config import IndexingSettings, chroma_collection_exists, storage_key_for_base
-
-
-def test_chroma_client_rejects_client_without_concrete_lifecycle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unsupported provider client must fail at the typed ownership boundary."""
-    client = Mock(spec_set=ClientAPI)
-    monkeypatch.setattr("mindroom.knowledge.chroma_client.chromadb.PersistentClient", lambda **_kwargs: client)
-    collection = KnowledgeCollection(path=str(tmp_path), name="collection")
-
-    with pytest.raises(TypeError, match="Expected a concrete Chroma client"):
-        _ = collection.client
-
-
-def _assert_probe_storage_released(storage_path: Path) -> None:
-    # A fresh client may change settings only once every previous client has
-    # closed. This detects leaked Chroma systems through its public API.
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path), allow_reset=True)) as client:
-        assert client.count_collections() == 1
-
-
-@pytest.mark.parametrize(("collection_name", "expected"), [("present", True), ("missing", False)])
-def test_collection_probe_releases_storage(tmp_path: Path, collection_name: str, expected: bool) -> None:
-    """Repeated found/missing probes must leave no unowned persistent client behind."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as client:
-        client.create_collection("present")
-
-    for _ in range(3):
-        assert chroma_collection_exists(tmp_path, collection_name) is expected
-
-    _assert_probe_storage_released(tmp_path)
-
-
-def test_collection_probe_keeps_retained_reader_queryable(tmp_path: Path) -> None:
-    """Closing a probe must preserve another client's shared system and leave no extra owner."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as reader:
-        collection = reader.create_collection("present")
-        collection.add(ids=["document"], embeddings=[[1.0, 0.0]])
-
-        assert chroma_collection_exists(tmp_path, "present") is True
-        assert chroma_collection_exists(tmp_path, "missing") is False
-        assert collection.query(query_embeddings=[[1.0, 0.0]], n_results=1)["ids"] == [["document"]]
-
-    _assert_probe_storage_released(tmp_path)
-
-
-def test_collection_probe_is_independent_of_parent_client_settings(tmp_path: Path) -> None:
-    """A child probe must not share the parent's native client settings."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path), allow_reset=True)) as reader:
-        reader.create_collection("present")
-        # The child has its own native system despite different settings.
-        assert chroma_collection_exists(tmp_path, "present") is True
-        assert reader.count_collections() == 1
+if TYPE_CHECKING:
+    import pytest
 
 
 def _settings(base_id: str = "docs") -> IndexingSettings:
@@ -152,9 +95,11 @@ def test_storage_key_for_base_sanitizes_unsafe_identifiers(tmp_path: Path) -> No
     assert key != storage_key_for_base("my docs.v1", knowledge_path)
 
 
-def test_storage_key_for_base_resolves_each_path_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Repeated lookups must not re-enter the filesystem, which can be a slow network mount."""
-    storage_key_for_base.cache_clear()
+def test_storage_key_for_base_hashes_the_canonical_path_as_given(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key never re-enters the filesystem: no slow-mount syscall per turn, and no link swapped onto the path since."""
     knowledge_path = tmp_path / "docs"
     resolved: list[Path] = []
     original_resolve = Path.resolve
@@ -164,11 +109,12 @@ def test_storage_key_for_base_resolves_each_path_once(tmp_path: Path, monkeypatc
         return original_resolve(self, strict=strict)
 
     monkeypatch.setattr(Path, "resolve", counting_resolve)
-    first = storage_key_for_base("docs", knowledge_path)
-    second = storage_key_for_base("docs", knowledge_path)
+    key = storage_key_for_base("docs", knowledge_path)
+    (tmp_path / "elsewhere").mkdir()
+    knowledge_path.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
 
-    assert first == second
-    assert resolved == [knowledge_path]
+    assert storage_key_for_base("docs", knowledge_path) == key
+    assert resolved == []
 
 
 def test_indexing_settings_metadata_round_trip() -> None:
@@ -232,6 +178,20 @@ def test_skip_hidden_changes_corpus_key_but_not_query_key() -> None:
     current = replace(legacy, skip_hidden="True")
     assert legacy._corpus_compatibility_key() != current._corpus_compatibility_key()
     assert legacy._query_compatibility_key() == current._query_compatibility_key()
+
+
+def test_chroma_era_metadata_rebuilds_in_the_owned_store() -> None:
+    """Metadata written while Chroma held the vectors parses, but no longer matches the owned store's query key."""
+    chroma_era = IndexingSettings.from_metadata(_legacy_metadata())
+    assert chroma_era is not None
+    assert (chroma_era.vector_store, chroma_era.chunk_context_model) == ("", "")
+    owned = replace(chroma_era, vector_store=_VECTOR_STORE_FORMAT)
+    contextual = replace(owned, chunk_context_model="fast")
+
+    assert IndexingSettings.from_metadata(contextual.to_metadata()) == contextual
+    assert chroma_era._query_compatibility_key() != owned._query_compatibility_key()
+    assert owned._query_compatibility_key() == contextual._query_compatibility_key()
+    assert owned != contextual
 
 
 def test_content_publication_gate_round_trips_and_changes_corpus_key() -> None:

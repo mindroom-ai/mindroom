@@ -100,10 +100,7 @@ class CandidateCheckpoint:
     failed: Mapping[str, CandidateFailure] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
-    #: Only seals rely on these two. Rows written into the collection since it
-    #: was created, each an entry Chroma's local vector index keeps even once
-    #: deleted, and the rows it held when it was sealed.
-    rows_written: int = 0
+    #: Only seals rely on this: the rows the collection held when it was sealed.
     row_count: int = 0
     #: Journal entries replayed when this checkpoint was loaded. Not persisted:
     #: it exists so a resumed run inherits the compaction bound instead of
@@ -170,7 +167,6 @@ def _snapshot_payload(checkpoint: CandidateCheckpoint) -> dict[str, object]:
         },
         "created_at": checkpoint.created_at,
         "updated_at": checkpoint.updated_at,
-        "rows_written": checkpoint.rows_written,
         "row_count": checkpoint.row_count,
     }
 
@@ -225,7 +221,6 @@ def _parse_snapshot(payload: Mapping[str, object]) -> CandidateCheckpoint | None
     total_files = payload.get("total_files")
     created_at = payload.get("created_at")
     updated_at = payload.get("updated_at")
-    rows_written = payload.get("rows_written")
     row_count = payload.get("row_count")
     return CandidateCheckpoint(
         collection=collection,
@@ -237,7 +232,6 @@ def _parse_snapshot(payload: Mapping[str, object]) -> CandidateCheckpoint | None
         failed=failed,
         created_at=created_at if isinstance(created_at, str) else "",
         updated_at=updated_at if isinstance(updated_at, str) else "",
-        rows_written=rows_written if isinstance(rows_written, int) and not isinstance(rows_written, bool) else 0,
         row_count=row_count if isinstance(row_count, int) and not isinstance(row_count, bool) else 0,
     )
 

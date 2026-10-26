@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-import chromadb
 import pytest
 
 import mindroom.memory._semantic_file_search as semantic_file_search
@@ -18,11 +17,11 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge import read_worker
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
+from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -390,27 +389,31 @@ async def test_semantic_memory_scores_each_hit_by_its_similarity(
 
 
 @pytest.mark.asyncio
-async def test_semantic_memory_scores_the_hits_the_read_worker_returns(
+async def test_semantic_memory_scores_the_hits_the_owned_store_returns(
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hits from a real collection query score as one minus their cosine distance, nearest first."""
+    """Hits from a real collection search score as one minus their cosine distance, nearest first."""
     root = storage_path / "memory-root"
     memory_file = root / "memory" / "notes.md"
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("Close note.\nFar note.\n", encoding="utf-8")
-    collection = chromadb.EphemeralClient().create_collection(
-        f"memory-hits-{storage_path.name}",
-        metadata={"hnsw:space": "cosine"},
+    collection = KnowledgeCollection(path=storage_path, name="mindroom_knowledge_memory_hits")
+    collection.reset()
+    collection.write_source_rows(
+        "memory/notes.md",
+        [
+            StoredRow(
+                id=row_id,
+                document=document,
+                metadata={"source_path": "memory/notes.md", "name": "notes"},
+                embedding=embedding,
+            )
+            for row_id, document, embedding in (("far", "Far note.", [0.0, 1.0]), ("close", "Close note.", [1.0, 0.0]))
+        ],
     )
-    collection.add(
-        ids=["far", "close"],
-        documents=["Far note.", "Close note."],
-        embeddings=[[0.0, 1.0], [1.0, 0.0]],
-        metadatas=[{"source_path": "memory/notes.md", "name": "notes"}] * 2,
-    )
-    hits = read_worker._query_collection(collection, [1.0, 0.0], limit=2)
+    hits = collection.search([1.0, 0.0], limit=2)
 
     class RealHitsKnowledge:
         async def asearch(self, _query: str, _limit: int) -> list[SearchHit]:
@@ -2571,3 +2574,17 @@ async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_p
         await delete_agent_memory("file:memory/2026-06-13.md:1", "general", storage_path, config)
 
     assert daily_file.read_bytes() == original
+
+
+def test_semantic_memory_scores_keep_the_hybrid_rank_order() -> None:
+    """A keyword-lifted hit keeps its rank: each score is the best cosine similarity at or below it."""
+    hits = [
+        SearchHit(content="keyword match", meta_data={"source_path": "a.md", DISTANCE_KEY: 0.7}),
+        SearchHit(content="close vector", meta_data={"source_path": "b.md", DISTANCE_KEY: 0.2}),
+        SearchHit(content="far vector", meta_data={"source_path": "c.md", DISTANCE_KEY: 0.5}),
+    ]
+
+    results = semantic_file_search._memory_results_from_hits(hits, scope_user_id="agent")
+
+    assert [result["memory"] for result in results] == ["keyword match", "close vector", "far vector"]
+    assert [result["score"] for result in results] == pytest.approx([0.8, 0.8, 0.5])

@@ -18,13 +18,9 @@ import aiohttp
 import nio
 import pytest
 from agno.utils import log as agno_log
-from chromadb.api.client import Client
-from chromadb.config import Settings
 
 from mindroom import logging_config
 from mindroom.constants import RuntimePaths
-from mindroom.knowledge.read_process import read_chroma_async
-from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import (
     bound_log_context,
     configure_default_logging,
@@ -41,8 +37,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
     from typing import TextIO
-
-    from mindroom.knowledge.read_protocol import ReadResult
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -726,42 +720,6 @@ def test_knowledge_refresh_subprocess_logs_like_its_parent(
     assert record["event"] == "Knowledge refresh subprocess failed"
     assert record["level"] == "error"
     assert "missing config_data" in str(record["exception"])
-
-
-@pytest.mark.parametrize("level", ["INFO", "WARNING"])
-def test_knowledge_read_worker_logs_like_its_parent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
-    level: str,
-) -> None:
-    """The read worker renders its failures in the parent's format and logs nothing for a search at any level."""
-    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
-    setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
-    index = tmp_path / "index"
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(index))) as client:
-        client.create_collection("docs").add(ids=["a"], embeddings=[[1.0, 0.0]], documents=["alpha"])
-    capfd.readouterr()
-
-    async def read(collection: str) -> ReadResult:
-        async def request() -> ReadRequest:
-            return ReadRequest(str(index), collection, [1.0, 0.0])
-
-        return await read_chroma_async(request)
-
-    assert len(asyncio.run(read("docs")).hits) == 1
-    # Chroma names a missing collection in its error, so the name carries the URL credentials.
-    missing = "https://reader:synthetic-secret@example.test docs"
-    with pytest.raises(RuntimeError, match="NotFoundError"):
-        asyncio.run(read(missing))
-
-    stderr = capfd.readouterr().err
-    records = _stderr_records(stderr.encode())
-    assert [(record["event"], record["level"], record["logger"]) for record in records] == [
-        ("Knowledge read failed", "error", "mindroom.knowledge.read_worker"),
-    ]
-    assert "does not exist" in str(records[-1]["exception"])
-    assert "synthetic-secret" not in stderr
 
 
 def test_subprocess_logging_appends_to_the_parent_log_file(
