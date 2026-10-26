@@ -2031,6 +2031,17 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     assert sleeps == [2.0, 2.0, 1.0]
 
 
+@pytest.mark.asyncio
+async def test_synthetic_times_its_turn_from_its_first_text(tmp_path: Path) -> None:
+    """The synthetic model's time to first token runs from the request to its first text, within its duration."""
+    provider = build_synthetic_provider(_synthetic_config(chars_per_second=0), runtime_paths_for(tmp_path))
+
+    metrics = _completed([event async for event in provider.stream(_request())]).message.metrics
+
+    assert metrics.time_to_first_token is not None
+    assert 0 <= metrics.time_to_first_token <= metrics.duration
+
+
 @pytest.mark.parametrize(
     ("extra_kwargs", "message"),
     [

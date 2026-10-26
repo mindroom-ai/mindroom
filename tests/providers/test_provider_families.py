@@ -22,7 +22,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
 from mindroom.llm.media import Audio, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, complete
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline import retry as retry_stage
@@ -498,6 +498,30 @@ async def test_a_reply_without_output_records_no_time_to_first_token(family: str
 
     assert turn.content == ""
     assert turn.usage.time_to_first_token is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_ends_a_turn_with_its_final_usage_timed_from_its_first_output(
+    family: str,
+    tmp_path: Path,
+) -> None:
+    """A finished turn's last events are its final usage report and the turn, which carries that usage.
+
+    Its time to first token runs from the request to the reply's text, within the request's duration.
+    """
+    spec = FAMILIES[family]
+    provider = pipeline_provider(spec.adapter(tmp_path, Wire(spec.reply())))
+
+    events = [event async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")]))]
+
+    *_, usage, completed = events
+    assert isinstance(usage, UsageReported)
+    assert isinstance(completed, TurnCompleted)
+    metrics = completed.message.metrics
+    assert (completed.message.content, completed.stop_reason, usage.final, usage.usage) == ("ok", "end", True, metrics)
+    assert metrics.time_to_first_token is not None
+    assert 0 <= metrics.time_to_first_token <= metrics.duration
 
 
 # --- Stream activity and server tools ----------------------------------------------------------------------------

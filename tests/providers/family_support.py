@@ -155,7 +155,9 @@ def _responses_events(text: str, usage: dict[str, int]) -> list[dict[str, Any]]:
 
 
 def _claude_reply() -> httpx.Response:
-    return sse_response(claude_events([{"type": "text", "text": "ok"}]), named=True)
+    """A Claude stream whose text block opens empty and streams its text as a delta, as the API sends it."""
+    deltas = [{"type": "text_delta", "text": "ok"}]
+    return sse_response(claude_events([{"type": "text", "text": ""}], deltas=deltas), named=True)
 
 
 def _gemini_reply() -> httpx.Response:
