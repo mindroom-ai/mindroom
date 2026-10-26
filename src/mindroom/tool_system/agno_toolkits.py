@@ -183,8 +183,23 @@ def with_offered_instructions(toolkit: Toolkit, adapted: AdaptedToolkit) -> Adap
 
 
 def _prompt_and_guidance(toolkit: Toolkit, instructions: str | None) -> tuple[str | None, str | None]:
-    """Return what the prompt shows of ``instructions``, only when ``add_instructions`` asks, and the guidance."""
-    return (instructions if toolkit.add_instructions else None), instructions or None
+    """Return what the prompt shows of ``instructions``, and the guidance, which is all of them.
+
+    The prompt shows a toolkit's instructions whenever it offers a function, except that a vendor toolkit keeps its
+    own ``add_instructions`` opt-in (``_is_vendor_toolkit``).
+    """
+    shown = instructions if toolkit.add_instructions or not _is_vendor_toolkit(toolkit) else None
+    return shown or None, instructions or None
+
+
+def _is_vendor_toolkit(toolkit: Toolkit) -> bool:
+    """Return whether ``toolkit`` is one of Agno's own toolkits, or a subclass of one, rather than a bare ``Toolkit``.
+
+    Agno's toolkits ship instructions that their ``add_instructions`` setting opts into, such as ``reasoning``'s
+    "You must ALWAYS think before making tool calls", which MindRoom exposes as each toolkit's ``add_instructions``
+    setting; toolkits MindRoom and plugins author subclass ``Toolkit`` directly and mean their instructions to show.
+    """
+    return any(cls is not Toolkit and cls.__module__.startswith("agno.tools.") for cls in type(toolkit).__mro__)
 
 
 def offered_refusal(toolkit: AdaptedToolkit) -> str | None:

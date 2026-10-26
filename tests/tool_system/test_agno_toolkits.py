@@ -9,6 +9,7 @@ import pytest
 from agno.run import RunContext  # noqa: TC002 - pydantic resolves the annotations at wrap time.
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall
+from agno.tools.reasoning import ReasoningTools
 from agno.utils.schema import AGNO_INJECTED_PARAMS, FRAMEWORK_INJECTED_PARAMS
 
 from mindroom.llm.provider import ToolSpec
@@ -277,13 +278,16 @@ def test_async_variants_replace_sync_functions_in_place() -> None:
     assert adapted.functions[1].entrypoint.__wrapped__ is async_second
 
 
-def test_instructions_are_adapted_only_when_agno_adds_them() -> None:
-    """Toolkit instructions reach the prompt only with ``add_instructions``; the adapter reports the same."""
-    silent = Toolkit(name="silent", tools=[probes.probe_no_arguments], instructions="Not added.")
-    spoken = Toolkit(name="spoken", tools=[probes.probe_no_arguments], instructions="Added.", add_instructions=True)
+def test_a_toolkit_s_instructions_reach_the_prompt_unless_a_vendor_toolkit_opts_out() -> None:
+    """A toolkit authored on ``Toolkit`` shows its instructions without ``add_instructions``; Agno's own keep the opt-in."""
+    authored = Toolkit(name="authored", tools=[probes.probe_no_arguments], instructions="Shown.")
+    vendor = ReasoningTools(enable_think=True, enable_analyze=False)
+    opted_in = ReasoningTools(enable_think=True, enable_analyze=False, add_instructions=True)
 
-    assert adapt_toolkit(silent).instructions is None
-    assert adapt_toolkit(spoken).instructions == "Added."
+    assert adapt_toolkit(authored).instructions == "Shown."
+    assert adapt_toolkit(vendor).instructions is None
+    assert adapt_toolkit(vendor).guidance == vendor.instructions
+    assert adapt_toolkit(opted_in).instructions == opted_in.instructions
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:

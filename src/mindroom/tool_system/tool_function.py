@@ -112,9 +112,10 @@ class ToolFunction:
 
 @dataclass(frozen=True, slots=True)
 class AdaptedToolkit:
-    """One Agno toolkit as the agent loop sees it; ``instructions`` is set only when ``add_instructions`` asks for it.
+    """One Agno toolkit as the agent loop sees it; ``instructions`` is what the prompt shows of its instructions.
 
-    ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
+    The prompt shows them whenever the toolkit offers a function, except a vendor toolkit whose ``add_instructions``
+    is off. ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
     it describes the toolkit's functions and minimal mode offers as a context document.
     ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
     only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
