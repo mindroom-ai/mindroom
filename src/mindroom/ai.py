@@ -473,7 +473,7 @@ def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
     trace: list[ToolTraceEntry] = []
     for tool in record.tools:
         tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-        _, trace_entry = format_tool_combined(tool.tool_name, tool_args, tool.result)
+        _, trace_entry = format_tool_combined(tool.tool_name, tool_args, tool.result, is_error=tool.is_error is True)
         trace.append(trace_entry)
     return trace
 

@@ -100,7 +100,7 @@ def _quoted_tool_preview(preview: str) -> str:
 
 
 def _render_retained_tool_sentence(tool: ToolTraceEntry, *, interrupted: bool) -> str:
-    """Render one retained tool event without implying terminal success."""
+    """Render one retained tool event: still running, failed with its error, or finished with its output."""
     tool_name = tool.tool_name.replace("`", r"\`")
     if interrupted:
         sentence = f"The `{tool_name}` tool was still running"
@@ -108,12 +108,13 @@ def _render_retained_tool_sentence(tool: ToolTraceEntry, *, interrupted: bool) -
             sentence += f" with input preview {_quoted_tool_preview(tool.args_preview)}"
         sentence += "; no output was available before interruption."
     else:
-        sentence = f"The `{tool_name}` tool finished"
+        outcome, result_kind = ("failed", "error") if tool.is_error else ("finished", "output")
+        sentence = f"The `{tool_name}` tool {outcome}"
         previews: list[str] = []
         if tool.args_preview:
             previews.append(f"input preview {_quoted_tool_preview(tool.args_preview)}")
         if tool.result_preview:
-            previews.append(f"output preview {_quoted_tool_preview(tool.result_preview)}")
+            previews.append(f"{result_kind} preview {_quoted_tool_preview(tool.result_preview)}")
         if previews:
             sentence += " with " + " and ".join(previews)
         sentence += "."

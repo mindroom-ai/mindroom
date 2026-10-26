@@ -99,8 +99,8 @@ def test_split_interrupted_tool_trace_keeps_missing_terminal_state_as_interrupte
     assert [entry.tool_name for entry in interrupted] == ["noop"]
 
 
-def test_interrupted_replay_describes_terminal_tool_errors_without_implying_success() -> None:
-    """Terminal errors should use outcome-neutral replay wording."""
+def test_interrupted_replay_says_a_failed_tool_call_failed() -> None:
+    """A call the run recorded as failed replays as failed, its result as the error, never as finished."""
     completed, interrupted = split_interrupted_tool_trace(
         [
             ToolExecution(
@@ -124,10 +124,10 @@ def test_interrupted_replay_describes_terminal_tool_errors_without_implying_succ
 
     content = _assistant_text(run)
     assert (
-        'The `request` tool finished with input preview "url=https://example.com" and output preview "HTTP 500".'
+        'The `request` tool failed with input preview "url=https://example.com" and error preview "HTTP 500".'
         in content
     )
-    assert "tool completed" not in content
+    assert "tool finished" not in content
 
 
 def test_build_interrupted_replay_run_creates_completed_agent_run_with_summary_and_tools() -> None:

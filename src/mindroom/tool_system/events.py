@@ -45,6 +45,9 @@ class ToolTraceEntry:
     scope_key: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
+    # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so; no stored or
+    # public trace keeps it.
+    is_error: bool = field(default=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -128,6 +131,7 @@ class StreamingToolTracker:
         existing_entry.type = "tool_call_completed"
         existing_entry.result_preview = completed_trace.result_preview
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated
+        existing_entry.is_error = completed_trace.is_error
         return True
 
     def restore_pending(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
@@ -727,8 +731,10 @@ def format_tool_combined(
     tool_args: dict[str, object],
     result: object | None,
     tool_index: int | None = None,
+    *,
+    is_error: bool = False,
 ) -> tuple[str, ToolTraceEntry]:
-    """Format a complete tool call marker and associated trace metadata."""
+    """Format a complete tool call marker and associated trace metadata, marked failed when ``is_error``."""
     args_preview, truncated = _format_tool_args(tool_args)
     result_display = ""
     if result is not None and result != "":
@@ -741,6 +747,7 @@ def format_tool_combined(
         args_preview=args_preview or None,
         result_preview=result_display or None,
         truncated=truncated,
+        is_error=is_error,
     )
     return _format_tool_marker(tool_name, tool_index, pending=False), trace
 
@@ -789,7 +796,7 @@ def format_tool_started_event(
 
 def format_tool_completed_event(call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> ToolTraceEntry:
     """Return a tool-call completion's trace metadata."""
-    _, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result)
+    _, trace = format_tool_combined(call.tool_name, _tool_args(call), call.result, is_error=call.is_error is True)
     return _identified(trace, call, origin)
 
 

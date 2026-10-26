@@ -434,6 +434,26 @@ def test_streaming_tool_tracker_updates_visible_trace_slot() -> None:
     ]
 
 
+def test_streaming_tool_tracker_marks_a_visible_slot_its_failed_call_completes() -> None:
+    """A visible slot a failed call completes is marked failed, as that call's completed trace is."""
+    tracker = StreamingToolTracker()
+    _tool_msg, trace_entry = tracker.start(
+        ToolExecution(tool_call_id="call-fetch", tool_name="fetch", tool_args={"url": "https://example.com"}).call,
+        tool_index=1,
+    )
+    assert trace_entry is not None
+    visible_trace = [trace_entry]
+
+    pending_tool, completed_trace = tracker.complete(
+        ToolExecution(tool_call_id="call-fetch", tool_name="fetch", result="HTTP 500", is_error=True).call,
+    )
+
+    assert pending_tool is not None
+    assert tracker.update_visible_trace_entry(visible_trace, pending_tool, completed_trace) is True
+    assert completed_trace.is_error is True
+    assert visible_trace[0].is_error is True
+
+
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:
     """V2 tool trace keeps all events so `[N] -> events[N-1]` remains valid."""
     entries = [ToolTraceEntry(type="tool_call_started", tool_name=f"tool_{i}") for i in range(125)]
