@@ -104,7 +104,8 @@ class KnowledgeCollection:
         with closing(sqlite3.connect(building)) as connection:
             connection.executescript(_SCHEMA)
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-        self.delete()
+        # The old file's journal must not outlive it, or SQLite would roll it back into the new file.
+        self.file.with_name(f"{self.file.name}-journal").unlink(missing_ok=True)
         building.replace(self.file)
 
     def delete(self) -> None:
@@ -377,21 +378,23 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
 def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
     import numpy as np  # noqa: PLC0415
 
-    count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-    first = connection.execute("SELECT length(embedding) FROM chunks LIMIT 1").fetchone()
-    dimension = 0 if first is None else first[0] // 4
-    rowids = np.empty(count, dtype=np.int64)
-    matrix = np.empty((count, dimension), dtype=np.float32)
-    loaded = 0
-    for loaded, (rowid, blob) in enumerate(connection.execute("SELECT rowid, embedding FROM chunks ORDER BY rowid")):
-        if len(blob) != dimension * 4:
-            message = "Knowledge collection holds embeddings of different dimensions"
-            raise ValueError(message)
-        rowids[loaded] = rowid
-        matrix[loaded] = np.frombuffer(blob, dtype="<f4")
-    if count and loaded != count - 1:
-        message = "Knowledge collection changed while its vectors were loading"
-        raise RuntimeError(message)
+    # One read transaction, so the count and the rows come from the same snapshot.
+    connection.execute("BEGIN")
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        first = connection.execute("SELECT length(embedding) FROM chunks LIMIT 1").fetchone()
+        dimension = 0 if first is None else first[0] // 4
+        rowids = np.empty(count, dtype=np.int64)
+        matrix = np.empty((count, dimension), dtype=np.float32)
+        rows = connection.execute("SELECT rowid, embedding FROM chunks ORDER BY rowid")
+        for position, (rowid, blob) in enumerate(rows):
+            if len(blob) != dimension * 4:
+                message = "Knowledge collection holds embeddings of different dimensions"
+                raise ValueError(message)
+            rowids[position] = rowid
+            matrix[position] = np.frombuffer(blob, dtype="<f4")
+    finally:
+        connection.rollback()
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     matrix /= norms

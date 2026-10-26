@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier
 from typing import TYPE_CHECKING, Never
 
@@ -36,8 +37,6 @@ from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection
 from tests.knowledge_test_support import seed_collection, stored_rows
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.constants import RuntimePaths
 
 
@@ -179,11 +178,11 @@ def test_write_source_rows_replaces_one_files_rows(space: CollectionSpace) -> No
     assert any(row["metadata"]["source_path"] == "other.md" for row in rows)
 
 
-def test_reset_raises_when_the_old_collection_cannot_be_dropped(
+def test_reset_raises_and_keeps_the_old_rows_when_the_swap_fails(
     space: CollectionSpace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed drop surfaces instead of leaving the old rows in a collection reported as emptied."""
+    """A reset that cannot swap in the empty file raises and leaves the old rows, never a half-built collection."""
     collection = open_collection(space, "rows")
     collection.reset()
     write_source_rows(
@@ -193,9 +192,14 @@ def test_reset_raises_when_the_old_collection_cannot_be_dropped(
         rows=_rows(("old", [1.0, 0.0])),
     )
 
-    monkeypatch.setattr(KnowledgeCollection, "delete", _fail_delete)
+    def fail_replace(_path: Path, _target: Path) -> Never:
+        msg = "collection operation failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
     with pytest.raises(OSError, match="collection operation failed"):
         collection.reset()
+    monkeypatch.undo()
     assert [row["content"] for row in stored_rows(collection)] == ["old"]
 
 
