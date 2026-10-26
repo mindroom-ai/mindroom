@@ -227,14 +227,15 @@ def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
 
 
 def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons: Sequence[str]) -> bool:
-    """Print that ``key_name`` is not checked, and return True, when ``reasons`` name a setting that may send it elsewhere.
+    """Print that ``key_name`` is not checked, and return True, when ``reasons`` may redirect or replace it.
 
     A provider without a key check is never probed, so it reports nothing here and gets the probe's "no key check".
     """
     if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
         return False
     listed = ", ".join(reasons)
-    console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} may send it elsewhere")
+    effect = "may send it elsewhere or send another key in its place"
+    console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} {effect}")
     return True
 
 

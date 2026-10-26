@@ -4244,7 +4244,10 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
         output = " ".join(result.output.split())
-        assert "OPENAI_API_KEY not checked: models.default.extra_kwargs.base_url may send it elsewhere" in output
+        assert (
+            "OPENAI_API_KEY not checked: models.default.extra_kwargs.base_url may send it elsewhere or send another key in its place"
+            in output
+        )
         assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(

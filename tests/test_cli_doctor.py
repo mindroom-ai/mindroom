@@ -468,7 +468,7 @@ def test_doctor_skips_the_shared_key_check_wherever_an_endpoint_setting_or_varia
     assert _check_providers(config, runtime_paths) == (0, 0, 1)
     assert sent == []
     output = " ".join(capsys.readouterr().out.split())
-    assert f"{env_key} not checked: {reason} may send it elsewhere" in output
+    assert f"{env_key} not checked: {reason} may send it elsewhere or send another key in its place" in output
 
 
 @pytest.mark.parametrize(
@@ -731,7 +731,9 @@ def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_
     assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
     assert sent == []
     output = " ".join(capsys.readouterr().out.split())
-    assert f"Memory LLM: {key_name} not checked: {reason} may send it elsewhere" in output
+    assert (
+        f"Memory LLM: {key_name} not checked: {reason} may send it elsewhere or send another key in its place" in output
+    )
 
 
 @pytest.mark.parametrize(
