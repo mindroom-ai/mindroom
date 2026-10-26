@@ -277,7 +277,7 @@ def _waiting_coordinate_call(
         return linked
     # LEGACY_COMPAT: Coordinate calls that wait on a paused member without naming the member's run.
     # Legacy format: a paused team row's waiting ``delegate_task_to_member`` entry whose ``child_run_id`` is null.
-    # Last legacy release: v2026.10.569, whose team runs stored ``child_run_id`` null on every delegation call, as
+    # Last legacy release: v2026.10.574, whose team runs stored ``child_run_id`` null on every delegation call, as
     # blocking turns on the Agno runtime did; replacement: the next release names the paused member's run in
     # ``child_run_id`` of the call that waits on it.
     # Handling: the first call that waits on the member answers its paused run, so an approval saved before the
