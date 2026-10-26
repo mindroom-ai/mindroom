@@ -107,28 +107,22 @@ class ChatAdapter:
         accumulator = ChatStream(self.wire)
         try:
             client = await self.clients.client(request.overrides)
-            if not kwargs.get("stream"):
-                # A request the dialect does not stream (``chat_request_kwargs``) gets the whole reply.
-                for event in accumulator.add_reply(await client.chat.completions.create(**kwargs)):
-                    first_token = output_started(first_token, event)
-                    yield event
-            else:
-                sdk_stream = await client.chat.completions.create(**kwargs)
-                # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
-                # stops decoding at the sentinel, so a body decoded to its end never sent one.
-                body = _WatchedBody(cast("httpx2.AsyncByteStream", sdk_stream.response.stream))
-                sdk_stream.response.stream = body
-                try:
-                    async for chunk in sdk_stream:
-                        # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
-                        for event in accumulator.add(chunk) or [StreamProgress()]:
-                            first_token = output_started(first_token, event)
-                            yield event
-                finally:
-                    await sdk_stream.close()
-                if body.decoded_to_end and accumulator.parts.finish_reason is None:
-                    # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
-                    return
+            sdk_stream = await client.chat.completions.create(**kwargs)
+            # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
+            # stops decoding at the sentinel, so a body decoded to its end never sent one.
+            body = _WatchedBody(cast("httpx2.AsyncByteStream", sdk_stream.response.stream))
+            sdk_stream.response.stream = body
+            try:
+                async for chunk in sdk_stream:
+                    # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
+                    for event in accumulator.add(chunk) or [StreamProgress()]:
+                        first_token = output_started(first_token, event)
+                        yield event
+            finally:
+                await sdk_stream.close()
+            if body.decoded_to_end and accumulator.parts.finish_reason is None:
+                # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
+                return
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
         for event in accumulator.finish():

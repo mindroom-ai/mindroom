@@ -353,28 +353,61 @@ class _Packing(BaseModel):
     item: str
 
 
-@pytest.mark.asyncio
-async def test_a_groq_request_for_structured_output_reads_the_whole_reply(tmp_path: Path) -> None:
-    """Groq does not stream structured output, so a request for it asks for the whole reply instead of a stream."""
-    completion = {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "openai/gpt-oss-120b",
-        "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": '{"item": "coat"}'}, "finish_reason": "stop"},
-        ],
-        "usage": {**_USAGE, "queue_time": 0.011},
+def _answer_call_reply(arguments: str) -> dict[str, Any]:
+    """Return a Chat stream whose one call is the forced ``structured_output`` call with ``arguments``."""
+    call = {
+        "index": 0,
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "structured_output", "arguments": arguments},
     }
-    built = _Built(tmp_path, _DECISION_ROUTES["groq"][0], _json_reply(completion))
+    return _chat_reply(_chunk({"tool_calls": [call]}, finish_reason="tool_calls"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": "k"},
+        {"provider": "deepseek", "id": "deepseek-chat", "api_key": "k"},
+        {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k", "extra_kwargs": {"use_thinking": False}},
+    ],
+    ids=["groq", "deepseek-chat", "deepseek-without-thinking"],
+)
+async def test_a_route_that_can_force_a_tool_asks_for_structured_output_with_a_forced_call(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    """The output schema goes as the one tool the request forces, streamed, and the call carries the answer."""
+    built = _Built(tmp_path, model_config, _answer_call_reply('{"item": "coat"}'))
 
     turn = await _turn(built, ModelRequest(messages=[_user()], output_schema=_Packing))
 
     body = built.body()
-    assert ("stream" in body, body["response_format"]) == (False, {"type": "json_object"})
-    assert (turn.content, turn.stop_reason) == ('{"item": "coat"}', "end")
-    tokens = turn.usage.tokens
-    assert (tokens.input_tokens, tokens.output_tokens, turn.usage.provider_metrics) == (42, 12, {"queue_time": 0.011})
+    assert built.adapter.capabilities.structured_output == "forced_tool"
+    assert "response_format" not in body
+    assert body["stream"] is True
+    assert body["tool_choice"] == {"type": "function", "function": {"name": "structured_output"}}
+    assert [tool["function"]["name"] for tool in body["tools"]] == ["structured_output"]
+    assert body["tools"][0]["function"]["parameters"] == _Packing.model_json_schema()
+    assert [call["function"]["arguments"] for call in turn.tool_calls] == ['{"item": "coat"}']
+
+
+@pytest.mark.asyncio
+async def test_a_thinking_deepseek_model_asks_for_structured_output_in_json_mode(tmp_path: Path) -> None:
+    """DeepSeek rejects a forced tool call in thinking mode, so a thinking model asks for JSON instead."""
+    built = _Built(
+        tmp_path,
+        {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k"},
+        _chat_reply(_chunk({"content": '{"item": "coat"}'}, finish_reason="stop")),
+    )
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], output_schema=_Packing))
+
+    body = built.body()
+    assert built.adapter.capabilities.structured_output == "json_mode"
+    assert (body["response_format"], "tools" in body, "tool_choice" in body) == ({"type": "json_object"}, False, False)
+    assert turn.content == '{"item": "coat"}'
 
 
 def _tool_call_reply(server_id: str | None) -> dict[str, Any]:

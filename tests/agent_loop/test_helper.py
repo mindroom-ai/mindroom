@@ -14,6 +14,7 @@ from mindroom.agent_loop.structured import output_format_prompt
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
+    STRUCTURED_OUTPUT_TOOL,
     Capabilities,
     ModelIdentity,
     ModelRequest,
@@ -49,12 +50,24 @@ class _RecordingProvider:
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
-        yield TextDelta(self.answer)
+        # A ``forced_tool`` route answers a structured request with the forced call, its arguments the answer.
+        forced = request.output_schema is not None and self.capabilities.structured_output == "forced_tool"
+        if not forced:
+            yield TextDelta(self.answer)
         if not self.finish:
             return
         usage = MessageMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=5, total_tokens=17))
         yield UsageReported(usage)
-        message = Message(role="assistant", content=self.answer, metrics=usage)
+        call = {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": STRUCTURED_OUTPUT_TOOL, "arguments": self.answer},
+        }
+        message = (
+            Message(role="assistant", tool_calls=[call], metrics=usage)
+            if forced
+            else Message(role="assistant", content=self.answer, metrics=usage)
+        )
         stamp_model(message, self.identity)
         yield TurnCompleted(message=message, stop_reason="end")
 
@@ -67,7 +80,7 @@ class _Verdict(BaseModel):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("structured_output", "json_prompt"),
-    [("native", False), ("json_schema", False), ("json_mode", True)],
+    [("native", False), ("json_schema", False), ("forced_tool", False), ("json_mode", True)],
 )
 async def test_a_prompt_is_sent_under_its_instructions_as_written(structured_output: str, *, json_prompt: bool) -> None:
     """Each instruction goes verbatim, a blank line apart, and the JSON prompt follows on JSON-mode routes."""
@@ -139,7 +152,7 @@ async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("structured_output", ["native", "json_schema", "json_mode"])
+@pytest.mark.parametrize("structured_output", ["native", "json_schema", "forced_tool", "json_mode"])
 async def test_a_structured_answer_is_read_into_the_schema(structured_output: str) -> None:
     """The request asks for the schema the provider's way, and the answer comes back as the model."""
     capabilities = Capabilities(structured_output=structured_output)
@@ -156,7 +169,7 @@ async def test_a_structured_answer_is_read_into_the_schema(structured_output: st
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("structured_output", "repaired"),
-    [("native", False), ("json_schema", False), ("json_mode", True)],
+    [("native", False), ("json_schema", False), ("forced_tool", False), ("json_mode", True)],
 )
 async def test_only_a_json_mode_answer_is_repaired(structured_output: str, *, repaired: bool) -> None:
     """A fenced answer is repaired only on a JSON-mode route; a route that enforces the schema is read strictly."""

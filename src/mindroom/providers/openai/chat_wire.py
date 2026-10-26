@@ -3,7 +3,7 @@
 
 Three dialects shape the request bodies: ``openai`` (OpenAI, Azure, OpenRouter, DeepSeek, Z.ai, llama.cpp,
 Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
-call from canonical messages and fold SDK chunks, or Groq's whole structured reply, into one finished turn.
+call from canonical messages and fold SDK chunks into one finished turn.
 """
 
 from __future__ import annotations
@@ -17,7 +17,15 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.llm.messages import tool_result_view, with_joined_system
-from mindroom.llm.provider import ReasoningDelta, StopReason, StructuredOutput, TextDelta, UsageReported
+from mindroom.llm.provider import (
+    STRUCTURED_OUTPUT_TOOL,
+    ReasoningDelta,
+    StopReason,
+    StructuredOutput,
+    TextDelta,
+    UsageReported,
+    structured_output_tool,
+)
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
@@ -29,7 +37,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from openai.types import CompletionUsage
-    from openai.types.chat import ChatCompletion, ChatCompletionChunk
+    from openai.types.chat import ChatCompletionChunk
     from pydantic import BaseModel
 
     from mindroom.llm.messages import Message
@@ -43,6 +51,7 @@ __all__ = [
     "ChatWire",
     "chat_request_kwargs",
     "chat_stop_reason",
+    "deepseek_thinking",
     "function_definition",
     "sdk_call_kwargs",
 ]
@@ -53,9 +62,6 @@ type _SDKEndpoint = Literal["chat", "responses"]
 
 # Groq Compound runs hosted tools on its own, which a decision that must not run tools cannot allow.
 _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-beta", "compound-beta-mini"})
-# Groq does not stream structured output (https://console.groq.com/docs/structured-outputs), so its requests for
-# structured output ask for the whole reply.
-_WHOLE_STRUCTURED_REPLY_DIALECTS: frozenset[ChatDialect] = frozenset({"groq"})
 # Cerebras rejects parallel tool calls on this model.
 _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 _SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
@@ -236,8 +242,11 @@ def _response_format(
     *,
     strict: bool,
 ) -> dict[str, Any] | None:
-    """Return the ``response_format`` that asks the route for ``schema``, or for JSON when it enforces no schema."""
-    if schema is None:
+    """Return the ``response_format`` that asks the route for ``schema``, or for JSON when it enforces no schema.
+
+    A ``forced_tool`` route asks with a forced tool call instead (``chat_request_kwargs``).
+    """
+    if schema is None or structured_output == "forced_tool":
         return None
     if structured_output == "json_mode":
         return {"type": "json_object"}
@@ -269,10 +278,14 @@ def _close_cerebras_objects(schema: Any) -> None:  # noqa: ANN401 - any JSON sch
         _close_cerebras_objects(child)
 
 
+def deepseek_thinking(settings: ChatSettings, model_id: str) -> bool:
+    """Return whether a DeepSeek request thinks: on for thinking-capable ids unless the config turns it off."""
+    return settings.use_thinking if settings.use_thinking is not None else model_id != "deepseek-chat"
+
+
 def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings, model_id: str) -> None:
     """Enable thinking for thinking-capable DeepSeek ids unless the config turns it off."""
-    thinking = settings.use_thinking if settings.use_thinking is not None else model_id != "deepseek-chat"
-    if thinking:
+    if deepseek_thinking(settings, model_id):
         params["extra_body"] = {"thinking": {"type": "enabled"}, **(params.get("extra_body") or {})}
         return
     params.pop("reasoning_effort", None)
@@ -411,30 +424,36 @@ def chat_request_kwargs(
     settings: ChatSettings,
     wire: ChatWire,
 ) -> dict[str, Any]:
-    """Return the ``chat.completions.create`` keyword arguments for one request, streamed unless the dialect cannot.
+    """Return the ``chat.completions.create`` keyword arguments for one streamed request.
 
     Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
     """
     response_format = _response_format(output_schema, structured_output, strict=settings.strict_output)
     params = _dialect_params(settings, wire, response_format)
+    output_tool = (
+        (structured_output_tool(output_schema),)
+        if output_schema is not None and structured_output == "forced_tool"
+        else ()
+    )
     _add_tools(
         params,
-        _chat_tools(tools, wire),
+        _chat_tools((*tools, *output_tool), wire),
         tool_choice,
         model_id=model_id,
         settings=settings,
         wire=wire,
     )
+    if output_tool:
+        params["tool_choice"] = {"type": "function", "function": {"name": STRUCTURED_OUTPUT_TOOL}}
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
     params = {
         "model": model_id,
         "messages": _chat_messages(messages, wire, settings),
         **disable_tool_selection(params, tool_choice),
     }
-    if output_schema is None or wire.dialect not in _WHOLE_STRUCTURED_REPLY_DIALECTS:
-        params["stream"] = True
-        if wire.dialect == "openai":
-            params["stream_options"] = {"include_usage": True}
+    params["stream"] = True
+    if wire.dialect == "openai":
+        params["stream_options"] = {"include_usage": True}
     return sdk_call_kwargs(params, "chat")
 
 
@@ -513,8 +532,8 @@ def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> 
     return calls
 
 
-def _reply_metadata(reply: ChatCompletion | ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a reply or chunk carried, for stored provider data."""
+def _reply_metadata(reply: ChatCompletionChunk) -> dict[str, Any]:
+    """Return the ``id``, ``system_fingerprint``, and unknown fields a chunk carried, for stored provider data."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id
@@ -539,7 +558,7 @@ def _usage_metrics(usage: CompletionUsage, wire: ChatWire) -> MessageMetrics:
 
 @dataclass(slots=True)
 class ChatStream:
-    """Fold streamed Chat Completions chunks, or a whole reply, into deltas and one finished turn.
+    """Fold streamed Chat Completions chunks into deltas and one finished turn.
 
     The ``openai`` dialect also moves reasoning a model writes inline as a leading ``<think>`` block out of the
     reply text (``ThinkTagSplitter``), as servers without a reasoning parser send it.
@@ -570,18 +589,7 @@ class ChatStream:
                     events.extend(self._add_reasoning(_extra(delta)))
         return events
 
-    def add_reply(self, reply: ChatCompletion) -> list[StreamEvent]:
-        """Fold the whole reply to a request the dialect does not stream, and return its text.
-
-        Only a request for structured output goes unstreamed, and it offers no tools, so its reply carries only text.
-        """
-        if reply.usage is not None:
-            self.parts.usage = _usage_metrics(reply.usage, self.wire)
-        choice = reply.choices[0]
-        self.parts.finish_reason = choice.finish_reason
-        return self._add_content(reply, choice.message.content)
-
-    def _add_content(self, chunk: ChatCompletion | ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
+    def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
         # Cerebras skips empty content deltas; the other dialects keep them, with their reply metadata.
         if content is None or (not content and self.wire.dialect == "cerebras"):
             return []

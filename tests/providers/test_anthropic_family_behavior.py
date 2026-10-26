@@ -648,6 +648,57 @@ async def test_documents_ask_for_no_citations(tmp_path: Path, *, structured: boo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id"),
+    [
+        ("bedrock_claude", "anthropic.claude-haiku-4-5"),
+        ("vertexai_claude", "claude-opus-4-6"),
+        ("anthropic", "claude-3-5-haiku-latest"),
+    ],
+)
+async def test_a_route_without_native_structured_output_forces_the_answer_tool(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+) -> None:
+    """Where the model accepts forced tool use, the output schema goes as the one tool the request forces."""
+    call = {"type": "tool_use", "id": "toolu_1", "name": "structured_output", "input": {"city": "Paris"}}
+    wire = Wire(sse_reply([call], stop_reason="tool_use"))
+    provider = route_provider(route, tmp_path, wire, id=model_id)
+
+    completed = await claude_turn(provider, ModelRequest(messages=_user(), output_schema=_Answer))
+
+    body = wire.body()
+    assert provider.capabilities.structured_output == "forced_tool"
+    assert body["tool_choice"] == {"type": "tool", "name": "structured_output"}
+    assert [(tool["name"], tool["input_schema"]) for tool in body["tools"]] == [
+        ("structured_output", _Answer.model_json_schema()),
+    ]
+    assert "output_config" not in body
+    assert [json.loads(call["function"]["arguments"]) for call in completed.message.tool_calls] == [{"city": "Paris"}]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "extra_kwargs"),
+    [
+        ("anthropic.claude-sonnet-5-5", {}),
+        ("anthropic.claude-opus-5-5", {}),
+        ("anthropic.claude-haiku-4-5", {"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+    ],
+    ids=["sonnet-5-5", "opus-5-5", "manual-thinking"],
+)
+def test_a_model_that_rejects_forced_tool_use_answers_in_json_mode(
+    tmp_path: Path,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    """Some models reject forced tool use on every request, and manual extended thinking rejects it on every model."""
+    provider = route_provider("bedrock_claude", tmp_path, Wire(sse_reply([])), id=model_id, extra_kwargs=extra_kwargs)
+
+    assert provider.capabilities.structured_output == "json_mode"
+
+
+@pytest.mark.asyncio
 async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Path) -> None:
     """Vertex rejects provider-level strict fields and has no structured output, so the schema stays out."""
     wire = Wire(sse_reply([{"type": "text", "text": "{}"}]))

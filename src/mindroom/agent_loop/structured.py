@@ -1,9 +1,10 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
-Each adapter renders a request's output schema in its provider's wire format; a route that only offers JSON mode
-also needs a JSON prompt, derived from the schema, at the end of the system message. An answer from a route that
-enforces the schema is parsed strictly; only a JSON-mode answer gets the lenient repairs.
+Each adapter renders a request's output schema in its provider's wire format: a ``forced_tool`` route as a forced
+call of ``structured_output_tool``, whose arguments are the answer. A route that only offers JSON mode also needs a
+JSON prompt, derived from the schema, at the end of the system message. An answer from a route that enforces the
+schema is parsed strictly; only a JSON-mode answer gets the lenient repairs.
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
+from mindroom.llm.provider import STRUCTURED_OUTPUT_TOOL
+
 if TYPE_CHECKING:
-    from mindroom.llm.provider import Capabilities
+    from mindroom.llm.provider import Capabilities, ModelTurn
 
 _MARKDOWN_KEY = re.compile(r'[*`#]?"([A-Za-z0-9_]+)"[*`#]?')
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1F\x7F]")
@@ -30,6 +33,16 @@ def output_format_prompt(capabilities: Capabilities, schema: type[BaseModel] | N
     if schema is None or capabilities.structured_output != "json_mode":
         return None
     return json_output_prompt(schema)
+
+
+def structured_answer_text(turn: ModelTurn, capabilities: Capabilities) -> str:
+    """Return the text of a structured answer: a ``forced_tool`` route's forced call arguments, else the turn's text."""
+    if capabilities.structured_output == "forced_tool":
+        for call in turn.tool_calls:
+            function = call.get("function") or {}
+            if function.get("name") == STRUCTURED_OUTPUT_TOOL:
+                return str(function.get("arguments") or "")
+    return turn.content
 
 
 def json_output_prompt(schema: type[BaseModel]) -> str:
@@ -171,4 +184,5 @@ __all__ = [
     "json_output_prompt",
     "output_format_prompt",
     "parse_structured",
+    "structured_answer_text",
 ]

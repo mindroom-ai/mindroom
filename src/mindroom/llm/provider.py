@@ -23,8 +23,9 @@ if TYPE_CHECKING:
 type MediaKind = Literal["audio", "image", "file", "video"]
 type StopReason = Literal["end", "tool_use", "output_limit", "refusal", "content_filter", "incomplete"]
 type ToolChoice = Literal["none"]
-# How a route enforces an output schema: natively, by a JSON-schema response format, or only by JSON mode.
-type StructuredOutput = Literal["native", "json_schema", "json_mode"]
+# How a route enforces an output schema: natively, by a JSON-schema response format, by a forced call of the
+# ``structured_output_tool`` whose arguments are the answer, or only by JSON mode.
+type StructuredOutput = Literal["native", "json_schema", "forced_tool", "json_mode"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -71,6 +72,20 @@ class ToolSpec:
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None
+
+
+# The one tool a ``forced_tool`` route is made to call for a request's output schema.
+STRUCTURED_OUTPUT_TOOL = "structured_output"
+
+
+def structured_output_tool(schema: type[BaseModel]) -> ToolSpec:
+    """Return the tool a ``forced_tool`` route must call to answer: its arguments are the answer, in ``schema``."""
+    return ToolSpec(
+        name=STRUCTURED_OUTPUT_TOOL,
+        description="Give your answer as this tool's arguments.",
+        parameters=schema.model_json_schema(),
+        strict=None,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -368,6 +383,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
 
 
 __all__ = [
+    "STRUCTURED_OUTPUT_TOOL",
     "Capabilities",
     "DeferredTools",
     "MediaKind",
@@ -393,4 +409,5 @@ __all__ = [
     "UsageReported",
     "complete",
     "hosted_tool_started",
+    "structured_output_tool",
 ]

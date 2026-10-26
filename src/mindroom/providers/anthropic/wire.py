@@ -78,6 +78,10 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
     },
 )
 
+# These models reject forced tool use on every request
+# (https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility).
+_NO_FORCED_TOOL_PREFIXES = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1")
+
 _TRAILING_USER_MESSAGE = "continue"
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 _IMAGE_MEDIA_TYPES = {
@@ -138,6 +142,14 @@ def supports_structured_outputs(model_id: str) -> bool:
     """Return whether the direct API offers ``output_config.format`` for this model, read by its core id as prefill is."""
     core_id = _core_model_id(model_id)
     return core_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not core_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
+
+
+def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
+    """Return whether the model accepts a request that forces one tool call, read by its core id as prefill is.
+
+    Manual extended thinking (``thinking.type: "enabled"``) rejects forced tool use on every model.
+    """
+    return not manual_thinking and not _core_model_id(model_id).startswith(_NO_FORCED_TOOL_PREFIXES)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
@@ -591,6 +603,7 @@ __all__ = [
     "inline_url_media",
     "parse_claude_usage",
     "stop_reason_of",
+    "supports_forced_tool_use",
     "supports_prefill",
     "supports_structured_outputs",
     "tool_call_from_block",
