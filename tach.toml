@@ -640,6 +640,7 @@ depends_on = [
 visibility = [
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.journal_ingress",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -5936,6 +5937,7 @@ depends_on = [
     "mindroom.matrix.message_content",
     "mindroom.matrix.rooms",
     "mindroom.matrix.thread_membership",
+    "mindroom.matrix.transport_progress",
     "mindroom.metadata_merge",
     "mindroom.coalescing.prompt_ingress_reservation",
     "mindroom.response_lifecycle",
@@ -6139,8 +6141,13 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.legacy_chroma_storage"
-depends_on = ["mindroom.knowledge.vector_store", "mindroom.logging_config", "mindroom.tool_system.dependencies"]
-visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.manager"]
+depends_on = [
+    "mindroom.knowledge.registry",
+    "mindroom.knowledge.vector_store",
+    "mindroom.logging_config",
+    "mindroom.tool_system.dependencies",
+]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.manager", "mindroom.knowledge.watch"]
 
 [[modules]]
 path = "mindroom.embeddings.batching"
@@ -6335,6 +6342,7 @@ visibility = ["mindroom.knowledge.search", "mindroom.knowledge.utils"]
 path = "mindroom.knowledge.watch"
 depends_on = [
     "mindroom.knowledge.file_listing",
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
 ]

@@ -81,7 +81,11 @@ from mindroom.knowledge.indexing_config import (
     knowledge_git_dir,
     storage_key_for_base,
 )
-from mindroom.knowledge.legacy_chroma_storage import copy_legacy_chroma_rows, legacy_chroma_store_exists
+from mindroom.knowledge.legacy_chroma_storage import (
+    chroma_era_publication,
+    copy_legacy_chroma_rows,
+    legacy_chroma_store_exists,
+)
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -447,8 +451,9 @@ def _knowledge_source_signature(
     *,
     git_dir: Path,
     tracked_relative_paths: Iterable[str] | None = None,
+    scanned: dict[str, tuple[FileSignature, Path]] | None = None,
 ) -> str:
-    """Return a robust signature for the currently managed local file corpus."""
+    """Return a robust signature for the currently managed local file corpus; ``scanned`` collects each signed file."""
     root = knowledge_root
     digest = hashlib.sha256()
     base_config = config.get_knowledge_base_config(base_id)
@@ -464,9 +469,12 @@ def _knowledge_source_signature(
     files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
     for relative_path, path in sorted(files_with_relative_paths):
         try:
-            mtime_ns, size, source_digest = _file_signature(path)
+            signature = _file_signature(path)
         except (OSError, ValueError):
             continue
+        if scanned is not None:
+            scanned[relative_path] = (signature, path)
+        mtime_ns, size, source_digest = signature
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(mtime_ns).encode("ascii"))
@@ -538,6 +546,8 @@ class KnowledgeManager:
     _file_index_errors: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _embedder_failure_streak: int = field(default=0, init=False, repr=False)
     _global_embedder_failure: str | None = field(default=None, init=False, repr=False)
+    #: The files a local base's last corpus hash listed and signed, which the next reconciliation adopts once.
+    _source_scan: dict[str, tuple[FileSignature, Path]] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -667,15 +677,23 @@ class KnowledgeManager:
 
         Git-backed bases hand over the tracked paths this process already
         listed, so an unchanged checkout is not re-listed just to hash it.
+        A local base keeps the scan for its next reconciliation instead of
+        listing and hashing the corpus again: a file that changes after the
+        scan still fails the hash that ends the pass. A Git base's pass ends
+        on its revision instead, which a stale scan could slip past.
         """
-        return await asyncio.to_thread(
+        scanned: dict[str, tuple[FileSignature, Path]] | None = None if self.git_source.is_configured() else {}
+        signature = await asyncio.to_thread(
             _knowledge_source_signature,
             self.config,
             self.base_id,
             self._knowledge_source_path(),
             git_dir=self.git_source.git_dir,
             tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
+            scanned=scanned,
         )
+        self._source_scan = scanned
+        return signature
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
@@ -1233,12 +1251,8 @@ class KnowledgeManager:
         if persisted_state is None or persisted_state.status != "complete" or persisted_state.collection is None:
             return None
         settings = persisted_state.settings
-        if not settings.vector_store:
-            # LEGACY_COMPAT: Chroma-era publications are reusable: their vectors are copied out of Chroma once.
-            # Legacy format: published metadata without vector_store, its vectors in the base's Chroma database.
-            # Last legacy release: v2026.10.568; replacement: the next release stores semantic indexes in owned SQLite files.
-            # Handling: compare settings as if the publication were owned; the copy reads Chroma.
-            # Coverage: tests/test_knowledge_collection_cleanup.py::test_a_chroma_era_index_is_copied_without_embedding_again.
+        if chroma_era_publication(settings):
+            # Compared as if the publication were owned; the copy reads Chroma.
             settings = replace(settings, vector_store=self._indexing_settings.vector_store)
         return persisted_state.collection if settings == self._indexing_settings else None
 
@@ -1724,7 +1738,6 @@ class KnowledgeManager:
     async def _reconcile_candidate(
         self,
         run: _CandidateRun,
-        files: Sequence[Path],
         *,
         changed_files: frozenset[str] | None = None,
     ) -> _CandidateReconciliation:
@@ -1732,9 +1745,13 @@ class KnowledgeManager:
         # ``vanished`` describes files lost during one indexing pass, so it must
         # not outlive the pass and permanently exclude a path that came back.
         run.vanished.clear()
-        if changed_files is None:
-            signatures = await self._file_signatures_for(files)
+        scanned, self._source_scan = self._source_scan, None
+        if changed_files is None and scanned is not None:
+            signatures = scanned
+        elif changed_files is None:
+            signatures = await self._file_signatures_for(await asyncio.to_thread(self.list_files))
         else:
+            files = await asyncio.to_thread(self.list_files)
             files_by_relative_path = {self._relative_path(file_path): file_path for file_path in files}
             files_to_scan = [
                 file_path
@@ -1973,8 +1990,7 @@ class KnowledgeManager:
                 if _round == 0 and self.git_source.is_configured()
                 else None
             )
-            files = await asyncio.to_thread(self.list_files)
-            plan = await self._reconcile_candidate(run, files, changed_files=changed_files)
+            plan = await self._reconcile_candidate(run, changed_files=changed_files)
             run.baseline_revision = round_revision
             progress.total = len(plan.expected)
             progress.completed = len(run.completed)
