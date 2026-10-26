@@ -78,10 +78,10 @@ def _format_member_contribution(agent_name: str, content: str) -> str:
 
 
 def _with_consensus(contributions: list[str], consensus: str, *, finished: bool) -> list[str]:
-    """Return the contributions, then the consensus, or the no-consensus note when only members spoke.
+    """Return the contributions, then the consensus or, for a finished reply in which only members spoke, the note.
 
-    Only a ``finished`` reply adds the note: a reply still running or waiting for an approval may yet get its leader's
-    answer.
+    ``finished`` means the team run completed. A reply still running or waiting for an approval may yet get its
+    leader's answer, and a stopped or failed one ended without it, so neither shows the note.
     """
     if consensus.strip():
         return [*contributions, "\n**Team Consensus**:", consensus]
