@@ -74,7 +74,8 @@ async def complete_prompt[T: BaseModel](
     metrics = RunMetrics(duration=perf_counter() - started)
     metrics.add(turn.usage, model_id=identity.id, provider=identity.provider_name)
     text = turn.content
-    parsed = None if schema is None else parse_structured(text, schema)
+    lenient = provider.capabilities.structured_output == "json_mode"
+    parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)
     if schema is not None and parsed is None:
         logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
     record = RunRecord(

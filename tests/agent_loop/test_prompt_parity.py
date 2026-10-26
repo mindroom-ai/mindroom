@@ -75,14 +75,13 @@ def test_sections_render_as_a_stable_part_and_a_turn_part() -> None:
         turn_context="<context>\n",
         skills_block="<skills_system>\n</skills_system>",
         knowledge_block="<knowledge_base>\n</knowledge_base>",
-        output_format_prompt="JSON prompt.",
     )
 
     stable, turn = render_system_messages(spec)
     assert stable.content == (
         f"Persona.\n\n<your_role>\nRole.\n</your_role>\n\n{MARKDOWN_OUTPUT_FORMAT}\n\n- One.\n- Two.\n\n"
         "Toolkit guidance.\n\nMore guidance.\n\n<skills_system>\n</skills_system>\n\n"
-        "<knowledge_base>\n</knowledge_base>\n\nJSON prompt."
+        "<knowledge_base>\n</knowledge_base>"
     )
     assert (stable.role, turn.role, turn.content) == ("system", "system", "<context>")
 

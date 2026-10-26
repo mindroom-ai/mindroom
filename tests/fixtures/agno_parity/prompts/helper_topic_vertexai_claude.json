@@ -53,7 +53,7 @@
       },
       "messages": [
         {
-          "content": "Generate contextual room topics\n\nProvide your output as a JSON containing the following fields:\n<json_fields>\n[\"topic\"]\n</json_fields>\n\nHere are the properties for each field:\n<json_field_properties>\n{\n  \"topic\": {\n    \"description\": \"The room topic - concise, informative, with emoji\",\n    \"type\": \"string\"\n  }\n}\n</json_field_properties>\nStart your response with `{` and end it with `}`.\nYour output will be passed to json.loads() to convert it to a Python object.\nMake sure it only contains valid JSON.",
+          "content": "Generate contextual room topics\n\nAnswer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it.\n<json_schema>\n{\n  \"description\": \"Structured room topic response.\",\n  \"properties\": {\n    \"topic\": {\n      \"description\": \"The room topic - concise, informative, with emoji\",\n      \"title\": \"Topic\",\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"topic\"\n  ],\n  \"title\": \"_RoomTopic\",\n  \"type\": \"object\"\n}\n</json_schema>",
           "role": "system"
         },
         {

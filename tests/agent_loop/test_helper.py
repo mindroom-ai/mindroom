@@ -143,14 +143,29 @@ async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
 async def test_a_structured_answer_is_read_into_the_schema(structured_output: str) -> None:
     """The request asks for the schema the provider's way, and the answer comes back as the model."""
     capabilities = Capabilities(structured_output=structured_output)
-    provider = _RecordingProvider(answer='```json\n{"answer": "yes"}\n```', capabilities=capabilities)
+    provider = _RecordingProvider(answer='{"answer": "yes"}', capabilities=capabilities)
 
     result = await complete_prompt(provider, "Is it raining?", instructions=["Decide."], schema=_Verdict)
 
     assert result.content == _Verdict(answer="yes")
-    assert result.record.content == '```json\n{"answer": "yes"}\n```'
+    assert result.record.content == '{"answer": "yes"}'
     [request] = provider.requests
     assert request.output_schema is _Verdict
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("structured_output", "repaired"),
+    [("native", False), ("json_schema", False), ("json_mode", True)],
+)
+async def test_only_a_json_mode_answer_is_repaired(structured_output: str, *, repaired: bool) -> None:
+    """A fenced answer is repaired only on a JSON-mode route; a route that enforces the schema is read strictly."""
+    fenced = '```json\n{"answer": "yes"}\n```'
+    provider = _RecordingProvider(answer=fenced, capabilities=Capabilities(structured_output=structured_output))
+
+    result = await complete_prompt(provider, "Is it raining?", instructions=["Decide."], schema=_Verdict)
+
+    assert result.content == (_Verdict(answer="yes") if repaired else fenced)
 
 
 @pytest.mark.asyncio

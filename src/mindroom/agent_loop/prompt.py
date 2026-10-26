@@ -29,8 +29,7 @@ class PromptSpec:
     runtime facts under a persona), or a team's identity.
     ``markdown`` states the chat's Markdown output format right after the role (``MARKDOWN_OUTPUT_FORMAT``); callers
     with an output schema, and realtime voice calls, leave it False.
-    ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered, and
-    ``output_format_prompt`` the JSON prompt a structured-output request needs (``structured.output_format_prompt``).
+    ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
     ``turn_context`` is the turn part: the date and session context, plus the blocks a turn appends
     (``build.prompt_for_turn``).
     """
@@ -42,7 +41,6 @@ class PromptSpec:
     tool_instructions: tuple[str, ...] = ()
     skills_block: str | None = None
     knowledge_block: str | None = None
-    output_format_prompt: str | None = None
     turn_context: str | None = None
 
 
@@ -81,7 +79,6 @@ def render_system_messages(spec: PromptSpec) -> tuple[Message, ...]:
             *spec.tool_instructions,
             spec.skills_block,
             spec.knowledge_block,
-            spec.output_format_prompt,
         ),
     )
     turn = join_sections((spec.turn_context,))
