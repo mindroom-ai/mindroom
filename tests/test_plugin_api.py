@@ -100,7 +100,7 @@ _EXPORTS = [
     "write_file_within_root",
 ]
 
-# Fields every hook context except the two tool contexts shares, before and after its own fields.
+# Every hook context has the base parameters; all but the two tool contexts put them first and end with the helpers.
 _HOOK = "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id"
 _HOOK_HELPERS = (
     "runtime_started_at, message_sender, agent_message_snapshot_reader, matrix_admin, room_state_querier, "
