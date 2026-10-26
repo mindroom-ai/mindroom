@@ -585,17 +585,13 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    # As for models, any endpoint setting or variable skips the check, whichever key it is. So does an exported
-    # OPENROUTER_API_KEY, which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of
-    # any other key.
+    # Any endpoint setting or variable skips the check, whichever key it is, and so does an exported OPENROUTER_API_KEY,
+    # which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of any other key.
     if env_key:
         reasons = _endpoint_settings(config.memory.llm.config, "memory.llm.config")
         reasons += _endpoint_variables(env_key, runtime_paths)
-        if (
-            provider_route(llm_provider) in {"openai", "openrouter"}
-            and key_name != "OPENROUTER_API_KEY"
-            and runtime_paths.env_value("OPENROUTER_API_KEY")
-        ):
+        replaced = provider_route(llm_provider) in {"openai", "openrouter"} and key_name != "OPENROUTER_API_KEY"
+        if replaced and runtime_paths.env_value("OPENROUTER_API_KEY"):
             reasons.append("OPENROUTER_API_KEY")
         if _report_key_not_checked("Memory LLM", llm_provider, key_name, reasons):
             return 0, 0, 1
@@ -658,12 +654,8 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
         return 0, 0, 1
-    if env_key and _report_key_not_checked(
-        "Memory embedder",
-        emb.provider,
-        env_key,
-        _endpoint_variables(env_key, runtime_paths),
-    ):
+    variables = _endpoint_variables(env_key, runtime_paths) if env_key else []
+    if _report_key_not_checked("Memory embedder", emb.provider, env_key or "", variables):
         return 0, 0, 1
 
     valid, detail = _validate_provider_key(emb.provider, api_key or "")
