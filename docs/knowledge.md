@@ -514,7 +514,9 @@ Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROO
 For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
-Indexes that earlier MindRoom versions stored in Chroma are rebuilt once after upgrading, which embeds every file again; the base's old `chroma.sqlite3` and segment directories are then removed.
+Indexes that earlier MindRoom versions stored in Chroma are rebuilt once after upgrading, which embeds every file again.
+A base cannot be searched until its rebuild publishes, so a large corpus or a slow local embedder can leave it unavailable for a while.
+The base's old `chroma.sqlite3` and segment directories are removed once the new index is published.
 
 ## Dashboard and API
 

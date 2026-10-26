@@ -988,14 +988,31 @@ class KnowledgeManager:
             file_path = files[end]
             end += 1
             prepared_file = await self._prepare_file(file_path, vanished_files=vanished_files)
-            if prepared_file is not None:
-                prepared_file = await self._with_chunk_contexts(prepared_file)
             if prepared_file is None:
                 await on_file_result(file_path)
                 continue
             prepared.append(prepared_file)
             text_bytes += prepared_file.text_bytes()
-        return prepared, end
+        if self.config.get_knowledge_base_config(self.base_id).chunk_context_model is None:
+            return prepared, end
+        # Files get their chunk contexts concurrently, under the same per-file limit as their writes.
+        slots = asyncio.Semaphore(self._max_concurrent_file_indexes)
+
+        async def with_contexts(prepared_file: _PreparedFile) -> _PreparedFile | None:
+            async with slots:
+                return await self._with_chunk_contexts(prepared_file)
+
+        contextualized: list[_PreparedFile] = []
+        for prepared_file, result in zip(
+            prepared,
+            await asyncio.gather(*(with_contexts(prepared_file) for prepared_file in prepared)),
+            strict=True,
+        ):
+            if result is None:
+                await on_file_result(prepared_file.path)
+            else:
+                contextualized.append(result)
+        return contextualized, end
 
     async def _with_chunk_contexts(self, prepared: _PreparedFile) -> _PreparedFile | None:
         """Prefix each chunk with the context the base's ``chunk_context_model`` writes; None when that fails.

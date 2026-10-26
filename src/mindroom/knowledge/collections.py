@@ -263,6 +263,9 @@ def cleanup_superseded_collections(
                     collection=collection_name,
                     exc_info=True,
                 )
+        for leftover in space.storage_path.glob("*.sqlite3.building"):
+            # A reset killed before its rename; no collection is ever read from these.
+            leftover.unlink(missing_ok=True)
         if not candidates_only:
             # Only the sweep after a publication: until then the Chroma files are what a downgrade would read.
             _remove_legacy_chroma_storage(space)
