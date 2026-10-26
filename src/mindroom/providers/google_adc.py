@@ -75,7 +75,7 @@ def with_runtime_application_credentials(kwargs: dict[str, Any], runtime_paths: 
     """Return a Vertex model's settings with the runtime ``GOOGLE_APPLICATION_CREDENTIALS`` in their ``client_params``.
 
     Credentials ``client_params`` already set win, and without the variable the settings come back unchanged, so the
-    SDK runs its own Application Default Credentials discovery.
+    route falls back to Application Default Credentials.
     """
     client_params = kwargs.get("client_params") or {}
     credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
