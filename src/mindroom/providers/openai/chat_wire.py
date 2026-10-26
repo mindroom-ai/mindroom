@@ -1,9 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Chat Completions request bodies and stream parsing for every OpenAI-compatible route.
+"""Chat Completions request bodies and response parsing for every OpenAI-compatible route.
 
 Three dialects shape the request bodies: ``openai`` (OpenAI, Azure, OpenRouter, DeepSeek, Z.ai, llama.cpp,
 Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
-call from canonical messages and fold SDK chunks into one finished turn.
+call from canonical messages and fold SDK chunks, or Groq's whole structured reply, into one finished turn.
 """
 
 from __future__ import annotations
