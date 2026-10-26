@@ -31,6 +31,7 @@ from mindroom.llm.messages import Message, ToolResultView, tool_result_view
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
+from mindroom.model_defaults import CLAUDE_PREFIX_CHECKED_THINKING_MODELS
 from mindroom.providers.claude_wire_blocks import as_dict
 
 if TYPE_CHECKING:
@@ -76,9 +77,6 @@ _NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
         "claude-opus-4-0",
     },
 )
-# Models whose API checks each replayed thinking block against the system prompt, tools, and messages sent before it
-# (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join this set.
-_PREFIX_CHECKED_THINKING_PREFIXES = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 _TRAILING_USER_MESSAGE = "continue"
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
@@ -145,7 +143,7 @@ def supports_structured_outputs(model_id: str) -> bool:
 
 def checks_thinking_prefix(model_id: str) -> bool:
     """Return whether the API rejects or drops this model's replayed thinking once the context before it changed."""
-    return _core_model_id(model_id).startswith(_PREFIX_CHECKED_THINKING_PREFIXES)
+    return _core_model_id(model_id).startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
