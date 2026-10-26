@@ -39,18 +39,12 @@ _SEARCH_DOCS = ToolSpec(
     description="Search the engineering docs for a matching answer.",
     parameters=_SEARCH_PARAMETERS,
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 _EXPORT_NOTES = ToolSpec(
     name="export_notes",
     description="Export the current working notes as markdown.",
     parameters=_EXPORT_PARAMETERS,
     strict=True,
-    requires_confirmation=True,
-    external_execution=None,
-    approval_type=None,
 )
 
 
@@ -78,7 +72,6 @@ def test_static_estimate_counts_each_offered_tool_definition_as_the_request_send
             "description": "Export the current working notes as markdown.",
             "parameters": _EXPORT_PARAMETERS,
             "strict": True,
-            "requires_confirmation": True,
         },
     ]
     assert estimator.non_prompt_tokens() == (

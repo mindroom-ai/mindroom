@@ -26,18 +26,12 @@ _TOOLS = [
         description="First.",
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
     ToolSpec(
         name="second",
         description="Second.",
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
 ]
 _USAGE = {

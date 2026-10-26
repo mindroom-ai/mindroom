@@ -48,7 +48,7 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `family`, `scenario` | The provider route and scenario names. |
 | `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
 | `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter sends or parses. |
-| `input.tools` | The request's `ToolSpec` definitions, every field present and null where the tool sets none; the capture's `Function.to_dict()` dicts left out unset approval flags, which Agno read as false. |
+| `input.tools` | The request's `ToolSpec` definitions (`name`, `description`, `parameters`, `strict`), every field present and null where the tool sets none. |
 | `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
 | `input.output_schema` | `null`, or the request's output schema as `{"model": "module:Class", "json_schema": ...}`; the route renders it as its structured-output support asks, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
@@ -108,7 +108,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind the production `dynamic_tools` functions `tool_search`/`call_tool`, then a deferred call replayed. |
 | `output_limit_stop` | A reply the output limit cut off mid-sentence, as a compaction summary can be: Claude `max_tokens`, Chat and Ollama `length`, Gemini `MAX_TOKENS`, or an incomplete Responses response. |
 | `output_limit_stop_tool_call` | A streamed reply the output limit cut off inside a tool call's arguments JSON. |
-| `approval_gated_tools` | A function the approval policy gates (`requires_confirmation`, `approval_type` `mindroom_policy`) and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the reply calls the gated one. |
+| `approval_gated_tools` | A function the approval policy gates and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the gating stays with the functions, so their definitions go out like the ungated one's, and the reply calls the gated one. |
 | `tool_job_wait_parameter` | A turn whose calls can become tool jobs: the managed function gains the optional `background_after` parameter, the other function keeps its schema, and the reply passes `background_after`. |
 | `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
 | `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined. |

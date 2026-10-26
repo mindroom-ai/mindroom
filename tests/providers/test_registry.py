@@ -848,9 +848,6 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
             description="Weather.",
             parameters=_SCHEMA,
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
 

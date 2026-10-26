@@ -59,9 +59,6 @@ DELEGATION_TOOLS: Mapping[TeamMode, ToolSpec] = {
             "additionalProperties": False,
         },
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
     TeamMode.COLLABORATE: ToolSpec(
         name="delegate_task_to_members",
@@ -82,9 +79,6 @@ DELEGATION_TOOLS: Mapping[TeamMode, ToolSpec] = {
             "additionalProperties": False,
         },
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
 }
 

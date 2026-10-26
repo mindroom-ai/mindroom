@@ -565,9 +565,6 @@ def _tool(name: str) -> ToolSpec:
         description=name,
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
 

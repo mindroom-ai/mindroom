@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -194,6 +195,7 @@ def _what_the_loop_reads(function: Function) -> tuple[object, ...]:
     adapted = adapt_function(function)
     return (
         adapted.definition(),
+        (adapted.requires_confirmation, adapted.external_execution, adapted.approval_type),
         adapted.stop_after_call,
         adapted.external_execution_silent,
         adapted.entrypoint_processed,
@@ -291,7 +293,7 @@ def test_a_toolkit_s_instructions_reach_the_prompt_unless_a_vendor_toolkit_opts_
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:
-    """``definition()`` carries every field Agno serialized into a tool definition, with each tri-state kept."""
+    """``definition()`` carries the fields a provider sends, with each tri-state kept; approval stays on the function."""
     [function] = adapt_toolkit(Toolkit(name="probes", tools=[probes.probe_choice])).functions
     [gated] = adapt_toolkit(
         Toolkit(
@@ -309,21 +311,15 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
         description="Record a constrained choice.",
         parameters=function.parameters,
         strict=None,
-        requires_confirmation=False,
-        external_execution=False,
-        approval_type=None,
     )
     assert (gated.requires_confirmation, gated.external_execution) == (True, True)
-    assert (gated.definition().requires_confirmation, gated.definition().external_execution) == (True, True)
-    # Agno omitted these from the wire; the definition keeps None so a provider adapter can omit them too.
+    assert gated.definition() == replace(function.definition(), name=gated.name)
+    # The definition keeps None for a field the tool never set, so a provider adapter can omit it.
     assert bare.definition() == ToolSpec(
         name="bare",
         description=None,
         parameters=bare.parameters,
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
 

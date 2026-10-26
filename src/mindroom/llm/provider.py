@@ -59,19 +59,14 @@ class Capabilities:
 class ToolSpec:
     """A model-facing tool definition; ``parameters`` is the final JSON schema.
 
-    ``description`` and the flags are None when the tool never set them, so wires that send the field inside each
-    function definition omit it. The approval flags are not policy here.
+    ``description`` and ``strict`` are None when the tool never set them, so wires that send the field inside each
+    function definition omit it.
     """
 
     name: str
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None
-    # TODO(simplify): the approval flags exist only so OpenAI-family wires send them in each function definition.
-    # Stop sending them and drop them here. Models would notice: tool definitions change once. (#3075)
-    requires_confirmation: bool | None
-    external_execution: bool | None
-    approval_type: str | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

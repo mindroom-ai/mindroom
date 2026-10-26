@@ -83,9 +83,6 @@ WEATHER = ToolSpec(
     description="Return the forecast.",
     parameters={"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
@@ -1613,9 +1610,6 @@ async def test_ollama_tools_are_sorted_and_leave_out_empty_descriptions(tmp_path
         description=None,
         parameters={"type": "object", "properties": {}},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
     request, _ = await run_adapter(OLLAMA, _request(tools=[WEATHER, quiet]), tmp_path, ollama_ndjson(_ollama_done()))

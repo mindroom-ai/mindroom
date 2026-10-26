@@ -75,20 +75,9 @@ class ToolFunction:
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
 
-    # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire.
-    # Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
-    # Models would notice: Chat and Responses requests stop sending them for the tools that set them (#3075).
     def definition(self) -> ToolSpec:
-        """Return the model-facing definition a provider adapter formats, with the flags the tool never set as None."""
-        return ToolSpec(
-            name=self.name,
-            description=self.description,
-            parameters=self.parameters,
-            strict=self.strict,
-            requires_confirmation=self.requires_confirmation,
-            external_execution=self.external_execution,
-            approval_type=self.approval_type,
-        )
+        """Return the model-facing definition a provider adapter formats; a field the tool never set is None."""
+        return ToolSpec(name=self.name, description=self.description, parameters=self.parameters, strict=self.strict)
 
     def planned_execution(self, call_id: str, arguments: dict[str, Any] | None) -> ToolExecution:
         """Return the execution a call of this function starts as, before it runs.

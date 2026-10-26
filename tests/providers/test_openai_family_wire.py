@@ -1162,9 +1162,6 @@ async def test_a_temperature_override_is_sent_as_the_models_temperature(
         description="Forecast.",
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
     await _turn(built, ModelRequest(messages=[_user()], tools=[tool], overrides=RequestOverrides(temperature=0.2)))
@@ -1188,9 +1185,6 @@ _DECISION_TOOL = ToolSpec(
     description="Forecast.",
     parameters={"type": "object"},
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 _DECISION_ROUTES = {
     "openai-chat": (_OPENAI_CHAT, "text"),
@@ -1518,9 +1512,6 @@ async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_pat
             "properties": {"label": {"type": ["string", "null"]}, "limit": {"type": "integer"}},
         },
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
     built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()))
 

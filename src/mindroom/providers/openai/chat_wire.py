@@ -199,17 +199,12 @@ def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSe
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
-    """Return the function definition OpenAI-family wires send: its set fields, always in this order."""
+    """Return the function definition OpenAI-family wires send: its set fields, in the order the API documents them."""
     fields = {
         "name": tool.name,
         "description": tool.description,
         "parameters": deepcopy(dict(tool.parameters)),
         "strict": tool.strict,
-        # TODO(simplify): Tool definitions still send Agno's approval flags, which no OpenAI-family API reads. Send
-        # only the name, description, parameters, and strict. Provider request bodies and prompt caches (#3075).
-        "requires_confirmation": tool.requires_confirmation,
-        "external_execution": tool.external_execution,
-        "approval_type": tool.approval_type,
     }
     return {key: value for key, value in fields.items() if value is not None}
 

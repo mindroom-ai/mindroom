@@ -137,9 +137,6 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
             description="Forecast.",
             parameters={"type": "object", "properties": {}},
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     streamed = await claude_events(provider, ModelRequest(messages=_user(), tools=tools))
@@ -583,9 +580,6 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
             description="Pick.",
             parameters={"type": "object", "properties": {}},
             strict=True,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     completed = await claude_turn(
@@ -648,9 +642,6 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
             description="Pick.",
             parameters={"type": "object", "properties": {}},
             strict=True,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, output_schema=_Answer))
@@ -692,27 +683,18 @@ async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
             description=None,
             parameters=schema,
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
         ToolSpec(
             name="gated",
             description="Gated.",
             parameters=schema,
             strict=True,
-            requires_confirmation=True,
-            external_execution=True,
-            approval_type="mindroom_policy",
         ),
         ToolSpec(
             name="plain",
             description="Plain.",
             parameters=schema,
             strict=False,
-            requires_confirmation=False,
-            external_execution=False,
-            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
@@ -753,9 +735,6 @@ async def test_request_tool_choice_replaces_an_authored_one(
             description="Forecast.",
             parameters={"type": "object", "properties": {}},
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice))
@@ -800,9 +779,6 @@ async def test_claude_native_tools_cannot_execute_during_decision(tmp_path: Path
                 description="Look it up.",
                 parameters={"type": "object", "properties": {}},
                 strict=None,
-                requires_confirmation=None,
-                external_execution=None,
-                approval_type=None,
             ),
         ]
     wire = Wire(sse_reply([{"type": "text", "text": "{}"}]))

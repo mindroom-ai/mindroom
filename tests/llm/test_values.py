@@ -423,9 +423,6 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
                 description="d",
                 parameters={"type": "object"},
                 strict=None,
-                requires_confirmation=None,
-                external_execution=None,
-                approval_type=None,
             ),
         ],
     )
