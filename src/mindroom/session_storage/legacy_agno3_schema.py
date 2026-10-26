@@ -78,7 +78,7 @@ class AgnoTableNames(TableNames):
 # Legacy format: Agno 3's fourteen-column sessions table and its runs table (`agno_runs` for the storage name `agno`)
 # with their indexes, the summary-row and removed-run tables, and the usage ledger; a database an older release wrote
 # lacks some of them.
-# Last legacy release: v2026.10.567; replacement: the next release, `log_schema_sql`.
+# Last legacy release: v2026.10.569; replacement: the next release, `log_schema_sql`.
 # Handling: The conversion's Agno-era steps add the tables they introduced, and the conversion then creates any the
 # database still lacks, empty, so every step reads its rows from a table that exists; it drops them once copied.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_database_missing_an_agno_table_converts.

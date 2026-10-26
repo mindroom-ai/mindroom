@@ -333,7 +333,7 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # LEGACY_COMPAT: Agno 3 run rows, one `run_data` JSON document per run.
 # Legacy format: `<s>_runs` (`agno_runs` for the storage name `agno`) rows ordered by `run_index`, each run's messages,
 # tools, and a paused team run's embedded `member_responses` inside `run_data`; workflow rows and members of members.
-# Last legacy release: run rows, v2026.10.567; replacement: the next release, `<s>_log_runs` rows with their
+# Last legacy release: run rows, v2026.10.569; replacement: the next release, `<s>_log_runs` rows with their
 # `<s>_log_tools` rows.
 # Workflow rows and members of members have no known MindRoom writer (unversioned external input).
 # Handling: Per session, each agent or team row becomes a `<s>_log_runs` row with the next `seq` in the order a load
@@ -534,7 +534,7 @@ def _write_run(
 # LEGACY_COMPAT: Run messages stored as a list inside an Agno 3 run row.
 # Legacy format: `run_data.messages`, which may hold history copies (CLI checkpoints), system messages of runs that
 # are not paused, and one message id twice.
-# Last legacy release: history copies, v2026.10.567; replacement: the next release, one
+# Last legacy release: history copies, v2026.10.569; replacement: the next release, one
 # `<s>_log_messages` row each. System messages of runs that are not paused: no single verified cutoff. v2026.5.250
 # (#1013) stopped the reply path's agent and team-scope stores writing them, but through v2026.10.498 an agent built
 # without such a store opened an unstripped one (`agents.py` `_open_agent_session_storage`), and v2026.10.499 (#3022)
@@ -582,7 +582,7 @@ def _current_delegation_snapshot(path: Path, run_id: str, metadata: dict[str, An
 # LEGACY_COMPAT: Agno-layout summary rows positioned by `after_run_index`.
 # Legacy format: `<s>_summaries` rows keyed `(after_run_index, id)` against the runs' `run_index`, with `summary_model`,
 # `segment_run_id`, and a mid-turn fold's `segment` payload; legacy rows at -1 and barriers without text.
-# Last legacy release: v2026.10.567; replacement: the next release, `<s>_log_summaries` rows.
+# Last legacy release: v2026.10.569; replacement: the next release, `<s>_log_summaries` rows.
 # Handling: Each row keeps its id, text, legacy flag, event sets, and time; `through` is the largest `seq` of a run
 # sorted at or before its `after_run_index`, else 0, which keeps every run-to-row and row-to-row order; a fold's row
 # names its run in `fold_run_id` and keeps the answered and seen ids of the segment's metadata as its provenance.
@@ -634,7 +634,7 @@ def _convert_summary(
 # LEGACY_COMPAT: Mid-turn fold segments on Agno-layout summary rows.
 # Legacy format: A fold row's `segment`: the running run's metadata, the folded message dicts, its tool executions, and
 # the member runs ended so far; a load stripped the folded messages from the run's stored copy.
-# Last legacy release: v2026.10.567; replacement: the next release, `folded_by` on message and run rows.
+# Last legacy release: v2026.10.569; replacement: the next release, `folded_by` on message and run rows.
 # Handling: In row order, each segment message the run's row lacks becomes a message row folded by that row, and one it
 # holds gains the flag; a tool execution no folded message names becomes a folded tool-result message with its call
 # id; the segment's members gain the flag on their rows, so the run's folded tool calls stay what they were. A segment
@@ -706,7 +706,7 @@ def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> R
 # Legacy format: `mindroom_pending_compaction_scope_keys` in a session row's `session_data.session_state`: the keys of
 # the scopes a `compact_context` call asked to compact, written beside the metadata force flag, which each scope's next
 # run read into that flag.
-# Last legacy release: v2026.10.567; replacement: the next release, the metadata force flag alone.
+# Last legacy release: v2026.10.569; replacement: the next release, the metadata force flag alone.
 # Handling: Each listed scope gets the force flag in the session's metadata, as its next run would have set it, and the
 # key leaves the session state; an entry that names no scope requests nothing. The row's update time stays.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_queued_compaction_request_becomes_the_metadata_flag,
@@ -750,7 +750,7 @@ def _requested_scopes(scope_keys: object) -> list[HistoryScope]:
 
 # LEGACY_COMPAT: The Agno-layout removed-run table.
 # Legacy format: `<s>_removed_runs`, the ids of runs a cut removed, which a late save must not write again.
-# Last legacy release: v2026.10.567; replacement: the next release, `<s>_log_removed`.
+# Last legacy release: v2026.10.569; replacement: the next release, `<s>_log_removed`.
 # Handling: Every row of a stored session is copied, so a late save of a removed run still writes nothing; an id that is
 # not UTF-8 is copied as the conversion reads it, with replacement characters, and two such ids can read alike.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_removed_runs_stay_removed and
@@ -769,7 +769,7 @@ def _copy_removed(connection: sqlite3.Connection, names: AgnoTableNames) -> None
 # LEGACY_COMPAT: The Agno-layout run, summary-row, and removed-run tables, and Agno's own version table.
 # Legacy format: `<s>_runs` (or `agno_runs`), `<s>_summaries`, and `<s>_removed_runs` with their indexes, and
 # `agno_schema_versions`, where Agno recorded the layout version it created each table with.
-# Last legacy release: v2026.10.567; replacement: the next release, the `<s>_log_*` tables.
+# Last legacy release: v2026.10.569; replacement: the next release, the `<s>_log_*` tables.
 # Handling: Dropped once copied, in the conversion's transaction; the backup keeps them.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
 def _drop_agno_tables(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
@@ -781,7 +781,7 @@ def _drop_agno_tables(connection: sqlite3.Connection, names: AgnoTableNames) -> 
 # LEGACY_COMPAT: Sessions-table columns only Agno wrote.
 # Legacy format: `workflow_id`, `agent_data`, `team_data`, `workflow_data`, and `summary` on every Agno sessions table,
 # Agno 2's cleared `runs` blob column, and the unused `created_at` index.
-# Last legacy release: v2026.10.567; replacement: the next release, the nine columns storage v2 keeps.
+# Last legacy release: v2026.10.569; replacement: the next release, the nine columns storage v2 keeps.
 # Handling: Every column outside `SESSION_COLUMNS` is dropped, and the index, so an older release started on the
 # converted file finds its required columns missing and archives the sessions directory instead of writing into it.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
