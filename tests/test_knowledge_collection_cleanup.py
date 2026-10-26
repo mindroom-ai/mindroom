@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.candidate_checkpoint import CandidateCheckpoint, save_candidate_checkpoint
 from mindroom.knowledge.collections import (
     CollectionSpace,
     cleanup_superseded_collections,
@@ -17,8 +16,6 @@ from mindroom.knowledge.collections import (
     open_collection,
 )
 from mindroom.knowledge.index_metadata import save_published_index_state, state_for_publication
-from mindroom.knowledge.indexing_config import knowledge_storage_directory
-from mindroom.knowledge.legacy_chroma_storage import remove_legacy_chroma_storage
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.registry import get_published_index
 from mindroom.knowledge.vector_store import list_collection_names
@@ -126,46 +123,3 @@ async def test_a_chroma_era_index_rebuilds_and_its_files_go_only_after_publicati
     )
     assert not (storage / "chroma.sqlite3").exists()
     assert not segment.exists()
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("patch_vector_store")
-async def test_a_checkpoint_naming_a_foreign_collection_is_dropped_without_touching_it(tmp_path: Path) -> None:
-    """A forged checkpoint cannot get a file this base does not own opened or deleted."""
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    (docs / "guide.md").write_text("Travel policy.", encoding="utf-8")
-    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
-    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
-    sentinel = manager._base_storage_path / "script_runs.sqlite3"
-    sentinel.write_bytes(b"primary data")
-    save_candidate_checkpoint(
-        manager._base_storage_path,
-        CandidateCheckpoint(collection="script_runs", settings=replace(manager._indexing_settings, chunk_size="1")),
-    )
-
-    assert (await manager.reindex_all()).published
-
-    assert sentinel.read_bytes() == b"primary data"
-    with pytest.raises(ValueError, match="does not belong"):
-        open_collection(manager._collections, "script_runs")
-
-
-def test_a_linked_index_directory_is_refused(tmp_path: Path) -> None:
-    """An index directory replaced by a link is neither resolved through nor emptied of Chroma files."""
-    elsewhere = tmp_path / "agent_state" / "chroma"
-    elsewhere.mkdir(parents=True)
-    (elsewhere / "chroma.sqlite3").write_bytes(b"mem0")
-    segment = elsewhere / str(uuid.uuid4())
-    segment.mkdir()
-    storage_root = tmp_path / "storage"
-    index_directory = knowledge_storage_directory(storage_root, "docs", tmp_path / "docs")
-    index_directory.parent.mkdir(parents=True)
-    index_directory.symlink_to(elsewhere, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="authorized root"):
-        knowledge_storage_directory(storage_root, "docs", tmp_path / "docs")
-    remove_legacy_chroma_storage(index_directory, base_id="docs")
-
-    assert (elsewhere / "chroma.sqlite3").read_bytes() == b"mem0"
-    assert segment.is_dir()

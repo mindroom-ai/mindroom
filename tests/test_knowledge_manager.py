@@ -7755,7 +7755,7 @@ def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config
 
 @pytest.mark.asyncio
 async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path) -> None:
-    """Requester-local private knowledge must resolve to separate physical index bindings."""
+    """Requester-local private knowledge gets separate indexes, kept in primary-only storage outside private roots."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
@@ -7812,6 +7812,9 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
     ).knowledge
 
     assert key_a != key_b
+    index_a, index_b = published_index_storage_path(key_a), published_index_storage_path(key_b)
+    assert index_a != index_b
+    assert index_a.parent == index_b.parent == runtime_paths.storage_root.resolve() / "knowledge_db"
     assert knowledge_a is not None
     assert knowledge_b is not None
     assert [document.content for document in await knowledge_a.asearch("private", 5)] == ["alice private note"]

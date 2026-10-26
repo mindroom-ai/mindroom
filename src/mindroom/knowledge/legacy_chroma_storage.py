@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import os
 import shutil
-import stat
 import uuid
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = get_logger(__name__)
 
@@ -24,29 +24,22 @@ _CHROMA_FILES = frozenset({_CHROMA_FILE, f"{_CHROMA_FILE}-journal", f"{_CHROMA_F
 
 
 def remove_legacy_chroma_storage(storage: Path, *, base_id: str) -> None:
-    """Remove the Chroma database and segment directories one base's index directory still holds.
-
-    The directory is reached by a no-follow walk from the filesystem root, so a directory a worker swapped for a link,
-    such as one pointing at a Mem0 Chroma store, is refused rather than emptied.
-    """
+    """Remove the Chroma database and segment directories one base's index directory still holds."""
     removed = 0
     try:
-        with open_directory_within_root(Path(storage.anchor), storage.relative_to(storage.anchor)) as directory:
-            for name in os.listdir(directory):  # noqa: PTH208 - lists the pinned descriptor, not a path
-                try:
-                    if name in _CHROMA_FILES:
-                        os.unlink(name, dir_fd=directory)
-                    elif str(uuid.UUID(name)) == name and stat.S_ISDIR(
-                        os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode,
-                    ):
-                        shutil.rmtree(name, dir_fd=directory)
-                    else:
-                        continue
-                except (OSError, ValueError):
-                    continue
-                removed += 1
+        entries = tuple(storage.iterdir())
     except OSError:
-        logger.warning("Skipped legacy Chroma knowledge storage cleanup", base_id=base_id, exc_info=True)
         return
+    for path in entries:
+        try:
+            if path.name in _CHROMA_FILES:
+                path.unlink()
+            elif not path.is_symlink() and path.is_dir() and str(uuid.UUID(path.name)) == path.name:
+                shutil.rmtree(path)
+            else:
+                continue
+        except (OSError, ValueError):
+            continue
+        removed += 1
     if removed:
         logger.info("Removed legacy Chroma knowledge storage", base_id=base_id, entries=removed)

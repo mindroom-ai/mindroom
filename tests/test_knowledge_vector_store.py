@@ -7,8 +7,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -20,9 +21,6 @@ from mindroom.knowledge.vector_store import (
     _CollectionNotFoundError,
     list_collection_names,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _row(row_id: str, source_path: str, document: str, embedding: list[float], **metadata: object) -> StoredRow:
@@ -287,19 +285,6 @@ def test_collection_names_must_be_one_plain_component(tmp_path: Path, name: str)
         KnowledgeCollection(path=tmp_path, name=name)
 
 
-def test_a_linked_collection_file_is_refused(collection: KnowledgeCollection, tmp_path: Path) -> None:
-    """A collection file replaced by a link is not followed into whatever database it names."""
-    target = KnowledgeCollection(path=tmp_path / "other", name="target")
-    target.reset()
-    collection.delete()
-    collection.file.symlink_to(target.file)
-
-    with pytest.raises(ValueError, match="is a link"):
-        collection.has_rows()
-    collection.delete()
-    assert target.exists()
-
-
 def test_top_k_keeps_the_earliest_positions_among_ties_at_the_cutoff() -> None:
     """Equal scores at the cutoff are taken in position order, so tied chunks rank the same way every time."""
     scores = np.array([0.5, 0.9, 0.5, 0.5, 0.9, 0.5], dtype=np.float32)
@@ -370,3 +355,30 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
         small.search([1.0, 0.0], limit=1)
 
     assert len(loads) == 2
+
+
+def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matrices of deleted or rewritten files leave the cache, so a stale large one cannot crowd out the live index."""
+    monkeypatch.setattr(vector_store_module, "_MATRIX_CACHE_BYTES", 1)
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    old = KnowledgeCollection(path=tmp_path, name="old")
+    old.reset()
+    old.write_source_rows("a.md", [_row(f"o{index}", "a.md", "old", [1.0, float(index)]) for index in range(40)])
+    old.search([1.0, 0.0], limit=1)
+    old.delete()
+    live = KnowledgeCollection(path=tmp_path, name="live")
+    live.reset()
+    live.write_source_rows("a.md", [_row("l1", "a.md", "live", [1.0, 0.0])])
+    loads: list[str] = []
+    real_load = vector_store_module._load_vector_index
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection: loads.append("load") or real_load(connection),
+    )
+
+    for _search in range(3):
+        assert live.search([1.0, 0.0], limit=1)[0].content == "live"
+
+    assert loads == ["load"]
+    assert [Path(key[0]).name for key in vector_store_module._index_cache] == ["live.sqlite3"]

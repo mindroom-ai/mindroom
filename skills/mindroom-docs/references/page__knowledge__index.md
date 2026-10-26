@@ -510,12 +510,14 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
 Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
 Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
-For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
+Private agent knowledge is indexed there too, outside the private roots that sandboxed workers can write; its hash comes from the requester's own knowledge folder, so each requester gets a separate index.
+Removing a private instance leaves its index behind.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 Indexes that earlier MindRoom versions stored in Chroma are rebuilt once after upgrading, which embeds every file again.
 A base cannot be searched until its rebuild publishes, so a large corpus or a slow local embedder can leave it unavailable for a while.
 The base's old `chroma.sqlite3` and segment directories are removed once the new index is published.
+Private agent indexes used to live in `<private root>/knowledge_db/`; MindRoom no longer reads that directory, so it can be deleted after upgrading.
 
 ## Dashboard and API
 

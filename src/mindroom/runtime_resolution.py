@@ -384,7 +384,9 @@ def resolve_knowledge_binding(
 
     return ResolvedKnowledgeBinding(
         base_id=base_id,
-        storage_root=agent_runtime.state_root,
+        # Indexes live in the primary-only storage root, as knowledge Git directories do: the agent's state root is
+        # writable by its static runner. The workspace path keys the index, so each requester still gets their own.
+        storage_root=runtime_paths.storage_root.expanduser().resolve(),
         knowledge_path=resolve_workspace_relative_path(
             agent_runtime.workspace.root,
             base_config.path,

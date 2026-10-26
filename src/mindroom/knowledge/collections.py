@@ -70,12 +70,6 @@ class CollectionSpace:
         """Return the published collection name this base's identity owns."""
         return _collection_name_for_base(self.base_id, self.knowledge_path)
 
-    def owns(self, collection_name: str) -> bool:
-        """Return whether a collection name carries this base's identity: its default name or candidate prefix."""
-        return collection_name == self.default_collection or collection_name.startswith(
-            f"{self.default_collection}_candidate_",
-        )
-
 
 @dataclass(frozen=True)
 class KnowledgeChunk:
@@ -99,14 +93,7 @@ def candidate_collection_name(space: CollectionSpace) -> str:
 
 
 def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCollection:
-    """Return a handle on one collection this base owns in its storage directory; nothing is opened yet.
-
-    Names come from metadata a worker sharing the storage root can write, and even a directory swapped for a link
-    then only exposes files named for this base, never another file a forged name would choose.
-    """
-    if not space.owns(collection_name):
-        message = f"Knowledge collection {collection_name!r} does not belong to base {space.base_id!r}"
-        raise ValueError(message)
+    """Return a handle on one collection in this base's storage directory; nothing is opened yet."""
     return KnowledgeCollection(path=space.storage_path, name=collection_name)
 
 

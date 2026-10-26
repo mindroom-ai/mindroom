@@ -15,13 +15,13 @@ import threading
 from collections import OrderedDict
 from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY, SearchHit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-    from pathlib import Path
 
     import numpy as np
 
@@ -93,11 +93,7 @@ class KnowledgeCollection:
     name: str
 
     def __post_init__(self) -> None:
-        """Refuse a name that is not one plain file-name component.
-
-        Names come from metadata a worker sharing the storage root can write, so a name must never reach a path
-        outside the base's directory.
-        """
+        """Refuse a name that is not one plain file-name component, so a name read from metadata stays a file name."""
         if not _COLLECTION_NAME.fullmatch(self.name):
             message = f"Invalid knowledge collection name: {self.name!r}"
             raise ValueError(message)
@@ -233,9 +229,6 @@ class KnowledgeCollection:
         Only published files, which are never mid-transaction, open read-only. Anything else opens read-write, so
         SQLite can roll back the journal a refresh killed mid-write left behind instead of refusing to read.
         """
-        if self.file.is_symlink():
-            message = f"Knowledge collection {self.name!r} is a link, not a collection file"
-            raise ValueError(message)
         if not self.file.is_file():
             message = f"Knowledge collection {self.name!r} does not exist"
             raise _CollectionNotFoundError(message)
@@ -419,10 +412,21 @@ _index_cache_lock = threading.Lock()
 _index_load_lock = threading.Lock()
 
 
+def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
+    """Return the cache key of the file's current version, or None once the file is gone."""
+    try:
+        status = file.stat()
+    except FileNotFoundError:
+        return None
+    return (str(file), status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
+
+
 def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
     """Return the file's vectors, loading them once per file version and keeping recent ones within the cache budget."""
-    status = file.stat()
-    key = (str(file), status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
+    key = _file_version(file)
+    if key is None:
+        message = f"Knowledge collection file {file} disappeared"
+        raise FileNotFoundError(message)
     with _index_cache_lock:
         index = _index_cache.get(key)
         if index is not None:
@@ -435,6 +439,9 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
             return index
         index = _load_vector_index(connection)
         with _index_cache_lock:
+            # Superseded publications are deleted and republished ones are new files; their matrices go first.
+            for stale in [cached for cached in _index_cache if _file_version(Path(cached[0])) != cached]:
+                del _index_cache[stale]
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
             # search, even when searches alternate between it and smaller ones.

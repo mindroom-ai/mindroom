@@ -75,7 +75,7 @@ from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     indexing_settings_key,
     knowledge_git_dir,
-    knowledge_storage_directory,
+    storage_key_for_base,
 )
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
@@ -546,7 +546,9 @@ class KnowledgeManager:
         self.storage_path = self.storage_path.resolve()
         _ensure_knowledge_directory_ready(self.knowledge_path)
         self._set_settings(self.config, self.runtime_paths, self.storage_path, self.knowledge_path)
-        self._base_storage_path = knowledge_storage_directory(self.storage_path, self.base_id, self.knowledge_path)
+        self._base_storage_path = (
+            self.storage_path / "knowledge_db" / storage_key_for_base(self.base_id, self.knowledge_path)
+        ).resolve()
         self._base_storage_path.mkdir(parents=True, exist_ok=True)
         self._indexing_settings_path = self._base_storage_path / "indexing_settings.json"
         self.git_source = GitKnowledgeSource(
@@ -1377,25 +1379,9 @@ class KnowledgeManager:
             resumed=True,
         )
 
-    async def _load_owned_candidate_checkpoint(self) -> CandidateCheckpoint | None:
-        """Load the candidate checkpoint, dropping one that names a collection this base does not own.
-
-        Checkpoints sit in storage a worker may write, so a forged one must never get a collection opened or deleted.
-        """
-        checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
-        if checkpoint is None or self._collections.owns(checkpoint.collection):
-            return checkpoint
-        logger.warning(
-            "Ignoring knowledge candidate checkpoint for a collection this base does not own",
-            base_id=self.base_id,
-            collection=checkpoint.collection,
-        )
-        await asyncio.to_thread(delete_candidate_checkpoint, self._base_storage_path)
-        return None
-
     async def _open_candidate_run(self, *, force_reindex: bool = False) -> _CandidateRun:
         """Resolve the durable candidate to continue, or start one clean candidate."""
-        checkpoint = await self._load_owned_candidate_checkpoint()
+        checkpoint = await asyncio.to_thread(load_candidate_checkpoint, self._base_storage_path)
         persisted_state, cleanup_is_safe = await asyncio.to_thread(self._published_state_and_cleanup_safety)
         # A collection name is only ever recorded by a publication, so whatever
         # the state names is the live index whatever its current status says.

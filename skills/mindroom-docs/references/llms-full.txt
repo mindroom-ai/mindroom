@@ -3987,12 +3987,14 @@ See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder field
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
 Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
 Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
-For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
+Private agent knowledge is indexed there too, outside the private roots that sandboxed workers can write; its hash comes from the requester's own knowledge folder, so each requester gets a separate index.
+Removing a private instance leaves its index behind.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 Indexes that earlier MindRoom versions stored in Chroma are rebuilt once after upgrading, which embeds every file again.
 A base cannot be searched until its rebuild publishes, so a large corpus or a slow local embedder can leave it unavailable for a while.
 The base's old `chroma.sqlite3` and segment directories are removed once the new index is published.
+Private agent indexes used to live in `<private root>/knowledge_db/`; MindRoom no longer reads that directory, so it can be deleted after upgrading.
 
 ## Dashboard and API
 
@@ -15473,7 +15475,7 @@ The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
-Private-instance knowledge indexes, with their metadata and candidate checkpoints, live in `private_instances`, which that sidecar can write, so the primary refuses an index directory reached through a link, opens, writes, and deletes only collection files named for that base, refuses a collection file that is a link, and removes legacy Chroma files only from a directory pinned by a no-follow walk; forged index metadata can break that requester's knowledge search, but cannot make the primary delete or overwrite a file that is not one of that base's collection files.
+Knowledge indexes, including private agents' indexes, their metadata, and candidate checkpoints, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
 When the broker is enabled, the worker-routed `shell` and `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.

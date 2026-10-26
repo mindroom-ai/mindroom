@@ -6135,7 +6135,7 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.legacy_chroma_storage"
-depends_on = ["mindroom.logging_config", "mindroom.path_confinement"]
+depends_on = ["mindroom.logging_config"]
 visibility = ["mindroom.knowledge.collections"]
 
 [[modules]]
@@ -6195,7 +6195,6 @@ path = "mindroom.knowledge.indexing_config"
 depends_on = [
     "mindroom.embeddings.signatures",
     "mindroom.knowledge.legacy_metadata",
-    "mindroom.path_confinement",
     "mindroom.knowledge.redaction",
 ]
 
