@@ -43,7 +43,13 @@ from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    seed_session,
+    unstored_team_scope_context,
+)
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
 from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
@@ -98,25 +104,13 @@ def _build_pair(
         active_model_names=None,
     )
     assert members.failed_agent_names == []
-    if scope_context is None:
-        storage = MagicMock()
-        scope_context = ScopeSessionContext(
-            scope=resolve_bound_team_scope(
-                member_names=["zeta", "alpha"],
-                config=config,
-                team_name=configured_team_name,
-            ),
-            storage=storage,
-            session=None,
-            session_id="session-1",
-            storage_factory=lambda: storage,
-        )
     return build_team_spec(
         members=members,
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime_paths,
-        scope_context=scope_context,
+        scope_context=scope_context
+        or unstored_team_scope_context(config, ["zeta", "alpha"], team_name=configured_team_name),
         execution_identity=None,
         model_name="default",
         configured_team_name=configured_team_name,
