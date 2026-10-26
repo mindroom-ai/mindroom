@@ -1,4 +1,4 @@
-"""Tests for knowledge indexing-config identity and probe resource ownership.
+"""Tests for knowledge indexing-config identity.
 
 Storage keys and indexing-settings metadata are persisted cache/identity keys
 for vector collections, so their stability is the invariant pinned here.
@@ -9,69 +9,12 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from typing import TYPE_CHECKING
 
-import pytest
-from chromadb.api import ClientAPI
-from chromadb.api.client import Client
-from chromadb.config import Settings
+from mindroom.knowledge.indexing_config import IndexingSettings, storage_key_for_base
 
-from mindroom.knowledge.chroma_client import KnowledgeCollection
-from mindroom.knowledge.indexing_config import IndexingSettings, chroma_collection_exists, storage_key_for_base
-
-
-def test_chroma_client_rejects_client_without_concrete_lifecycle(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unsupported provider client must fail at the typed ownership boundary."""
-    client = Mock(spec_set=ClientAPI)
-    monkeypatch.setattr("mindroom.knowledge.chroma_client.chromadb.PersistentClient", lambda **_kwargs: client)
-    collection = KnowledgeCollection(path=str(tmp_path), name="collection")
-
-    with pytest.raises(TypeError, match="Expected a concrete Chroma client"):
-        _ = collection.client
-
-
-def _assert_probe_storage_released(storage_path: Path) -> None:
-    # A fresh client may change settings only once every previous client has
-    # closed. This detects leaked Chroma systems through its public API.
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage_path), allow_reset=True)) as client:
-        assert client.count_collections() == 1
-
-
-@pytest.mark.parametrize(("collection_name", "expected"), [("present", True), ("missing", False)])
-def test_collection_probe_releases_storage(tmp_path: Path, collection_name: str, expected: bool) -> None:
-    """Repeated found/missing probes must leave no unowned persistent client behind."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as client:
-        client.create_collection("present")
-
-    for _ in range(3):
-        assert chroma_collection_exists(tmp_path, collection_name) is expected
-
-    _assert_probe_storage_released(tmp_path)
-
-
-def test_collection_probe_keeps_retained_reader_queryable(tmp_path: Path) -> None:
-    """Closing a probe must preserve another client's shared system and leave no extra owner."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path))) as reader:
-        collection = reader.create_collection("present")
-        collection.add(ids=["document"], embeddings=[[1.0, 0.0]])
-
-        assert chroma_collection_exists(tmp_path, "present") is True
-        assert chroma_collection_exists(tmp_path, "missing") is False
-        assert collection.query(query_embeddings=[[1.0, 0.0]], n_results=1)["ids"] == [["document"]]
-
-    _assert_probe_storage_released(tmp_path)
-
-
-def test_collection_probe_is_independent_of_parent_client_settings(tmp_path: Path) -> None:
-    """A child probe must not share the parent's native client settings."""
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(tmp_path), allow_reset=True)) as reader:
-        reader.create_collection("present")
-        # The child has its own native system despite different settings.
-        assert chroma_collection_exists(tmp_path, "present") is True
-        assert reader.count_collections() == 1
+if TYPE_CHECKING:
+    import pytest
 
 
 def _settings(base_id: str = "docs") -> IndexingSettings:

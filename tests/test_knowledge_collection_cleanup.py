@@ -1,7 +1,8 @@
-"""Integration tests for physical Chroma collection cleanup."""
+"""Integration tests for physical knowledge collection cleanup."""
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,61 +13,56 @@ from mindroom.knowledge.collections import (
     delete_collection,
     open_collection,
 )
+from mindroom.knowledge.vector_store import list_collection_names
+from tests.knowledge_test_support import seed_collection, stored_rows
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from chromadb.api import ClientAPI
-
-
-def _create_collection_segment(storage_path: Path, client: ClientAPI, collection_name: str) -> Path:
-    """Create one populated collection and return its new physical segment directory."""
-    before = {path for path in storage_path.iterdir() if path.is_dir()}
-    collection = client.create_collection(collection_name, embedding_function=None)
-    collection.add(ids=["one"], embeddings=[[0.1, 0.2, 0.3]])
-    created = {path for path in storage_path.iterdir() if path.is_dir()} - before
-    assert len(created) == 1
-    return created.pop()
-
 
 @pytest.mark.asyncio
-async def test_delete_collection_reclaims_only_unreferenced_segment_directories(tmp_path: Path) -> None:
-    """Deleting a collection removes old orphans while preserving every live segment."""
-    storage_path = tmp_path / "chroma"
+async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_path: Path) -> None:
+    """Deletion and cleanup reclaim superseded collections and old Chroma files while preserving everything else."""
+    storage_path = tmp_path / "storage"
     space = CollectionSpace(
         base_id="docs",
         knowledge_path=tmp_path / "docs",
         storage_path=storage_path,
     )
-    live_collection = open_collection(space, space.default_collection)
-    client = live_collection.client
-    live_segment = _create_collection_segment(storage_path, client, space.default_collection)
+    live = open_collection(space, space.default_collection)
+    seed_collection(live, [{"content": "live"}])
+    deleted = open_collection(space, f"{space.default_collection}_candidate_deleted")
+    seed_collection(deleted, [{"content": "deleted"}])
+    stale = open_collection(space, f"{space.default_collection}_candidate_stale")
+    seed_collection(stale, [{"content": "stale"}])
+
+    legacy_files = [storage_path / name for name in ("chroma.sqlite3", "chroma.sqlite3-wal", "chroma.sqlite3-shm")]
+    for legacy_file in legacy_files:
+        legacy_file.write_bytes(b"legacy")
+    legacy_segment = storage_path / str(uuid.uuid4())
+    legacy_segment.mkdir()
+    (legacy_segment / "data_level0.bin").write_bytes(b"legacy")
     unrelated_directory = storage_path / "not-a-segment"
     unrelated_directory.mkdir()
+    uuid_named_file = storage_path / str(uuid.uuid4())
+    uuid_named_file.write_bytes(b"not a segment")
+    unrelated_file = storage_path / "notes.txt"
+    unrelated_file.write_bytes(b"kept")
 
-    stale_name = f"{space.default_collection}_candidate_stale"
-    stale_segment = _create_collection_segment(storage_path, client, stale_name)
-    client.delete_collection(stale_name)
-    assert stale_segment.is_dir()
+    assert await delete_collection(space, deleted.name)
+    assert not deleted.exists()
+    assert await delete_collection(space, deleted.name)
 
-    deleted_name = f"{space.default_collection}_candidate_deleted"
-    deleted_segment = _create_collection_segment(storage_path, client, deleted_name)
-
-    assert await delete_collection(space, deleted_name)
-    assert live_segment.is_dir()
-    assert client.get_collection(space.default_collection, embedding_function=None).count() == 1
-    assert unrelated_directory.is_dir()
-    assert not stale_segment.exists()
-    assert not deleted_segment.exists()
-
-    later_stale_name = f"{space.default_collection}_candidate_later_stale"
-    later_stale_segment = _create_collection_segment(storage_path, client, later_stale_name)
-    client.delete_collection(later_stale_name)
     cleanup_superseded_collections(
         space,
-        client=client,
         preserved=frozenset({space.default_collection}),
         candidates_only=True,
     )
-    assert not later_stale_segment.exists()
-    assert live_segment.is_dir()
+
+    assert list_collection_names(storage_path) == (space.default_collection,)
+    assert [row["content"] for row in stored_rows(live)] == ["live"]
+    assert not any(legacy_file.exists() for legacy_file in legacy_files)
+    assert not legacy_segment.exists()
+    assert unrelated_directory.is_dir()
+    assert uuid_named_file.is_file()
+    assert unrelated_file.read_bytes() == b"kept"
