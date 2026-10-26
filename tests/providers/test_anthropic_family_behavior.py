@@ -741,10 +741,10 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("route", "model_id", "extra_kwargs", "earlier_kept"),
+    ("route", "model_id", "extra_kwargs", "bound", "earlier_kept"),
     [
-        pytest.param("anthropic", "claude-sonnet-5-5", {}, True, id="anthropic-bound"),
-        pytest.param("vertexai_claude", "claude-sonnet-5-5", {}, True, id="vertex-bound"),
+        pytest.param("anthropic", "claude-sonnet-5-5", {}, True, True, id="anthropic-bound"),
+        pytest.param("vertexai_claude", "claude-sonnet-5-5", {}, True, True, id="vertex-bound"),
         pytest.param(
             "anthropic",
             "claude-opus-5-5",
@@ -753,12 +753,14 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
                 "request_params": {"extra_body": {"thinking": {"type": "adaptive"}}},
             },
             True,
+            True,
             id="raw-override-bound",
         ),
         pytest.param(
             "anthropic",
             "claude-sonnet-5-5",
             {"thinking": {"type": "between_tools"}},
+            False,
             False,
             id="between-tools",
         ),
@@ -767,18 +769,27 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
             "claude-sonnet-5-5",
             {"thinking": {"type": "between_tools"}},
             False,
+            False,
             id="vertex-between-tools",
         ),
-        pytest.param("anthropic", "claude-haiku-5-5", {"thinking": {"type": "disabled"}}, False, id="haiku-disabled"),
-        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, id="bedrock"),
+        pytest.param(
+            "anthropic",
+            "claude-haiku-5-5",
+            {"thinking": {"type": "disabled"}},
+            False,
+            False,
+            id="haiku-disabled",
+        ),
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, False, id="bedrock"),
         pytest.param(
             "bedrock_claude",
             "anthropic.claude-sonnet-5-5",
             {"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}},
             True,
+            True,
             id="bedrock-authored-binding",
         ),
-        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5", {}, True, id="bedrock-unchecked-model"),
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5", {}, False, True, id="bedrock-unchecked-model"),
     ],
 )
 async def test_a_request_without_the_binding_replays_thinking_only_inside_the_current_tool_loop(
@@ -787,12 +798,14 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
     model_id: str,
     extra_kwargs: dict[str, Any],
     *,
+    bound: bool,
     earlier_kept: bool,
 ) -> None:
-    """Where no binding can be sent, a stale earlier block would fail the request, so earlier turns lose thinking.
+    """Where no binding is sent, a stale earlier block would fail the request, so earlier turns lose thinking.
 
     The API requires the current tool loop's thinking exactly as received and allows leaving out earlier turns'.
-    An authored binding is the operator's choice, and a model without the check keeps every block.
+    An authored binding is the operator's choice and gets the beta it needs on every route, and a model without
+    the check keeps every block.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
     provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
@@ -807,6 +820,7 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
         [_EARLIER_THINKING, *earlier] if earlier_kept else earlier,
         [_LOOP_THINKING, _LOOP_REDACTED, _LOOP_CALL],
     ]
+    assert (wire.requests[0].headers.get("anthropic-beta") == _THINKING_BINDING_BETA) is bound
 
 
 @pytest.mark.asyncio
@@ -845,6 +859,13 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             RequestOverrides(),
             {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}},
             id="authored-binding",
+        ),
+        pytest.param(
+            "claude-haiku-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": {}}},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": {}},
+            id="authored-default-binding",
         ),
         pytest.param(
             "anthropic/claude-sonnet-5-5",

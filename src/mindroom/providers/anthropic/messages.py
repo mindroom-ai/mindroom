@@ -118,9 +118,9 @@ _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 # Replayed thinking whose earlier context changed is dropped instead of failing the request. The system prompt carries
 # the date and the turn's memory and enrichment, a turn's transient context leaves the history after it, and
 # compaction and replay limits rewrite earlier turns, so a request regularly replays thinking produced after a different
-# prefix; the API rejects such a request by default on accounts created from 2026-08-31. Bedrock stays without it
-# until it is shown to accept the beta, because a platform rejects a beta it does not take; a request without the
-# binding leaves out earlier turns' thinking instead (``_replays_earlier_thinking``).
+# prefix; the API rejects such a request by default on accounts created from 2026-08-31. The default binding goes
+# only on the routes shown to accept the beta, because a platform rejects a beta it does not take, so not on Bedrock;
+# a request without a binding leaves out earlier turns' thinking instead (``_replays_earlier_thinking``).
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _THINKING_BINDING_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _VERTEX_ENDPOINTS = {
@@ -374,38 +374,34 @@ class ClaudeProvider:
             params.pop("extra_body", None)
         return params
 
-    def _with_thinking_binding(self, params: dict[str, Any], request: ModelRequest) -> bool:
-        """Ask the API to drop stale replayed thinking (``_THINKING_BINDING_BETA``); return whether the request does.
+    def _with_thinking_binding(self, params: dict[str, Any], request: ModelRequest) -> dict[str, Any]:
+        """Return the params with stale replayed thinking set to be dropped (``_THINKING_BINDING_BETA``).
 
-        The binding rides on adaptive thinking, which these models run when the request sends no thinking setting;
-        the API rejects it beside any other thinking type. An authored ``block_binding`` is kept, and a request that
-        disables thinking sends none.
+        The default ``drop_block`` binding goes only on the routes that take the beta, and rides on adaptive
+        thinking, which these models run when the request sends no thinking setting; the API rejects it beside any
+        other thinking type. An authored ``block_binding`` is kept, and a request that disables thinking gets none.
         """
         if (
             self.route not in _THINKING_BINDING_ROUTES
             or request.overrides.disable_thinking
             or not checks_thinking_prefix(self.identity.id)
         ):
-            return False
+            return params
         owner = _thinking_owner(params)
         thinking = dict(owner.get("thinking") or {"type": "adaptive"})
-        if thinking.get("type") != "adaptive":
-            return False
-        thinking.setdefault("block_binding", {"prefix_mismatch_behavior": "drop_block"})
-        owner["thinking"] = thinking
-        return True
+        if thinking.get("type") == "adaptive":
+            thinking.setdefault("block_binding", {"prefix_mismatch_behavior": "drop_block"})
+            owner["thinking"] = thinking
+        return params
 
     def _replays_earlier_thinking(self, params: dict[str, Any]) -> bool:
         """Return whether earlier turns' thinking replays: always, unless the API checks it and nothing binds it.
 
-        Where no ``block_binding`` can be sent (Bedrock, ``between_tools``, disabled thinking), a stale earlier block
+        Where no ``block_binding`` is sent (Bedrock, ``between_tools``, disabled thinking), a stale earlier block
         fails the request, so earlier turns replay without thinking, which is always valid. An authored binding,
         ``"error"`` included, is the operator's choice and keeps every block.
         """
-        if not checks_thinking_prefix(self.identity.id):
-            return True
-        thinking = _thinking_owner(params).get("thinking")
-        return isinstance(thinking, dict) and thinking.get("block_binding") is not None
+        return not checks_thinking_prefix(self.identity.id) or _sends_thinking_binding(params)
 
     def _request_params(
         self,
@@ -418,7 +414,7 @@ class ClaudeProvider:
 
         Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
         """
-        params = self._with_sampling_in_extra_body(self._authored_params(request))
+        params = self._with_thinking_binding(self._with_sampling_in_extra_body(self._authored_params(request)), request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
         betas = list(self.settings.betas or [])
@@ -426,7 +422,8 @@ class ClaudeProvider:
             betas.append(_STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or compaction_edit:
             betas.append(COMPACTION_BETA)
-        if self._with_thinking_binding(params, request):
+        # The API rejects a binding without its beta, so an authored one gets it on every route.
+        if _sends_thinking_binding(params):
             betas.append(_THINKING_BINDING_BETA)
         if betas:
             params["betas"] = list(dict.fromkeys(betas))
@@ -586,6 +583,12 @@ def _thinking_owner(params: dict[str, Any]) -> dict[str, Any]:
     """Return the dict whose ``thinking`` the request sends: the SDK sends ``extra_body`` over the body's own fields."""
     extra_body = params.get("extra_body") or {}
     return extra_body if "thinking" in extra_body else params
+
+
+def _sends_thinking_binding(params: dict[str, Any]) -> bool:
+    """Return whether the thinking the request sends carries a ``block_binding``, which needs the binding beta."""
+    thinking = _thinking_owner(params).get("thinking")
+    return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
 def _raw_request_params(settings: ClaudeSettings, *, disable_thinking: bool) -> dict[str, Any]:
