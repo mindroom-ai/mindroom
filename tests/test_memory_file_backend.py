@@ -2495,3 +2495,17 @@ async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_p
         await delete_agent_memory("file:memory/2026-06-13.md:1", "general", storage_path, config)
 
     assert daily_file.read_bytes() == original
+
+
+def test_semantic_memory_scores_keep_the_hybrid_rank_order() -> None:
+    """A keyword-lifted hit keeps its rank: each score is the best cosine similarity at or below it."""
+    hits = [
+        SearchHit(content="keyword match", meta_data={"source_path": "a.md", "distances": 0.7}),
+        SearchHit(content="close vector", meta_data={"source_path": "b.md", "distances": 0.2}),
+        SearchHit(content="far vector", meta_data={"source_path": "c.md", "distances": 0.5}),
+    ]
+
+    results = semantic_file_search._memory_results_from_hits(hits, scope_user_id="agent")
+
+    assert [result["memory"] for result in results] == ["keyword match", "close vector", "far vector"]
+    assert [result["score"] for result in results] == pytest.approx([0.8, 0.8, 0.5])
