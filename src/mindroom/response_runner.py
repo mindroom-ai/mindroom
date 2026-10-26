@@ -2679,7 +2679,6 @@ class ResponseRunner:
                 response_text = await self._approval_execution.continue_run(
                     continuation,
                     paused_answer=paused_answer,
-                    execution_identity=execution_identity,
                     tool_dispatch=tool_dispatch,
                     decisions=decisions,
                     denial_reasons=denial_reasons,

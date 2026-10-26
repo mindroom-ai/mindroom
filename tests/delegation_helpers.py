@@ -343,7 +343,6 @@ async def resume(
     return await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        execution_identity=identity,
         tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime),
         decisions=dict(decisions),
         denial_reasons={call_id: (denial_reasons or {}).get(call_id) for call_id in decisions},

@@ -2853,7 +2853,6 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         await runner._approval_execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            execution_identity=identity,
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
             decisions={},
             denial_reasons={},
