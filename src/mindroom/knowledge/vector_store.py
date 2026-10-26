@@ -43,6 +43,8 @@ _WORD = re.compile(r"\w+")
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
+#: Rows normalized at a time while a matrix loads.
+_NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
 _SCHEMA = f"""
@@ -514,7 +516,10 @@ def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
             matrix[position] = np.frombuffer(blob, dtype="<f4")
     finally:
         connection.rollback()
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    matrix /= norms
+    # In row blocks: a norm over the whole matrix allocates a temporary as large as the matrix itself.
+    for start in range(0, count, _NORMALIZE_ROWS):
+        block = matrix[start : start + _NORMALIZE_ROWS]
+        norms = np.linalg.norm(block, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        block /= norms
     return _VectorIndex(rowids=rowids, matrix=matrix)

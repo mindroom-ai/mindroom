@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import contextmanager, nullcontext, suppress
@@ -140,10 +141,14 @@ class _InMemoryTextReader(TextReader):
 #: Files pulled into one prepare/embed/write batch. This bounds live asyncio
 #: tasks and peak memory independently of corpus size; the provider request
 #: bounds are applied separately when the batch's chunks are planned.
-_INDEX_FILES_PER_BATCH = 64
+_INDEX_FILES_PER_BATCH = 256
+#: Planned provider requests one batch keeps in flight. Every file write waits
+#: on the batch's vectors, so one request at a time leaves the provider idle
+#: between round trips; a batch needs enough files to plan several requests.
+_EMBEDDING_REQUESTS_IN_FLIGHT = 4
 #: Chunk text one batch holds between reading its files and writing them. File
-#: count alone does not bound memory: 64 large files can materialize far more
-#: text (and far more vectors) than 64 small ones. A batch closes once its text
+#: count alone does not bound memory: 256 large files can materialize far more
+#: text (and far more vectors) than 256 small ones. A batch closes once its text
 #: reaches this budget, so it holds at most the budget plus one file's chunks,
 #: which indexing that file has to materialize anyway.
 _MAX_BATCH_TEXT_BYTES = 8_000_000
@@ -451,8 +456,9 @@ def _knowledge_source_signature(
     *,
     git_dir: Path,
     tracked_relative_paths: Iterable[str] | None = None,
+    scanned: dict[str, tuple[FileSignature, Path]] | None = None,
 ) -> str:
-    """Return a robust signature for the currently managed local file corpus."""
+    """Return a robust signature for the currently managed local file corpus; ``scanned`` collects each signed file."""
     root = knowledge_root
     digest = hashlib.sha256()
     base_config = config.get_knowledge_base_config(base_id)
@@ -468,9 +474,12 @@ def _knowledge_source_signature(
     files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
     for relative_path, path in sorted(files_with_relative_paths):
         try:
-            mtime_ns, size, source_digest = _file_signature(path)
+            signature = _file_signature(path)
         except (OSError, ValueError):
             continue
+        if scanned is not None:
+            scanned[relative_path] = (signature, path)
+        mtime_ns, size, source_digest = signature
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(mtime_ns).encode("ascii"))
@@ -542,6 +551,8 @@ class KnowledgeManager:
     _file_index_errors: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _embedder_failure_streak: int = field(default=0, init=False, repr=False)
     _global_embedder_failure: str | None = field(default=None, init=False, repr=False)
+    #: The files a local base's last corpus hash listed and signed, which the next reconciliation adopts once.
+    _source_scan: dict[str, tuple[FileSignature, Path]] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the underlying vector database."""
@@ -671,15 +682,23 @@ class KnowledgeManager:
 
         Git-backed bases hand over the tracked paths this process already
         listed, so an unchanged checkout is not re-listed just to hash it.
+        A local base keeps the scan for its next reconciliation instead of
+        listing and hashing the corpus again: a file that changes after the
+        scan still fails the hash that ends the pass. A Git base's pass ends
+        on its revision instead, which a stale scan could slip past.
         """
-        return await asyncio.to_thread(
+        scanned: dict[str, tuple[FileSignature, Path]] | None = None if self.git_source.is_configured() else {}
+        signature = await asyncio.to_thread(
             _knowledge_source_signature,
             self.config,
             self.base_id,
             self._knowledge_source_path(),
             git_dir=self.git_source.git_dir,
             tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
+            scanned=scanned,
         )
+        self._source_scan = scanned
+        return signature
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
@@ -932,7 +951,7 @@ class KnowledgeManager:
         embedder: RefreshEmbedder,
         prepared: Sequence[_PreparedFile],
     ) -> dict[str, list[float]]:
-        """Embed one batch's distinct chunk texts in as few provider requests as limits allow.
+        """Embed one batch's distinct chunk texts in as few provider requests as limits allow, several at once.
 
         A text left out here is embedded by its own file's write, one request
         per chunk, where a failure is retried and recorded against that file.
@@ -941,42 +960,62 @@ class KnowledgeManager:
         """
         vectors: dict[str, list[float]] = {}
         texts = list(dict.fromkeys(chunk.text for file in prepared for chunk in file.chunks if chunk.text))
-        for planned_batch in plan_embedding_batches(texts):
-            if not embedder.batches():
-                # Without batch requests, each file embeds its own chunks,
-                # concurrently with the rest of the batch.
-                break
-            try:
-                vectors.update(
-                    await run_with_embedding_retry(
-                        partial(asyncio.to_thread, embedder.embed_texts, planned_batch),
-                        policy=_EMBEDDING_RETRY_POLICY,
-                        sleep=_EMBEDDING_RETRY_SLEEP,
-                        on_retry=self._record_embedding_retry,
-                    ),
-                )
-            except Exception as exc:
-                if not embedder_failure_is_transient(exc):
-                    # Bad credentials or a wrong model will reject every
-                    # request; stop now instead of grinding out one doomed
-                    # request per remaining chunk, and report the failure the
-                    # same way a per-file rejection would.
-                    if self._last_file_index_error is None:
-                        self._last_file_index_error = classified_embedder_error(exc) or (
-                            f"knowledge indexing failed ({type(exc).__name__})"
-                        )
-                    raise _PermanentEmbeddingError from exc
-                # Exhausted transient retries: stop batching for this batch and
-                # let each file's write retry its own chunks, so the failure is
-                # attributed to specific files and nothing already embedded is
-                # embedded again.
-                logger.warning(
-                    "Falling back to per-file embedding after batch retries were exhausted",
-                    base_id=self.base_id,
-                    batch_items=len(planned_batch),
-                    exc_info=True,
-                )
-                break
+        planned_batches = iter(plan_embedding_batches(texts))
+        # Set once the batch gives up, on a permanent rejection or a request out of retries: no worker starts another
+        # planned request, and a thread embedding one text per request stops between texts. Requests already running
+        # finish; a permanent rejection drops their results, while after an exhausted request their vectors are kept.
+        stop = threading.Event()
+
+        async def embed_planned_batches() -> None:
+            for planned_batch in planned_batches:
+                if stop.is_set() or not embedder.batches():
+                    # Without batch requests, each file embeds its own chunks,
+                    # concurrently with the rest of the batch.
+                    return
+                try:
+                    vectors.update(
+                        await run_with_embedding_retry(
+                            partial(asyncio.to_thread, embedder.embed_texts, planned_batch, stop=stop),
+                            policy=_EMBEDDING_RETRY_POLICY,
+                            sleep=_EMBEDDING_RETRY_SLEEP,
+                            on_retry=self._record_embedding_retry,
+                        ),
+                    )
+                except Exception as exc:
+                    stop.set()
+                    if not embedder_failure_is_transient(exc):
+                        # Bad credentials or a wrong model will reject every
+                        # request; stop now instead of grinding out one doomed
+                        # request per remaining chunk, and report the failure the
+                        # same way a per-file rejection would.
+                        if self._last_file_index_error is None:
+                            self._last_file_index_error = classified_embedder_error(exc) or (
+                                f"knowledge indexing failed ({type(exc).__name__})"
+                            )
+                        raise _PermanentEmbeddingError from exc
+                    # Exhausted transient retries: stop batching for this batch
+                    # and leave the texts no request finished to their files'
+                    # writes, which retry their own chunks, so the failure is
+                    # attributed to specific files and nothing already
+                    # embedded is embedded again.
+                    logger.warning(
+                        "Falling back to per-file embedding after batch retries were exhausted",
+                        base_id=self.base_id,
+                        batch_items=len(planned_batch),
+                        exc_info=True,
+                    )
+
+        try:
+            # Each worker pulls the next planned request when its own one
+            # finishes. The group cancels and awaits every worker task before a
+            # permanent failure or a cancellation leaves this call.
+            async with asyncio.TaskGroup() as workers:
+                for _worker in range(min(_EMBEDDING_REQUESTS_IN_FLIGHT, self._max_concurrent_file_indexes)):
+                    workers.create_task(embed_planned_batches())
+        except* _PermanentEmbeddingError as failures:
+            raise _PermanentEmbeddingError from failures
+        finally:
+            stop.set()
         return vectors
 
     async def _prepare_batch(
@@ -1724,7 +1763,6 @@ class KnowledgeManager:
     async def _reconcile_candidate(
         self,
         run: _CandidateRun,
-        files: Sequence[Path],
         *,
         changed_files: frozenset[str] | None = None,
     ) -> _CandidateReconciliation:
@@ -1732,9 +1770,13 @@ class KnowledgeManager:
         # ``vanished`` describes files lost during one indexing pass, so it must
         # not outlive the pass and permanently exclude a path that came back.
         run.vanished.clear()
-        if changed_files is None:
-            signatures = await self._file_signatures_for(files)
+        scanned, self._source_scan = self._source_scan, None
+        if changed_files is None and scanned is not None:
+            signatures = scanned
+        elif changed_files is None:
+            signatures = await self._file_signatures_for(await asyncio.to_thread(self.list_files))
         else:
+            files = await asyncio.to_thread(self.list_files)
             files_by_relative_path = {self._relative_path(file_path): file_path for file_path in files}
             files_to_scan = [
                 file_path
@@ -1973,8 +2015,7 @@ class KnowledgeManager:
                 if _round == 0 and self.git_source.is_configured()
                 else None
             )
-            files = await asyncio.to_thread(self.list_files)
-            plan = await self._reconcile_candidate(run, files, changed_files=changed_files)
+            plan = await self._reconcile_candidate(run, changed_files=changed_files)
             run.baseline_revision = round_revision
             progress.total = len(plan.expected)
             progress.completed = len(run.completed)

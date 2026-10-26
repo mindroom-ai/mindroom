@@ -16,6 +16,8 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -26,6 +28,7 @@ from agno.knowledge.document.base import Document
 from agno.knowledge.reader.markdown_reader import MarkdownReader
 from structlog.testing import capture_logs
 
+import mindroom.embeddings.batching as embedding_batching_module
 import mindroom.knowledge.candidate_checkpoint as knowledge_checkpoint_module
 import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
@@ -839,6 +842,55 @@ async def test_source_change_during_final_verification_reconciles_without_losing
     assert state.indexed_count == 4
 
 
+@pytest.mark.asyncio
+async def test_a_changed_local_refresh_signs_each_file_once_before_and_once_after_indexing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciliation adopts the scan that found the source changed instead of reading every file again."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("changed body", encoding="utf-8")
+    signed: list[str] = []
+    original_signature = knowledge_manager_module._file_signature
+
+    def _recording_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
+        if snapshot is None:
+            signed.append(file_path.name)
+        return original_signature(file_path, snapshot)
+
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _recording_signature)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published
+    assert sorted(signed) == sorted(names * 2)
+
+
+@pytest.mark.asyncio
+async def test_a_file_changed_after_the_adopted_scan_is_still_indexed(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A change the adopted scan missed fails the final hash, so the next round indexes it before publishing."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await _manager(config).reindex_all()
+    manager = _manager(config)
+    await manager.source_signature()
+    (docs_path / names[1]).write_text("late body", encoding="utf-8")
+
+    assert (await manager.reindex_all()).published
+    assert embedder.embedded_count("late body") == 1
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.source_signature == await _manager(config).source_signature()
+
+
 # --------------------------------------------------------------------------
 # 9. Concurrency
 # --------------------------------------------------------------------------
@@ -1049,6 +1101,226 @@ async def test_batch_failure_falls_back_to_per_file_without_reembedding_successe
     assert embedder.single_requests, "the fallback path re-embedded per file"
     for index in range(3):
         assert embedder.embedded_count(f"content {index}") == 1
+
+
+class _InFlightEmbedder(_RecordingEmbedder):
+    """Recording embedder that counts how many batch requests run at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = Lock()
+        self.started = 0
+        self.in_flight = 0
+        self.peak_in_flight = 0
+        self.overlapped = Event()
+        self.saturated = Event()
+
+    def hold(self, texts: list[str]) -> None:
+        """Keep a request open until another one overlaps it, then a little longer."""
+        del texts
+        self.overlapped.wait(timeout=5)
+        time.sleep(0.02)
+
+    def batch_request(self, texts: list[str]) -> list[list[float]]:
+        with self._lock:
+            self.started += 1
+            self.in_flight += 1
+            self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+            if self.in_flight >= 2:
+                self.overlapped.set()
+            if self.in_flight >= knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT:
+                self.saturated.set()
+        try:
+            self.hold(texts)
+            return super().batch_request(texts)
+        finally:
+            with self._lock:
+                self.in_flight -= 1
+
+
+def _use_in_flight_embedder(monkeypatch: pytest.MonkeyPatch) -> _InFlightEmbedder:
+    """Index with an in-flight counting embedder and four texts per request, so small corpora plan many requests."""
+    tracked = _InFlightEmbedder()
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", lambda *_a, **_k: tracked)
+    monkeypatch.setattr(embedding_batching_module, "_MAX_EMBEDDING_BATCH_ITEMS", 4)
+    return tracked
+
+
+@pytest.mark.asyncio
+async def test_batch_overlaps_its_embedding_requests_up_to_the_in_flight_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch's planned requests overlap, but never more of them than the in-flight cap."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+
+    assert (await _manager(config).reindex_all()).indexed_count == 40
+
+    assert len(tracked.batch_requests) == 10
+    assert tracked.single_requests == []
+    assert 2 <= tracked.peak_in_flight <= knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT
+
+
+@pytest.mark.asyncio
+async def test_permanent_batch_error_cancels_the_other_request_tasks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanent rejection cancels the batch's other requests; none is retried or started afterwards."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    release = Event()
+
+    def _reject_one_and_stall_the_rest(texts: list[str]) -> None:
+        if "content 0" in texts:
+            tracked.saturated.wait(timeout=5)
+            msg = "embedder request failed (HTTP 400)"
+            raise EmbedderRequestError(msg)
+        release.wait(timeout=5)
+        # A request task that outlived the batch would retry this.
+        raise _server_error()
+
+    monkeypatch.setattr(tracked, "hold", _reject_one_and_stall_the_rest)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+    config = _config(tmp_path, docs_path)
+
+    outcome = await _manager(config).reindex_all()
+
+    assert outcome.error is not None
+    assert "embedder request failed (HTTP 400)" in outcome.error
+    assert asyncio.all_tasks() == {asyncio.current_task()}, "a request task outlived the batch"
+    release.set()
+    for _ in range(500):
+        if tracked.in_flight == 0:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+    assert tracked.started == knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT
+    assert tracked.single_requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_batch_starts_no_further_provider_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider threads still embedding one text at a time stop asking once a permanent rejection fails the batch."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    # Short responses retire batching, so the other requests go on one text per request on their threads.
+    tracked.short_batch = True
+    rejected = Event()
+    others_on_single_texts = Event()
+    release = Event()
+    entered: list[str] = []
+    original_single = tracked.single_request
+
+    def _slow_single(text: str) -> list[float]:
+        entered.append(text)
+        if len(entered) >= knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT - 1:
+            others_on_single_texts.set()
+        release.wait(timeout=5)
+        return original_single(text)
+
+    def _reject_one(texts: list[str]) -> None:
+        # Every request is in flight before any returns, so each other worker's short response sends it on to one
+        # text per request, and the rejection only comes once all of them are inside that loop.
+        tracked.saturated.wait(timeout=5)
+        if "content 0" in texts:
+            others_on_single_texts.wait(timeout=5)
+            rejected.set()
+            msg = "embedder request failed (HTTP 400)"
+            raise EmbedderRequestError(msg)
+
+    monkeypatch.setattr(tracked, "single_request", _slow_single)
+    monkeypatch.setattr(tracked, "hold", _reject_one)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 40)
+
+    outcome = await _manager(_config(tmp_path, docs_path)).reindex_all()
+    entered_when_failed = len(entered)
+    release.set()
+    await asyncio.sleep(0.3)
+
+    assert outcome.error is not None
+    assert rejected.is_set()
+    assert entered_when_failed == knowledge_manager_module._EMBEDDING_REQUESTS_IN_FLIGHT - 1
+    # Each of those threads finishes the request it was already making, and starts no other.
+    assert len(entered) == entered_when_failed
+
+
+@pytest.mark.asyncio
+async def test_embedding_requests_in_flight_never_exceed_the_file_index_concurrency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator who limits file indexing to one at a time also gets one embedding request at a time."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    monkeypatch.setattr(knowledge_manager_module, "_max_concurrent_knowledge_file_indexes", lambda _runtime_paths: 1)
+    monkeypatch.setattr(tracked, "hold", lambda _texts: time.sleep(0.01))
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 20)
+
+    assert (await _manager(_config(tmp_path, docs_path)).reindex_all()).published
+    assert tracked.peak_in_flight == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_request_falls_back_alone_and_other_requests_keep_their_vectors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the request that ran out of retries is embedded per file; its siblings' vectors are kept."""
+    monkeypatch.setattr(
+        knowledge_manager_module,
+        "_EMBEDDING_RETRY_POLICY",
+        EmbeddingRetryPolicy(max_attempts=2, initial_backoff_seconds=0.0),
+    )
+    tracked = _use_in_flight_embedder(monkeypatch)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 12)
+    config = _config(tmp_path, docs_path)
+    tracked.failures["content 5"] = [_server_error() for _ in range(2)]
+
+    assert (await _manager(config).reindex_all()).indexed_count == 12
+
+    failed_request = next(batch for batch in tracked.batch_requests if "content 5" in batch)
+    assert len(set(tracked.batch_requests)) == 3
+    assert sorted(tracked.single_requests) == sorted(failed_request)
+    for index in range(12):
+        assert tracked.embedded_count(f"content {index}") == 1
+
+
+@pytest.mark.asyncio
+async def test_overlapping_embedding_requests_store_what_sequential_requests_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding several requests at once stores the same rows and vectors as one request at a time."""
+    tracked = _use_in_flight_embedder(monkeypatch)
+    monkeypatch.setattr(tracked, "hold", lambda _texts: time.sleep(0.01))
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    for index in range(30):
+        # Distinct lengths give every chunk its own vector, so a misattributed one shows.
+        (docs_path / f"doc{index:04d}.md").write_text("word " * (index + 1), encoding="utf-8")
+
+    async def _stored_rows(root: Path) -> list[tuple[Any, ...]]:
+        config = _config(root, docs_path)
+        assert (await _manager(config).reindex_all()).indexed_count == 30
+        state = _published_state(config, runtime_paths_for(config))
+        assert state is not None
+        with closing(sqlite3.connect(_collection(config, state.collection).file)) as connection:
+            return connection.execute("SELECT id, document, metadata, embedding FROM chunks ORDER BY id").fetchall()
+
+    overlapping = await _stored_rows(tmp_path / "overlapping")
+    monkeypatch.setattr(knowledge_manager_module, "_EMBEDDING_REQUESTS_IN_FLIGHT", 1)
+    sequential = await _stored_rows(tmp_path / "sequential")
+
+    assert len(overlapping) == 30
+    assert overlapping == sequential
 
 
 def test_refresh_embedder_degrades_for_providers_without_batching() -> None:
