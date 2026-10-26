@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.candidate_checkpoint import FileSignature
 
 
 def _source_has_vectors(manager: KnowledgeManager, relative_path: str) -> bool:
@@ -8575,6 +8576,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         *,
         git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
+        scanned: dict[str, tuple[FileSignature, Path]] | None = None,
     ) -> str:
         counter.calls += 1
         return original_signature(
@@ -8583,6 +8585,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
             knowledge_root,
             git_dir=git_dir,
             tracked_relative_paths=tracked_relative_paths,
+            scanned=scanned,
         )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)

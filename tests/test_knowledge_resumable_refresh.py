@@ -839,6 +839,55 @@ async def test_source_change_during_final_verification_reconciles_without_losing
     assert state.indexed_count == 4
 
 
+@pytest.mark.asyncio
+async def test_a_changed_local_refresh_signs_each_file_once_before_and_once_after_indexing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciliation adopts the scan that found the source changed instead of reading every file again."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("changed body", encoding="utf-8")
+    signed: list[str] = []
+    original_signature = knowledge_manager_module._file_signature
+
+    def _recording_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
+        if snapshot is None:
+            signed.append(file_path.name)
+        return original_signature(file_path, snapshot)
+
+    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _recording_signature)
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published
+    assert sorted(signed) == sorted(names * 2)
+
+
+@pytest.mark.asyncio
+async def test_a_file_changed_after_the_adopted_scan_is_still_indexed(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A change the adopted scan missed fails the final hash, so the next round indexes it before publishing."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await _manager(config).reindex_all()
+    manager = _manager(config)
+    await manager.source_signature()
+    (docs_path / names[1]).write_text("late body", encoding="utf-8")
+
+    assert (await manager.reindex_all()).published
+    assert embedder.embedded_count("late body") == 1
+    state = _published_state(config, runtime_paths)
+    assert state is not None
+    assert state.source_signature == await _manager(config).source_signature()
+
+
 # --------------------------------------------------------------------------
 # 9. Concurrency
 # --------------------------------------------------------------------------
