@@ -19,8 +19,8 @@ _AI_RUN_KEY = "io.mindroom.ai_run"
 _JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
 _MAX_JSONL_RECORDS = 1000
 _MAX_RUNS = 100
-# The JSON text columns of a run row and of its message rows.
-_RUN_JSON_COLUMNS = frozenset({"record", "tools", "requirements", "metadata", "data"})
+# The JSON text columns of a run row and of its message and tool rows.
+_RUN_JSON_COLUMNS = frozenset({"record", "requirements", "metadata", "data"})
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
@@ -292,7 +292,7 @@ def _read_run_database(
     conditions: Sequence[str],
     params: Sequence[object],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Return how many runs match and the newest `_MAX_RUNS` of the database's runs, oldest first, with their messages.
+    """Return how many runs match and the newest `_MAX_RUNS` runs, oldest first, with their messages and tools.
 
     The tables are the ones `TableNames.of_database` names for the database's file. A message a mid-turn fold took
     names that fold's summary row in `folded_by`. A database the storage conversion has not reached raises.
@@ -313,18 +313,27 @@ def _read_run_database(
             f'SELECT * FROM "{runs_table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
             [*params, _MAX_RUNS],
         )
+        selected = [json.dumps([row["run_id"] for row in rows])]
         # Each fold numbers its messages from 0, so the stored messages come first, then each fold's in order.
         message_rows = query(
             f'SELECT run_id, folded_by, data FROM "{names.log_messages}" WHERE run_id IN '  # noqa: S608
             "(SELECT value FROM json_each(?)) ORDER BY folded_by IS NOT NULL, folded_by, ord",
-            [json.dumps([row["run_id"] for row in rows])],
+            selected,
+        )
+        tool_rows = query(
+            f'SELECT run_id, data FROM "{names.log_tools}" WHERE run_id IN (SELECT value FROM json_each(?)) ORDER BY ord',  # noqa: S608
+            selected,
         )
     messages: dict[str, list[dict[str, Any]]] = {}
     for message in message_rows:
         messages.setdefault(message.pop("run_id"), []).append(_decode_json_columns(message))
+    tools: dict[str, list[object]] = {}
+    for tool in tool_rows:
+        tools.setdefault(tool["run_id"], []).append(_decode_json_columns(tool)["data"])
     runs = [{"database": str(database), "table": runs_table, **_decode_json_columns(row)} for row in reversed(rows)]
     for run in runs:
         run["messages"] = messages.get(run["run_id"], [])
+        run["tools"] = tools.get(run["run_id"], [])
     return counted["matches"], runs
 
 

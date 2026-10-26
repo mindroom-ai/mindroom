@@ -333,18 +333,20 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # LEGACY_COMPAT: Agno 3 run rows, one `run_data` JSON document per run.
 # Legacy format: `<s>_runs` (`agno_runs` for the storage name `agno`) rows ordered by `run_index`, each run's messages,
 # tools, and a paused team run's embedded `member_responses` inside `run_data`; workflow rows and members of members.
-# Last legacy release: run rows, v2026.10.559; replacement: the next release, `<s>_log_runs` rows.
+# Last legacy release: run rows, v2026.10.559; replacement: the next release, `<s>_log_runs` rows with their
+# `<s>_log_tools` rows.
 # Workflow rows and members of members have no known MindRoom writer (unversioned external input).
 # Handling: Per session, each agent or team row becomes a `<s>_log_runs` row with the next `seq` in the order a load
-# read them, decoded through `run_from_row`, the row's ids winning; a row without a position goes last rather than
-# first, so no summary row covers it, as none did; a member of a member is re-parented to its team run. A paused team
-# run's embedded members replace or create their member rows, since a resume read them; a fold whose run has no row and
-# was not removed gets a cancelled one right after its latest summary row, with the fold's metadata and members. Workflow
-# rows and rows that do not decode are left out, the latter logged by id; the backup keeps both. Worker code can write
-# the run data, so a row whose run id is not text is left out too, with what a paused team row embeds, as is an
-# embedded or folded member whose run id is not text; a position that is not a number goes last, as SQLite sorted it;
-# a member's creation time that is not whole seconds a datetime holds becomes its team run row's or its fold's; and
-# each message and tool keeps its call ids only as text or none (`_use_text_call_ids`).
+# read them, decoded through `run_from_row`, the row's ids winning, with a `<s>_log_tools` row per tool execution in
+# order; a row without a position goes last rather than first, so no summary row covers it, as none did; a member of a
+# member is re-parented to its team run. A paused team run's embedded members replace or create their member rows, since
+# a resume read them; a fold whose run has no row and was not removed gets a cancelled one right after its latest
+# summary row, with the fold's metadata and members. Workflow rows and rows that do not decode are left out, the latter
+# logged by id; the backup keeps both. Worker code can write the run data, so a row whose run id is not text is left out
+# too, with what a paused team row embeds, as is an embedded or folded member whose run id is not text; a position that
+# is not a number goes last, as SQLite sorted it; a member's creation time that is not whole seconds a datetime holds
+# becomes its team run row's or its fold's; and each message and tool keeps its call ids only as text or none
+# (`_use_text_call_ids`).
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,

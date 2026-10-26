@@ -81,6 +81,7 @@ def test_a_new_database_gets_every_table_when_it_opens(tmp_path: Path) -> None:
         names.log_meta,
         names.log_runs,
         names.log_messages,
+        names.log_tools,
         names.log_summaries,
         names.log_removed,
         "sqlite_sequence",

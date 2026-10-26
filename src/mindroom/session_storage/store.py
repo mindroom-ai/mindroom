@@ -5,9 +5,10 @@ databases keep SQLite's default rollback journal. A write takes the write lock b
 depend on, and a load reads from one snapshot. Opening a database (``create_state_storage``) converts it and creates
 every table it lacks, so no operation runs DDL.
 
-A run is a ``*_log_runs`` row plus a ``*_log_messages`` row per stored message, and every reader gets its replay
-view: the message rows no mid-turn fold took, in order. ``seq`` places a run in the log; the meta row's counter hands
-it out and never goes back, so a deleted run's number is never reused.
+A run is a ``*_log_runs`` row plus a ``*_log_messages`` row per stored message and a ``*_log_tools`` row per tool
+execution, so a save rewrites only the rows that changed, and every reader gets its replay view: the message rows no
+mid-turn fold took, in order. ``seq`` places a run in the log; the meta row's counter hands it out and never goes
+back, so a deleted run's number is never reused.
 """
 
 from __future__ import annotations
@@ -724,9 +725,11 @@ def upsert_run(
     created_at: int,
     updated_at: int,
 ) -> None:
-    """Upsert the row of the run whose stored dict is ``data``, keeping a stored row's ``session_id`` and ``created_at``.
+    """Upsert the row and the tool rows of the run whose stored dict is ``data``.
 
-    An update rather than a replace, which would cascade the run's message rows away.
+    A stored row keeps its ``session_id`` and ``created_at``. An update rather than a replace, which would cascade the
+    run's message rows away. Tool rows are keyed by their place in the list, so a save that appends a tool execution
+    writes that one row; changed rows are rewritten and rows past the list's end deleted.
     """
     written = ("parent_run_id", *_RECORD_COLUMNS, "seq", "updated_at")
     run_id, parent_run_id, columns = data["run_id"], data.get("parent_run_id"), run_columns(data, kind)
@@ -736,6 +739,13 @@ def upsert_run(
         f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(f'{column} = excluded.{column}' for column in written)}",
         (run_id, session_id, created_at, parent_run_id, *astuple(columns), seq, updated_at),
     )
+    tools, table = data.get("tools") or [], quote_identifier(names.log_tools)
+    connection.executemany(
+        f"INSERT INTO {table} (run_id, ord, data) VALUES (?, ?, ?) ON CONFLICT(run_id, ord) "  # noqa: S608
+        "DO UPDATE SET data = excluded.data WHERE data IS NOT excluded.data",
+        [(run_id, position, json.dumps(tool)) for position, tool in enumerate(tools)],
+    )
+    connection.execute(f"DELETE FROM {table} WHERE run_id = ? AND ord >= ?", (run_id, len(tools)))  # noqa: S608
 
 
 def _join_covering_row(
@@ -834,7 +844,7 @@ def _decoded_runs(
     condition: str,
     parameters: tuple[object, ...],
 ) -> list[AnyRunRecord]:
-    """Decode the runs whose rows meet ``condition``, each with its unfolded message rows in ``ord`` order.
+    """Decode the runs whose rows meet ``condition``, each with its unfolded message and tool rows in ``ord`` order.
 
     Each call parses its own copy of the JSON.
     """
@@ -843,17 +853,37 @@ def _decoded_runs(
         f"FROM {quote_identifier(names.log_runs)} AS run WHERE {condition}",
         parameters,
     ).fetchall()
-    messages: dict[str, list[dict[str, Any]]] = {}
-    for run_id, data in connection.execute(
-        f"SELECT run_id, data FROM {quote_identifier(names.log_messages)} WHERE folded_by IS NULL "  # noqa: S608
-        "AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_id, ord",
-        (json.dumps([run_id for run_id, *_ in rows]),),
-    ):
-        messages.setdefault(run_id, []).append(json.loads(data))
+    run_ids = [run_id for run_id, *_ in rows]
+    messages = _rows_by_run(connection, names.log_messages, run_ids, "folded_by IS NULL")
+    tools = _rows_by_run(connection, names.log_tools, run_ids)
     return [
-        run_record(run_id, session_id, parent_run_id, RunColumns(*columns), messages.get(run_id, []))
+        run_record(
+            run_id,
+            session_id,
+            parent_run_id,
+            RunColumns(*columns),
+            messages.get(run_id, []),
+            tools.get(run_id, []),
+        )
         for run_id, session_id, parent_run_id, *columns in rows
     ]
+
+
+def _rows_by_run(
+    connection: sqlite3.Connection,
+    table: str,
+    run_ids: list[str],
+    condition: str = "TRUE",
+) -> dict[str, list[dict[str, Any]]]:
+    """Decode the ``data`` of ``table``'s rows of the runs ``run_ids`` that meet ``condition``, by run, in ``ord`` order."""
+    decoded: dict[str, list[dict[str, Any]]] = {}
+    for run_id, data in connection.execute(
+        f"SELECT run_id, data FROM {quote_identifier(table)} WHERE {condition} "  # noqa: S608
+        "AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_id, ord",
+        (json.dumps(run_ids),),
+    ):
+        decoded.setdefault(run_id, []).append(json.loads(data))
+    return decoded
 
 
 def _loads_sql(alias: str, summaries: str) -> str:

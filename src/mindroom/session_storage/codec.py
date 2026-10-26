@@ -1,7 +1,8 @@
 """Run rows to run records and back.
 
-A run's stored dict (``record.to_dict()``) spreads over its ``*_log_runs`` row (``run_columns``) and one message row per
-message; ``run_record`` joins them again. The JSON keys are the ones ``mindroom.llm.runs`` reads and writes.
+A run's stored dict (``record.to_dict()``) spreads over its ``*_log_runs`` row (``run_columns``), one message row per
+message, and one tool row per tool execution; ``run_record`` joins them again. The JSON keys are the ones
+``mindroom.llm.runs`` reads and writes.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.types import SessionKind
 
 # The keys of a stored run dict that a run row holds in columns of their own, or in rows of other tables:
-# messages in the messages table, and a paused team run's members in their own run rows.
+# messages and tool executions in tables of their own, and a paused team run's members in their own run rows.
 _NOT_IN_RECORD = frozenset(
     {
         "run_id",
@@ -37,17 +38,18 @@ _NOT_IN_RECORD = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class RunColumns:
-    """The columns of a run row that its stored dict fills, the ids and the messages aside.
+    """The columns of a run row that its stored dict fills, the ids, the messages, and the tool executions aside.
 
-    ``record`` is the JSON of every other key. ``tools``, ``requirements``, and ``metadata`` are JSON, or None when
-    the record has none, so ``[]`` and ``{}`` stay distinct from none.
+    ``record`` is the JSON of every other key. ``requirements`` and ``metadata`` are JSON, or None when the record has
+    none, so ``[]`` and ``{}`` stay distinct from none; ``has_tools`` does the same for the tool list, whose entries
+    are rows of their own.
     """
 
     kind: SessionKind
     scope_key: str
     status: str
+    has_tools: bool
     record: str
-    tools: str | None
     requirements: str | None
     metadata: str | None
 
@@ -63,8 +65,8 @@ def run_columns(data: Mapping[str, Any], kind: SessionKind) -> RunColumns:
         kind=kind,
         scope_key=f"{kind}:{owner or ''}",
         status=data["status"],
+        has_tools=data.get("tools") is not None,
         record=json.dumps({key: value for key, value in data.items() if key not in _NOT_IN_RECORD}),
-        tools=_encoded(data.get("tools")),
         requirements=_encoded(data.get("requirements")),
         metadata=_encoded(data.get("metadata")),
     )
@@ -76,8 +78,9 @@ def run_record(
     parent_run_id: str | None,
     columns: RunColumns,
     messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
 ) -> AnyRunRecord:
-    """Decode a run row and its messages' stored dicts, in replay order, into its record.
+    """Decode a run row, its messages' stored dicts in replay order, and its tool executions' in order, into its record.
 
     The row's ids win over any the record JSON holds. A team run decodes without ``member_responses``; the store
     fills them from the member rows.
@@ -89,7 +92,7 @@ def run_record(
         "parent_run_id": parent_run_id,
         "status": columns.status,
         "messages": messages,
-        "tools": _decoded(columns.tools),
+        "tools": tools if columns.has_tools else None,
         "requirements": _decoded(columns.requirements),
         "metadata": _decoded(columns.metadata),
     }

@@ -96,6 +96,7 @@ class _Tables(NamedTuple):
     names: TableNames
     runs: str
     messages: str
+    tools: str
     summaries: str
     removed: str
 
@@ -200,15 +201,15 @@ def folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id:
             f"(SELECT run_id FROM {tables.runs} WHERE session_id = ? AND run_id = ?)",
             (session_id, run_id),
         ).fetchall()
-        members = connection.execute(
-            f"SELECT tools FROM {tables.runs} WHERE session_id = ? AND parent_run_id = ? "  # noqa: S608
-            "AND folded_by IS NOT NULL AND tools IS NOT NULL",
+        member_tools = connection.execute(
+            f"SELECT tool.data FROM {tables.tools} AS tool JOIN {tables.runs} AS run ON run.run_id = tool.run_id "  # noqa: S608
+            "WHERE run.session_id = ? AND run.parent_run_id = ? AND run.folded_by IS NOT NULL",
             (session_id, run_id),
         ).fetchall()
     folded = [json.loads(data) for (data,) in messages]
     call_ids = {call.get("id") for message in folded for call in message.get("tool_calls") or []}
     call_ids |= {message.get("tool_call_id") for message in folded}
-    call_ids |= {tool.get("tool_call_id") for (tools,) in members for tool in json.loads(tools)}
+    call_ids |= {json.loads(data).get("tool_call_id") for (data,) in member_tools}
     return {call_id for call_id in call_ids if isinstance(call_id, str)}
 
 
@@ -424,7 +425,7 @@ def _rows(
 
 def _tables(storage: ConversationStore) -> _Tables:
     names = storage.names
-    tables = (names.log_runs, names.log_messages, names.log_summaries, names.log_removed)
+    tables = (names.log_runs, names.log_messages, names.log_tools, names.log_summaries, names.log_removed)
     return _Tables(names, *map(quote_identifier, tables))
 
 

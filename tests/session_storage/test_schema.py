@@ -119,12 +119,12 @@ _LOG_COLUMNS = {
         "status TEXT NOT NULL",
         "seq INTEGER NOT NULL",
         "folded_by INTEGER",
+        "has_tools INTEGER NOT NULL",
         "created_at INTEGER NOT NULL",
         "updated_at INTEGER NOT NULL",
         "metadata TEXT",
         "record TEXT NOT NULL",
         "requirements TEXT",
-        "tools TEXT",
     ],
     "code_sessions_log_messages": [
         "run_id TEXT NOT NULL PK1",
@@ -133,6 +133,7 @@ _LOG_COLUMNS = {
         "folded_by INTEGER",
         "data TEXT NOT NULL",
     ],
+    "code_sessions_log_tools": ["run_id TEXT NOT NULL PK1", "ord INTEGER NOT NULL PK2", "data TEXT NOT NULL"],
     "code_sessions_log_summaries": [
         "id INTEGER PK1",
         "session_id TEXT NOT NULL",
@@ -153,6 +154,7 @@ _LOG_COLUMNS = {
 _LOG_FOREIGN_KEYS = {
     "code_sessions_log_runs": ["session_id -> code_sessions.session_id ON DELETE CASCADE"],
     "code_sessions_log_messages": ["run_id -> code_sessions_log_runs.run_id ON DELETE CASCADE"],
+    "code_sessions_log_tools": ["run_id -> code_sessions_log_runs.run_id ON DELETE CASCADE"],
     "code_sessions_log_summaries": ["session_id -> code_sessions.session_id ON DELETE CASCADE"],
     "code_sessions_log_removed": ["session_id -> code_sessions.session_id ON DELETE CASCADE"],
     "code_sessions_usage": ["session_id -> code_sessions.session_id ON DELETE CASCADE"],
@@ -166,6 +168,7 @@ _LOG_OBJECTS = [
     ("table", "code_sessions_log_removed", "code_sessions_log_removed"),
     ("table", "code_sessions_log_runs", "code_sessions_log_runs"),
     ("table", "code_sessions_log_summaries", "code_sessions_log_summaries"),
+    ("table", "code_sessions_log_tools", "code_sessions_log_tools"),
     ("table", "code_sessions_usage", "code_sessions_usage"),
     ("table", "sqlite_sequence", "sqlite_sequence"),
     ("index", "idx_code_sessions_log_messages_run_id_ord", "code_sessions_log_messages"),
@@ -177,6 +180,7 @@ _LOG_OBJECTS = [
     ("index", "sqlite_autoindex_code_sessions_log_messages_1", "code_sessions_log_messages"),
     ("index", "sqlite_autoindex_code_sessions_log_removed_1", "code_sessions_log_removed"),
     ("index", "sqlite_autoindex_code_sessions_log_runs_1", "code_sessions_log_runs"),
+    ("index", "sqlite_autoindex_code_sessions_log_tools_1", "code_sessions_log_tools"),
     ("index", "sqlite_autoindex_code_sessions_usage_1", "code_sessions_usage"),
 ]
 
@@ -224,7 +228,7 @@ def _log_database(path: Path | str = ":memory:") -> sqlite3.Connection:
 
 
 def test_the_v2_schema_creates_exactly_its_tables_indexes_and_meta_row(tmp_path: Path) -> None:
-    """An empty file gets the nine-column sessions table, the five log tables, the ledger, and version 2's meta row."""
+    """An empty file gets the nine-column sessions table, the six log tables, the ledger, and version 2's meta row."""
     with closing(_log_database(tmp_path / "code.db")) as connection:
         layout = _layout(connection)
 
@@ -289,6 +293,7 @@ def test_the_v2_tables_sit_beside_the_agno_tables_of_every_golden(store: GoldenS
         store.names.log_meta,
         store.names.log_runs,
         store.names.log_messages,
+        store.names.log_tools,
         store.names.log_summaries,
         store.names.log_removed,
         "sqlite_sequence",

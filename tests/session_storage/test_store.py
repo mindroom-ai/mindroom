@@ -70,6 +70,7 @@ def _run(
     metrics: RunMetrics | None = None,
     metadata: dict[str, Any] | None = None,
     messages: list[Message] | None = None,
+    tools: list[ToolExecution] | None = None,
 ) -> RunRecord:
     return RunRecord(
         run_id=run_id,
@@ -86,6 +87,7 @@ def _run(
         ],
         metrics=metrics,
         metadata=metadata,
+        tools=tools,
         created_at=1_700_000_000,
     )
 
@@ -514,12 +516,12 @@ def test_a_message_id_held_twice_raises_and_writes_nothing(store: ConversationSt
     assert _row(store, "r1") is None
 
 
-def _audited(store: ConversationStore) -> None:
+def _audited(store: ConversationStore, table: str = "code_sessions_log_messages") -> None:
     _execute(store, "CREATE TABLE audit (change TEXT)")
     for change in ("INSERT", "UPDATE", "DELETE"):
         _execute(
             store,
-            f"CREATE TRIGGER audit_{change.lower()} AFTER {change} ON code_sessions_log_messages "  # noqa: S608
+            f"CREATE TRIGGER audit_{change.lower()} AFTER {change} ON {table} "  # noqa: S608
             f"BEGIN INSERT INTO audit VALUES ('{change}'); END",
         )
 
@@ -547,6 +549,49 @@ def test_a_save_rewrites_only_the_message_rows_that_changed(store: ConversationS
     _save(store, _run("r1", RunStatus.cancelled, messages=[changed[0], changed[2]]))
     assert sorted(_changes(store)) == ["DELETE", "UPDATE"]
     assert [(row[0], row[1]) for row in _message_rows(store, "r1")] == [("m0", 0), ("m2", 1)]
+
+
+def _tool(call_id: str, result: str) -> ToolExecution:
+    return ToolExecution(tool_call_id=call_id, tool_name="shell", tool_args={"command": call_id}, result=result)
+
+
+def test_a_save_writes_only_the_tool_rows_that_changed(store: ConversationStore) -> None:
+    """A checkpoint after each tool call writes that call's row; earlier calls and their results are not written again."""
+    tools = [_tool("c0", "out0"), _tool("c1", "out1")]
+    _save(store, _run("r1", RunStatus.cancelled, tools=tools))
+    _audited(store, "code_sessions_log_tools")
+
+    grown = [*copy.deepcopy(tools), _tool("c2", "out2")]
+    _save(store, _run("r1", RunStatus.cancelled, tools=grown))
+    assert _changes(store) == ["INSERT"]
+
+    grown[0].result = "edited"
+    _save(store, _run("r1", RunStatus.cancelled, tools=grown))
+    assert _changes(store) == ["UPDATE"]
+
+    _save(store, _run("r1", RunStatus.cancelled, tools=grown[:1]))
+    assert _changes(store) == ["DELETE", "DELETE"]
+    assert _loaded(store).runs[0].tools == grown[:1]
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [None, [], [_tool("c0", "first"), _tool("c0", "second")]],
+    ids=["none", "empty", "same-id"],
+)
+def test_tool_executions_load_as_saved_in_their_order(
+    store: ConversationStore,
+    tools: list[ToolExecution] | None,
+) -> None:
+    """No tool list stays apart from an empty one, and calls sharing an id, as legacy ones can, keep their own rows."""
+    _save(store, _run("r1", RunStatus.cancelled, tools=[_tool("old", "stale")]))
+
+    _save(store, _run("r1", tools=tools))
+
+    assert _loaded(store).runs[0].tools == tools
+    assert _query(store, "SELECT ord FROM code_sessions_log_tools ORDER BY ord") == [
+        (i,) for i in range(len(tools or []))
+    ]
 
 
 def test_a_folded_message_row_is_never_touched_by_a_save(store: ConversationStore) -> None:
@@ -986,15 +1031,17 @@ def test_load_reads_one_snapshot(store: ConversationStore, traced: list[Callable
     assert session.summary is None
 
 
-def test_saves_and_loads_read_messages_in_order_without_a_sort(
+@pytest.mark.parametrize("table", ["code_sessions_log_messages", "code_sessions_log_tools"])
+def test_saves_and_loads_read_messages_and_tools_in_order_without_a_sort(
     store: ConversationStore,
     traced: list[Callable[[str], None]],
+    table: str,
 ) -> None:
-    """Message reads walk an index in ``ord`` order; a sort would spill a large run's messages to a temp file."""
+    """Message and tool reads walk an index in ``ord`` order; a sort would spill a large run's rows to a temp file."""
     reads: list[str] = []
 
     def record(statement: str) -> None:
-        if statement.lstrip().upper().startswith("SELECT") and "code_sessions_log_messages" in statement:
+        if statement.lstrip().upper().startswith("SELECT") and table in statement:
             reads.append(statement)
 
     traced.append(record)

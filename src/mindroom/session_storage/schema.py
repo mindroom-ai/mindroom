@@ -1,8 +1,8 @@
 """File and table names and layout of a conversation database.
 
-A database holds its sessions table, the five ``*_log_*`` tables of the run log, which hold a run's messages as rows
-of their own, and the usage ledger, whose DDL lives with its owner. ``*_log_meta`` records the layout version, which
-the Agno layout a conversion starts from (``legacy_agno3_schema``) lacks.
+A database holds its sessions table, the six ``*_log_*`` tables of the run log, which hold a run's messages and tool
+executions as rows of their own, and the usage ledger, whose DDL lives with its owner. ``*_log_meta`` records the
+layout version, which the Agno layout a conversion starts from (``legacy_agno3_schema``) lacks.
 """
 
 from __future__ import annotations
@@ -91,6 +91,11 @@ class TableNames:
         return f"{self.sessions}_log_messages"
 
     @property
+    def log_tools(self) -> str:
+        """The tool-execution table, one row per tool execution of a run."""
+        return f"{self.sessions}_log_tools"
+
+    @property
     def log_summaries(self) -> str:
         """The summary-row table."""
         return f"{self.sessions}_log_summaries"
@@ -104,7 +109,7 @@ class TableNames:
 def log_schema_sql(names: TableNames) -> tuple[str, ...]:
     """Return the idempotent DDL of a conversation database, new or converted, with its meta row.
 
-    It creates the nine-column sessions table, the five log tables and their indexes, and the usage ledger, each
+    It creates the nine-column sessions table, the six log tables and their indexes, and the usage ledger, each
     only when missing, and the meta row (version 2, ``next_seq`` 1) only when the table has none, so it leaves a
     converted database's counter and existing tables alone.
     """
@@ -119,12 +124,13 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         "next_seq INTEGER NOT NULL)",
         f"INSERT OR IGNORE INTO {meta} (id, version, next_seq) VALUES (1, {LOG_VERSION}, 1)",  # noqa: S608
         # The JSON columns come last, the metadata a cut scans first among them, so scans of the small columns and
-        # of the metadata skip the overflow pages of the larger ones.
+        # of the metadata skip the overflow pages of the larger ones. ``has_tools`` keeps a record's empty tool list
+        # apart from none; its entries are rows of their own.
         f"CREATE TABLE IF NOT EXISTS {runs} (run_id TEXT NOT NULL PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE, parent_run_id TEXT, "
         "kind TEXT NOT NULL, scope_key TEXT NOT NULL, status TEXT NOT NULL, seq INTEGER NOT NULL, "
-        "folded_by INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, metadata TEXT, "
-        "record TEXT NOT NULL, requirements TEXT, tools TEXT)",
+        "folded_by INTEGER, has_tools INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, "
+        "metadata TEXT, record TEXT NOT NULL, requirements TEXT)",
         _index_sql(names.log_runs, "session_id", "seq"),
         _index_sql(names.log_runs, "parent_run_id"),
         # Not WITHOUT ROWID: SQLite recommends that only for rows under about a twentieth of a page, and messages are
@@ -134,6 +140,10 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         "ord INTEGER NOT NULL, folded_by INTEGER, data TEXT NOT NULL, PRIMARY KEY (run_id, message_id))",
         # Serves reading a run's messages in order without a sort, which spills a large run to a temp file.
         _index_sql(names.log_messages, "run_id", "ord"),
+        # Rows of their own, so a save that adds a tool call writes that call alone rather than the run's whole list.
+        f"CREATE TABLE IF NOT EXISTS {quote_identifier(names.log_tools)} ("
+        f"run_id TEXT NOT NULL REFERENCES {runs}(run_id) ON DELETE CASCADE, ord INTEGER NOT NULL, "
+        "data TEXT NOT NULL, PRIMARY KEY (run_id, ord))",
         # AUTOINCREMENT never hands out the id of a deleted newest row again, which an append's compare relies on.
         f"CREATE TABLE IF NOT EXISTS {summaries} (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE, scope_key TEXT NOT NULL, "
