@@ -809,12 +809,15 @@ async def test_gemini_empty_text_parts_add_no_deltas_but_keep_their_signature(tm
     ]
     assert (message.content, message.reasoning_content) == ("Hi", None)
     assert message.provider_data is not None
-    assert message.provider_data["gemini_parts"] == [{"text": "Hi", "thought_signature": "c2ln"}]
+    assert message.provider_data["gemini_parts"] == [{"text": "Hi"}, {"text": "", "thought_signature": "c2ln"}]
+    replayed = (Message(role="user", content="Hello"), message, Message(role="user", content="Again."))
+    body, _ = await run_adapter(GEMINI, _request(*replayed), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+    assert body["body"]["contents"][1]["parts"] == [{"text": "Hi"}, {"text": "", "thoughtSignature": "c2ln"}]
 
 
 @pytest.mark.asyncio
 async def test_gemini_replays_a_reply_in_the_order_its_parts_arrived(tmp_path: Path) -> None:
-    """Text before and after a call replays as two parts around it, each with its own signature; a legacy row merges."""
+    """Every part replays in arrival order, a signed one apart from the unsigned text before it; a legacy row merges."""
     call = {"functionCall": {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}}
     response = gemini_sse(
         _gemini_chunk({"text": "Look"}, finish=None, usage=False),
@@ -826,7 +829,8 @@ async def test_gemini_replays_a_reply_in_the_order_its_parts_arrived(tmp_path: P
     reply = _completed(events).message
     assert reply.provider_data is not None
     assert reply.provider_data["gemini_parts"] == [
-        {"text": "Looking.", "thought_signature": "c2lnMQ=="},
+        {"text": "Look"},
+        {"text": "ing.", "thought_signature": "c2lnMQ=="},
         {"function_call_id": "call-1"},
         {"text": "Found it.", "thought_signature": "c2lnMg=="},
     ]
@@ -845,7 +849,8 @@ async def test_gemini_replays_a_reply_in_the_order_its_parts_arrived(tmp_path: P
 
     function_call = {"functionCall": {"id": "call-1", "name": "get_weather", "args": {"city": "Paris"}}}
     assert sent[0] == [
-        {"text": "Looking.", "thoughtSignature": "c2lnMQ=="},
+        {"text": "Look"},
+        {"text": "ing.", "thoughtSignature": "c2lnMQ=="},
         function_call,
         {"text": "Found it.", "thoughtSignature": "c2lnMg=="},
     ]

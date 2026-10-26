@@ -32,7 +32,10 @@
       "provider_data": {
         "gemini_parts": [
           {
-            "text": "Pack a light rain jacket and comfortable shoes.",
+            "text": "Pack a light rain jacket"
+          },
+          {
+            "text": " and comfortable shoes.",
             "thought_signature": "cGFyaXR5LXRob3VnaHQtc2lnbmF0dXJl"
           }
         ],

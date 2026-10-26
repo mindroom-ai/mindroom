@@ -458,8 +458,9 @@ class GeminiReply:
     """What one streamed Gemini reply produced so far.
 
     ``parts`` holds the reply's text and function calls in the order they arrived: a text part as ``{"text"}`` with
-    the ``thought_signature`` Gemini signed it with, a function call as ``{"function_call_id"}``. Streamed text joins
-    the open text part until a signature or a call closes it.
+    the ``thought_signature`` Gemini signed it with, a function call as ``{"function_call_id"}``. Unsigned streamed
+    text joins the open unsigned text part; a signed part, even one with empty text, stays its own part, because
+    Google requires each signature back in the part it came in, never merged with another part.
     """
 
     content: str = ""
@@ -531,12 +532,11 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
             reply.reasoning += part.text
             if part.text:
                 events.append(ReasoningDelta(part.text))
-        elif part.text:
-            reply.content += part.text
-            events.append(TextDelta(part.text))
-            _add_text(reply, part.text)
-        if signature is not None and not part.thought and reply.parts and "text" in reply.parts[-1]:
-            reply.parts[-1]["thought_signature"] = signature
+        elif part.text or signature is not None:
+            if part.text:
+                reply.content += part.text
+                events.append(TextDelta(part.text))
+            _add_text(reply, part.text, signature)
     if part.function_call is not None:
         call: dict[str, Any] = {
             "id": part.function_call.id or str(uuid4()),
@@ -554,13 +554,13 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
     return events
 
 
-def _add_text(reply: GeminiReply, text: str) -> None:
-    """Join ``text`` to the open text part, or start one after a signed part or a function call."""
+def _add_text(reply: GeminiReply, text: str, signature: str | None) -> None:
+    """Join unsigned ``text`` to the open unsigned text part; a signed part, or text after a call, starts a part."""
     last = reply.parts[-1] if reply.parts else None
-    if last is not None and "text" in last and "thought_signature" not in last:
+    if signature is None and last is not None and "text" in last and "thought_signature" not in last:
         last["text"] += text
-    else:
-        reply.parts.append({"text": text})
+        return
+    reply.parts.append({"text": text} if signature is None else {"text": text, "thought_signature": signature})
 
 
 def reply_provider_data(reply: GeminiReply) -> dict[str, Any]:
