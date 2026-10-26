@@ -11,13 +11,14 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading to conversation storage v2
 
 The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
-Meanwhile the process answers liveness and startup probes and becomes ready once the conversion finishes, so Kubernetes keeps the pod running however long the conversion takes.
+Meanwhile `/api/health` answers `200` and `/api/ready` answers `503` with the detail `Converting conversation storage`; the process becomes ready only after the conversion and the rest of startup finish.
 The conversion is one-way, and downgrading afterwards is not supported.
 
 ### Before upgrading
 
-Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about twice the total size of their `.db` files.
-A database whose directory has less than twice its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+Point every startup probe at `/api/health`, not `/api/ready`, as the bundled Helm charts do: a startup probe on `/api/ready` restarts the process during a long conversion, each restart rolls back the database being converted, and a large one never finishes (see [Health & Readiness](operational-log-events.md#health-readiness)).
+Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about two and a half times the total size of their `.db` files.
+A database whose directory has less than two and a half times its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
 
 ### What carries over
 

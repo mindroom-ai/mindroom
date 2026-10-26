@@ -12,7 +12,9 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 | GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Never point a startup probe at `/api/ready`: the one-time conversion after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) keeps the process not ready for as long as it takes, a probe restart rolls back the database being converted, and a database larger than the probe allows never finishes converting.
+A startup probe on `/api/health` passes as soon as the process answers, as the bundled Helm charts configure it.
 
 The `/api/health` body also contains:
 

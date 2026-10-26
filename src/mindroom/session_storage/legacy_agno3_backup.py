@@ -36,7 +36,7 @@ class ConversionSpaceError(RuntimeError):
 def write_conversion_backup(connection: sqlite3.Connection, database: Path, descriptors: ExitStack) -> Path:
     """Copy ``database`` to ``<name>.db.pre-storage-v2`` beside it, while ``connection`` holds its write lock.
 
-    Free space must be at least twice the file's size. The copy reads and writes only through descriptors of the
+    Free space must be at least two and a half times the file's size. The copy reads and writes only through descriptors of the
     pinned directory, never following a link, and replaces an earlier attempt's temporary file.
 
     ``descriptors`` takes the database file's own descriptor. SQLite's locks are POSIX record locks, which a
@@ -54,7 +54,9 @@ def write_conversion_backup(connection: sqlite3.Connection, database: Path, desc
             os.unlink(temporary_name, dir_fd=directory)
         source = open_regular_file_at(directory, database.name)
         descriptors.callback(os.close, source)
-        _require_free_space(directory, database, 2 * os.fstat(source).st_size)
+        # The backup takes the file's size and the converted file grows by about as much again, measured at up to
+        # 2.04 times the size in all, so two and a half times leaves a margin.
+        _require_free_space(directory, database, 5 * os.fstat(source).st_size // 2)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         with (
             os.fdopen(source, "rb", closefd=False) as reader,
@@ -74,6 +76,6 @@ def _require_free_space(directory: int, database: Path, needed: int) -> None:
     if available < needed:
         msg = (
             f"Converting {database} to storage v2 needs {needed} bytes free in its directory, "
-            f"twice the database's size, but only {available} are free"
+            f"two and a half times the database's size, but only {available} are free"
         )
         raise ConversionSpaceError(msg)

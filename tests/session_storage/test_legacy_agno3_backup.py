@@ -222,15 +222,15 @@ def test_a_leftover_temporary_file_is_replaced(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(("spare", "written"), [(-1, False), (0, True)])
-def test_the_backup_needs_twice_the_database_size_free(
+def test_the_backup_needs_two_and_a_half_times_the_database_size_free(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     spare: int,
     written: bool,
 ) -> None:
-    """Below twice the file's size, the error names the database and the bytes, and nothing is written."""
+    """Below two and a half times the file's size, the error names the database and the bytes, and nothing is written."""
     database = _database(tmp_path)
-    needed = 2 * database.stat().st_size
+    needed = 5 * database.stat().st_size // 2
     monkeypatch.setattr(os, "statvfs", lambda _directory: SimpleNamespace(f_bavail=needed + spare, f_frsize=1))
 
     if written:
@@ -247,7 +247,7 @@ def test_the_backup_needs_twice_the_database_size_free(
 def test_free_space_counts_blocks_available_to_the_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Blocks reserved for the superuser do not count, and blocks count at the fragment size."""
     database = _database(tmp_path)
-    needed = 2 * database.stat().st_size
+    needed = 5 * database.stat().st_size // 2
     monkeypatch.setattr(
         os,
         "statvfs",

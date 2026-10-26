@@ -35,7 +35,7 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
 The [conversation storage v2 upgrade](upgrades.md#upgrading-to-conversation-storage-v2) leaves a `<name>.db.pre-storage-v2` copy beside each conversation database, which MindRoom never deletes.
-A conversation database restored from a backup taken before that upgrade converts again when it is next opened, which needs free space of twice its size in its directory.
+A conversation database restored from a backup taken before that upgrade converts again when it is next opened, which needs free space of two and a half times its size in its directory.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.

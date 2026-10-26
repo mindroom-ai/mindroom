@@ -269,9 +269,9 @@ Matrix sync callback
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
 | `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the conversion to the current layout first |
-| `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
+| `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
 | `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, and the usage ledger |
-| `session_storage/codec.py` | A run record to its run row and message rows and back, with the JSON keys stored runs carry |
+| `session_storage/codec.py` | A run record to its run row, message rows, and tool-execution rows and back, with the JSON keys stored runs carry |
 | `session_storage/types.py` | `ConversationSession` and the other values the store reads and writes |
 | `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
 | `session_storage/legacy_agno2_runs.py` | Data older Agno releases stored: Agno 2 run blobs, rows without a position, and odd timestamps, which the conversion reads, and session JSON columns encoded twice, which loads read |

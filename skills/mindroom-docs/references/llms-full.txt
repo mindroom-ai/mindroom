@@ -18406,7 +18406,7 @@ curl http://localhost:8765/api/health
 curl http://localhost:8765/api/ready
 ```
 
-Use `/api/health` for liveness and `/api/ready` for readiness; responses are described in [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness).
+Use `/api/health` for startup and liveness probes and `/api/ready` for readiness; responses and why a startup probe must not use readiness are described in [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness).
 A hosted container waiting for pairing approval is live but not ready; find the approval link with `docker logs mindroom`.
 
 ## Building from Source
@@ -20402,7 +20402,7 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
 The [conversation storage v2 upgrade](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) leaves a `<name>.db.pre-storage-v2` copy beside each conversation database, which MindRoom never deletes.
-A conversation database restored from a backup taken before that upgrade converts again when it is next opened, which needs free space of twice its size in its directory.
+A conversation database restored from a backup taken before that upgrade converts again when it is next opened, which needs free space of two and a half times its size in its directory.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
@@ -20681,7 +20681,9 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 | GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Never point a startup probe at `/api/ready`: the one-time conversion after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) keeps the process not ready for as long as it takes, a probe restart rolls back the database being converted, and a database larger than the probe allows never finishes converting.
+A startup probe on `/api/health` passes as soon as the process answers, as the bundled Helm charts configure it.
 
 The `/api/health` body also contains:
 
@@ -20850,13 +20852,14 @@ Always back up configuration and persistent storage before replacing the running
 ## Upgrading to conversation storage v2
 
 The first start after this upgrade converts the conversation database of every agent and team, private instances included, to a new layout before any agent comes online.
-Meanwhile the process answers liveness and startup probes and becomes ready once the conversion finishes, so Kubernetes keeps the pod running however long the conversion takes.
+Meanwhile `/api/health` answers `200` and `/api/ready` answers `503` with the detail `Converting conversation storage`; the process becomes ready only after the conversion and the rest of startup finish.
 The conversion is one-way, and downgrading afterwards is not supported.
 
 ### Before upgrading
 
-Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about twice the total size of their `.db` files.
-A database whose directory has less than twice its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+Point every startup probe at `/api/health`, not `/api/ready`, as the bundled Helm charts do: a startup probe on `/api/ready` restarts the process during a long conversion, each restart rolls back the database being converted, and a large one never finishes (see [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness)).
+Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about two and a half times the total size of their `.db` files.
+A database whose directory has less than two and a half times its own size free is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
 
 ### What carries over
 
