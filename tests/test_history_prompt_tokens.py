@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import (
@@ -19,8 +20,13 @@ from mindroom.history.types import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
+from mindroom.session_storage.schema import TableNames
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.history_helpers import _completed_run, _session, replay_settings
+from tests.session_storage.agno_layout import SESSION_ID, converted_store
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
 _SEARCH_PARAMETERS = {
@@ -145,27 +151,23 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
     assert [message.to_dict() for run in session.runs for message in run.messages] == original_snapshots
 
 
-def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
+def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles(tmp_path: Path) -> None:
+    """A run an earlier release stored with its system prompt converts without it, so no estimate counts it."""
     conversation_messages = [
         Message(role="user", content="user request"),
         Message(role="assistant", content="assistant answer"),
         Message(role="tool", content="tool result"),
     ]
     history_settings = replay_settings()
-    contaminated_session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="system", content="legacy system prompt " * 20),
-                    *conversation_messages,
-                ],
-            ),
-        ],
-    )
+    stored = _completed_run(
+        "run-1",
+        messages=[Message(role="system", content="legacy system prompt " * 20), *conversation_messages],
+    ).to_dict()
+    store = converted_store(TableNames("test_agent").database_path(tmp_path), stored, owner_id="test_agent")
+    contaminated_session = store.load_session(SESSION_ID, "agent")
+    assert contaminated_session is not None
     clean_session = _session(
-        "session-1",
+        SESSION_ID,
         runs=[_completed_run("run-1", messages=conversation_messages)],
     )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import httpx
@@ -42,6 +43,7 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import Await
@@ -53,6 +55,10 @@ from tests.history_helpers import (
     _session,
     replay_settings,
 )
+from tests.session_storage.agno_layout import converted_store
+
+if TYPE_CHECKING:
+    from mindroom.llm.runs import AnyRunRecord
 
 
 @pytest.mark.asyncio
@@ -612,10 +618,19 @@ def test_build_summary_input_renders_a_block_list_one_block_per_line() -> None:
     assert '{"text":"first block","type":"text"}\n{"text":"second block","type":"text"}' in summary_input
 
 
-def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
-    run = _completed_run(
-        "run-1",
-        messages=[
+def _converted_run(tmp_path: Path, messages: list[Message]) -> AnyRunRecord:
+    """Return ``run-1`` holding ``messages`` as an earlier release stored it, once its database converts."""
+    stored = _completed_run("run-1", messages=messages).to_dict()
+    run = converted_store(TableNames("code").database_path(tmp_path), stored).get_run("run-1")
+    assert run is not None
+    return run
+
+
+def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles(tmp_path: Path) -> None:
+    """A run an earlier release stored with its system prompt converts without it, so compaction never reads it."""
+    run = _converted_run(
+        tmp_path,
+        [
             Message(role="system", content="legacy system prompt"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
@@ -635,10 +650,11 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
     ]
 
 
-def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
-    run = _completed_run(
-        "run-1",
-        messages=[
+def test_build_summary_input_excludes_legacy_persisted_prompt_roles(tmp_path: Path) -> None:
+    """A run an earlier release stored with its system prompt converts without it, so no summary input holds it."""
+    run = _converted_run(
+        tmp_path,
+        [
             Message(role="system", content="Persisted system prompt that should not be summarized"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),

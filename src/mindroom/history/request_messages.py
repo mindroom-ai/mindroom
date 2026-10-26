@@ -100,12 +100,12 @@ def replayed_history(
 
 
 def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:
-    """Return the stored messages of ``runs`` that can replay, oldest first: every message but the prompt messages.
+    """Return the stored messages of ``runs``, oldest first; a visible stored run holds no prompt message to leave out.
 
     The messages are the stored ones, never copies. A request's history and a compaction's input both select their
     messages here, so each counts the same messages against its limits.
     """
-    return [message for run in runs for message in run.messages if message.role != "system"]
+    return [message for run in runs for message in run.messages]
 
 
 def _history_copy(message: Message) -> Message:
