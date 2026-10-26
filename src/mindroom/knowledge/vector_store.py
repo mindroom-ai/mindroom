@@ -245,7 +245,7 @@ class KnowledgeCollection:
     def load_vectors(self) -> None:
         """Load the collection's vectors into the matrix cache as a search would, so the next search finds them.
 
-        No search used them yet, so they go in as the least recently used and never evict a searched base's.
+        No search used them yet, so they take the recency of the version they replace instead of the newest.
         """
         with closing(self._connect(read_only=True)) as connection:
             _vector_index(connection, self.file, searched=False)
@@ -444,7 +444,8 @@ class _VectorIndex:
         return int(self.rowids.nbytes + self.matrix.nbytes)
 
 
-_index_cache: OrderedDict[tuple[str, int, int, int, int, int], _VectorIndex] = OrderedDict()
+_CacheKey = tuple[str, int, int, int, int, int]
+_index_cache: OrderedDict[_CacheKey, _VectorIndex] = OrderedDict()
 _index_cache_lock = threading.Lock()
 #: Held while a matrix loads, so concurrent cold searches load it once instead of each allocating a copy.
 _index_load_lock = threading.Lock()
@@ -475,38 +476,60 @@ def _vector_index(connection: sqlite3.Connection, file: Path, *, searched: bool 
     with _index_cache_lock:
         index = _index_cache.get(key)
         if index is not None:
-            _index_cache.move_to_end(key)
+            if searched:
+                _index_cache.move_to_end(key)
             return index
     with _index_load_lock:
         with _index_cache_lock:
             index = _index_cache.get(key)
             if index is not None:
                 return index
-            # A base serves one collection at a time, so before the load, drop the matrices of its other collections
-            # (the one a refresh retired stays on disk unchanged), of this file's older versions (a rewrite within one
-            # timestamp tick may keep the stat key), and of deleted or rewritten files. A search that chose the old
-            # collection just before a publication and loads it after the new one can swap them once more; it costs
-            # one extra load per such search and settles as soon as it finishes.
-            for stale in [
-                cached
-                for cached in _index_cache
-                if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
-            ]:
-                del _index_cache[stale]
+            later = _drop_replaced_matrices(file)
         index = _load_vector_index(connection)
         with _index_cache_lock:
             _index_cache[key] = index
-            _index_cache.move_to_end(key, last=searched)
-            # The largest index does not count against the budget, so one base too big for it is not reloaded on every
-            # search, even when searches alternate between it and smaller ones.
-            largest = max(_index_cache, key=lambda cached: _index_cache[cached].nbytes)
-            cached_bytes = sum(cached.nbytes for cached in _index_cache.values()) - _index_cache[largest].nbytes
-            for cached in list(_index_cache):
-                if cached_bytes <= _MATRIX_CACHE_BYTES:
-                    break
-                if cached != largest:
-                    cached_bytes -= _index_cache.pop(cached).nbytes
+            if not searched:
+                # A preload takes the replaced version's place: bases searched since stay more recent than it.
+                for cached in later:
+                    _index_cache.move_to_end(cached)
+            _evict_over_budget()
     return index
+
+
+def _drop_replaced_matrices(file: Path) -> list[_CacheKey]:
+    """Drop the cached matrices a load of ``file`` replaces; return the keys that were more recent than its base's.
+
+    A base serves one collection at a time, so its other collections' matrices go (the one a refresh retired stays on
+    disk unchanged), as do this file's older versions (a rewrite within one timestamp tick may keep the stat key) and
+    those of deleted or rewritten files. A search that chose the old collection just before a publication and loads it
+    after the new one can swap them once more; it costs one extra load per such search and settles as soon as it ends.
+    Called with the cache lock held.
+    """
+    order = list(_index_cache)
+    stale = {
+        cached
+        for cached in order
+        if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
+    }
+    replaced = next((at for at, cached in enumerate(order) if Path(cached[0]).parent == file.parent), len(order))
+    for cached in stale:
+        del _index_cache[cached]
+    return [cached for cached in order[replaced + 1 :] if cached not in stale]
+
+
+def _evict_over_budget() -> None:
+    """Drop the least recently used matrices until the others fit the budget. Called with the cache lock held.
+
+    The largest index does not count against the budget, so one base too big for it is not reloaded on every search,
+    even when searches alternate between it and smaller ones.
+    """
+    largest = max(_index_cache, key=lambda cached: _index_cache[cached].nbytes)
+    cached_bytes = sum(cached.nbytes for cached in _index_cache.values()) - _index_cache[largest].nbytes
+    for cached in list(_index_cache):
+        if cached_bytes <= _MATRIX_CACHE_BYTES:
+            break
+        if cached != largest:
+            cached_bytes -= _index_cache.pop(cached).nbytes
 
 
 def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
