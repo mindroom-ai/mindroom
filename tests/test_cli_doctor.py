@@ -280,6 +280,48 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
     assert vertex_models == ["claude-sonnet-5-5"]
 
 
+@pytest.mark.parametrize(
+    ("provider", "extra_kwargs", "env", "url"),
+    [
+        (
+            "openai",
+            {"client_params": {"base_url": "https://proxy.example/v1"}, "base_url": "https://other.example/v1"},
+            "",
+            "https://proxy.example/v1/models",
+        ),
+        ("openai", {}, "OPENAI_BASE_URL=https://env-proxy.example/v1\n", "https://env-proxy.example/v1/models"),
+        ("groq", {"base_url": "https://groq-proxy.example"}, "", "https://groq-proxy.example/openai/v1/models"),
+        ("google", {}, "", "https://generativelanguage.googleapis.com/v1beta/models?key=k"),
+    ],
+)
+def test_doctor_checks_a_provider_key_at_the_endpoint_the_runtime_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    extra_kwargs: dict[str, object],
+    env: str,
+    url: str,
+) -> None:
+    """The key check goes to the model's runtime endpoint: ``client_params.base_url``, then ``base_url``, then the endpoint variable."""
+    env_key = f"{provider.upper()}_API_KEY"
+    (tmp_path / ".env").write_text(f"{env_key}=k\n{env}", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed: list[str] = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        probed.append(url)
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    config = Config(
+        models={"default": ModelConfig(provider=provider, id="gpt-6-astra", extra_kwargs=extra_kwargs or None)},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_single_provider(provider, config, runtime_paths) == (1, 0, 0)
+    assert probed == [url]
+
+
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A healthy embedding round-trip counts as a pass."""
     monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)

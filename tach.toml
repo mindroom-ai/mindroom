@@ -4905,6 +4905,8 @@ depends_on = [
     "mindroom.startup_errors",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
+    # Deferred import in the provider key check, so the OpenAI routes load only when a key is checked.
+    "mindroom.providers.openai",
 ]
 
 [[modules]]

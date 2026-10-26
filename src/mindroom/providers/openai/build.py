@@ -73,6 +73,7 @@ __all__ = [
     "ProviderRuntime",
     "accepted_extra_kwargs",
     "build_provider",
+    "configured_endpoint",
 ]
 
 logger = get_logger(__name__)
@@ -102,6 +103,8 @@ class _ChatRoute:
     omitted_media: frozenset[MediaKind] = frozenset({"video"})
     # The runtime env variable that sets the endpoint when the config sets none.
     base_url_variable: str | None = None
+    # The API path appended to a configured endpoint: Groq and Cerebras configs give a host, as their SDKs take it.
+    api_path: str = ""
 
 
 _CHAT_ROUTES: dict[str, _ChatRoute] = {
@@ -152,21 +155,25 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         provider="Groq",
         provider_name="Groq",
         api_key_env=PROVIDER_ENV_KEYS["groq"],
+        base_url=f"{GROQ_HOST_DEFAULT}/openai/v1",
         dialect="groq",
         accepted=GROQ_FIELDS,
         structured_output="json_mode",
         omitted_media=frozenset({"audio", "file", "video"}),
         base_url_variable="GROQ_BASE_URL",
+        api_path="/openai/v1",
     ),
     "cerebras": _ChatRoute(
         provider="Cerebras",
         provider_name="Cerebras",
         api_key_env=PROVIDER_ENV_KEYS["cerebras"],
+        base_url=f"{CEREBRAS_HOST_DEFAULT}/v1",
         dialect="cerebras",
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
         omitted_media=frozenset({"audio", "image", "file", "video"}),
         base_url_variable="CEREBRAS_BASE_URL",
+        api_path="/v1",
     ),
 }
 # The endpoint variable of every route that reads one, by route.
@@ -279,6 +286,22 @@ def _openai_client(
     return AsyncOpenAI(**_sdk_client_kwargs({"api_key": api_key, **options}, settings, http_client))
 
 
+def _configured_route_base_url(
+    route_key: str,
+    client_params: Mapping[str, Any] | None,
+    base_url: str | None,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Return the endpoint a route's config sets, else its endpoint variable's, with the route's API path; None for neither."""
+    route = _CHAT_ROUTES[route_key]
+    configured = _authored_base_url(client_params, base_url) or (
+        runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
+    )
+    if not configured:
+        return None
+    return f"{configured.rstrip('/')}{route.api_path}" if route.api_path else configured
+
+
 def _route_base_url(
     route_key: str,
     client_params: Mapping[str, Any] | None,
@@ -286,16 +309,26 @@ def _route_base_url(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return a route's endpoint: the config's, else its endpoint variable's, else its default."""
-    route = _CHAT_ROUTES[route_key]
-    configured = _authored_base_url(client_params, base_url) or (
-        runtime_paths.env_value(route.base_url_variable) if route.base_url_variable else None
+    configured = _configured_route_base_url(route_key, client_params, base_url, runtime_paths)
+    return configured or _CHAT_ROUTES[route_key].base_url or ""
+
+
+def configured_endpoint(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+    """Return the endpoint one model calls when its config or its route's endpoint variable sets one, else None.
+
+    Only the Chat Completions routes, whose endpoint OpenAI's Responses route shares, resolve one here; any other
+    route, such as Codex or Claude, gets None.
+    """
+    route_key = provider_route(model_config.provider)
+    if route_key not in _CHAT_ROUTES:
+        return None
+    extra_kwargs = model_config.extra_kwargs or {}
+    return _configured_route_base_url(
+        route_key,
+        extra_kwargs.get("client_params"),
+        extra_kwargs.get("base_url"),
+        runtime_paths,
     )
-    # Groq and Cerebras endpoints are hosts, as configs for their SDKs give them; the route appends its API path.
-    if route_key == "groq":
-        return f"{(configured or GROQ_HOST_DEFAULT).rstrip('/')}/openai/v1"
-    if route_key == "cerebras":
-        return f"{(configured or CEREBRAS_HOST_DEFAULT).rstrip('/')}/v1"
-    return configured or route.base_url or ""
 
 
 def _keyed_client_factory(

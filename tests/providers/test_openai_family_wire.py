@@ -1507,18 +1507,26 @@ async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_configured_groq_host_keeps_the_sdk_path(tmp_path: Path) -> None:
-    config = {
-        "provider": "groq",
-        "id": "openai/gpt-oss-120b",
-        "api_key": "k",
-        "extra_kwargs": {"base_url": "http://groq.test"},
-    }
+@pytest.mark.parametrize(
+    ("provider", "model_id", "url"),
+    [
+        ("groq", "openai/gpt-oss-120b", "http://proxy.test/openai/v1/chat/completions"),
+        ("cerebras", "gpt-oss-120b", "http://proxy.test/v1/chat/completions"),
+    ],
+)
+async def test_a_configured_groq_or_cerebras_host_keeps_the_sdk_path(
+    tmp_path: Path,
+    provider: str,
+    model_id: str,
+    url: str,
+) -> None:
+    """Groq and Cerebras configs give a host, as their SDKs take it, and the route appends its API path."""
+    config = {"provider": provider, "id": model_id, "api_key": "k", "extra_kwargs": {"base_url": "http://proxy.test/"}}
     built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
 
     await _turn(built, ModelRequest(messages=[_user()]))
 
-    assert str(built.requests[0].url) == "http://groq.test/openai/v1/chat/completions"
+    assert str(built.requests[0].url) == url
 
 
 def _client_options(prefix: str) -> dict[str, Any]:
@@ -1725,6 +1733,14 @@ def test_identity_strings_match_the_stored_provider_names(
     identity = build_provider(ModelConfig(**config), _runtime(tmp_path)).identity
 
     assert (identity.provider, identity.provider_name, identity.endpoint) == (provider, provider_name, endpoint)
+
+
+def test_a_blank_endpoint_variable_leaves_the_built_in_endpoint(tmp_path: Path) -> None:
+    """A blank ``GROQ_BASE_URL`` is no endpoint, so Groq keeps its own instead of a bare API path."""
+    model = ModelConfig(provider="groq", id="openai/gpt-oss-120b")
+    runtime = _runtime(tmp_path, GROQ_BASE_URL="")
+
+    assert build_provider(model, runtime).identity.endpoint == "https://api.groq.com/openai/v1"
 
 
 def test_openai_routes_pick_responses_only_where_it_is_selected_or_searchable(tmp_path: Path) -> None:

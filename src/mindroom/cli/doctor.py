@@ -200,14 +200,12 @@ def _models_using_shared_key(config: Config, env_key: str, runtime_paths: Runtim
         return None
 
 
-def _get_custom_base_url(models: list[ModelConfig]) -> str | None:
-    """Get custom base_url from model extra_kwargs, if any."""
-    for model in models:
-        if model.extra_kwargs:
-            base_url = model.extra_kwargs.get("base_url")
-            if base_url:
-                return base_url
-    return None
+def _get_custom_base_url(models: list[ModelConfig], runtime_paths: RuntimePaths) -> str | None:
+    """Return the endpoint the runtime sends the shared key to when a model's config or its route's endpoint variable sets one."""
+    # Deferred: the OpenAI routes load the model HTTP client and token counter.
+    from mindroom.providers.openai.build import configured_endpoint  # noqa: PLC0415
+
+    return next((endpoint for model in models if (endpoint := configured_endpoint(model, runtime_paths))), None)
 
 
 def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
@@ -459,7 +457,7 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, int(needs_shared_key)
 
-    base_url = _get_custom_base_url(shared_key_models or [])
+    base_url = _get_custom_base_url(shared_key_models or [], runtime_paths)
     valid, detail = _validate_provider_key(provider, api_key, base_url)
     return _print_validation(
         valid,
