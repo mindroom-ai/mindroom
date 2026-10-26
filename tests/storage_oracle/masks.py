@@ -11,7 +11,7 @@ To undo message differences, the backend checks every run the v2 store shows aga
 (``NextBackend.expected_view``), and keeps the message list the Agno-layout store held of each run, which kept history
 copies, and the messages a fold took until a whole-run rewrite of a loaded copy. It also keeps where that store's
 copy of a manual compaction request in the session state was: in each loaded session's state, as each one last
-stored it, in the stored row, and in each state a run saved.
+stored it, and in the stored row.
 """
 
 from __future__ import annotations
@@ -362,19 +362,6 @@ class MaskedBackend(NextBackend):
         self.flag_restored = self.flag_restored or not has_queued_force_compaction(self.store, SESSION_ID, self.scope)
         pending.live = pending.held = self.pending_stored = False
         self.pending_written_at = self.determinism.now
-
-    @override
-    def state_version(self, session: ConversationSession) -> dict[str, object]:
-        version = super().state_version(session)
-        if self.pending[id(session)].live:
-            version[_PENDING_KEY] = [self.scope.key]
-        return version
-
-    @override
-    def save_session_state(self, session: ConversationSession, state: dict[str, object]) -> object:
-        # A late writer stores a state a run saved, with the request where the old store's run state held it.
-        self.pending_stored = self.pending[id(session)].held = state.pop(_PENDING_KEY, None) is not None
-        return super().save_session_state(session, state)
 
     def _old_state_save(self, session: ConversationSession, state: dict[str, object] | None) -> None:
         """Follow the old store's write of the state a run save carries, before the v2 store writes its own."""

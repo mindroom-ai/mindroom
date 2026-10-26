@@ -544,13 +544,9 @@ class Driver(ABC):
             created_at=datetime.fromtimestamp(self.determinism.now, UTC),
         )
 
-    def state_version(self, session: ConversationSession) -> dict[str, object]:
-        """Return the session state a run save of ``session`` stores, which a late writer may store again."""
-        return session_state_snapshot(session.session_state)
-
     def _terminal(self, session: ConversationSession, record: AnyRunRecord) -> object:
         _assert_unique_message_ids(record)
-        self.state_versions.append(self.state_version(session))
+        self.state_versions.append(session_state_snapshot(session.session_state))
         outcome = self.save_terminal(session, record)
         self._remember(record)
         return outcome
@@ -913,7 +909,7 @@ class Driver(ABC):
         record.messages = deepcopy(turn.messages)
         record.status = RunStatus.cancelled
         _assert_unique_message_ids(record)
-        self.state_versions.append(self.state_version(turn.session))
+        self.state_versions.append(session_state_snapshot(turn.session.session_state))
         outcome = self.save_checkpoint(turn.session, record)
         self._remember(record)
         return outcome
