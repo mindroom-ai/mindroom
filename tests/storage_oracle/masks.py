@@ -9,7 +9,9 @@ sequence (``Diverged``).
 
 To undo message differences, the backend checks every run the v2 store shows against what its writes left
 (``NextBackend.expected_view``), and keeps the message list the Agno-layout store held of each run, which kept history
-copies, and the messages a fold took until a whole-run rewrite of a loaded copy.
+copies, and the messages a fold took until a whole-run rewrite of a loaded copy. It also keeps where that store's
+copy of a manual compaction request in the session state was: in each loaded session's state, as each one last
+stored it, in the stored row, and in each state a run saved.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.history.session_runs import session_runs
+from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
@@ -85,10 +88,17 @@ MASKS: dict[str, Mask] = {
             "not in spec v4: a discarded or retired fold owner's folded calls go with its message rows, while its "
             "fold row stays",
         ),
+        Mask(
+            "force_request_only_in_metadata",
+            "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
+            "that the next reply moves into the flag",
+        ),
     )
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
+# Where the Agno-layout store's runtime also queued a manual compaction request: a list of scope keys in the state.
+_PENDING_KEY = "mindroom_pending_compaction_scope_keys"
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,18 @@ class _Row:
     status: str
     seq: int
     scope_key: str
+
+
+@dataclass
+class _Pending:
+    """Whether the Agno-layout store's copy of one session held the queued request: in its state, and as last stored.
+
+    The session is kept so that no other session takes its ``id`` while the backend tracks it.
+    """
+
+    session: ConversationSession
+    live: bool
+    held: bool
 
 
 def _old_kept(messages: Sequence[dict[str, Any]], status: str) -> list[dict[str, Any]]:
@@ -178,6 +200,12 @@ class MaskedBackend(NextBackend):
         self.link_only: set[str] = set()
         self.delegation_only: dict[str, object] = {}
         self.replaced_covered: dict[str, dict[str, Any]] = {}
+        # The Agno-layout store's queued request: per session by ``id``, in the stored row, and the latest time only
+        # its writes moved the row's update time to.
+        self.pending: dict[int, _Pending] = {}
+        self.pending_stored = False
+        self.pending_written_at: int | None = None
+        self.flag_restored = False
         super().__init__(root, kind, determinism)
 
     # What the masks read of the v2 store.
@@ -291,9 +319,83 @@ class MaskedBackend(NextBackend):
 
     @override
     def apply(self, action: Action) -> object:
+        self.flag_restored = False
         outcome = super().apply(action)
+        if self.flag_restored and not has_queued_force_compaction(self.store, SESSION_ID, self.scope):
+            # The old reply moved a queued copy into the flag after a compaction had cleared it, and no request of
+            # this action set the flag again, so only the old store compacts again.
+            self._diverge(
+                "force_request_only_in_metadata",
+                "the Agno-layout store's queued copy asked for a compaction again after one cleared the flag",
+            )
         self._sync()
         return outcome
+
+    def _tracked(self, session: ConversationSession, *, pending: bool) -> ConversationSession:
+        self.pending[id(session)] = _Pending(session, live=pending, held=pending)
+        return session
+
+    @override
+    def load(self) -> ConversationSession | None:
+        session = super().load()
+        # A loaded session's state is the stored one, which held the request where the old store's did.
+        return session if session is None else self._tracked(session, pending=self.pending_stored)
+
+    @override
+    def _stand_in(self) -> ConversationSession:
+        return self._tracked(super()._stand_in(), pending=False)
+
+    @override
+    def request_force(self, session: ConversationSession) -> None:
+        super().request_force(session)
+        # The old store's tool also queued the request in the turn's state, which the turn's next state save stored.
+        self.pending[id(session)].live = True
+
+    @override
+    def prepare_scope_state(self, session: ConversationSession) -> None:
+        super().prepare_scope_state(session)
+        pending = self.pending[id(session)]
+        if not pending.live:
+            return
+        # The old reply stored the flag, then its state without the request. The flag is set already unless a
+        # compaction cleared it after the request was stored.
+        self.flag_restored = self.flag_restored or not has_queued_force_compaction(self.store, SESSION_ID, self.scope)
+        pending.live = pending.held = self.pending_stored = False
+        self.pending_written_at = self.determinism.now
+
+    @override
+    def state_version(self, session: ConversationSession) -> dict[str, object]:
+        version = super().state_version(session)
+        if self.pending[id(session)].live:
+            version[_PENDING_KEY] = [self.scope.key]
+        return version
+
+    @override
+    def save_session_state(self, session: ConversationSession, state: dict[str, object]) -> object:
+        # A late writer stores a state a run saved, with the request where the old store's run state held it.
+        self.pending_stored = self.pending[id(session)].held = state.pop(_PENDING_KEY, None) is not None
+        return super().save_session_state(session, state)
+
+    def _old_state_save(self, session: ConversationSession, state: dict[str, object] | None) -> None:
+        """Follow the old store's write of the state a run save carries, before the v2 store writes its own."""
+        pending = self.pending[id(session)]
+        unchanged = state == session.stored_session_state
+        if state is None or (unchanged and pending.live == pending.held):
+            return
+        if unchanged:
+            # Only the queued request made the run's state differ from what the old store held, so only it wrote.
+            if self._stored_state() != state:
+                self._diverge(
+                    "force_request_only_in_metadata",
+                    "the Agno-layout store saved a run's state over the one another writer stored",
+                )
+            self.pending_written_at = self.determinism.now
+        self.pending_stored = pending.held = pending.live
+
+    def _stored_state(self) -> object:
+        sessions = quote_identifier(self.names.sessions)
+        [(session_data,)] = self._query(f"SELECT session_data FROM {sessions} WHERE session_id = ?", (SESSION_ID,))  # noqa: S608
+        return json.loads(session_data)["session_state"]
 
     @override
     def _save(
@@ -304,6 +406,7 @@ class MaskedBackend(NextBackend):
         usage: bool,
         state: dict[str, object] | None,
     ) -> list[str]:
+        self._old_state_save(session, state)
         before = self._old_list_entry(record.run_id)
         [outcome] = super()._save(session, record, usage=usage, state=state)
         if outcome == "written":
@@ -646,7 +749,23 @@ class MaskedBackend(NextBackend):
                 view[key] = [event_id for event_id in view[key] if event_id not in replies]
         if isinstance(view["folded_tool_call_ids"], dict):
             view["folded_tool_call_ids"] = self._old_folded_view(view["folded_tool_call_ids"])
+        self._old_pending_view(view)
         return view
+
+    def _old_pending_view(self, view: dict[str, Any]) -> None:
+        """Show the request the old store queued in the stored state, and the update time only its writes made."""
+        session, row = view["session"], view["row"]
+        if self.pending_stored:
+            view["force_queued"] = True
+            for state in (session.get("session_state"), row.get("session_data", {}).get("session_state")):
+                state[_PENDING_KEY] = [self.scope.key]
+            self.used.add("force_request_only_in_metadata")
+        if (
+            self.pending_written_at is not None
+            and row.get("updated_at", self.pending_written_at) < self.pending_written_at
+        ):
+            row["updated_at"] = self.pending_written_at
+            self.used.add("force_request_only_in_metadata")
 
     def _old_loaded(self, runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows = self._rows()

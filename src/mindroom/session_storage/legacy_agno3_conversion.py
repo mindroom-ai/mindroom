@@ -28,6 +28,7 @@ from mindroom.constants import resolve_session_state_root
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.history.legacy_compaction_state import adopt_summary_rows
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -44,6 +45,7 @@ from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames, log_sch
 from mindroom.session_storage.store import (
     BUSY_TIMEOUT_SECONDS,
     connect_conversation_database,
+    decoded_mapping,
     flag_folded,
     seen_event_ids,
     set_visible_messages,
@@ -59,6 +61,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.session_storage.types import SessionKind
 
 logger = get_logger(__name__)
 
@@ -176,6 +179,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     if names.sessions in tables:
         seed_usage_ledger(connection, names)
         adopt_summary_rows(connection, names)
+        _fold_force_requests(connection, names)
         # Every Agno table then exists, so each step reads its rows from it.
         for statement in agno_schema_sql(names):
             connection.execute(statement)
@@ -665,6 +669,52 @@ def _decoded[Value, Record](decode: Callable[[Value], Record], data: Value) -> R
         return decode(data)
     except Exception:
         return None
+
+
+# LEGACY_COMPAT: Manual compaction requests mirrored into the tools' shared session state.
+# Legacy format: `mindroom_pending_compaction_scope_keys` in a session row's `session_data.session_state`: the keys of
+# the scopes a `compact_context` call asked to compact, written beside the metadata force flag, which each scope's next
+# run read into that flag.
+# Last legacy release: the last release before storage v2; replacement: unreleased, the metadata force flag alone.
+# Handling: Each listed scope gets the force flag in the session's metadata, as its next run would have set it, and the
+# key leaves the session state; an entry that names no scope requests nothing. The row's update time stays.
+# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_queued_compaction_request_becomes_the_metadata_flag,
+# ::test_a_request_queued_before_the_summary_rows_existed_leaves_the_scopes_tombstones_to_their_step,
+# ::test_a_queued_request_that_names_no_scope_requests_nothing, ::test_session_data_that_holds_no_state_object_converts_as_stored,
+# and tests/storage_oracle/test_migrated.py::test_a_converted_end_state_shows_its_last_recorded_observables_but_for_named_masks.
+_PENDING_FORCE_KEY = "mindroom_pending_compaction_scope_keys"
+
+
+def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    # The owner of the flag imports the store opener, which imports this module.
+    from mindroom.history.storage import with_force_compaction  # noqa: PLC0415
+
+    sessions = quote_identifier(names.sessions)
+    for session_id, raw_data, raw_metadata in connection.execute(
+        f"SELECT session_id, session_data, metadata FROM {sessions}",  # noqa: S608
+    ).fetchall():
+        data = decoded_mapping(raw_data)
+        state = data.get("session_state") if data is not None else None
+        if not isinstance(state, dict) or _PENDING_FORCE_KEY not in state:
+            continue
+        scopes = _requested_scopes(state.pop(_PENDING_FORCE_KEY))
+        metadata = decoded_mapping(raw_metadata)
+        for scope in scopes:
+            metadata = with_force_compaction(metadata, scope)
+        connection.execute(
+            f"UPDATE {sessions} SET session_data = ?, metadata = ? WHERE session_id = ?",  # noqa: S608
+            (json.dumps(data), json.dumps(metadata) if scopes else raw_metadata, session_id),
+        )
+
+
+def _requested_scopes(scope_keys: object) -> list[HistoryScope]:
+    """Return the scopes ``scope_keys`` lists; a run read only its own scope's key, so no other entry requested one."""
+    scopes: list[HistoryScope] = []
+    for scope_key in scope_keys if isinstance(scope_keys, list) else []:
+        kind, _, scope_id = scope_key.partition(":") if isinstance(scope_key, str) else ("", "", "")
+        if kind in ("agent", "team") and scope_id:
+            scopes.append(HistoryScope(kind=cast("SessionKind", kind), scope_id=scope_id))
+    return scopes
 
 
 # LEGACY_COMPAT: The Agno-layout removed-run table.

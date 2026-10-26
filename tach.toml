@@ -1098,6 +1098,8 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.history.legacy_compaction_state",
     "mindroom.history.legacy_stored_tool_calls",
+    "mindroom.history.storage",
+    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.session_storage.codec",

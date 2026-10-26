@@ -11,7 +11,6 @@ outside it, only the session loader and run-insertion rules in
 - per-scope control state under ``MINDROOM_COMPACTION_METADATA_KEY`` (force flag)
 - per-scope consumed Matrix event ids under ``MINDROOM_MATRIX_HISTORY_METADATA_KEY``
   that no stored run carries (team consumption)
-- the pending force-compaction scope keys list inside the tools' shared ``session_state``
 
 Nothing else the summary rows already know is stored: the event ids compacted
 history represents are derived from them when seen ids are read. A metadata change
@@ -58,7 +57,6 @@ if TYPE_CHECKING:
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
-_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 
 
 async def record_summary_usage(
@@ -146,50 +144,19 @@ def _with_scope_state(
     return session_metadata
 
 
-def add_pending_force_compaction_scope(
-    session_state: dict[str, object] | None,
-    scope: HistoryScope,
-) -> dict[str, object]:
-    """Record a next-run compaction request inside the tools' shared ``session_state``."""
-    next_session_state = session_state if session_state is not None else {}
-    scope_keys = _pending_scope_keys(next_session_state)
-    if scope.key not in scope_keys:
-        scope_keys.append(scope.key)
-    next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
-    return next_session_state
-
-
-def consume_pending_force_compaction_scope(session: ConversationSession, scope: HistoryScope) -> bool:
-    """Consume one pending next-run compaction request from the session's shared ``session_state``."""
-    if scope.key not in (scope_keys := _pending_scope_keys(session.session_state)):
-        return False
-    remaining_scope_keys = [scope_key for scope_key in scope_keys if scope_key != scope.key]
-    if remaining_scope_keys:
-        session.session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = remaining_scope_keys
-    else:
-        session.session_state.pop(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY, None)
-    return True
+def with_force_compaction(metadata: dict[str, Any] | None, scope: HistoryScope) -> dict[str, Any]:
+    """Return session ``metadata`` asking ``scope`` to compact before its next run; ``metadata`` itself is left alone."""
+    return _with_scope_state(metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
 
 
 def has_queued_force_compaction(storage: ConversationStore, session_id: str, scope: HistoryScope) -> bool:
     """Return whether one scope must compact before its next run.
 
-    Reads only the session row's ``metadata`` and ``session_state``, where both requests live; loading the
-    session would also decode every stored run, which takes seconds on a long session.
+    Reads only the session row, whose metadata holds the request; loading the session would also decode every stored
+    run, which takes seconds on a long session.
     """
     fields = storage.read_session_fields(session_id)
-    if fields is None:
-        return False
-    forced = _scope_state(fields.metadata, scope).force_compact_before_next_run
-    return forced or scope.key in _pending_scope_keys(fields.session_state)
-
-
-def _pending_scope_keys(session_state: Mapping[str, object]) -> list[str]:
-    """Return the scopes with a queued next-run compaction request."""
-    raw_scope_keys = session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
-    if not isinstance(raw_scope_keys, list):
-        return []
-    return [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
+    return fields is not None and _scope_state(fields.metadata, scope).force_compact_before_next_run
 
 
 def run_event_ids(run: AnyRunRecord) -> set[str]:

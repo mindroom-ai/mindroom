@@ -355,18 +355,6 @@ class ConversationStore:
         with self.transaction(write=False) as connection:
             return _read_runs(connection, self.names, "run.session_id = ?", (session_id,))
 
-    def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
-        """Write ``state`` as the session's ``session_state``, creating the row if needed, and leave the rest alone.
-
-        ``state`` is a ``session_state_snapshot`` of the run's state, which a caller outside the database's lane takes
-        before awaiting it, as the run's tools change the live state in place meanwhile. It is recorded as
-        ``session.stored_session_state``, so the caller must not change it.
-        """
-        with self.transaction(write=True) as connection:
-            ensure_session_row(connection, self.names, session)
-            _write_session_state(connection, self.names, session.session_id, state)
-        _record_stored_state(session, state)
-
     def _write_state(
         self,
         connection: sqlite3.Connection,
@@ -420,8 +408,8 @@ class ConversationStore:
     def list_updated_sessions(self, agent_id: str, *, since: int) -> list[tuple[str, int]]:
         """Return ``(session_id, updated_at)`` of agent ``agent_id``'s sessions updated after ``since``, oldest first.
 
-        A session's update time moves when its row is written: a state save, a metadata change, or a run save that
-        records its usage, as a run's terminal save through ``persist_to`` does.
+        A session's update time moves when its row is written: a changed state a run save carries, a metadata change,
+        or a run save that records its usage, as a run's terminal save through ``persist_to`` does.
         """
         with self.transaction(write=False) as connection:
             return connection.execute(

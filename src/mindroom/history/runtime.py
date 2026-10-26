@@ -39,7 +39,6 @@ from mindroom.history.session_context import (
     resolve_bound_team_scope,
 )
 from mindroom.history.storage import (
-    consume_pending_force_compaction_scope,
     first_scope_session,
     read_scope_state,
     set_force_compaction,
@@ -63,7 +62,6 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import response_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.types import session_state_snapshot
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -865,11 +863,6 @@ def _prepare_scope_state_for_run(
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
-    if consume_pending_force_compaction_scope(session, scope):
-        # The flag is stored before the request leaves the tools' state, so a crash between the two writes repeats
-        # the request instead of losing it.
-        state = set_force_compaction(storage, session=session, scope=scope, forced=True)
-        storage.save_session_state(session, session_state_snapshot(session.session_state))
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
         state = set_force_compaction(storage, session=session, scope=scope, forced=False)
         logger.warning(

@@ -18,6 +18,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
+from tests.conftest import seed_session_row
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -207,7 +208,7 @@ def _removed(store: ConversationStore) -> set[str]:
 
 def _seed_legacy_row(store: ConversationStore, summary: str, event_ids: Sequence[str]) -> None:
     """Store a legacy summary row as a conversion adopts one, sorting before every run."""
-    store.save_session_state(_session(), {})
+    seed_session_row(store, _session())
     _execute(
         store,
         "INSERT INTO code_sessions_log_summaries (session_id, scope_key, through, summary, legacy, event_ids, "
@@ -423,8 +424,8 @@ def test_a_summary_id_is_never_handed_out_again_after_a_cut_deletes_the_newest_r
 
 def test_the_fold_fence_checks_the_run_and_its_team_run_within_the_session(store: ConversationStore) -> None:
     """A fold whose running run or team run a cut removed writes nothing; another session's removed set does not fence."""
-    store.save_session_state(_session(), {})
-    store.save_session_state(ConversationSession(session_id="s2", kind="agent", owner_id="code"), {})
+    seed_session_row(store, _session())
+    seed_session_row(store, ConversationSession(session_id="s2", kind="agent", owner_id="code"))
     _execute(store, "INSERT INTO code_sessions_log_removed (run_id, session_id) VALUES ('gone', 's1')")
     _execute(store, "INSERT INTO code_sessions_log_removed (run_id, session_id) VALUES ('elsewhere', 's2')")
 

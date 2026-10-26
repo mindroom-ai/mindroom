@@ -7,11 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
 from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.storage import (
-    add_pending_force_compaction_scope,
-    first_scope_session,
-    set_force_compaction,
-)
+from mindroom.history.storage import first_scope_session, set_force_compaction
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 
@@ -35,13 +31,11 @@ async def request_compaction_before_next_reply(
     execution_identity: ToolExecutionIdentity | None,
     active_model_name: str | None = None,
     room_id: str | None = None,
-    session_state: dict[str, object] | None = None,
 ) -> str:
     """Schedule text compaction before the next reply in ``scope``, the history scope the running entity stores to.
 
     ``agent_name`` names the agent that asked, a team member when ``scope`` is its team's; only the log reads it.
-    Return the message the caller reports. When ``session_state``, the dict the run's tools share, is given, the
-    request is also recorded in it, in place.
+    Return the message the caller reports.
     """
     # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
     entity_name = scope.scope_id if scope.kind == "agent" or scope.scope_id in config.teams else None
@@ -64,7 +58,8 @@ async def request_compaction_before_next_reply(
         return f"Error: Compaction is unavailable for this scope because {unavailable}."
 
     # The flag merges into the metadata the stored row holds, in the database's lane as the session's other writes
-    # run; a new session names that row, which the write creates when the scope has none yet.
+    # run; a new session names that row, which the write creates when the scope has none yet. No run save writes
+    # session metadata, so the requesting run's own saves keep the flag.
     await run_session_storage_operation(
         partial(
             create_scope_session_storage,
@@ -75,9 +70,6 @@ async def request_compaction_before_next_reply(
         ),
         partial(set_force_compaction, session=first_scope_session(scope, session_id), scope=scope, forced=True),
     )
-
-    if session_state is not None:
-        add_pending_force_compaction_scope(session_state, scope)
     logger.info(
         "Manual compaction scheduled",
         agent=agent_name,

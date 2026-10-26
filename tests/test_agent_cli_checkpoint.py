@@ -24,6 +24,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.tool_function import ToolValue
+from tests.conftest import seed_session_state
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
@@ -182,7 +183,7 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     assert store is not None
     session = catalog.session
     session.session_state["cwd"] = "/repo"
-    store.save_session_state(session, session_state_snapshot(session.session_state))
+    seed_session_state(store, session, session_state_snapshot(session.session_state))
     persist = persist_to(store, session)
     checkpoint = BatchCheckpoint(catalog)
     record = _record()

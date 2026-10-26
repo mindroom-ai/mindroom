@@ -26,10 +26,8 @@ from mindroom.constants import (
 from mindroom.delegation.execution import persist_delegation_state
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import (
-    add_pending_force_compaction_scope,
     append_compaction_chunk,
     append_fold,
-    consume_pending_force_compaction_scope,
     first_scope_session,
     read_chunk_basis,
     read_fold_basis,
@@ -45,6 +43,7 @@ from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_ru
 from mindroom.session_storage.store import connect_conversation_database
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.usage.storage import quote_identifier, usage_table_sql
+from tests.conftest import seed_session_state
 from tests.storage_oracle.backend import (
     REQUESTER_ID,
     SESSION_ID,
@@ -247,7 +246,8 @@ class NextBackend(Driver):
 
     @override
     def save_session_state(self, session: ConversationSession, state: dict[str, object]) -> object:
-        self.store.save_session_state(session, state)
+        # No v2 writer stores a state alone; a late run save carrying it writes it the same way.
+        seed_session_state(self.store, session, state)
         return "state"
 
     @override
@@ -433,21 +433,20 @@ class NextBackend(Driver):
 
     @override
     def request_force(self, session: ConversationSession) -> None:
-        # As ``request_compaction_before_next_reply`` does: the flag on the stored row, then the tools' state.
+        # As ``request_compaction_before_next_reply`` does: the flag on the stored row.
+        del session
         set_force_compaction(
             self.store,
             session=first_scope_session(self.scope, SESSION_ID),
             scope=self.scope,
             forced=True,
         )
-        add_pending_force_compaction_scope(session.session_state, self.scope)
 
     @override
     def prepare_scope_state(self, session: ConversationSession) -> None:
-        # As ``_prepare_scope_state_for_run`` does.
-        if consume_pending_force_compaction_scope(session, self.scope):
-            set_force_compaction(self.store, session=session, scope=self.scope, forced=True)
-            self.store.save_session_state(session, session_state_snapshot(session.session_state))
+        # ``_prepare_scope_state_for_run`` reads the flag the session loaded; it writes only when compaction is
+        # unavailable, which no recorded sequence configures.
+        del session
 
     @override
     def seed_legacy(self, variant: int) -> None:

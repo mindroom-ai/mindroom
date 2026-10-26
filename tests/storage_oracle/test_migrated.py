@@ -63,6 +63,8 @@ MASKS: dict[str, str] = {
     "embedded_members_become_member_rows": "spec v4 4.5: a paused team run's embedded members replace their rows",
     "members_of_members_join_their_team": "spec v4 4.5: members of members are re-parented to their top-level run",
     "undecodable_run_left_out": "spec v4 4.5 and decision 9: a row that does not decode is left out, as if never stored",
+    "force_request_moves_into_metadata": "spec v4 4.5 and decision 5 (W9): a manual compaction request queued in the "
+    "session state becomes its scope's metadata flag",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
@@ -92,14 +94,19 @@ _PINS: dict[str, set[str]] = {
 # The masks each recorded end state uses; every other end state compares unmasked.
 _END_STATE_PINS: dict[str, frozenset[str]] = {
     **dict.fromkeys(
-        (f"generated/{seed}" for seed in (2, 10, 11, 12, 15, 17, 23, 25, 28, 29, 34, 38)),
+        (f"generated/{seed}" for seed in (10, 11, 12, 15, 17, 23, 25, 28, 29, 34, 38)),
         frozenset({"fold_stores_cancelled_row"}),
     ),
+    "generated/2": frozenset({"fold_stores_cancelled_row", "force_request_moves_into_metadata"}),
     "generated/3": frozenset({"history_copies_not_stored"}),
     "generated/13": frozenset({"fold_stores_cancelled_row", "history_copies_not_stored"}),
     "generated/20": frozenset({"embedded_members_become_member_rows"}),
     "generated/39": frozenset({"history_copies_not_stored"}),
+    "generated/8": frozenset({"force_request_moves_into_metadata"}),
+    "generated/19": frozenset({"force_request_moves_into_metadata"}),
 }
+# Where an older release also queued a manual compaction request: the scope keys listed in the session state.
+_PENDING_KEY = "mindroom_pending_compaction_scope_keys"
 
 
 @dataclass(frozen=True)
@@ -292,6 +299,32 @@ def _members_join_team(recorded: dict[str, Any], used: set[str]) -> None:
             used.add("members_of_members_join_their_team")
 
 
+def _states(observed: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the session states ``observed`` shows, the loaded session's and the row's, where each is an object."""
+    session, row = observed["session"], observed["row"]
+    data = row.get("session_data") if isinstance(row, dict) else None
+    shown = (
+        session.get("session_state") if isinstance(session, dict) else None,
+        data.get("session_state") if isinstance(data, dict) else None,
+    )
+    return [state for state in shown if isinstance(state, dict)]
+
+
+def _force_requests_in_metadata(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    """Show a request an older release queued in the session state as the metadata flag the conversion made of it."""
+    for state in _states(observed):
+        assert _PENDING_KEY not in state
+    requested = [state.pop(_PENDING_KEY) for state in _states(recorded) if _PENDING_KEY in state]
+    if not requested:
+        return
+    metadata = recorded["session"]["metadata"] or {}
+    compaction = metadata.get("mindroom_compaction", {"version": 2, "states": {}})
+    flags = {scope_key: {"force_compact_before_next_run": True} for scope_key in requested[0]}
+    states = {**compaction["states"], **flags}
+    recorded["session"]["metadata"] = {**metadata, "mindroom_compaction": {**compaction, "states": states}}
+    used.add("force_request_moves_into_metadata")
+
+
 def _mask_session(
     recorded: dict[str, Any],
     observed: dict[str, Any],
@@ -301,6 +334,7 @@ def _mask_session(
 ) -> set[str]:
     """Show one session's recorded and observed observables as one store would; return the runs the fold mask hid."""
     _rows_fill_records(recorded, observed, session_id, used)
+    _force_requests_in_metadata(recorded, observed, used)
     _drop_history_copies(recorded, observed, used)
     _hide_folded(recorded, facts, used)
     created = _hide_fold_rows(observed, facts, used)

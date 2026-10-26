@@ -155,7 +155,7 @@ from mindroom.response_payload_preparation import (
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.store import ensure_session_row, persist_to
+from mindroom.session_storage.store import _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -3540,6 +3540,19 @@ def seed_session_row(storage: "ConversationStore", session: "ConversationSession
         created = ensure_session_row(connection, storage.names, session)
     if created is not None:
         session.stored_session_state = created
+
+
+def seed_session_state(storage: "ConversationStore", session: "ConversationSession", state: "dict[str, Any]") -> None:
+    """Store ``state`` as the session row's ``session_state``, creating the row if needed, and leave the rest alone.
+
+    No store method writes the state alone: a run save carries it. Tests stand in for another run's save with this.
+    ``session.stored_session_state`` then records it as the row's, as the store's writes do, so ``state`` must not
+    change afterwards.
+    """
+    with storage.transaction(write=True) as connection:
+        ensure_session_row(connection, storage.names, session)
+        _write_session_state(connection, storage.names, session.session_id, state)
+    session.stored_session_state = state
 
 
 def seed_session(storage: "ConversationStore", session: "ConversationSession") -> "ConversationSession":

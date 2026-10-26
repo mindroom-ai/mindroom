@@ -40,7 +40,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from tests.conftest import seed_session
+from tests.conftest import seed_session, seed_session_state
 from tests.history_helpers import folded_run_ids, stored_run_ids
 
 if TYPE_CHECKING:
@@ -366,7 +366,7 @@ class _Runner:
         """Write an older snapshot's session state back, as a concurrent run's end would."""
         if self._snapshots:
             snapshot = self._snapshots[action.index % len(self._snapshots)]
-            self._storage.save_session_state(snapshot, session_state_snapshot(snapshot.session_state))
+            seed_session_state(self._storage, snapshot, session_state_snapshot(snapshot.session_state))
 
     def _resurrect(self, action: Action) -> None:
         """Save an old copy of a run that no longer loads, as a late run save would."""

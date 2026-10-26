@@ -56,7 +56,12 @@ from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import install_model_providers, make_turn_context, unwrap_extracted_collaborator
+from tests.conftest import (
+    install_model_providers,
+    make_turn_context,
+    seed_session_state,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.fakes.scripted_model import usage as owned_usage
 from tests.history_helpers import (
@@ -461,7 +466,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     assert len({row["run_id"] for row in helpers}) == 2
     assert "Synthetic conversation" not in json.dumps(helpers)
     assert "Remember" not in json.dumps(helpers)
-    storage.save_session_state(session, session_state_snapshot(session.session_state))
+    seed_session_state(storage, session, session_state_snapshot(session.session_state))
     assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 
