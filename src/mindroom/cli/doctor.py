@@ -288,15 +288,11 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
     )
 
 
-def _validate_provider_key(
-    provider: str,
-    api_key: str,
-    base_url: str | None = None,
-) -> tuple[bool | None, str]:
-    """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
+def _validate_provider_key(provider: str, api_key: str) -> tuple[bool | None, str]:
+    """Validate an API key with the provider's key check, which goes to the provider's own API.
 
-    A provider without a key check is never probed, at a custom endpoint either: its key style and a model list
-    are unknown, so a probe could report a valid key as invalid.
+    A provider without a key check is never probed: its key style and a model list are unknown, so a probe could
+    report a valid key as invalid.
 
     Returns (True, "") if valid, (False, reason) if invalid,
     (None, reason) if inconclusive (e.g. connection error, or a provider without a key check).
@@ -304,7 +300,7 @@ def _validate_provider_key(
     check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
     if check is None:
         return None, "no key check for this provider"
-    url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
+    url, headers = check.request(api_key)
     return _http_check(url, headers)
 
 
@@ -586,17 +582,22 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    # Mem0 sends the key to its configured endpoint, else to the endpoint variable, so a configured key is checked at a
-    # configured endpoint, and any other key is skipped where an endpoint setting or variable may send it elsewhere.
+    # As for models, any endpoint setting or variable skips the check, whichever key it is. So does an exported
+    # OPENROUTER_API_KEY, which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of
+    # any other key.
     if env_key:
-        reasons = [] if configured_key and llm_base_url else _endpoint_variables(env_key, runtime_paths)
-        if not configured_key:
-            reasons = [*_endpoint_settings(config.memory.llm.config, "memory.llm.config"), *reasons]
         key_name = "memory.llm.config.api_key" if configured_key else env_key
+        reasons = _endpoint_settings(config.memory.llm.config, "memory.llm.config")
+        reasons += _endpoint_variables(env_key, runtime_paths)
+        if (
+            provider_route(llm_provider) in {"openai", "openrouter"}
+            and key_name != "OPENROUTER_API_KEY"
+            and runtime_paths.env_value("OPENROUTER_API_KEY")
+        ):
+            reasons.append("OPENROUTER_API_KEY")
         if _report_key_not_checked("Memory LLM", llm_provider, key_name, reasons):
             return 0, 0, 1
-    # The runtime drops host for memory LLMs other than Ollama.
-    valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
+    valid, detail = _validate_provider_key(llm_provider, api_key or "")
     return _print_validation(
         valid,
         detail,

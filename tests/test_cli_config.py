@@ -4366,12 +4366,12 @@ class TestDoctor:
         shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
         assert shared_key_urls == []
 
-    def test_memory_llm_explicit_key_is_checked_at_its_openai_base_url(
+    def test_memory_llm_explicit_key_at_an_openai_base_url_is_not_checked(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Mem0 sends ``memory.llm.config.api_key`` to ``openai_base_url``, so doctor checks that pair."""
+        """An ``openai_base_url`` skips the memory LLM key check, even for ``memory.llm.config.api_key``."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             _VALID_CONFIG + "memory:\n  llm:\n    provider: openai\n    config:\n      model: gpt-oss-low\n"
@@ -4382,8 +4382,9 @@ class TestDoctor:
         requests = _record_doctor_requests(monkeypatch)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
-        assert "Memory LLM: openai/gpt-oss-low API key valid" in result.output
-        assert ("http://localllm:9292/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
+        output = " ".join(result.output.split())
+        assert "memory.llm.config.api_key not checked: memory.llm.config.openai_base_url may send it" in output
+        assert not any(headers.get("Authorization") == "Bearer sk-mem" for _url, headers in requests)
 
     def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
         self,

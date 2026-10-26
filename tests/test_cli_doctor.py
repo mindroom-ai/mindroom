@@ -189,26 +189,19 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
 
 
 @pytest.mark.parametrize(
-    ("provider", "base_url", "url", "headers"),
+    ("provider", "url", "headers"),
     [
         # The request the dashboard's provider setup sends for the same key.
-        ("openrouter", None, "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
-        (
-            "anthropic",
-            None,
-            "https://api.anthropic.com/v1/models",
-            {"x-api-key": "k", "anthropic-version": "2023-06-01"},
-        ),
-        ("openai", None, "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
-        ("gemini", None, "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
-        ("groq", None, "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
-        ("openai", "https://proxy.example/v1/", "https://proxy.example/v1/models", {"Authorization": "Bearer k"}),
+        ("openrouter", "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
+        ("anthropic", "https://api.anthropic.com/v1/models", {"x-api-key": "k", "anthropic-version": "2023-06-01"}),
+        ("openai", "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("groq", "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
     ],
 )
 def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
-    base_url: str | None,
     url: str,
     headers: dict[str, str],
 ) -> None:
@@ -221,31 +214,20 @@ def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
 
-    assert _validate_provider_key(provider, "k", base_url) == (True, "")
+    assert _validate_provider_key(provider, "k") == (True, "")
     assert sent == [(url, headers)]
 
 
-@pytest.mark.parametrize(
-    ("provider", "base_url"),
-    [
-        ("zai", "https://zai-proxy.example/v4"),
-        ("huggingface", "http://embeddings.local:8080"),
-        ("zai", None),
-    ],
-)
-def test_a_provider_without_a_key_check_is_not_probed_even_at_a_custom_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-    provider: str,
-    base_url: str | None,
-) -> None:
-    """Only a route with a known key check is probed, so a custom endpoint cannot misreport a valid key as invalid."""
+@pytest.mark.parametrize("provider", ["zai", "huggingface"])
+def test_a_provider_without_a_key_check_is_not_probed(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    """Only a route with a known key check is probed, so an unknown key style cannot misreport a valid key."""
 
     def get(url: str, **_kwargs: object) -> httpx.Response:
         raise AssertionError(url)
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
 
-    assert _validate_provider_key(provider, "k", base_url) == (None, "no key check for this provider")
+    assert _validate_provider_key(provider, "k") == (None, "no key check for this provider")
 
 
 def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_uses(
@@ -690,6 +672,32 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "memory.llm.config.api_key",
             "ANTHROPIC_BASE_URL",
         ),
+        # A configured key is skipped too: doctor never works out which endpoint Mem0 sends it to.
+        (
+            "openai",
+            {"model": "m", "api_key": "sk-mem", "openai_base_url": "https://mem.example/v1"},
+            {},
+            "memory.llm.config.api_key",
+            "memory.llm.config.openai_base_url",
+        ),
+        # An OpenRouter gateway: an exported OPENROUTER_API_KEY sends Mem0's OpenAI client, for openrouter and openai
+        # alike, to openrouter_base_url with that key.
+        (
+            "openrouter",
+            {"model": "m", "api_key": "gateway-key", "openrouter_base_url": "https://gateway.example/v1"},
+            {"OPENROUTER_API_KEY": "gateway-key"},
+            "memory.llm.config.api_key",
+            "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
+        ),
+        (
+            "openai",
+            {"model": "m", "api_key": "gateway-key", "openrouter_base_url": "https://gateway.example/v1"},
+            {"OPENROUTER_API_KEY": "gateway-key"},
+            "memory.llm.config.api_key",
+            "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
+        ),
+        # The exported OPENROUTER_API_KEY alone takes an openai memory LLM to OpenRouter.
+        ("openai", {"model": "m"}, {"OPENROUTER_API_KEY": "or-key"}, "OPENAI_API_KEY", "OPENROUTER_API_KEY"),
     ],
 )
 def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_may_send_it_elsewhere(
@@ -718,21 +726,42 @@ def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_
     assert f"Memory LLM: {key_name} not checked: {reason} may send it elsewhere" in output
 
 
-def test_memory_llm_configured_key_is_checked_at_its_configured_endpoint_over_the_variable(
+@pytest.mark.parametrize(
+    ("provider", "llm_config", "exported", "sent_request"),
+    [
+        (
+            "openai",
+            {"model": "m", "api_key": "sk-mem"},
+            {},
+            ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}),
+        ),
+        # Mem0 sends the exported OPENROUTER_API_KEY itself, which doctor checks at OpenRouter's own API.
+        (
+            "openrouter",
+            {"model": "m"},
+            {"OPENROUTER_API_KEY": "or-key"},
+            ("https://openrouter.ai/api/v1/key", {"Authorization": "Bearer or-key"}),
+        ),
+    ],
+)
+def test_memory_llm_key_is_checked_at_the_provider_s_own_api_without_endpoint_settings_or_variables(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    llm_config: dict[str, str],
+    exported: dict[str, str],
+    sent_request: tuple[str, dict[str, str]],
 ) -> None:
-    """Mem0 takes ``openai_base_url`` over OPENAI_BASE_URL, so a configured key is checked at that endpoint."""
-    runtime_paths = _runtime_with_env(tmp_path, {}, {"OPENAI_BASE_URL": "https://litellm.internal/v1"})
+    """A memory LLM key with nothing that could redirect it is checked at its provider's own API."""
+    runtime_paths = _runtime_with_env(tmp_path, {}, exported)
     sent = _record_key_checks(monkeypatch)
-    llm_config = {"model": "m", "api_key": "sk-mem", "openai_base_url": "https://mem.example/v1"}
     config = Config(
-        memory={"backend": "mem0", "llm": {"provider": "openai", "config": llm_config}},
+        memory={"backend": "mem0", "llm": {"provider": provider, "config": llm_config}},
         router=RouterConfig(model="default"),
     )
 
     assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
-    assert sent == [("https://mem.example/v1/models", {"Authorization": "Bearer sk-mem"})]
+    assert sent == [sent_request]
 
 
 @pytest.mark.parametrize(
