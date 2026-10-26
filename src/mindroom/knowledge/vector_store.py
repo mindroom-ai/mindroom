@@ -466,18 +466,19 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
     with _index_load_lock:
         with _index_cache_lock:
             index = _index_cache.get(key)
-        if index is not None:
-            return index
-        index = _load_vector_index(connection)
-        with _index_cache_lock:
-            # Matrices of deleted or rewritten files go first, including this file's own older versions, whose
-            # timestamps a rewrite within one tick may not have changed.
+            if index is not None:
+                return index
+            # A base serves one collection at a time, so before the load, drop the matrices of its other collections
+            # (the one a refresh retired stays on disk unchanged), of this file's older versions (a rewrite within one
+            # timestamp tick may keep the stat key), and of deleted or rewritten files.
             for stale in [
                 cached
                 for cached in _index_cache
-                if cached[0] == key[0] or _file_version(Path(cached[0])) != cached[:-1]
+                if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
             ]:
                 del _index_cache[stale]
+        index = _load_vector_index(connection)
+        with _index_cache_lock:
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
             # search, even when searches alternate between it and smaller ones.

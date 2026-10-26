@@ -333,8 +333,8 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A base larger than the cache budget is not reloaded when searches alternate between it and a smaller one."""
-    large = KnowledgeCollection(path=tmp_path, name="large")
-    small = KnowledgeCollection(path=tmp_path, name="small")
+    large = KnowledgeCollection(path=tmp_path / "large_base", name="large")
+    small = KnowledgeCollection(path=tmp_path / "small_base", name="small")
     for collection, count in ((large, 40), (small, 2)):
         collection.reset()
         collection.write_source_rows(
@@ -355,6 +355,40 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
         small.search([1.0, 0.0], limit=1)
 
     assert len(loads) == 2
+
+
+def test_the_published_matrix_stays_cached_beside_the_collection_it_retired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The collection a refresh retired stays on disk unchanged, but its matrix must not stay cached and evict the new one.
+
+    Both are over the budget and the same size, so whichever counts as the largest is the only one kept.
+    """
+    monkeypatch.setattr(vector_store_module, "_MATRIX_CACHE_BYTES", 1)
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    retired = KnowledgeCollection(path=tmp_path, name="retired")
+    published = KnowledgeCollection(path=tmp_path, name="published")
+    for collection in (retired, published):
+        collection.reset()
+        collection.write_source_rows(
+            "a.md",
+            [_row(f"{collection.name}{index}", "a.md", collection.name, [1.0, float(index)]) for index in range(40)],
+        )
+    retired.search([1.0, 0.0], limit=1)
+    loads: list[str] = []
+    real_load = vector_store_module._load_vector_index
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection: loads.append("load") or real_load(connection),
+    )
+
+    for _search in range(3):
+        assert published.search([1.0, 0.0], limit=1)[0].content == "published"
+
+    assert loads == ["load"]
+    assert [Path(key[0]).name for key in vector_store_module._index_cache] == ["published.sqlite3"]
 
 
 def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
