@@ -106,18 +106,19 @@ def _content_bytes(file: File) -> bytes | None:
 
 
 def chat_file_part(file: File) -> dict[str, Any] | None:
-    """Return a Chat Completions ``file`` part with an inline data URL, or None."""
-    if file.filepath is not None:
-        name = Path(file.filepath).name
-    elif file.content is not None:
-        name = file.filename or "file"
-    else:
+    """Return a Chat Completions ``file`` part with an inline data URL, or None.
+
+    The part is named by the attachment's original filename, as a Responses file part is, not by its stored path.
+    """
+    if file.filepath is None and file.content is None:
         logger.warning("Remote file input is not fetched", file_id=file.id)
         return None
+    name = file.filename or file.name or (Path(file.filepath).name if file.filepath is not None else "file")
     data = _content_bytes(file)
     if data is None:
         return None
-    mime_type = file.mime_type or mimetypes.guess_type(name)[0] or "application/pdf"
+    guessed = mimetypes.guess_type(name)[0] or (mimetypes.guess_type(file.filepath)[0] if file.filepath else None)
+    mime_type = file.mime_type or guessed or "application/pdf"
     data_url = f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
     return {"type": "file", "file": {"filename": name, "file_data": data_url}}
 
