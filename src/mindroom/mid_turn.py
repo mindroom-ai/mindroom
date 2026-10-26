@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
+from mindroom.attachments.storage import mentions_attachments
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.judgment.state import (
     MAX_REQUEST_BYTES,
@@ -48,12 +49,7 @@ MID_TURN_QUESTION = JudgmentQuestion(
 
 
 def _is_plain_text(text: str | None) -> TypeGuard[str]:
-    return (
-        text is not None
-        and bool(text.strip())
-        and "[attachments:" not in text
-        and "Attachments sent with the current message" not in text
-    )
+    return text is not None and bool(text.strip()) and not mentions_attachments(text)
 
 
 def _is_whole_text(text: str | None) -> TypeGuard[str]:
@@ -144,7 +140,7 @@ class MidTurnGate:
                     try:
                         finish = await self.evaluate(request) is True
                     except Exception:
-                        # Keep the existing behavior; SDK exceptions can contain private inputs.
+                        # Logged without the exception, whose SDK message can contain private inputs.
                         reason = "judge_error"
             if reason is not None:
                 logger.info("Mid-turn judgment skipped", reason=reason, queued_messages=len(pending))
