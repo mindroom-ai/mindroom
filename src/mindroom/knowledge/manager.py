@@ -943,8 +943,9 @@ class KnowledgeManager:
         vectors: dict[str, list[float]] = {}
         texts = list(dict.fromkeys(chunk.text for file in prepared for chunk in file.chunks if chunk.text))
         planned_batches = iter(plan_embedding_batches(texts))
-        # Set once the batch gives up, so no worker, nor a provider thread still running one-text requests, starts
-        # another request. A call already running on its thread still finishes; its result is dropped.
+        # Set once the batch gives up, on a permanent rejection or a request out of retries: no worker starts another
+        # planned request, and a thread embedding one text per request stops between texts. Requests already running
+        # finish; a permanent rejection drops their results, while after an exhausted request their vectors are kept.
         stop = threading.Event()
 
         async def embed_planned_batches() -> None:
