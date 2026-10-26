@@ -20,9 +20,16 @@ from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.registry import get_published_index
 from mindroom.knowledge.vector_store import list_collection_names
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, patch_vector_store, seed_collection, stored_rows  # noqa: F401
+from tests.knowledge_test_support import (  # noqa: F401
+    _config,
+    _FakeEmbedder,
+    patch_vector_store,
+    seed_collection,
+    stored_rows,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 
@@ -123,3 +130,63 @@ async def test_a_chroma_era_index_rebuilds_and_its_files_go_only_after_publicati
     )
     assert not (storage / "chroma.sqlite3").exists()
     assert not segment.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("patch_vector_store")
+async def test_a_chroma_era_index_is_copied_without_embedding_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upgrading copies the vectors Chroma held into the owned store, so unchanged files are not embedded again."""
+    chromadb = pytest.importorskip("chromadb")
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("Travel policy and hotel limits.", encoding="utf-8")
+    (docs / "notes.md").write_text("Expense reports are due monthly.", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    first = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    assert (await first.reindex_all()).published
+    assert first._published_collection is not None
+    rows = stored_rows(first._published_collection)
+    storage = first._base_storage_path
+    client = chromadb.PersistentClient(path=str(storage), settings=chromadb.Settings(anonymized_telemetry=False))
+    chroma = client.create_collection(first._collections.default_collection, metadata={"hnsw:space": "cosine"})
+    chroma.add(
+        ids=[row["id"] for row in rows],
+        embeddings=[[1.0] for _row in rows],
+        documents=[row["content"] for row in rows],
+        metadatas=[row["metadata"] for row in rows],
+    )
+    client.close()
+    for name in list_collection_names(storage):
+        open_collection(first._collections, name).delete()
+    save_published_index_state(
+        first._indexing_settings_path,
+        state_for_publication(
+            settings=replace(first._indexing_settings, vector_store=""),
+            collection=first._collections.default_collection,
+            indexed_count=2,
+            source_signature=await first.source_signature(),
+            published_revision=None,
+        ),
+    )
+    embedded: list[str] = []
+
+    class _CountingEmbedder(_FakeEmbedder):
+        def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+            embedded.extend(texts)
+            return super().embed(texts, purpose=purpose)
+
+    monkeypatch.setattr("mindroom.knowledge.manager.create_configured_embedder", lambda *_a, **_k: _CountingEmbedder())
+    upgraded = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+
+    assert (await upgraded.reindex_all()).published
+
+    assert embedded == []
+    assert upgraded._published_collection is not None
+    assert sorted(row["content"] for row in stored_rows(upgraded._published_collection)) == sorted(
+        row["content"] for row in rows
+    )
+    assert not (storage / "chroma.sqlite3").exists()

@@ -6117,6 +6117,7 @@ depends_on = ["mindroom.knowledge.read_protocol"]
 visibility = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.index_reader",
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
 ]
@@ -6135,8 +6136,8 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.legacy_chroma_storage"
-depends_on = ["mindroom.logging_config"]
-visibility = ["mindroom.knowledge.collections"]
+depends_on = ["mindroom.knowledge.vector_store", "mindroom.logging_config", "mindroom.tool_system.dependencies"]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.embeddings.batching"
@@ -6209,6 +6210,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.chunk_context",
     "mindroom.path_confinement",
     "mindroom.knowledge.chunking",

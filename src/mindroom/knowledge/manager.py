@@ -77,6 +77,7 @@ from mindroom.knowledge.indexing_config import (
     knowledge_git_dir,
     storage_key_for_base,
 )
+from mindroom.knowledge.legacy_chroma_storage import copy_legacy_chroma_rows, legacy_chroma_store_exists
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
 from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
 from mindroom.knowledge.redaction import redact_credentials_in_text
@@ -1194,7 +1195,11 @@ class KnowledgeManager:
             reused[relative_path] = signature
             return True
 
-        candidate.copy_rows(open_collection(self._collections, published_collection), select=select)
+        published = open_collection(self._collections, published_collection)
+        if published.exists() or not legacy_chroma_store_exists(self._base_storage_path):
+            candidate.copy_rows(published, select=select)
+        else:
+            copy_legacy_chroma_rows(self._base_storage_path, published_collection, candidate, select=select)
         return reused
 
     def _reusable_published_collection(self, persisted_state: PublishedIndexState | None) -> str | None:
@@ -1213,14 +1218,17 @@ class KnowledgeManager:
         the rest of the candidate lifecycle treats any other collection as an
         abandoned candidate it may reclaim.
         """
-        if (
-            persisted_state is None
-            or persisted_state.status != "complete"
-            or persisted_state.collection is None
-            or persisted_state.settings != self._indexing_settings
-        ):
+        if persisted_state is None or persisted_state.status != "complete" or persisted_state.collection is None:
             return None
-        return persisted_state.collection
+        settings = persisted_state.settings
+        if not settings.vector_store:
+            # LEGACY_COMPAT: Chroma-era publications are reusable: their vectors are copied out of Chroma once.
+            # Legacy format: published metadata without vector_store, its vectors in the base's Chroma database.
+            # Last legacy release: v2026.10.552; replacement: v2026.10.553 stored semantic indexes in owned SQLite files.
+            # Handling: compare settings as if the publication were owned; the copy reads Chroma.
+            # Coverage: tests/test_knowledge_collection_cleanup.py::test_a_chroma_era_index_is_copied_without_embedding_again.
+            settings = replace(settings, vector_store=self._indexing_settings.vector_store)
+        return persisted_state.collection if settings == self._indexing_settings else None
 
     async def _seed_candidate_from_published(
         self,

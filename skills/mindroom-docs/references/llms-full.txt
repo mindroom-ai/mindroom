@@ -3991,8 +3991,9 @@ Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<r
 Removing a private instance leaves its index behind; each index directory's `indexing_settings.json` names the `knowledge_path` it was built from.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
-Indexes that earlier MindRoom versions stored in Chroma are rebuilt once after upgrading, which embeds every file again.
-A base cannot be searched until its rebuild publishes, so a large corpus or a slow local embedder can leave it unavailable for a while.
+Indexes that earlier MindRoom versions stored in Chroma are converted on their first refresh after upgrading: their chunks and vectors are copied out of Chroma, and only files changed since are embedded again.
+The copy needs the `chromadb` package, which the Docker images include and the Mem0 backend still uses; without it, the base is rebuilt, which embeds every file again.
+A base cannot be searched until its converted index publishes, which for a very large base can take a while.
 A shared base's old `chroma.sqlite3` and segment directories are removed once its new index is published.
 Private agent indexes used to live in the agent's state root, `<storage_path>/private_instances/<scope>/<agent>/knowledge_db/`, beside the private root rather than inside it; MindRoom no longer reads that directory, so it can be deleted after upgrading.
 

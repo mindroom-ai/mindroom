@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY, SearchHit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     import numpy as np
 
@@ -82,7 +82,8 @@ class StoredRow:
     id: str
     document: str
     metadata: Mapping[str, Any]
-    embedding: Sequence[float]
+    #: The vector, or its little-endian float32 bytes as stored.
+    embedding: Sequence[float] | bytes
 
 
 @dataclass(frozen=True)
@@ -128,11 +129,11 @@ class KnowledgeCollection:
         """Replace one source file's rows with ``rows`` in one transaction; vectors must match the collection's width."""
         with closing(self._connect()) as connection, connection:
             connection.execute("DELETE FROM chunks WHERE source_path = ?", (relative_path,))
-            stored = connection.execute("SELECT length(embedding) / 4 FROM chunks LIMIT 1").fetchone()
-            dimensions = {len(row.embedding) for row in rows} | ({stored[0]} if stored else set())
-            if len(dimensions) > 1:
-                message = f"Embedding dimensions {sorted(dimensions)} do not match within one knowledge collection"
-                raise ValueError(message)
+            _insert_rows(connection, rows)
+
+    def add_rows(self, rows: Sequence[StoredRow]) -> None:
+        """Add rows in one transaction, as copied from another store; vectors must match the collection's width."""
+        with closing(self._connect()) as connection, connection:
             _insert_rows(connection, rows)
 
     def copy_rows(
@@ -267,7 +268,18 @@ def list_collection_names(storage_path: Path) -> tuple[str, ...]:
     )
 
 
-def _insert_rows(connection: sqlite3.Connection, rows: Iterable[StoredRow]) -> None:
+def _embedding_bytes(embedding: Sequence[float] | bytes) -> bytes:
+    return embedding if isinstance(embedding, bytes) else struct.pack(f"<{len(embedding)}f", *embedding)
+
+
+def _insert_rows(connection: sqlite3.Connection, rows: Sequence[StoredRow]) -> None:
+    """Insert rows, refusing vectors whose width differs from each other or from the rows already stored."""
+    stored = connection.execute("SELECT length(embedding) FROM chunks LIMIT 1").fetchone()
+    blobs = [_embedding_bytes(row.embedding) for row in rows]
+    widths = {len(blob) // 4 for blob in blobs} | ({stored[0] // 4} if stored else set())
+    if len(widths) > 1:
+        message = f"Embedding dimensions {sorted(widths)} do not match within one knowledge collection"
+        raise ValueError(message)
     connection.executemany(
         "INSERT INTO chunks(id, source_path, document, metadata, embedding) VALUES (?, ?, ?, ?, ?)",
         (
@@ -276,9 +288,9 @@ def _insert_rows(connection: sqlite3.Connection, rows: Iterable[StoredRow]) -> N
                 row.metadata[SOURCE_PATH_KEY],
                 row.document,
                 json.dumps(dict(row.metadata), sort_keys=True, ensure_ascii=False),
-                struct.pack(f"<{len(row.embedding)}f", *row.embedding),
+                blob,
             )
-            for row in rows
+            for row, blob in zip(rows, blobs, strict=True)
         ),
     )
 
