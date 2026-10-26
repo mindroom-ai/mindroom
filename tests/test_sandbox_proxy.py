@@ -1926,6 +1926,30 @@ def test_inline_attachment_byte_limit_honors_valid_operator_overrides(
     assert sandbox_proxy_module.inline_attachment_byte_limit(runtime_paths) == expected
 
 
+@pytest.mark.parametrize(
+    ("process_env", "env_file", "expected"),
+    [
+        ({}, "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES=5\n", 5),
+        ({"MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES": "7"}, "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES=5\n", 7),
+        ({}, "", RETAINED_MEDIA_MAX_BYTES),
+    ],
+    ids=["env_file", "process_env_wins", "live_environ_ignored"],
+)
+def test_inline_attachment_byte_limit_reads_the_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file: str,
+    expected: int,
+) -> None:
+    """The limit resolves like every runtime setting: the runtime's process env, then its `.env`, then the default."""
+    monkeypatch.setenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", "11")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
+
+    assert sandbox_proxy_module.inline_attachment_byte_limit(runtime_paths) == expected
+
+
 def test_view_file_from_worker_posts_and_decodes_bounded_media(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
