@@ -35,10 +35,10 @@ from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecor
 from mindroom.logging_config import get_logger
 from mindroom.teams.delegate_tools import (
     DELEGATION_TOOLS,
+    answer_delegation,
     delegate_functions,
     member_requirement,
     propagate_member_pause,
-    waited_on_member,
 )
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 
@@ -125,9 +125,9 @@ def continue_team(
     ``context`` returns the context of the run with a given id, which the resume calls with ``paused``'s.
     Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision must
     name a waiting call, else ``ValueError`` here before anything runs.
-    A member that completes hands the leader its text in the member-results message, which replaces every
-    delegation result that waited on a member; a member that pauses again keeps the team paused, with its new
-    requirements on the team run, and the leader sends no request.
+    A member whose resumed run ends answers the delegation call that waited on it (``answer_delegation``), even while
+    another member still waits, so the leader reads every member's result once none waits; a member that pauses
+    again keeps the team paused, with its new requirements on the team run, and the leader sends no request.
     """
     # A resume that fails or is cancelled stores this record over the paused team row on purpose, as an agent's does
     # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
@@ -148,21 +148,18 @@ def continue_team(
     check_approved_tools_offered(spec.leader, leader.approved)
     decisions.require_consumed()
 
+    # TODO(simplify): a resume hands its leader members' results by the streamed rules even when the run it continues
+    # did not stream. Resume with the run's own rules. Models would notice: such a resume would hand a team leader its
+    # members' results as a non-streaming run does.
+    stream = True
+
     async def entry(members: _MemberRuns) -> None:
-        results: list[str] = []
         for plan in plans:
             resumed = await members.resume(plan.member, plan.paused, plan.plan)
             if resumed.status is RunStatus.paused:
                 propagate_member_pause(record, plan.member, resumed)
             else:
-                # TODO(simplify): A resumed member's result is its raw content, or ``Task completed`` without any,
-                # unlike a first run's (``member_result_text``). Use that rule for both. Models would notice.
-                # TODO(simplify): A resumed member that wrote nothing hands over its carried pause notice ("I have
-                # tools to execute, but I need confirmation.") after its call ran. Hand over only what the resume
-                # added (``new_handover_content``) or a completion note. The leader model would notice.
-                results.append(f"[{plan.member.spec.name}]: {resumed.handover_content or 'Task completed'}")
-        if plans and all(r.is_resolved() for r in record.requirements or ()):
-            _answer_delegations(record, messages, [plan.member for plan in plans], results)
+                _answer_delegation(record, messages, plan.member, resumed, stream=stream)
 
     return _drive_team(
         spec,
@@ -172,10 +169,7 @@ def continue_team(
         hooks=hooks,
         persist=persist,
         template=request_template,
-        # TODO(simplify): a resume hands its leader members' results by the streamed rules even when the run it
-        # continues did not stream. Resume with the run's own rules. Models would notice: such a resume would hand a
-        # team leader its members' results as a non-streaming run does.
-        stream=True,
+        stream=stream,
         entry=entry,
         resumed=decided,
     )
@@ -314,30 +308,28 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
     return plans
 
 
-def _answer_delegations(
+def _answer_delegation(
     record: TeamRunRecord,
     messages: list[Message],
-    resumed: Sequence[TeamMember],
-    results: Sequence[str],
+    member: TeamMember,
+    resumed: RunRecord,
+    *,
+    stream: bool,
 ) -> None:
-    """Replace every delegation result that waited on a member with the members' results.
+    """Answer the delegation call that waited on ``member``'s paused run, which ended as ``resumed``.
 
-    A result waited on one of the ``resumed`` members when it is the notice the delegation gave for that member's
-    pause (``waited_on_member``). The replacement lands on the run's tool entries and on the leader's request, so the
-    leader reads the members' results where it read the pause notice.
+    The answer lands on the run's tool entry and on the leader's request, so the leader reads it where it read the
+    pause notice, and a team that pauses again stores it. A provider may reuse a call id in a later request, so the
+    call's message is the latest under its id.
     """
-    # TODO(simplify): ``results`` holds only the members resumed in this call, so a collaborate sibling that completed
-    # earlier, or a member completed in an earlier chained resume, never reaches the leader. Hand the leader every
-    # member's result. Models would notice (#3075).
-    text = "\n".join(["Member results after human-in-the-loop resolution:", *results])
-    answered: set[str] = set()
-    for tool in record.tools or ():
-        if any(waited_on_member(tool, member) for member in resumed):
-            tool.result = text
-            answered.add(tool.tool_call_id)
-    for index, message in enumerate(messages):
-        if message.role == "tool" and message.tool_call_id in answered:
-            messages[index] = replace(message, content=text)
+    call = answer_delegation(record.tools or (), member, resumed, stream=stream)
+    if call is None:
+        return
+    for index in reversed(range(len(messages))):
+        message = messages[index]
+        if message.role == "tool" and message.tool_call_id == call.tool_call_id:
+            messages[index] = replace(message, content=call.result)
+            return
 
 
 def _leader_spec(spec: TeamSpec, record: TeamRunRecord, run_member: MemberRunner, *, stream: bool) -> AgentSpec:

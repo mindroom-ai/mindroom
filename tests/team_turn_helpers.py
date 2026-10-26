@@ -448,12 +448,12 @@ def squad_turn(
     return team
 
 
-def member_approval(call_id: str, label: str) -> ApprovalCall:
-    """Return the approval of the squad checker's ``touch`` call with ``label``."""
+def member_approval(call_id: str, label: str, *, agent: str = "checker") -> ApprovalCall:
+    """Return the approval of a squad member's ``touch`` call with ``label``, the checker's unless ``agent`` names another."""
     return ApprovalCall(
         tool_call_id=call_id,
         tool_name="touch",
-        invoking_agent="checker",
+        invoking_agent=agent,
         toolkit_name=PROBE_TOOL,
         expires_at_ns=2**62,
         arguments_digest=approval_arguments_digest({"label": label}),

@@ -20,7 +20,7 @@ from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunStatus
-from mindroom.teams.delegate_tools import COLLABORATE_MEMBER_PAUSED_RESULT, MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
+from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_paused_content, team_usage
 from mindroom.teams.spec import TeamMode
@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamRunEvent
 
 pytestmark = pytest.mark.asyncio
+
+CHECKER_PAUSED_PIECE = "Agent Checker: Requires human input before continuing."
 
 
 def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetrics) -> list[Any]:
@@ -244,10 +246,15 @@ async def test_a_member_approval_pauses_the_team_with_the_team_paused_rows() -> 
     )
 
     assert record.status is RunStatus.paused
-    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
+    # The delegation names the member run it waits on, where Agno stored no member run on it.
+    [delegation] = team_row["tools"]
+    linked = {**team_row, "tools": [{**delegation, "child_run_id": checker_row["run_id"]}]}
+    assert comparable(record.to_dict()) == comparable(stored_as_owned(linked))
     [member] = store.members
     assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
     assert record.member_responses == [member]
+    assert record.tools is not None
+    assert record.tools[0].child_run_id == member.run_id
     assert record.requirements is not None
     [requirement] = record.requirements
     # The approval card keys the call by member id and call id, both as the member run recorded them.
@@ -368,7 +375,7 @@ async def test_a_collaborate_member_that_pauses_adds_its_paused_notice_in_its_pl
 
     assert record.status is RunStatus.paused
     assert record.tools is not None
-    assert record.tools[0].result == "Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
+    assert record.tools[0].result == "Six times seven is 42." + CHECKER_PAUSED_PIECE
     writer_record, checker_record = store.members
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
     assert record.member_responses == [checker_record]  # Only the paused member rides along.
@@ -673,9 +680,7 @@ async def test_a_blocking_collaborate_pause_adds_the_notice_after_the_labeled_re
 
     assert record.status is RunStatus.paused
     assert record.tools is not None
-    assert record.tools[0].result == (
-        "Agent Writer: Six times seven is 42." + COLLABORATE_MEMBER_PAUSED_RESULT.format(name="Checker")
-    )
+    assert record.tools[0].result == "Agent Writer: Six times seven is 42." + CHECKER_PAUSED_PIECE
     _, checker_record = store.members
     assert record.member_responses == [checker_record]
     assert record.requirements is not None
