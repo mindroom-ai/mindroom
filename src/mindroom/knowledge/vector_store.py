@@ -41,7 +41,7 @@ _MAX_KEYWORD_TERMS = 32
 _WORD = re.compile(r"\w+")
 #: What a collection name may be: one plain file-name component, the same characters Chroma allowed.
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-#: Vector matrices kept loaded across searches, bounded by their total size.
+#: Vector matrices kept loaded across searches, bounded by their total size; the most recent one always stays.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
 _SCHEMA = """
 CREATE TABLE chunks (
@@ -59,6 +59,7 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
     content_rowid='rowid',
     tokenize='porter unicode61 remove_diacritics 2'
 );
+CREATE VIRTUAL TABLE chunks_vocab USING fts5vocab(chunks_fts, row);
 CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, document) VALUES (new.rowid, new.document);
 END;
@@ -213,7 +214,10 @@ class KnowledgeCollection:
             candidates = min(len(scores), max(limit * 2, _FUSION_CANDIDATES))
             ranked = [int(index.rowids[position]) for position in _top_indices(scores, candidates)]
             if query is not None:
-                ranked = _reciprocal_rank_fusion(ranked, _keyword_rowids(connection, query, candidates))
+                ranked = _reciprocal_rank_fusion(
+                    ranked,
+                    _keyword_rowids(connection, query, candidates, chunk_count=len(index.rowids)),
+                )
             positions = np.searchsorted(index.rowids, ranked)
             return _hits(
                 connection,
@@ -308,13 +312,24 @@ def _top_indices(scores: np.ndarray, count: int) -> list[int]:
     return [int(position) for position in candidates[np.lexsort((candidates, -scores[candidates]))]]
 
 
-def _keyword_rowids(connection: sqlite3.Connection, query: str, limit: int) -> list[int]:
+def _keyword_rowids(connection: sqlite3.Connection, query: str, limit: int, *, chunk_count: int) -> list[int]:
     """Return the rowids of the ``limit`` chunks FTS5 ranks best by BM25 for any of the query's words.
 
-    Equal scores order by source path, then chunk order: rowids alone would follow which file a refresh happened to
-    write first.
+    Words in more than half the chunks are dropped first: BM25 gives them almost no weight, yet scoring them would
+    touch nearly every row. Equal scores order by source path, then chunk order: rowids alone would follow which file
+    a refresh happened to write first.
     """
     words = list(dict.fromkeys(word.lower() for word in _WORD.findall(query)))[:_MAX_KEYWORD_TERMS]
+    if words:
+        common = {
+            term
+            for term, documents in connection.execute(
+                f"SELECT term, doc FROM chunks_vocab WHERE term IN ({_placeholders(words)})",  # noqa: S608
+                words,
+            )
+            if documents * 2 > chunk_count
+        }
+        words = [word for word in words if word not in common]
     if not words:
         return []
     expression = " OR ".join(f'"{word}"' for word in words)
@@ -401,13 +416,13 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
         if index is not None:
             return index
         index = _load_vector_index(connection)
-        if index.nbytes <= _MATRIX_CACHE_BYTES:
-            with _index_cache_lock:
-                _index_cache[key] = index
-                cached_bytes = sum(cached.nbytes for cached in _index_cache.values())
-                while cached_bytes > _MATRIX_CACHE_BYTES:
-                    _, evicted = _index_cache.popitem(last=False)
-                    cached_bytes -= evicted.nbytes
+        with _index_cache_lock:
+            _index_cache[key] = index
+            cached_bytes = sum(cached.nbytes for cached in _index_cache.values())
+            # The newest index always stays, even alone over the budget, so a large base is not reloaded per search.
+            while cached_bytes > _MATRIX_CACHE_BYTES and len(_index_cache) > 1:
+                _, evicted = _index_cache.popitem(last=False)
+                cached_bytes -= evicted.nbytes
     return index
 
 

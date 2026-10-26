@@ -306,3 +306,22 @@ def test_top_k_keeps_the_earliest_positions_among_ties_at_the_cutoff() -> None:
 
     assert vector_store_module._top_indices(scores, 3) == [1, 4, 0]
     assert vector_store_module._top_indices(scores, 6) == [1, 4, 0, 2, 3, 5]
+
+
+def test_keyword_ranking_skips_words_most_chunks_contain(collection: KnowledgeCollection) -> None:
+    """A word in more than half the chunks carries no keyword weight, so it cannot reorder the vector ranking."""
+    collection.write_source_rows(
+        "a.md",
+        [
+            _row("a1", "a.md", "the first note", [1.0, 0.0]),
+            _row("a2", "a.md", "the the the second note", [0.9, 0.1]),
+            _row("a3", "a.md", "the zebra", [0.0, 1.0]),
+        ],
+    )
+
+    assert [hit.content for hit in collection.search([1.0, 0.0], limit=3, query="the")] == [
+        "the first note",
+        "the the the second note",
+        "the zebra",
+    ]
+    assert collection.search([1.0, 0.0], limit=1, query="the zebra")[0].content == "the zebra"
