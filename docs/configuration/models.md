@@ -170,6 +170,7 @@ With adaptive thinking, the notes these models write between tool calls are hidd
 
 Provider credentials come from environment variables, stored credentials, CLI logins, or a model-specific key.
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
+A key in `extra_kwargs.client_params.api_key` reaches the provider's API client over all of these, so that model never needs the shared key.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
 `codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.

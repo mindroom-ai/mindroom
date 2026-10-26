@@ -6515,6 +6515,7 @@ expose = [
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",
+    "own_api_key",
     "uses_alternative_auth",
 ]
 from = ["mindroom.providers.credentials"]
