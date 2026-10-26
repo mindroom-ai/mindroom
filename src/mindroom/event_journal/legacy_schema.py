@@ -68,6 +68,24 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
     transaction.execute("UPDATE visible_messages SET membership_epoch = 0 WHERE membership_epoch != 0")
 
 
+# LEGACY_COMPAT: Hydration markers written before walks had versions.
+# Legacy format: conversation_hydration without a walk_version column. Its thread markers came from a walk that trusted
+# a recursive relations walk to return every edit, which Tuwunel's paging does not, so a streamed reply whose ending it
+# missed sat at its placeholder under a marker that said the thread was whole.
+# Last legacy release: v2026.10.564, the newest release before walk versions; replacement: the next release writes
+# walk_version 1, whose thread walk looks up the edits of every message it left mid-stream.
+# Handling: adds walk_version as 0 to every existing marker, then sets room markers to 1 because the room walk did not
+# change. Each thread an older walk marked is walked again on its next read, and the new walk replaces its coverage.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_thread_markers_from_before_walk_versions_are_walked_again,
+# tests/test_conversation_hydration.py::TestMarkersFromAnOlderWalk.
+def upgrade_hydration_walk_version(transaction: Transaction, hydration_columns: frozenset[str]) -> None:
+    """Version the hydration markers of a journal created before walk versions, inside the schema transaction."""
+    if not hydration_columns or "walk_version" in hydration_columns:
+        return
+    transaction.execute("ALTER TABLE conversation_hydration ADD COLUMN walk_version BIGINT NOT NULL DEFAULT 0")
+    transaction.execute("UPDATE conversation_hydration SET walk_version = 1 WHERE thread_id = ''")
+
+
 _PRE_REPLY_OUTBOX_COLUMNS = (
     "principal_id, delivery_id, stage, event_type, room_id, membership_epoch, thread_id, transaction_id, "
     "payload_json, result_json, edits_event_id, edit_target_pending, attempted, retired, "

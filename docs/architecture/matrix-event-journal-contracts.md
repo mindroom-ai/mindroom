@@ -60,7 +60,7 @@ An empty relation page reports no depth on Tuwunel and is not a failure, and the
 
 Tuwunel's recursive `/relations` paging leaves out some edits of a reply whose parent fell on an earlier page and returns others after the reply instead of before it, while its direct `/relations/{event}/m.replace` lookup for that reply is complete.
 On one production thread a backwards walk returned 356 of 419 events and missed 26 of 99 edits, and every affected streamed reply was stored at its placeholder under a marker that called the thread whole.
-Thread hydration therefore looks up the direct edits of each message whose newest walked revision is still an unfinished stream.
+Thread hydration therefore looks up the direct edits of each message whose newest walked revision is still an unfinished stream, and markers carry a walk version so threads an older walk marked are walked again.
 User edits of ordinary messages are not looked up, because nothing in a message says an edit is missing, so one this paging drops keeps its earlier text.
 
 ### Transaction deduplication is per sending device

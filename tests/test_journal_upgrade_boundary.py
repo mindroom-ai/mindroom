@@ -380,3 +380,33 @@ async def test_outbox_upgrade_keeps_rows_and_admits_edit_stage(legacy_database: 
         legacy_database.execute(
             "UPDATE matrix_delivery_outbox SET stage = 'bogus' WHERE stage = 'final'",
         )
+
+
+@pytest.mark.asyncio
+async def test_thread_markers_from_before_walk_versions_are_walked_again(legacy_database: _LegacyDatabase) -> None:
+    """A thread marker without a walk version no longer stands, and a room marker still does."""
+    room_id = "!room:example.org"
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        epoch = await principal.membership_epoch(room_id)
+        for thread_id in ("$thread", None):
+            assert await principal.install_hydrated_conversation(
+                room_id=room_id,
+                thread_id=thread_id,
+                events=(),
+                complete=True,
+                expected_membership_epoch=epoch,
+            )
+    finally:
+        await store.close()
+    legacy_database.execute("ALTER TABLE conversation_hydration DROP COLUMN walk_version")
+
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            principal = store.principal("agent@alice")
+            assert not await principal.conversation_is_hydrated(room_id=room_id, thread_id="$thread")
+            assert await principal.conversation_is_hydrated(room_id=room_id, thread_id=None)
+        finally:
+            await store.close()

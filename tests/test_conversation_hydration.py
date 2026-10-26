@@ -1875,6 +1875,68 @@ class TestEditsTheThreadWalkMissed:
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
 
+class TestMarkersFromAnOlderWalk:
+    """A thread marked hydrated by a walk that could miss edits is walked again.
+
+    Such a walk left replies at their placeholders and marked the thread whole,
+    so nothing would ever have read those threads from the server again.
+    """
+
+    @staticmethod
+    async def _left_by_an_older_walk(store: PrincipalStore, journal_store: EventJournalStore) -> None:
+        """Install what an older walk left: the reply at its placeholder, in a thread marked whole."""
+        await store.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id="$root",
+            events=(
+                _projected(raw("$root", "the question")),
+                _projected(stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root")),
+            ),
+            complete=True,
+            attempted_policy_rank=HydrationPolicy.EXPORT,
+            expected_membership_epoch=await store.membership_epoch(ROOM),
+        )
+        await journal_store.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE conversation_hydration SET walk_version = walk_version - 1",
+            ),
+        )
+
+    async def test_a_thread_an_older_walk_marked_is_walked_again(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The next read walks the thread under the current walk, which repairs the reply."""
+        await self._left_by_an_older_walk(alice, journal_store)
+        client = streamed_reply_client(completed_ending())
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_new_walk_does_not_inherit_what_an_older_walk_claimed(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A bounded walk now does not stand for the whole thread an older walk claimed to have read."""
+        await self._left_by_an_older_walk(alice, journal_store)
+        client = streamed_reply_client(completed_ending())
+        client.relations["$root"].append(raw("$newer", "a newer question", ts=3_000, thread_id="$root"))
+
+        await hydrator(alice, client, prompt_window_messages=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        walked = client.relation_calls
+        await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_calls > walked
+        assert await bodies(alice, "$root") == ["the question", "the whole answer", "a newer question"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+
 def _projected(source: dict[str, Any]) -> ProjectedEvent:
     """Return the projection view of one raw event source."""
     event = parse(source)
