@@ -3189,7 +3189,7 @@ Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_tra
 | `config.query_prefix` | `null` | Text the `openai` provider prepends to search queries |
 | `config.document_prefix` | `null` | Text the `openai` provider prepends to indexed documents and stored memories |
 
-Only the `openai` provider reads `api_key`, `credentials_service`, `query_prefix`, and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects these fields for any other provider.
+Only the `openai` provider reads `api_key`, `credentials_service`, `query_prefix`, and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
 Config load also rejects `dimensions` for `ollama` and `sentence_transformers`, which always return the model's full-size vectors.
 
 ```yaml
