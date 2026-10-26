@@ -3363,7 +3363,6 @@ depends_on = [
     "mindroom.history.runtime",
     "mindroom.history.session_context",
     "mindroom.history.storage",
-    "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.llm",
