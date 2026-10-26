@@ -79,20 +79,34 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Requiring zero means "the server must tell us it recursed", and that is the
-# strongest portable requirement there is.
+# What every page of a recursive walk must report: only that the server
+# recursed at all. A server that ignores `recurse` omits the field and returns
+# direct children alone, and accepting that would lose every edit hanging off
+# a threaded reply.
 #
-# The two servers MindRoom runs against report different things under the same
-# name. Synapse returns the constant 3 — the depth it is willing to traverse.
-# Tuwunel returns the depth of the deepest event it actually returned, so a
-# root with one reply and one edit of that reply reports 1, verified against a
-# live server. Any numeric floor above zero would therefore reject ordinary
-# complete pages on Tuwunel while proving nothing on Synapse.
+# It cannot also say how deep the walk went. nio checks it on every non-empty
+# page and refuses the walk at the first page that falls short, and a refused
+# walk fails the read without installing a marker, so the next read walks the
+# same tree and fails the same way. A requirement is only safe if every page of
+# every walk a server gives meets it, and the servers MindRoom talks to report
+# different things under the same name:
 #
-# What is worth catching is a server that ignores `recurse` entirely and
-# silently returns only direct children: it omits the field, and a caller that
-# accepted that would quietly lose every edit hanging off a threaded reply.
+# - The Tuwunel fork from v1.9.4-mindroom.17 reports the depth its walk
+#   reached, the same on every page: 3 normally, and fewer whole levels, down
+#   to 0, once a thread passes its walk limits, which a thread never shrinks
+#   back under.
+# - Older and upstream Tuwunel report the depth of the deepest event on each
+#   page, so a page holding only replies reports 0.
+# - Synapse reports 3, the depth it recurses to.
+#
+# Requiring the depth replies' edits sit at would make every thread past the
+# fork's limits, and every older-Tuwunel thread with a page of only replies,
+# unreadable. Whether a walk reached those edits is judged after it instead, by
+# `_walk_reached_reply_edits`.
 _REQUIRED_RECURSION_DEPTH = 0
+# The depth the edits of a thread's replies sit at. The root's direct
+# relations, its replies and its own edits among them, are depth 0.
+_REPLY_EDIT_DEPTH = 1
 
 _MESSAGES_PAGE_LIMIT = 100
 # How much of a room hydration is for: enough recent logical messages to fill
@@ -124,7 +138,7 @@ _MAX_FETCHED_EVENTS = 20_000
 # happens inside nio, which yields events rather than pages, so there is no
 # request in it to count. In a thread this bounds the per-message edit lookups
 # that follow the walk instead, each of which is at least one request. See
-# `_fetch_stream_endings`.
+# `_fetch_missed_edits`.
 _MAX_MESSAGES_REQUESTS = 400
 
 # Membership can move while a walk is in flight, refusing its install. Retrying
@@ -944,7 +958,9 @@ class ConversationHydrator:
         such call. A walk that is not complete, because it stopped at a bound
         or met an unreadable relation, may add one edits-only call for the
         root, and each message the walk left mid-stream gets one edits-only
-        call of its own, up to the request ceiling.
+        call of its own, up to the request ceiling. A walk holding no edit of a
+        reply may add one call asking how deep it went, and if it stopped above
+        the replies' edits, every reply gets an edits-only call too.
         """
         root = await self._client().room_get_event(room_id, thread_id)
         events: list[ProjectedEvent] = []
@@ -1003,25 +1019,25 @@ class ConversationHydrator:
                     root_projected,
                     content=_with_notice(root_projected.content, _UNREADABLE_EDIT_NOTICE),
                 )
-        stream_endings = await self._fetch_stream_endings(
+        missed_edits = await self._fetch_missed_edits(
             room_id,
             thread_id,
             events,
             edits_fetched=edits_fetched,
             unreadable=unreadable,
         )
-        events.extend(stream_endings.events)
+        events.extend(missed_edits.events)
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
         # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
             events=tuple(events),
-            complete=relations.complete and stream_endings.complete and readable_root is not None,
+            complete=relations.complete and missed_edits.complete and readable_root is not None,
             unreadable=relations.unreadable,
         )
 
-    async def _fetch_stream_endings(
+    async def _fetch_missed_edits(
         self,
         room_id: str,
         thread_id: str,
@@ -1030,7 +1046,7 @@ class ConversationHydrator:
         edits_fetched: frozenset[str],
         unreadable: _UnreadableHistory,
     ) -> _Walk:
-        """Fetch the direct edits of every message a thread walk left mid-stream.
+        """Fetch the direct edits of the messages a thread walk may hold at an old revision.
 
         A recursive relation walk does not always deliver a message's edits
         before the message, or at all. Tuwunel's paging drops edits of a reply
@@ -1039,25 +1055,30 @@ class ConversationHydrator:
         both promises the walk rests on: that the tree is whole, and that
         stopping just after admitting a message keeps its edit tail.
 
-        The damage that matters has one shape. A streamed reply missing its
-        ending is installed at its placeholder or at its wait for a tool
+        The damage that matters most has one shape. A streamed reply missing
+        its ending is installed at its placeholder or at its wait for a tool
         approval, and prompts drop a placeholder as nothing to read, so a model
         loses the reply instead of reading an older revision of it. The walk
         can see that for free: the newest revision it holds of such a message
-        still says the reply is unfinished. Those messages, and only those, get
-        the lookup the root gets, on any server.
+        still says the reply is unfinished. Those messages get the lookup the
+        root gets, on any server.
 
-        A user's edit of an ordinary message is not covered. Nothing in the
-        message says an edit is missing, so covering it would cost one lookup
-        for every message in the window on every server, to repair text that is
-        older rather than absent.
+        A user's edit of an ordinary message is covered only when the walk
+        stopped above the depth replies' edits sit at, which the spec allows a
+        server to do as long as it says so. Such a walk holds none of those
+        edits, and without the lookups every edited reply would keep its first
+        wording. After a walk that did reach them, nothing in a message says an
+        edit is missing, so covering it would cost one lookup for every message
+        in the window on every server, to repair text that is older rather than
+        absent.
 
-        Lookups run in walk order, newest first, and stop at ``max_requests``,
-        because each is at least one request. Each walks one message's direct
-        edits only and is held to the event ceiling, like the root's. On a
-        server whose walk is whole, the only messages that qualify are replies
-        still running, waiting for an approval, or cut off for good, and a
-        lookup that finds no ending leaves them as the server holds them.
+        Lookups run unfinished replies first, then in walk order, newest first,
+        and stop at ``max_requests``, because each is at least one request and
+        a missing reply costs a prompt more than an older one. Each walks one
+        message's direct edits only and is held to the event ceiling, like the
+        root's. On a server whose walk is whole, the only messages that qualify
+        are replies still running, waiting for an approval, or cut off for good,
+        and a lookup that finds no ending leaves them as the server holds them.
         Stopping at the ceiling, or meeting an edit nobody can read, leaves the
         thread incomplete, because it still holds messages nothing vouched for.
         """
@@ -1065,17 +1086,24 @@ class ConversationHydrator:
         for event in events:
             if event.replaces_event_id is not None:
                 edits[event.replaces_event_id].append(event)
+        messages = [event for event in events if _is_logical_message(event) and event.event_id not in edits_fetched]
         unfinished = [
-            event
-            for event in events
-            if _is_logical_message(event)
-            and event.event_id not in edits_fetched
-            and is_unfinished_reply(_reduce_current_revision(event, edits[event.event_id]).content)
+            message
+            for message in messages
+            if is_unfinished_reply(_reduce_current_revision(message, edits[message.event_id]).content)
         ]
+        unfinished_ids = {message.event_id for message in unfinished}
+        # The root's own edits are among its direct relations, which every
+        # recursive walk holds.
+        replies = [
+            message for message in messages if message.event_id not in unfinished_ids and message.event_id != thread_id
+        ]
+        reached_reply_edits = not replies or await self._walk_reached_reply_edits(room_id, thread_id, events)
+        lookups = unfinished if reached_reply_edits else [*unfinished, *replies]
         seen = {event.event_id for event in events}
         found: list[ProjectedEvent] = []
         complete = True
-        for message in unfinished[: self.max_requests]:
+        for message in lookups[: self.max_requests]:
             message_edits = await self._fetch_relations(
                 room_id,
                 message.event_id,
@@ -1088,20 +1116,58 @@ class ConversationHydrator:
                 if edit.event_id not in seen:
                     seen.add(edit.event_id)
                     found.append(edit)
-        if unfinished:
+        if lookups:
             log = logger.info
-            if len(unfinished) > self.max_requests:
+            if len(lookups) > self.max_requests:
                 complete = False
                 log = logger.warning
             log(
-                "conversation_hydration_unfinished_streams_refetched",
+                "conversation_hydration_missed_edits_refetched",
                 room_id=room_id,
                 thread_id=thread_id,
                 unfinished_streams=len(unfinished),
-                edit_lookups=min(len(unfinished), self.max_requests),
+                walk_reached_reply_edits=reached_reply_edits,
+                edit_lookups=min(len(lookups), self.max_requests),
                 edits_found=len(found),
             )
         return _Walk(events=tuple(found), complete=complete, unreadable=unreadable)
+
+    async def _walk_reached_reply_edits(
+        self,
+        room_id: str,
+        thread_id: str,
+        events: Sequence[ProjectedEvent],
+    ) -> bool:
+        """Return whether a thread walk reached the depth its replies' edits sit at.
+
+        A walk holding an edit of a reply has shown that it did, whatever any
+        one page reported. Older Tuwunel reports each page's deepest event, so
+        a page holding only replies reports 0 although the walk recursed.
+
+        A walk holding no such edit cannot tell a thread nobody edited from a
+        walk that stopped above the edits, so the server is asked once, with
+        the edits' depth as the requirement: one request instead of a lookup
+        of every reply on the servers that did reach them. A server that
+        reports one depth for the whole walk answers for all of it. Older
+        Tuwunel answers for its first page only, which can send a walk of a
+        thread nobody edited to the lookups; they are bounded like any other
+        and find nothing to change.
+        """
+        if any(event.replaces_event_id not in {None, thread_id} for event in events):
+            return True
+        relations = self._client().room_get_event_relations(
+            room_id=room_id,
+            event_id=thread_id,
+            direction=nio.MessageDirection.back,
+            recurse=True,
+            minimum_recursion_depth=_REPLY_EDIT_DEPTH,
+        )
+        try:
+            async with contextlib.aclosing(relations):
+                await anext(relations, None)
+        except nio.InsufficientRecursionDepthError:
+            return False
+        return True
 
     async def _fetch_relations(
         self,
@@ -1125,7 +1191,7 @@ class ConversationHydrator:
         message arrives before that message does. The room walk's backwards
         pagination already rests on exactly this and for exactly this reason.
         Not every server keeps this order for a recursive walk, and
-        `_fetch_stream_endings` repairs the messages that losing it costs most.
+        `_fetch_missed_edits` repairs the messages that losing it costs most.
 
         So the unit the window is applied to is the logical message, and the
         only place the walk may stop for it is the moment one has just been

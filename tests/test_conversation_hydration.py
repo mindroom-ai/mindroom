@@ -772,23 +772,6 @@ class TestThreadHydration:
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
-    async def test_a_shallow_reported_depth_is_accepted(self, alice: PrincipalStore) -> None:
-        """Verified against a live Tuwunel: a complete page can report 0.
-
-        Tuwunel reports the depth of the deepest event it returned, so a
-        relation tree that is genuinely one level deep reports one level. A
-        floor above zero would reject ordinary conversations.
-        """
-        client = FakeClient(
-            events={"$root": raw("$root", "root")},
-            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
-            reported_depth=0,
-        )
-
-        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
-        assert await bodies(alice, "$root") == ["root", "reply"]
-
     async def test_an_empty_relation_page_is_not_a_failure(
         self,
         alice: PrincipalStore,
@@ -1834,7 +1817,9 @@ class TestEditsTheThreadWalkMissed:
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await bodies(alice, "$root") == ["the question", "an ordinary message"]
-        assert client.relation_calls == 1
+        # The walk, and the request that asks a walk holding no edit how deep
+        # it went. This server reached the edits, so no lookup follows.
+        assert client.relation_calls == 2
 
     @pytest.mark.parametrize("reader_sender", [ALICE, BOT], ids=["another_participant", "its_author"])
     async def test_a_prompt_reads_the_ending_the_walk_missed(
@@ -1929,6 +1914,173 @@ class TestEditsTheThreadWalkMissed:
         await hydrator(alice, client, max_requests=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await bodies(alice, "$root") == ["the question", "Thinking...", "the whole answer", "the whole answer"]
+        assert client.relation_calls == 3
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+
+def _relation_target(source: dict[str, Any]) -> object:
+    """Return the event one raw relation points at."""
+    return (source["content"].get("m.relates_to") or {}).get("event_id")
+
+
+@dataclass
+class DirectRelationsOnly(FakeClient):
+    """A homeserver whose recursive walk serves only the root's direct relations and says so.
+
+    The Tuwunel fork does this once a thread passes its walk limits: it serves
+    fewer whole levels, down to the direct relations alone, and reports the
+    depth it reached on every page. A reply's own edit lookup is still whole.
+    """
+
+    reported_depth: int | None = 0
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return the stored relations that point at the walked event itself."""
+        return (
+            source for source in super()._ordered_relations(event_id, direction) if _relation_target(source) == event_id
+        )
+
+
+@dataclass
+class DeepestEventDepthPages(FakeClient):
+    """A homeserver that reports each recursive page's depth as the depth of its deepest event.
+
+    Older and upstream Tuwunel report the depth this way, so a page holding
+    only replies reports 0 although the walk recursed. nio checks the required
+    depth on every non-empty page, and this checks it the same way.
+    """
+
+    page_size: int = 2
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        rel_type: RelationshipType | None = None,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Yield a recursive walk page by page, refusing a page below the required depth."""
+        if not recurse:
+            async for event in super().room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                rel_type=rel_type,
+                direction=direction,
+            ):
+                yield event
+            return
+        self.relation_calls += 1
+        sources = list(self._ordered_relations(event_id, direction))
+        for start in range(0, len(sources), self.page_size):
+            page = sources[start : start + self.page_size]
+            depth = max(0 if _relation_target(source) == event_id else 1 for source in page)
+            if minimum_recursion_depth is not None and depth < minimum_recursion_depth:
+                raise nio.InsufficientRecursionDepthError(minimum_recursion_depth, depth)
+            for source in page:
+                self.relation_events += 1
+                yield parse(source)
+
+
+class TestAWalkThatStoppedAboveTheReplyEdits:
+    """A thread walk that did not reach the depth replies' edits sit at does not pass them off as unedited.
+
+    The edits of a thread's replies sit one level below the root's direct
+    relations. A server may answer a recursive walk with the direct relations
+    alone, and a walk read as whole would install every edited reply at its
+    first wording for the whole membership.
+    """
+
+    async def test_an_edit_below_a_walk_reporting_depth_zero_is_looked_up(self, alice: PrincipalStore) -> None:
+        """An ordinary edit the walk left out is read from the reply's own edit lookup."""
+        reply = raw("$reply", "first wording", sender=BOB, ts=2_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_000, replaces="$reply")
+        client = DirectRelationsOnly(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [reply, edit], "$reply": [edit]},
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "second wording"]
+        assert await revisions(alice, "$root") == ["$root", "$edit"]
+        # The walk, one request asking how deep it went, and the reply's lookup.
+        assert client.relation_calls == 3
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_pages_reporting_varying_depths_hydrate_normally(self, alice: PrincipalStore) -> None:
+        """A page holding only replies reports 0 on older servers, and that neither fails the read nor costs lookups.
+
+        The first and last pages hold only replies and the middle one holds an
+        edit, so neither the first page nor any single page speaks for the walk.
+        """
+        client = DeepestEventDepthPages(
+            events={"$root": raw("$root", "root")},
+            relations={
+                "$root": [
+                    raw("$r1", "first", ts=2_000, thread_id="$root"),
+                    raw("$r2", "second", ts=3_000, thread_id="$root"),
+                    raw("$r2-edit", "second edited", ts=3_500, replaces="$r2"),
+                    raw("$r3", "third", ts=4_000, thread_id="$root"),
+                    raw("$r4", "fourth", ts=5_000, thread_id="$root"),
+                ],
+            },
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root", "first", "second edited", "third", "fourth"]
+        assert client.relation_calls == 1
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_walk_without_edits_costs_one_request_on_a_server_that_reached_their_depth(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A walk holding no edits cannot show its depth, so the server is asked once instead of every reply looked up."""
+        client = FakeClient(
+            events={"$root": raw("$root", "root")},
+            relations={
+                "$root": [
+                    raw("$r1", "first", ts=2_000, thread_id="$root"),
+                    raw("$r2", "second", ts=3_000, thread_id="$root"),
+                ],
+            },
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root", "first", "second"]
+        assert client.relation_calls == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_unfinished_replies_are_looked_up_first_and_the_ceiling_leaves_the_thread_incomplete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A placeholder is a missing reply and an unedited message is an older one, so the request ceiling spends on the first."""
+        placeholder = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root")
+        reply = raw("$reply", "first wording", sender=BOB, ts=3_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_500, replaces="$reply")
+        client = DirectRelationsOnly(
+            events={"$root": raw("$root", "the question")},
+            relations={
+                "$root": [placeholder, reply, edit, completed_ending(ts=2_100)],
+                "$answer": [completed_ending(ts=2_100)],
+                "$reply": [edit],
+            },
+        )
+
+        await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer", "first wording"]
         assert client.relation_calls == 3
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
