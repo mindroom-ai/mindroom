@@ -2523,9 +2523,10 @@ class TestAgentBot(AgentBotTestBase):
             *,
             config: Config,
             runtime_paths: RuntimePaths,
+            timezone: str,
             model_prompt: str | None = None,
         ) -> tuple[str, Sequence[ResolvedVisibleMessage], str, list[ResolvedVisibleMessage]]:
-            _ = config, runtime_paths
+            _ = config, runtime_paths, timezone
             return prompt, thread_history, model_prompt or prompt, list(thread_history)
 
         stale_history = [
@@ -2618,6 +2619,82 @@ class TestAgentBot(AgentBotTestBase):
         request = mock_process.await_args.args[0]
         assert list(request.thread_history) == fresh_history
         assert request.thread_history[0].stream_status == STREAM_STATUS_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_generate_response_timestamps_history_in_the_agents_timezone(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An agent with its own timezone sees the thread's user messages timed in that zone, not the global one."""
+
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
+            response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
+            await response_function(None)
+            return "$response"
+
+        config = self._config_for_storage(tmp_path)
+        config.timezone = "UTC"
+        config.agents[mock_agent_user.agent_name].timezone = "America/Los_Angeles"
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        # 2026-03-20 15:00 UTC.
+        history = [_visible_message(sender="@alice:localhost", body="older text", timestamp=1_774_018_800_000)]
+
+        with (
+            patch.object(
+                ResponseRunner,
+                "_process_and_respond",
+                new=AsyncMock(
+                    return_value=_ResponseGenerationOutcome(
+                        delivery=FinalDeliveryOutcome(
+                            terminal_status="completed",
+                            event_id="$response",
+                            is_visible_response=True,
+                            final_visible_body="ok",
+                        ),
+                        run_succeeded=True,
+                    ),
+                ),
+            ) as mock_process,
+            patch.object(
+                ResponseRunner,
+                "_run_cancellable_response",
+                new=AsyncMock(side_effect=run_cancellable_response),
+            ),
+            patch.object(
+                bot._conversation_resolver,
+                "fetch_thread_history",
+                new=AsyncMock(return_value=ThreadHistoryResult(history, is_full_history=True)),
+            ),
+            patch_response_runner_module(
+                should_use_streaming=AsyncMock(return_value=False),
+                apply_post_response_effects=AsyncMock(),
+            ),
+        ):
+            async with bot._conversation_resolver.turn_lookup_scope():
+                await bot._response_runner.generate_response(
+                    ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=("$event",),
+                            logical_source_event_ids=("$event",),
+                        ),
+                        prompt="Continue",
+                        thread_history=history,
+                        user_id="@alice:localhost",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            reply_to_event_id="$event",
+                            thread_id="$thread",
+                            prompt="Continue",
+                            user_id="@alice:localhost",
+                            agent_name=bot.agent_name,
+                        ),
+                    ),
+                )
+
+        [older] = mock_process.await_args.args[0].thread_history
+        assert older.body == "[2026-03-20 08:00 PDT] older text"
 
     @pytest.mark.asyncio
     async def test_generate_response_uses_resolved_thread_root_for_thinking_placeholder(

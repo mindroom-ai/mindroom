@@ -618,7 +618,7 @@ def build_unseen_context_messages_for_test(
     """Build one turn's unseen thread context through ``_build_unseen_context_messages`` with a plain reply's options.
 
     ``options`` names the options a test sets; the others take the values a thread reply without a sender, display
-    names, timestamp, transient context, or attachments passes.
+    names, timestamp, transient context, or attachments passes, in UTC.
     """
     turn_options: dict[str, Any] = {
         "transient_context_messages": (),
@@ -627,6 +627,7 @@ def build_unseen_context_messages_for_test(
         "current_timestamp_ms": None,
         "prompt_event_id": None,
         "current_prompt_is_structured": False,
+        "timezone": "UTC",
         "attachment_context": None,
     }
     return _build_unseen_context_messages(prompt, thread_history, **(turn_options | options))

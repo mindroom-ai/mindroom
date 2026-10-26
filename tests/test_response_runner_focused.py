@@ -4993,6 +4993,7 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
         prepared_request.thread_history,
         config=coordinator.deps.runtime.config,
         runtime_paths=coordinator.deps.runtime_paths,
+        timezone="UTC",
         model_prompt=prepared_request.model_prompt,
     )
 

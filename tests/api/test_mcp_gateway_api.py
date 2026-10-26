@@ -360,7 +360,10 @@ def _native_dispatch_builder(
         paused.set()
         assert release.wait(10), "Dispatch was never released"
 
-    @hook(EVENT_TOOL_BEFORE_CALL)
+    # A gate hook that times out lets the call proceed, so under the 200 ms `tool:before_call` default a test that
+    # takes longer to change access sees the body run before that change. This timeout sits above the pause's 10 s
+    # release wait, so only the release ends the pause.
+    @hook(EVENT_TOOL_BEFORE_CALL, timeout_ms=30_000)
     async def pause_in_hook(ctx: ToolBeforeCallContext) -> None:
         assert ctx.tool_name in {"account", "async_account"}
         await asyncio.to_thread(pause, "hook")

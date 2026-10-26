@@ -917,8 +917,8 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_as_its_text(tmp_path: Path) -> None:
     """The caller receives the failed outcome, so the call fails; the observers read its text, as a declined call's.
 
-    The after-call hooks, the tool-call log, and the reply's record of the call each receive the text, as they did
-    when the tool returned it as an ordinary value.
+    The after-call hooks and the tool-call log receive the text, as they did when the tool returned it as an ordinary
+    value. The reply's record of the call receives the outcome itself, so it keeps that the call failed.
     """
     seen: list[tuple[object, BaseException | None, bool]] = []
     finished: list[object] = []
@@ -959,7 +959,7 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
 
     assert result is refusal
     assert seen == [(refusal.content, None, False)]
-    assert finished == [refusal.content]
+    assert finished == [refusal]
     log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
     [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
     assert record["result"] == refusal.content

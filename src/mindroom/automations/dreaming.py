@@ -379,7 +379,7 @@ def check_dreaming(ctx: AutomationContext) -> Ask | None:
     if root is None or not root.is_dir():
         return None
     now = datetime.now(UTC)
-    today = now.astimezone(ZoneInfo(config.timezone)).date().isoformat()
+    today = now.astimezone(ZoneInfo(config.get_entity_timezone(agent_name))).date().isoformat()
     tree = _read_memory_tree(root, "")
     context_files = workspace_context_files(config, agent_name)
     excluded = frozenset({f"{_MEMORY_DIR}/{today}.md", *context_files, *tree.rejected})

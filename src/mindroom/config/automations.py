@@ -65,7 +65,7 @@ class PromptCurationAutomation(_ScheduledAutomation):
     """Daily check that asks the agent to condense its always-loaded prompt files once they grow too large."""
 
     name: Literal["prompt_curation"] = Field(default="prompt_curation", description="Built-in automation name")
-    cron: str = Field(default="0 4 * * *", description="When to check, in the configured timezone")
+    cron: str = Field(default="0 4 * * *", description="When to check, in the agent's timezone")
     trigger_tokens: int = Field(
         default=20_000,
         ge=1,
@@ -112,7 +112,7 @@ class DreamingAutomation(_ScheduledAutomation):
         default="dreaming",
         description="Built-in automation name",
     )
-    cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
+    cron: str = Field(default="15 3 * * *", description="When to check, in the agent's timezone")
 
 
 class ExplorationAutomation(_ScheduledAutomation):
@@ -122,7 +122,7 @@ class ExplorationAutomation(_ScheduledAutomation):
     requires_file_memory: ClassVar[bool] = False
 
     name: Literal["exploration"] = Field(default="exploration", description="Built-in automation name")
-    cron: str = Field(default="30 2 * * *", description="When to check, in the configured timezone")
+    cron: str = Field(default="30 2 * * *", description="When to check, in the agent's timezone")
     max_tool_calls: int = Field(
         default=40,
         ge=1,
@@ -157,7 +157,7 @@ class PluginAutomation(_ScheduledAutomation):
         description="Name of an automation a loaded plugin provides",
         json_schema_extra={"not": {"enum": list(BUILTIN_AUTOMATION_NAMES)}},
     )
-    cron: str = Field(description="When to check, in the configured timezone")
+    cron: str = Field(description="When to check, in the agent's timezone")
     options: dict[str, Any] = Field(default_factory=dict, description="Settings the plugin's automation reads")
 
     @model_validator(mode="before")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -21,11 +22,13 @@ from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.message_target import MessageTarget
+from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -45,6 +48,7 @@ from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continua
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot
+from tests.scripted_agent_helpers import stop_turn, stored_runs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -911,3 +915,93 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
     assert result.run_id == "run-fresh"
     assert published == ["Checked. Next, publishing.", "Checked. Next, publishing.\n\n🔧 `publish_report` [1] ⏳\n\n"]
     assert result.response_text == published[-1].rstrip()
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_approved_turn_is_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's saved trace keeps which call failed before the pause, so a stop after the approval says so."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator", "thread_model"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("failed-call-session")
+
+    def subtract(self: CalculatorTools, a: float, b: float) -> str:
+        del self, a, b
+        msg = "subtract is unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(CalculatorTools, "subtract", subtract)
+    model = _CheckedModel(
+        [
+            _call("subtract", "failed", a=5, b=1),
+            _call("add", "approved", a=2, b=3),
+            _continue_call("continue"),
+            [stop_turn()],
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Subtract, then add.")
+    # The resume reads the paused answer back from the reply's records, as the reply store keeps it.
+    saved = decode_presentation(
+        encode_presentation(
+            Presentation(
+                segments=(Segment(kind="answer", text=paused.response_text, tool_trace=paused.tool_trace),),
+            ),
+        ),
+    )
+    [segment] = saved.segments
+    continuation = approval_continuation(
+        approval_id="approval-failed-call",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Subtract, then add.",
+        show_tool_calls=True,
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+
+    with pytest.raises(asyncio.CancelledError):
+        await execution.continue_run(
+            continuation,
+            paused_answer=PausedAnswer(text=segment.text, tool_trace=segment.tool_trace),
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={"approved": True},
+            denial_reasons={"approved": None},
+            tool_trace_collector=[],
+            typing_log_context={},
+            progress=None,
+        )
+
+    [replay] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted_replay_run(run)]
+    content = replay.messages[-1].content
+    assert isinstance(content, str)
+    assert (
+        '- The `subtract` tool failed with input preview "a=5, b=1" and error preview "subtract is unavailable".'
+    ) in content

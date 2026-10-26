@@ -928,6 +928,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
         execution_identity=team.identity,
         model_name="default",
         configured_team_name=None,
+        timezone="UTC",
     )
     await prepare_materialized_team_execution(
         team.ctx(),
@@ -974,6 +975,7 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
             execution_identity=team.identity,
             model_name="default",
             configured_team_name=None,
+            timezone="UTC",
         )
 
 

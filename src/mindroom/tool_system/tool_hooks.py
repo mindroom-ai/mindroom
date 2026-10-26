@@ -360,7 +360,8 @@ def _observed(result: _ToolHookResult) -> _ToolHookResult:
     """Return what a call's observers read for ``result``: a failed outcome's text, as for a call a hook declined.
 
     A tool that answers its own failure with a failed ``ToolOutcome``, as ``run_scheduled_call`` does, fails its call,
-    while the after-call hooks, the tool-call log, and the reply's record read the text it answered with.
+    while the after-call hooks and the tool-call log read the text it answered with. The reply's record takes the
+    outcome itself, so it keeps that the call failed.
     """
     return result.content if isinstance(result, ToolOutcome) and result.is_error else result
 
@@ -383,7 +384,7 @@ async def _call_recorded_tool(
         # It ran and failed. A cancelled call stays started, since it may have taken effect.
         await recorder.finished(call_id, tool_name, args, exc)
         raise
-    await recorder.finished(call_id, tool_name, args, _observed(result))
+    await recorder.finished(call_id, tool_name, args, result)
     return result
 
 

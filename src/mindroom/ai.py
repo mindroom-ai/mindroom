@@ -103,6 +103,7 @@ from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
     format_tool_combined,
+    format_tool_completed_event,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -466,15 +467,7 @@ def _extract_response_content(record: AnyRunRecord, *, show_tool_calls: bool) ->
 
 def _extract_tool_trace(record: AnyRunRecord) -> list[ToolTraceEntry]:
     """Extract structured tool-trace metadata from a run record."""
-    if not record.tools:
-        return []
-
-    trace: list[ToolTraceEntry] = []
-    for tool in record.tools:
-        tool_args = {str(k): v for k, v in tool.tool_args.items()} if isinstance(tool.tool_args, dict) else {}
-        _, trace_entry = format_tool_combined(tool.tool_name, tool_args, tool.result)
-        trace.append(trace_entry)
-    return trace
+    return [format_tool_completed_event(tool.call) for tool in record.tools or ()]
 
 
 def _attach_blocking_pause_presentation(

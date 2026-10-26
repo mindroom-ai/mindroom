@@ -1438,7 +1438,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `room_models` | Map of managed room name to model name, the authored model default for a room | [Models](https://docs.mindroom.chat/configuration/models/#room_model) (`!room_model`) |
 | `room_thread_summary_models` | Map of room alias or Matrix room ID to automatic thread summary model | [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
-| `timezone`, `scheduler_catch_up_grace_seconds` | Scheduled task timezone (default `UTC`) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/) |
+| `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
@@ -1716,6 +1716,7 @@ agents:
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
+| `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
@@ -4524,11 +4525,22 @@ Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
-The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
+The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](https://docs.mindroom.chat/configuration/teams/#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
+An unknown timezone name fails config validation.
 
 ```yaml
 timezone: America/Los_Angeles
+agents:
+  atlas:
+    display_name: Atlas
+    timezone: Europe/Amsterdam
 ```
+
+A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
+The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
+Schedules created before agents had their own timezone keep following the top-level setting.
 
 Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
 Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
@@ -4593,7 +4605,7 @@ agents:
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
-- `cron` is a five-field expression in the configured [timezone](#timezone).
+- `cron` is a five-field expression in the agent's [timezone](#timezone).
 - `room` is a room alias or ID; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.

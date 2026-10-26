@@ -313,8 +313,9 @@ class ResponseTurnContext:
 
     Built once by the caller that owns the turn, then passed unchanged through
     the entity envelope, its prepare chain, and the turn drivers. For agent
-    turns ``entity_label`` is the configured agent name; team turns refine it
-    to the materialized team label via ``dataclasses.replace``.
+    turns ``entity_label`` is the configured agent name; team turns arrive
+    named by the entity whose bot runs them, whose timezone dates the turn,
+    and refine it to the materialized team label via ``dataclasses.replace``.
     """
 
     entity_label: str

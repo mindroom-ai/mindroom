@@ -120,6 +120,7 @@ def _build_pair(
         execution_identity=None,
         model_name="default",
         configured_team_name=configured_team_name,
+        timezone="UTC",
     )
 
 

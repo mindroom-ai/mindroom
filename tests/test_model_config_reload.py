@@ -139,6 +139,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         execution_identity=None,
         model_name=config.resolve_entity("team").model_name,
         configured_team_name="team",
+        timezone="UTC",
     )
     router = build_model_provider(config, runtime.runtime_paths, config.router.model)
     return agent, members.builds[0], team, router

@@ -235,15 +235,16 @@ class AutomationRunner:
         clock_offset = now - datetime.now(UTC)
         for instance in instances:
             agent_name, _requester_id = instance
+            timezone = config.get_entity_timezone(agent_name)
             for automation in config.resolve_entity(agent_name).automations:
                 key = _key(instance, automation.name)
                 enabled.add(key)
-                schedule = (automation.cron, config.timezone)
+                schedule = (automation.cron, timezone)
                 scheduled, due = self._next_due.get(key, (("", ""), now))
                 if scheduled != schedule:
-                    self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
+                    self._next_due[key] = (schedule, _next_time(automation.cron, now, timezone))
                 elif due <= now and instance not in self._active:
-                    self._next_due[key] = (schedule, _next_time(automation.cron, now, config.timezone))
+                    self._next_due[key] = (schedule, _next_time(automation.cron, now, timezone))
                     self._active.add(instance)
                     create_background_task(
                         self._fire(config, instance, automation, key, clock_offset),

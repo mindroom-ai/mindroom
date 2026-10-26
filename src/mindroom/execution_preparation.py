@@ -330,6 +330,7 @@ def _messages_with_current_prompt(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
+    timezone: str,
     member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
 ) -> TurnMessages:
     """Return the canonical live turn: its context messages, the current user prompt, and its transient context."""
@@ -342,7 +343,7 @@ def _messages_with_current_prompt(
                 sender=current_sender_id,
                 body=prompt,
                 event_id=current_event_id,
-                ts=format_timestamp_ms(current_timestamp_ms, timezone=config.timezone),
+                ts=format_timestamp_ms(current_timestamp_ms, timezone=timezone),
                 display_name=member_display_names.get(current_sender_id),
             )
         )
@@ -374,6 +375,7 @@ def _build_unseen_context_messages(
     prompt_event_id: str | None,
     current_prompt_is_structured: bool,
     config: Config,
+    timezone: str,
     attachment_context: _ThreadAttachmentContext | None,
 ) -> tuple[TurnMessages, list[str]]:
     """Return the canonical turn for unseen thread context plus the current prompt, and the unseen event ids."""
@@ -407,6 +409,7 @@ def _build_unseen_context_messages(
             current_event_id=prompt_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             member_display_names=member_display_names,
         ),
         _get_unseen_event_ids_for_metadata(
@@ -428,6 +431,7 @@ def _build_thread_history_messages(
     current_event_id: str | None,
     current_prompt_is_structured: bool,
     config: Config,
+    timezone: str,
     max_messages: int | None,
     max_message_length: int | None,
     missing_sender_label: str | None,
@@ -447,6 +451,7 @@ def _build_thread_history_messages(
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             member_display_names=member_display_names,
         )
 
@@ -688,6 +693,7 @@ async def _prepare_execution_context_common(
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
     config: Config,
+    timezone: str,
     prepare_scope_history_fn: Callable[[str], Awaitable[PreparedScopeHistory]],
     estimate_static_tokens_fn: Callable[[str], int],
     thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
@@ -695,7 +701,10 @@ async def _prepare_execution_context_common(
     attachment_context: _ThreadAttachmentContext | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
-    """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
+    """Prepare one request-scoped prompt/replay plan after unseen-thread handling.
+
+    ``timezone`` is the zone the current message's time is written in.
+    """
     history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     # Compacted history's seen ids are read from the summary rows; keep that SQLite read off the loop.
@@ -720,6 +729,7 @@ async def _prepare_execution_context_common(
                 current_event_id=current_event_id,
                 current_prompt_is_structured=current_prompt_is_structured,
                 config=config,
+                timezone=timezone,
                 member_display_names=member_display_names,
             ), []
         return _build_unseen_context_messages(
@@ -735,6 +745,7 @@ async def _prepare_execution_context_common(
             prompt_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             attachment_context=attachment_context,
             member_display_names=member_display_names,
         )
@@ -782,6 +793,7 @@ async def _prepare_execution_context_common(
             current_event_id=current_event_id,
             current_prompt_is_structured=current_prompt_is_structured,
             config=config,
+            timezone=timezone,
             max_messages=render_limits.max_messages,
             max_message_length=render_limits.max_message_length,
             missing_sender_label=render_limits.missing_sender_label,
@@ -880,6 +892,7 @@ async def prepare_agent_execution_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        timezone=config.get_entity_timezone(agent_name),
         prepare_scope_history_fn=_prepare_agent_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
         fallback_static_token_budget=_fallback_static_token_budget(
@@ -908,6 +921,7 @@ async def _prepare_bound_team_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
+    timezone: str,
     team_name: str | None,
     history_settings: ResolvedHistorySettings,
     active_model_name: str | None,
@@ -964,6 +978,7 @@ async def _prepare_bound_team_execution_context(
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
         config=config,
+        timezone=timezone,
         prepare_scope_history_fn=_prepare_team_scope_history,
         estimate_static_tokens_fn=static_token_estimator.estimate,
         thread_history_render_limits=thread_history_render_limits,
@@ -993,6 +1008,7 @@ async def prepare_bound_team_run_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
+    timezone: str,
     entity_name: str | None,
     history_settings: ResolvedHistorySettings,
     active_model_name: str | None,
@@ -1023,6 +1039,7 @@ async def prepare_bound_team_run_context(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
+        timezone=timezone,
         team_name=entity_name,
         history_settings=history_settings,
         active_model_name=active_model_name,

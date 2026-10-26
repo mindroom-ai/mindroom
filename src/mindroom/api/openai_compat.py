@@ -1011,6 +1011,7 @@ def _build_team(
         execution_identity=execution_identity,
         model_name=models.team_model_name,
         configured_team_name=team_name,
+        timezone=config.get_entity_timezone(team_name),
     )
 
 

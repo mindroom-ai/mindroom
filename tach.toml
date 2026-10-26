@@ -584,6 +584,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]

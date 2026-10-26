@@ -202,6 +202,7 @@ async def prepare_materialized_team_execution(
         thread_history=thread_history,
         runtime_paths=runtime_paths,
         config=config,
+        timezone=built.timezone,
         entity_name=configured_team_name,
         history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
@@ -393,6 +394,8 @@ class _TeamTurn:
     turn_recorder: TurnRecorder
     reason_prefix: str
     holder: _TeamTurnHolder
+    # The zone of the entity whose bot runs the turn, which dates all of it.
+    timezone: str
 
     @property
     def runtime_paths(self) -> RuntimePaths:
@@ -490,6 +493,7 @@ class _TeamTurn:
             execution_identity=self.execution_identity,
             model_name=runtime_model.model_name,
             configured_team_name=self.configured_team_name,
+            timezone=self.timezone,
             system_enrichment=render_system_enrichment_block(self.ctx.system_enrichment_items),
         )
         prepared = await prepare_materialized_team_execution(
@@ -913,6 +917,8 @@ def _team_turn(
         turn_recorder=turn_recorder,
         reason_prefix=reason_prefix,
         holder=_TeamTurnHolder(members=team_members),
+        # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
+        timezone=config.get_entity_timezone(ctx.entity_label),
     )
 
 

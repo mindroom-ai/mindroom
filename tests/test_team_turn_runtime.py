@@ -3,8 +3,9 @@
 The seam is ``run_team`` fed by scripted providers behind the production member and leader builders: what a team
 reply streams and renders, what it stores, how a member's approval pauses and resumes it, which scope its members'
 tools address, and how it ends when a member is stopped. The last tests drive turns through ``ResponseRunner``, the
-lifecycle owner: it writes the interrupted-turn record after the loop stored its own terminal record, and it posts the
-approval cards of a member's gated delegations and resumes the turn they approve.
+lifecycle owner: it dates a turn in the zone of the entity whose bot runs it, it writes the interrupted-turn record
+after the loop stored its own terminal record, and it posts the approval cards of a member's gated delegations and
+resumes the turn they approve.
 """
 # ruff: noqa: D103
 
@@ -15,8 +16,9 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 from agno.tools import Toolkit
 
@@ -26,9 +28,11 @@ from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.coalescing.batch import CoalescingKey, RequesterCoalescingOwner, build_prepared_turn
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
@@ -36,6 +40,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
@@ -57,13 +62,15 @@ from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import carries_approval_receipt, receipt_call_ids, request_call_ids
-from tests.bot_helpers import make_test_team_bot, unique_room_send_responses
+from tests.bot_helpers import make_test_agent_bot, make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_runtime_journal_support,
     make_matrix_client_mock,
+    make_pending_event,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
 )
@@ -92,9 +99,10 @@ from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
-    from mindroom.bot import TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import ApprovalCall, MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -2381,17 +2389,19 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
     )
 
 
-def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:
+def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:
     """Build the squad's team bot on the team's config, with a mocked Matrix client and inert post-response effects.
 
-    A completed reply would otherwise queue a thread summary on the config's real ``default`` model.
+    A completed reply would otherwise queue a thread summary on the config's real ``default`` model. An agent
+    ``entity`` builds that agent's bot instead, which runs a team request as an ad hoc team.
     """
-    bot = make_test_team_bot(
+    make_bot = make_test_team_bot if entity in team.config.teams else make_test_agent_bot
+    bot = make_bot(
         AgentMatrixUser(
-            agent_name="squad",
+            agent_name=entity,
             password=TEST_PASSWORD,
-            display_name="Squad",
-            user_id="@mindroom_squad:localhost",
+            display_name=entity.title(),
+            user_id=f"@mindroom_{entity}:localhost",
         ),
         tmp_path,
         team.config,
@@ -2399,7 +2409,7 @@ def _team_bot(team: TeamTurn, tmp_path: Path) -> TeamBot:
         rooms=[ROOM_ID],
     )
     install_direct_response_admission(bot)
-    bot.client = make_matrix_client_mock(user_id="@mindroom_squad:localhost")
+    bot.client = make_matrix_client_mock(user_id=f"@mindroom_{entity}:localhost")
     unique_room_send_responses(bot.client)
     install_runtime_journal_support(bot)
     _install_inert_post_response_effects(bot._response_runner)
@@ -2429,6 +2439,118 @@ def _request(prompt: str = "Hello") -> ResponseRequest:
         ),
         sources=ResponseSources(pending_event_ids=(EVENT_ID,), logical_source_event_ids=(EVENT_ID,)),
     )
+
+
+# 2026-03-20 15:00 UTC, which is 08:00 in Los Angeles.
+_OLDER_MESSAGE_MS = 1_774_018_800_000
+
+
+def _older_thread_history(bot: AgentBot) -> AbstractContextManager[object]:
+    """Serve the thread as one older message from the requester, which the turn reads once it owns the thread."""
+    history = [make_visible_message(sender=REQUESTER_ID, body="older text", timestamp=_OLDER_MESSAGE_MS)]
+    return patch.object(
+        bot._conversation_resolver,
+        "fetch_thread_history",
+        new=AsyncMock(return_value=ThreadHistoryResult(history, is_full_history=True)),
+    )
+
+
+def _leader_request_text(team: TeamTurn, model: str) -> tuple[str, str]:
+    """Return the leader's first request on ``model`` as its system message and the text of every other message."""
+    [system, *rest] = team.models[model].requests[0].messages
+    return str(system.content), "\n".join(str(message.content) for message in rest)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coalesced", [True, False], ids=["coalesced", "single"])
+async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_runs_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    coalesced: bool,
+) -> None:
+    """An ad hoc team turn on the writer's bot uses the writer's zone for every time the leader sees.
+
+    The message tags of a coalesced batch or of a single message, the thread history, and the leader's date line all
+    read Los Angeles time, though the global timezone is UTC. The leader of a team the writer's bot runs uses the
+    writer's model.
+    """
+    team = squad_turn(tmp_path, monkeypatch, leader=[], writer=[answer("Done.")])
+    team.config.agents["writer"].timezone = "America/Los_Angeles"
+    bot = _team_bot(team, tmp_path, "writer")
+    room = nio.MatrixRoom(ROOM_ID, "@mindroom_writer:localhost")
+    messages = [
+        ("$first:localhost", "first", _OLDER_MESSAGE_MS + 900_000),
+        (EVENT_ID, "second", _OLDER_MESSAGE_MS + 960_000),
+    ]
+    batch = build_prepared_turn(
+        CoalescingKey(ROOM_ID, THREAD_ID, RequesterCoalescingOwner(REQUESTER_ID)),
+        [
+            make_pending_event(
+                nio.RoomMessageText.from_dict(
+                    {
+                        "content": {"body": body, "msgtype": "m.text"},
+                        "event_id": event_id,
+                        "sender": REQUESTER_ID,
+                        "origin_server_ts": timestamp_ms,
+                        "room_id": ROOM_ID,
+                        "type": "m.room.message",
+                    },
+                ),
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=REQUESTER_ID,
+            )
+            for event_id, body, timestamp_ms in (messages if coalesced else messages[1:])
+        ],
+        timestamp_formatter=bot._coalescing_gate._timestamp_formatter,
+    )
+    assert batch.current_prompt_is_structured is coalesced
+    request = _request(batch.event.body)
+    request = replace(
+        request,
+        response_envelope=replace(request.response_envelope, agent_name="writer"),
+        current_prompt_is_structured=batch.current_prompt_is_structured,
+        current_timestamp_ms=_OLDER_MESSAGE_MS + 960_000,
+    )
+
+    with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
+        await bot._response_runner.generate_team_response_helper(
+            request,
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+
+    system, turn = _leader_request_text(team, "writer-model")
+    assert "Timezone: America/Los_Angeles (" in system
+    assert ('ts="2026-03-20 08:15 PDT"' in turn) is coalesced
+    assert 'ts="2026-03-20 08:16 PDT"' in turn
+    assert "[2026-03-20 08:00 PDT] older text" in turn
+    assert "UTC" not in turn
+
+
+@pytest.mark.asyncio
+async def test_a_configured_team_turn_is_dated_in_the_global_zone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured team has no zone of its own, so its turn uses the global one even when a member has another."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[answer("Done.")])
+    team.config.agents["writer"].timezone = "America/Los_Angeles"
+    request = replace(_request("What changed?"), current_timestamp_ms=_OLDER_MESSAGE_MS + 960_000)
+    bot = _team_bot(team, tmp_path)
+
+    with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
+        await bot._response_runner.generate_team_response_helper(
+            request,
+            team_agents=team.member_ids(),
+            team_mode="coordinate",
+        )
+
+    system, turn = _leader_request_text(team, "default")
+    assert "Timezone: UTC (UTC)" in system
+    assert 'ts="2026-03-20 15:16 UTC"' in turn
+    assert "[2026-03-20 15:00 UTC] older text" in turn
+    assert "PDT" not in turn
 
 
 @pytest.mark.asyncio
@@ -2493,7 +2615,7 @@ async def _approving_team_bot(
     tmp_path: Path,
     *,
     streaming: bool = True,
-) -> AsyncIterator[tuple[TeamBot, list[MatrixDelivery]]]:
+) -> AsyncIterator[tuple[AgentBot, list[MatrixDelivery]]]:
     """Yield the squad's team bot with its approval cards published into the yielded list, the n-th as ``$card-n``."""
     bot = _team_bot(team, tmp_path)
     cards: list[MatrixDelivery] = []
@@ -2528,7 +2650,7 @@ def _card_calls(cards: list[MatrixDelivery]) -> list[tuple[object, object]]:
     return [(card.payload["tool_name"], card.payload["tool_call_id"]) for card in cards]
 
 
-async def _approve(bot: TeamBot, card_event_id: str) -> None:
+async def _approve(bot: AgentBot, card_event_id: str) -> None:
     """Approve one card as the requester does, then hand the request's source to the readied resume, as the journal does."""
     manager = get_approval_store()
     assert manager is not None
@@ -2546,7 +2668,7 @@ async def _approve(bot: TeamBot, card_event_id: str) -> None:
     await runner.wait_for_source_owned_inbox_responses()
 
 
-def _shown(bot: TeamBot) -> str:
+def _shown(bot: AgentBot) -> str:
     """Return what the reply shows now: the body of its last send or edit."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
     return str(content.get("m.new_content", content)["body"])

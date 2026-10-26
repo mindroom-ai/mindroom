@@ -78,6 +78,7 @@ agents:
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
 | `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
+| `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](https://docs.mindroom.chat/memory/) |
 | `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](https://docs.mindroom.chat/memory/#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](https://docs.mindroom.chat/scheduling/#automations) |
