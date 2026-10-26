@@ -24,7 +24,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-_RECORD_FILENAME: Final = ".mindroom-private-instance.json"
+PRIVATE_INSTANCE_RECORD_FILENAME: Final = ".mindroom-private-instance.json"
 _LOCK_FILENAME: Final = ".mindroom-private-instance.lock"
 _RECORD_FORMAT: Final = "mindroom-private-instance"
 _RECORD_VERSION: Final = 1
@@ -97,7 +97,7 @@ def load_private_instance_identity(base_storage_path: Path, scope_root: Path) ->
     """Load and validate the identity record for one private scope, if it exists."""
     trusted_base_path = shared_storage_root(base_storage_path)
     trusted_scope_root = _trusted_scope_root(trusted_base_path, scope_root, create=False)
-    return _load_identity(trusted_base_path, trusted_scope_root, trusted_scope_root / _RECORD_FILENAME)
+    return _load_identity(trusted_base_path, trusted_scope_root, trusted_scope_root / PRIVATE_INSTANCE_RECORD_FILENAME)
 
 
 def _load_identity(trusted_base_path: Path, scope_root: Path, record_path: Path) -> PrivateInstanceIdentity | None:
@@ -112,7 +112,7 @@ def _load_identity(trusted_base_path: Path, scope_root: Path, record_path: Path)
 def _primary_record_path(trusted_base_path: Path, scope_root: Path) -> Path:
     """Return the primary's copy of one scope record, below the tracking directory that no worker mounts."""
     # Same storage-relative layout as `constants.primary_records_dir`, which needs runtime paths this store lacks.
-    return trusted_base_path / "tracking" / scope_root.relative_to(trusted_base_path) / _RECORD_FILENAME
+    return trusted_base_path / "tracking" / scope_root.relative_to(trusted_base_path) / PRIVATE_INSTANCE_RECORD_FILENAME
 
 
 def _write_record(record_path: Path, identity: PrivateInstanceIdentity) -> None:
@@ -154,7 +154,7 @@ def ensure_private_instance_identity(
             return None
         # The copy comes first, so a scope record the primary wrote always has one.
         _write_record(_primary_record_path(trusted_base_path, trusted_scope_root), requested_identity)
-        _write_record(trusted_scope_root / _RECORD_FILENAME, requested_identity)
+        _write_record(trusted_scope_root / PRIVATE_INSTANCE_RECORD_FILENAME, requested_identity)
         return requested_identity
 
 
@@ -172,9 +172,9 @@ def _matching_identity(
 def _scope_has_preexisting_data(scope_root: Path) -> bool:
     """Return whether a recordless scope contains data beyond identity bookkeeping."""
     for entry in scope_root.iterdir():
-        if entry.name == _RECORD_FILENAME:
+        if entry.name == PRIVATE_INSTANCE_RECORD_FILENAME:
             continue
-        if entry.name.startswith(f"{_RECORD_FILENAME}.") and entry.name.endswith(".tmp"):
+        if entry.name.startswith(f"{PRIVATE_INSTANCE_RECORD_FILENAME}.") and entry.name.endswith(".tmp"):
             continue
         return True
     return False

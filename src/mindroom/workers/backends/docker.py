@@ -180,7 +180,7 @@ _WORKER_EXTRA_HOSTS = {DOCKER_HOST_ALIAS: "host-gateway"}
 # Each worker root is bind-mounted read-write into its own container, so any
 # lifecycle state kept there would be rewritable by the untrusted tool code the
 # container runs.
-_WORKER_CONTROL_DIRNAME = ".mindroom-worker-control"
+WORKER_CONTROL_DIRNAME = ".mindroom-worker-control"
 
 _LABEL_COMPONENT = "mindroom.ai/component"
 _LABEL_COMPONENT_VALUE = "worker"
@@ -205,6 +205,7 @@ _DOCKER_EXTRA = "docker"
 __all__ = [
     "LABEL_STORAGE_LAYOUT",
     "LABEL_STORAGE_LAYOUT_VALUE",
+    "WORKER_CONTROL_DIRNAME",
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
     "docker_backend_config_signature",
@@ -401,7 +402,7 @@ class _DockerWorkerPaths:
 
 def _docker_worker_paths(workers_root: Path, worker_dir: str) -> _DockerWorkerPaths:
     """Return the state and control paths owned by one Docker worker directory."""
-    control_root = workers_root / _WORKER_CONTROL_DIRNAME / worker_dir
+    control_root = workers_root / WORKER_CONTROL_DIRNAME / worker_dir
     metadata_dir = control_root / "metadata"
     return _DockerWorkerPaths(
         state=local_worker_state_paths_for_root(workers_root / worker_dir),
@@ -539,7 +540,7 @@ class DockerWorkerBackend:
         self.idle_timeout_seconds = config.idle_timeout_seconds
         self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
         self._workers_root = docker_workers_root(self._storage_path)
-        self._control_root = self._workers_root / _WORKER_CONTROL_DIRNAME
+        self._control_root = self._workers_root / WORKER_CONTROL_DIRNAME
         base_runtime_paths = (
             resolve_primary_runtime_paths(
                 config_path=config.host_config_path,

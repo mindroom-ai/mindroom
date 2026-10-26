@@ -254,7 +254,8 @@ def _requester_localpart(requester: str) -> str:
     return requester
 
 
-def _encode_worker_requester_part(value: str) -> str:
+def encode_worker_requester_part(value: str) -> str:
+    """Return the lossless requester component of a ``user`` or ``user_agent`` worker key."""
     return "~" + quote(value, safe="._:@+-")
 
 
@@ -479,7 +480,7 @@ def resolve_worker_key(
         raise ValueError(msg)
     if not identity.requester_id:
         return None
-    requester_key = _encode_worker_requester_part(identity.requester_id)
+    requester_key = encode_worker_requester_part(identity.requester_id)
     if worker_scope == "user":
         return f"v1:{tenant_key}:user:{requester_key}"
     return f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
