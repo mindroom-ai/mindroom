@@ -972,6 +972,35 @@ For hosted MindRoom, the homeserver is `https://mindroom.chat`.
 
 To pair a local MindRoom runtime with that account, follow [Getting Started](https://docs.mindroom.chat/getting-started/#2-approve-pairing); on a computer, approve the pairing at `https://chat.mindroom.chat`.
 
+## Homeservers Behind Cloudflare Access
+
+A homeserver behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/) redirects the app's requests to the Access login, because the app cannot hold the Access cookie, so sign-in fails.
+The app can instead send the Access token in a `cf-access-token` header, which Access accepts, when the homeserver advertises a handoff page.
+
+With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
+When the Access session ends, the bar at the top asks for that sign-in again.
+The app registers no push notifications for such a homeserver, because the public push gateway would carry its messages outside the organization.
+
+Set up the homeserver (examples use `chat.example.com`):
+
+1. Publish the advert at `https://chat.example.com/.well-known/mindroom/cloudflare-access`, outside Access, as JSON with `Access-Control-Allow-Origin: *`:
+   `{"handoff_url": "https://chat.example.com/native/cloudflare-access"}`.
+   The handoff URL must use HTTPS on the homeserver's own origin.
+2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
+
+    ```nginx
+    location = /native/cloudflare-access {
+      add_header Cache-Control "no-store" always;
+      return 302 "mindroom://cloudflare-access#token=$cookie_CF_Authorization";
+    }
+    ```
+
+3. Turn on "Bypass OPTIONS requests to origin" (`options_preflight_bypass`) on the Access application, because browsers send CORS preflights without credentials.
+4. Let `/_matrix/client/v1/media` and `/_matrix/media/v3/upload` bypass Access. Images and uploads cannot carry the header, and the homeserver refuses them without a Matrix access token.
+5. Run a homeserver that allows the `cf-access-token` header in CORS, such as the MindRoom fork of Tuwunel.
+
+Access application paths include everything below them, so answer 404 for anything under the public advert path.
+
 ## Reporting Issues
 
 Report problems through the [support page](https://docs.mindroom.chat/support/#what-to-include-in-a-support-request), which lists the device, app, and homeserver details to include.
