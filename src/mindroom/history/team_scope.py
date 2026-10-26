@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
 
 
-def ad_hoc_team_has_private_member(
+def _ad_hoc_team_has_private_member(
     member_names: Iterable[str],
     agent_configs: Mapping[str, AgentConfig],
 ) -> bool:
@@ -34,7 +34,7 @@ def ad_hoc_team_scope_id(
         return None
 
     scope_id = f"team_{'+'.join(stable_member_names)}"
-    if not ad_hoc_team_has_private_member(stable_member_names, agent_configs):
+    if not _ad_hoc_team_has_private_member(stable_member_names, agent_configs):
         return scope_id
     if not requester_user_id:
         msg = "Private ad hoc team history scope requires requester identity"

@@ -4042,7 +4042,7 @@ class TestDoctor:
             loaded.append(path)
             return GoogleCredentials(token="file-token")  # noqa: S106 - synthetic credential
 
-        monkeypatch.setattr("mindroom.providers.anthropic.messages.load_google_application_credentials", _load_adc)
+        monkeypatch.setattr("mindroom.providers.google_adc._load_google_application_credentials", _load_adc)
         requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)

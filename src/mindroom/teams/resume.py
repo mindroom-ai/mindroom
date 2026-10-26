@@ -1,42 +1,38 @@
 """Resuming a paused team run: within a turn, after a member's delegations, and from a saved approval.
 
-``TeamResume`` continues a paused run under a turn's hooks and storage, with the decisions routed to the member or
-leader calls the team waits for; ``drive_team_delegations`` runs the children of a member's delegations and
-continues the run with their results. ``continue_paused_team_run`` rebuilds the team from a saved approval and
-resumes its stored run through both.
+``TeamResume`` continues a paused run as the turn's leader runs (``LeaderRun``), with the decisions routed to the
+member or leader calls the team waits for; ``drive_team_delegations`` runs the children of a member's delegations and
+continues the run with their results. ``continue_paused_team_run`` rebuilds the team and its leader run from a saved
+approval and resumes its stored run through both.
 """
 
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.agent_loop.spec import RunContext
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
-from mindroom.approval.resume import approval_decisions, forward_resume, with_resumed_turn_log_context
+from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
-from mindroom.history.request_messages import build_resume_request, replayed_history
-from mindroom.history.session_context import load_scope_session
-from mindroom.history.team_scope import ad_hoc_team_scope_id
-from mindroom.history.types import HistoryScope
+from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
 from mindroom.llm.events import RunFinished
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
-from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
-from mindroom.run_storage import persist_into, scope_run_storage
+from mindroom.response_turn import CompletedApprovalRun, pause_without_approval_error, paused_attempt_from_response
+from mindroom.run_storage import scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
+from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     build_team_spec,
     materialize_exact_team_members,
@@ -49,7 +45,7 @@ from mindroom.teams.presentation import (
     format_team_header,
     publish_team_presentation,
 )
-from mindroom.teams.runtime import MemberEvent, TeamDecisions, continue_team
+from mindroom.teams.runtime import MemberEvent, TeamDecisions
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
@@ -58,43 +54,23 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
-    from mindroom.agent_loop.model_loop import LoopHooks
     from mindroom.agent_loop.run import ApprovedCall
-    from mindroom.approval.resume import ResumeDecisions, ResumeEvents
+    from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalCall
     from mindroom.history.session_context import ScopeSessionContext
-    from mindroom.history.types import ResolvedReplayPlan
+    from mindroom.history.types import HistoryScope, ResolvedReplayPlan
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
     from mindroom.llm.runs import RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
-    from mindroom.teams.members import BuiltTeam
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
     from mindroom.teams.spec import TeamMode
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def _approval_history_scope(
-    member_names: tuple[str, ...],
-    team_name: str | None,
-    config: Config,
-    execution_identity: ToolExecutionIdentity,
-    retained_scope: HistoryScope | None,
-) -> HistoryScope | None:
-    """Resolve retained team storage before reconstructing member executables; ``team_name`` is None for an ad hoc team."""
-    if retained_scope is not None:
-        return retained_scope
-    scope_id = (
-        team_name
-        if team_name is not None
-        else ad_hoc_team_scope_id(member_names, config.agents, requester_user_id=execution_identity.requester_id)
-    )
-    return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
 def _stored_paused_team_run(scope: ScopeSessionContext, run_id: str) -> TeamRunRecord:
@@ -159,29 +135,30 @@ def _route_decisions(
 
 @dataclass(frozen=True)
 class TeamResume:
-    """Continue one paused team run under a turn's hooks and storage; the ``ContinueRun`` the delegation driver calls.
+    """Continue one paused team run as ``leader`` runs; the ``ContinueRun`` the delegation driver uses.
 
-    ``built`` is the team the run resumes as. ``plan`` selects the stored history the leader's resume request
-    replays: the turn's own plan within a turn, the configured policy for a saved approval. ``model_name`` is the
-    configured model the team run uses, which the resumed run's tool calls carry.
+    ``plan`` selects the stored history the leader's resume request replays: the turn's own plan within a turn, the
+    configured policy for a saved approval.
     """
 
-    built: BuiltTeam
-    storage: RunStorage
+    leader: LeaderRun
     records: TerminalRecord[TeamRunRecord]
-    hooks: LoopHooks
-    request_template: ModelRequest
     plan: ResolvedReplayPlan | None
     user_id: str | None
     toolkit_owners: Mapping[tuple[str, str], str]
-    model_name: str
 
-    def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[TeamRunEvent]:
+    @property
+    def storage(self) -> RunStorage:
+        """Where the paused team run's row lives, the leader's storage."""
+        return self.leader.storage
+
+    def events(self, paused: TeamRunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
         """Resume ``paused`` with ``decisions`` routed to the calls the team waits for; the stream ends with ``RunFinished``.
 
         Routing and the loop's own coverage check run here, before the stream starts, so a resume that no longer fits
         is refused before anything runs. A member run whose own paused call an approval decided reads that approval's
-        receipt.
+        receipt. The stream carries the members' events too: the driver forwards a parent's events without reading
+        them, so member events ride along.
         """
         routed = _route_decisions(paused, decisions, toolkit_owners=self.toolkit_owners)
         decided = {*routed.approved, *routed.denied}
@@ -192,39 +169,8 @@ class TeamResume:
                     requirement.member_run_id,
                     partial(member_call_id, requirement.member_agent_id),
                 )
-        session = self.storage.session
-        # The leader's resume request: its stored system message, the summary and history ``plan`` replays, the rest.
-        history, summary = replayed_history(session, self.storage.scope, self.built.history_settings, self.plan)
-        return continue_team(
-            self.built.spec,
-            paused,
-            build_resume_request(paused=paused.messages, summary=summary, history=history),
-            decisions=routed,
-            context=lambda run_id: RunContext(
-                run_id=run_id,
-                user_id=self.user_id,
-                metadata=deepcopy(paused.metadata),
-                session=session,
-                history_scope=self.storage.scope,
-                model_name=self.model_name,
-            ),
-            hooks=self.hooks,
-            persist=persist_into(self.records, self.storage),
-            request_template=self.request_template,
-        )
-
-    async def __call__(
-        self,
-        paused: TeamRunRecord,
-        decisions: ResumeDecisions,
-        on_event: ResumeEvents | None,
-    ) -> TeamRunRecord:
-        """Resume ``paused`` with its delegations' results, forwarding its events, and return its terminal record.
-
-        The driver forwards a parent's events without reading them, so member events ride along.
-        """
-        events = cast("AsyncIterator[RunEvent]", self.events(paused, decisions))
-        return await forward_resume(events, on_event, paused=paused)
+        events = self.leader.resume(paused, routed, plan=self.plan, user_id=self.user_id, records=self.records)
+        return cast("AsyncIterator[RunEvent]", events)
 
 
 def _member_call_event(requirement: RunRequirement, event: ToolStarted | ToolCompleted) -> RunEvent:
@@ -261,7 +207,6 @@ def drive_team_delegations(
     driven = drive_delegation_stream(
         cast("AsyncIterator[RunEvent]", events),
         record_type=TeamRunRecord,
-        storage=resume.storage,
         continue_parent=resume,
         agent_name=team_name,
         run_child=run_delegated_child_response,
@@ -277,62 +222,32 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def _waiting_slot(presentation: TeamStreamPresentation, requirement: RunRequirement) -> tuple[str, str]:
-    """Return the slot that shows the call ``requirement`` waits on and the call's id there, by ``pending_call_slot``."""
-    member_id, call_id = pending_call_slot(requirement, presentation.config_names_by_id.values())
-    if member_id is None:
-        return "team", call_id
-    return f"agent:{presentation.resolve_member_id(member_id, requirement.member_display_name)}", call_id
-
-
 def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
-    The approval card of a member's own delegation call adds no marker: the member's slot already shows that call
-    pending under its own id, and the resume finishes it there.
+    Each call waits in the slot ``pending_call_slot`` names, the rule the approval card anchors by too. The approval
+    card of a member's own delegation call adds no marker: the member's slot already shows that call pending under
+    its own id, and the resume finishes it there. Every other call waits under its own id.
     """
     member_names = presentation.config_names_by_id.values()
     for requirement in paused.requirements:
         if member_delegation_card(requirement, member_names):
             continue
-        scope, _ = _waiting_slot(presentation, requirement)
-        presentation.start_tool(scope, requirement.tool_execution.call)
+        member_id, _ = pending_call_slot(requirement, member_names)
+        call = requirement.tool_execution.call
+        if member_id is None:
+            presentation.start_tool("team", call)
+        else:
+            presentation.start_member_tool(
+                presentation.resolve_member_id(member_id, requirement.member_display_name),
+                call,
+            )
     return replace(
         paused,
         response_text=presentation.render_body(),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
     )
-
-
-def blocking_team_pause(
-    paused: PausedAttempt,
-    record: TeamRunRecord,
-    *,
-    config_names: Sequence[str],
-    display_names: Sequence[str],
-    show_tool_calls: bool,
-) -> PausedAttempt:
-    """Render a blocking team pause from its runs' records into the document the resume continues.
-
-    Each run's text fills its slot first, paused notices included: the leader's is the consensus, and each
-    member run that ended (``ended_member_runs``) adds its own to its member's slot. Every run's tool calls follow
-    in their slots, still pending where the pause waits on them; a member's own delegation card waits on that
-    member's call.
-    """
-    presentation = TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
-    waiting = {_waiting_slot(presentation, requirement) for requirement in paused.requirements}
-    presentation.append_consensus(finished_run_text(record))
-    calls = [("team", tool) for tool in record.tools or ()]
-    for member in record.ended_member_runs:
-        member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
-        presentation.append_member(member_id, finished_run_text(member))
-        calls.extend((f"agent:{member_id}", tool) for tool in member.tools or ())
-    for scope, tool in calls:
-        presentation.start_tool(scope, tool.call)
-        if (scope, tool.tool_call_id) not in waiting:
-            presentation.complete_tool(scope, tool.call)
-    return continued_team_pause(presentation, paused)
 
 
 async def _finished(record: TeamRunRecord) -> AsyncIterator[TeamRunEvent]:
@@ -382,16 +297,21 @@ async def continue_paused_team_run(
     # The entity the run's logs, notices, and delegations name, as its turn named it: the configured team, or the
     # label of an ad hoc team's members once they are known.
     entity_name = team_name or configured_team_name
+    # The approval's retained team storage, else the scope its team resolves to before members are rebuilt.
     scope = load_scope_session(
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
         execution_identity=execution_identity,
-        scope=_approval_history_scope(member_names, team_name, config, execution_identity, history_scope),
+        scope=history_scope
+        or resolve_bound_team_scope(
+            member_names=member_names,
+            config=config,
+            team_name=team_name,
+            execution_identity=execution_identity,
+        ),
     )
     try:
-        # Named members always resolve a team scope, and the approval names its session.
-        assert scope is not None
         set_consumption_storage(scope.storage_factory)
         persisted = _stored_paused_team_run(scope, run_id)
         delegated = has_delegation_state(persisted)
@@ -452,10 +372,9 @@ async def continue_paused_team_run(
             prepared_history=None,
         )
         plan = configured_replay_plan(history_settings=built.history_settings, estimated_tokens=0)
-        resume = TeamResume(
+        leader = LeaderRun(
             built=built,
             storage=storage,
-            records=attempt.records,
             hooks=leader_loop_hooks(
                 built,
                 HookTurn(
@@ -469,10 +388,14 @@ async def continue_paused_team_run(
                 entity_name=team_name,
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
+            model_name=model_name,
+        )
+        resume = TeamResume(
+            leader=leader,
+            records=attempt.records,
             plan=plan,
             user_id=user_id,
             toolkit_owners=toolkit_owners,
-            model_name=model_name,
         )
         # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
         # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
@@ -500,7 +423,7 @@ async def continue_paused_team_run(
                         await publish_team_presentation(progress, presentation)
         continued = attempt.terminal_record()
         # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
-        # events did not show: a paused notice, or a failed member run's reason.
+        # events did not show, such as a failed member run's reason; a run that paused again shows no paused notice.
         for run in (continued, *continued.ended_member_runs):
             attempt.show_unshown_handover(run)
         paused = paused_attempt_from_response(
@@ -510,7 +433,8 @@ async def continue_paused_team_run(
         if paused is not None:
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:
-            raise RuntimeError(continued.handover_content or "Team continuation did not complete")
+            # Paused on a call no approval asks about and no delegation answers, as the agent resume fails on it.
+            raise pause_without_approval_error(continued, entity_label="team")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
@@ -537,7 +461,6 @@ async def continue_paused_team_run(
 
 __all__ = [
     "TeamResume",
-    "blocking_team_pause",
     "continue_paused_team_run",
     "continued_team_pause",
     "drive_team_delegations",

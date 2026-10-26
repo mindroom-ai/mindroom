@@ -301,7 +301,7 @@ def child_call_id(delegation_id: str, card_id: str) -> str:
 
 
 class ChildResponseRunner(Protocol):
-    """Normal response envelope supplied by the caller of the native driver."""
+    """Normal response envelope supplied by the caller of the native driver, whose children can pause for approval."""
 
     async def __call__(
         self,
@@ -311,7 +311,6 @@ class ChildResponseRunner(Protocol):
         config: Config,
         runtime_paths: RuntimePaths,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
-        supports_native_tool_approval: bool,
     ) -> str:
         """Execute a child response in its retained scope, reporting exact run IDs."""
         ...

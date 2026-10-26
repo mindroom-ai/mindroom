@@ -65,22 +65,15 @@ def _is_markable_block(block: object) -> bool:
     return True
 
 
-def mark_message_cache_rungs(
-    messages: list[Any],
-    cache_control: dict[str, str],
-    rung_budget: int,
-) -> tuple[list[Any], int]:
-    """Mark the newest cacheable block of up to ``rung_budget`` trailing messages.
+def mark_message_cache_rungs(messages: list[Any], cache_control: dict[str, str], rung_budget: int) -> list[Any]:
+    """Return a copy of the messages with the newest cacheable block of up to ``rung_budget`` trailing messages marked.
 
-    Returns the (copied) message list and the number of newly added markers. At most one block per message is
-    marked, scanning from the end of the request, so consecutive requests in a tool loop always share the
-    previous request's newest boundary. A block that already carries a marker occupies a rung but is not counted
-    as newly added (its marker was already deducted from the caller's overall budget). The input structure is
-    never mutated.
+    At most one block per message is marked, scanning from the end of the request, so consecutive requests in a tool
+    loop always share the previous request's newest boundary. A block that already carries a marker occupies a rung.
+    The input structure is never mutated.
     """
     marked_messages = list(messages)
     rungs_occupied = 0
-    markers_added = 0
     for message_index in range(len(marked_messages) - 1, -1, -1):
         if rungs_occupied >= rung_budget:
             break
@@ -99,9 +92,8 @@ def mark_message_cache_rungs(
             marked_content[block_index] = {**block, "cache_control": dict(cache_control)}
             marked_messages[message_index] = {**message_dict, "content": marked_content}
             rungs_occupied += 1
-            markers_added += 1
             break
-    return marked_messages, markers_added
+    return marked_messages
 
 
 def mark_last_tool(tools: object, cache_control: dict[str, str]) -> tuple[object, int]:

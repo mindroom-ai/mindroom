@@ -102,8 +102,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901, PLR
         parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
         response = parent.record
         options = {
-            "storage": parent.runner.storage,
-            "continue_parent": parent.runner.continue_run,
+            "continue_parent": parent.runner,
             "agent_name": "leader",
             "run_child": unused_child,
             "config": config,
@@ -228,8 +227,7 @@ async def test_a_refused_subagent_call_answers_with_its_refusal_instead_of_its_o
         parent = await pause_parent("leader", "Delegate", config=config, runtime_paths=paths, identity=identity)
         response = parent.record
         options = {
-            "storage": parent.runner.storage,
-            "continue_parent": parent.runner.continue_run,
+            "continue_parent": parent.runner,
             "agent_name": "leader",
             "run_child": unused_child,
             "config": config,

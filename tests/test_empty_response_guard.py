@@ -137,6 +137,7 @@ def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage
         storage=storage,
         session=session,
         session_id="session-1",
+        storage_factory=lambda: storage,
     )
 
     discard_empty_completed_run(
@@ -176,6 +177,7 @@ def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tm
             storage=storage,
             session=live_session,
             session_id="session-1",
+            storage_factory=lambda: storage,
         ),
         session_id="session-1",
         run_id="run-empty",
@@ -209,6 +211,7 @@ def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(t
         storage=storage,
         session=session,
         session_id="session-1",
+        storage_factory=lambda: storage,
     )
 
     discard_empty_completed_run(
@@ -277,6 +280,28 @@ async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
     assert result == EMPTY_RESPONSE_NOTICE
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_the_turn_recorder_holds_the_run_id_of_the_attempt_that_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """After an empty attempt's retry, the recorder names the retry's stored run, which an interruption would record."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("Recovered")])})
+    recorder = TurnRecorder(user_message="test")
+
+    if stream:
+        await _stream(config, turn_recorder=recorder)
+    else:
+        await _respond(config, turn_recorder=recorder)
+
+    [run] = stored_runs(config, runtime_paths_for(config), "session-1")
+    assert recorder.run_id == run.run_id
 
 
 @pytest.mark.asyncio

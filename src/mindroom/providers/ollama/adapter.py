@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from ollama import AsyncClient
 
-from mindroom.credentials.sync import get_ollama_host
+from mindroom.credentials.sync import get_ollama_api_key, get_ollama_host
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import tool_result_view
 from mindroom.llm.provider import (
@@ -290,8 +290,9 @@ def _stop_reason(reply: _OllamaReply) -> StopReason | None:
 
 
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> OllamaProvider:
-    """Build the adapter for an ``ollama`` model config."""
-    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": model_config.configured_api_key()}
+    """Build the adapter for an ``ollama`` model config; without a key of its own it sends ``OLLAMA_API_KEY``."""
+    api_key = model_config.configured_api_key() or get_ollama_api_key(runtime_paths)
+    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
     settings = settings_from_extra_kwargs(OllamaSettings, extra_kwargs, provider=model_config.provider)
     # ``client_params`` wins over every client option, so its ``host`` is the server requests reach.
     host = str(

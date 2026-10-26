@@ -28,7 +28,6 @@ from mindroom.approval.tool_owners import (
     validate_approval_tool_owners,
 )
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -43,8 +42,10 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     ResumedAttempt,
-    local_approval_requirements,
+    own_approved_calls,
+    pause_without_approval_error,
     paused_attempt_from_response,
+    pending_approval_requirements,
 )
 from mindroom.run_storage import TerminalRecord, scope_run_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -75,7 +76,6 @@ if TYPE_CHECKING:
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)
@@ -171,7 +171,6 @@ async def _continue_persisted_agent(
     paused_answer: PausedAnswer,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
@@ -203,13 +202,12 @@ async def _continue_persisted_agent(
     events = drive_delegation_stream(
         native_events,
         record_type=RunRecord,
-        storage=storage,
-        continue_parent=runner.continue_run,
+        continue_parent=runner,
         run_child=run_delegated_child_response,
         agent_name=continuation.entity_name,
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=tool_dispatch.execution_identity,
         refresh_scheduler=refresh_scheduler,
         decisions=decisions if delegated else None,
         denial_reasons=denial_reasons if delegated else None,
@@ -236,7 +234,9 @@ async def _continue_persisted_agent(
             runtime_model_name=continuation.runtime_model_name,
         )
     if response.status is not RunStatus.completed:
-        raise RuntimeError(response.content or "Approval continuation did not complete")
+        # Paused on a call no approval asks about and no delegation answers, such as a plugin's externally executed
+        # call: nothing can resume it, so the resume fails naming that call, as a live turn does.
+        raise pause_without_approval_error(response, entity_label="agent")
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
@@ -265,11 +265,9 @@ async def _continue_persisted_agent(
         _continuation_turn_context(continuation, model_name=model_name, metadata=response.metadata),
         presentation,
         prompt=continuation.request_body,
-        show_tool_calls=continuation.show_tool_calls,
         resumed_attempt=ResumedAttempt(attempt, continuation_count=continuation.continuation_count),
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
         knowledge=knowledge,
         refresh_scheduler=refresh_scheduler,
         tool_trace_collector=tool_trace_collector,
@@ -305,10 +303,8 @@ async def _stream_continuation_turn(
     presentation: CollectedStreamPresentation,
     *,
     prompt: str,
-    show_tool_calls: bool,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
     knowledge: AgentKnowledge | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     tool_trace_collector: list[ToolTraceEntry],
@@ -322,8 +318,9 @@ async def _stream_continuation_turn(
 ) -> CompletedApprovalRun | PausedAttempt:
     """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
 
-    A recovered CLI call runs without a model request, so its follow-up, the turn with no ``resumed_attempt``, reads
-    the approval receipt in its first attempt's run; a resumed run already read it.
+    The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
+    follow-up, the turn with no ``resumed_attempt``, reads the approval receipt in its first attempt's run; a resumed
+    run already read it.
     """
     if resumed_attempt is None:
         run_id = str(uuid4())
@@ -338,10 +335,10 @@ async def _stream_continuation_turn(
         runtime_paths=runtime_paths,
         config=config,
         knowledge=knowledge,
-        execution_identity=execution_identity,
+        execution_identity=tool_dispatch.execution_identity,
         refresh_scheduler=refresh_scheduler,
         run_metadata_collector=run_metadata,
-        show_tool_calls=show_tool_calls,
+        show_tool_calls=presentation.show_tool_calls,
         tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
         supports_native_tool_approval=True,
         reusable_build=reusable_build,
@@ -367,7 +364,7 @@ async def _stream_continuation_turn(
         )
     if not completed or completed[-1].status is not RunStatus.completed:
         raise RuntimeError(response_text or "Approval continuation did not complete")
-    if show_tool_calls:
+    if presentation.show_tool_calls:
         tool_trace_collector.extend(tool_trace)
     return CompletedApprovalRun(response_text=response_text, metadata_content=run_metadata)
 
@@ -391,7 +388,6 @@ class AgentApprovalExecution:
         continuation: ApprovalContinuation,
         *,
         paused_answer: PausedAnswer,
-        execution_identity: ToolExecutionIdentity,
         tool_dispatch: ToolDispatchContext,
         decisions: dict[str, bool],
         denial_reasons: dict[str, str | None],
@@ -399,12 +395,13 @@ class AgentApprovalExecution:
         typing_log_context: Mapping[str, object],
         progress: ProgressPublisher | None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        """Apply exact decisions and continue the matching persisted paused run.
+        """Apply exact decisions and continue the matching persisted paused run under ``tool_dispatch``'s identity.
 
         ``progress``, when given, shows the resumed presentation live in the
         reply being continued; the terminal delivery stays with the caller.
         """
         config = self.config()
+        execution_identity = tool_dispatch.execution_identity
         cli_call = CliApprovalCall.from_dict(continuation.cli_call) if continuation.cli_call is not None else None
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
@@ -434,9 +431,7 @@ class AgentApprovalExecution:
         ):
             msg = f"Paused run {continuation.run_id!r} is no longer available"
             raise RuntimeError(msg)
-        delegation = DelegationState.from_metadata(persisted.metadata)
-        local_calls = () if delegation.pending_child_id is not None else continuation.calls
-        approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
+        approved_calls = own_approved_calls(persisted, continuation.calls, decisions)
         # Generated CLI functions have no configured toolkit to restore.
         # Their exact current binding is checked by continue_cli_approval
         # and authorize_prepared_tool_call after this agent is rebuilt.
@@ -523,14 +518,12 @@ class AgentApprovalExecution:
                                 recovered.ctx,
                                 recovered.presentation,
                                 prompt=recovered.prompt,
-                                show_tool_calls=continuation.show_tool_calls,
                                 reusable_build=recovered.reusable_build,
                                 initial_continuation_count=recovered.initial_continuation_count,
                                 delegation_depth=recovered.delegation_depth,
                                 media=recovered.media,
                                 config=config,
                                 runtime_paths=self.runtime_paths,
-                                execution_identity=execution_identity,
                                 knowledge=knowledge,
                                 refresh_scheduler=self.refresh_scheduler(),
                                 tool_trace_collector=tool_trace_collector,
@@ -545,7 +538,7 @@ class AgentApprovalExecution:
                         validate_approval_tool_owners(
                             tool_owners_by_agent(build),
                             approved_calls,
-                            local_approval_requirements(persisted),
+                            pending_approval_requirements(persisted),
                         )
                         operation = partial(
                             _continue_persisted_agent,
@@ -556,7 +549,6 @@ class AgentApprovalExecution:
                             paused_answer=paused_answer,
                             config=config,
                             runtime_paths=self.runtime_paths,
-                            execution_identity=execution_identity,
                             refresh_scheduler=self.refresh_scheduler(),
                             decisions=decisions,
                             denial_reasons=denial_reasons,
@@ -568,7 +560,7 @@ class AgentApprovalExecution:
                     result = await self.tool_runtime.run_in_context(
                         tool_context=runtime_context,
                         operation=lambda: run_with_tool_execution_identity(
-                            tool_dispatch.execution_identity,
+                            execution_identity,
                             operation=operation,
                         ),
                     )

@@ -38,6 +38,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import ConversationStore, persist_to
+from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import quote_identifier
@@ -48,8 +49,11 @@ from tests.delegation_helpers import (
     _delegate_runtime_context,
     _runtime_paths,
     _saved_approval_calls,
+    approval_calls_for,
     approval_executor,
     pause_parent,
+    registered_hand_off_tool,
+    registered_metadata_probe_tool,
     registered_report_tool,
     respond,
     resume,
@@ -326,6 +330,164 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
         # Every delegation's requirement holds its child's answer as the external result the parent continued with.
         assert all(requirement.external_execution_result for requirement in resumed.requirements or ())
         assert all(not tool.is_paused for tool in resumed.tools or ())
+
+
+@pytest.mark.asyncio
+async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approved call a resumed child runs, and what it says next, are its caller's progress, as a fresh child's are."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), answer("child result")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    reports: list[str] = []
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        with tool_progress_reporter(reports.append):
+            result = await resume(
+                approval_executor(config, paths),
+                paused,
+                _saved_approval_calls(state),
+                agent_name="leader",
+                identity=identity,
+                config=config,
+                runtime_paths=paths,
+                decisions={call_id: True},
+                denial_reasons={call_id: None},
+                approval_id="card-0",
+            )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written"]
+    assert reports[-1] == "\nCalling write_report\nchild result"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_whose_continuation_fails_records_every_delegation_it_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails after two delegation continuations records both finished calls, from the failed run's record."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Summarize")),
+            calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Review")),
+            [_provider_failure("provider connection lost")],
+        ],
+    )
+    code = ScriptedModel([answer("summary"), answer("review")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    text = await respond(
+        "leader",
+        "delegate",
+        config=config,
+        runtime_paths=paths,
+        identity=identity,
+        run_id="parent-run",
+    )
+
+    assert isinstance(text, str)
+    assert "provider connection lost" in text
+    stored = _parent_record(config, paths, identity, "parent-run")
+    replay = next(message.content for message in stored.messages if message.role == "assistant")
+    assert isinstance(replay, str)
+    assert replay.startswith("(turn failed before completion; 2 tool call(s) had finished)")
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_reads_the_run_metadata_of_the_run_it_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The call an approval resumes reads the paused run's metadata, as the call would have in the turn it paused."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = replace(_leader_identity(), agent_name="code")
+    ScriptedAgents(
+        {"code": ScriptedModel([calls(tool_call("write_report", "write-call")), answer("Written.")])},
+    ).install(monkeypatch)
+    with registered_metadata_probe_tool() as probe:
+        paused = await respond("code", "Write", config=config, runtime_paths=paths, identity=identity, run_id="run")
+        assert isinstance(paused, PausedAttempt)
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            approval_calls_for(paused, default_agent="code", toolkit_names={"write_report": "report"}),
+            agent_name="code",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={"write-call": True},
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    [metadata] = probe.seen
+    assert metadata["room_id"] == identity.room_id
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run that pauses on an externally executed call no approval asks about fails the resume.
+
+    Only a delegation's call is answered outside the loop, so a plugin function marked for external execution
+    leaves the resumed run paused with nothing to resume it, as it fails a live turn.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = replace(_leader_identity(), agent_name="code")
+    ScriptedAgents(
+        {"code": ScriptedModel([calls(tool_call("write_report", "write-call")), calls(tool_call("hand_off", "hand"))])},
+    ).install(monkeypatch)
+
+    with registered_hand_off_tool() as tools:
+        paused = await respond("code", "Write", config=config, runtime_paths=paths, identity=identity, run_id="run")
+        assert isinstance(paused, PausedAttempt)
+        with pytest.raises(RuntimeError) as raised:
+            await resume(
+                approval_executor(config, paths),
+                paused,
+                approval_calls_for(paused, default_agent="code", toolkit_names={"write_report": "report"}),
+                agent_name="code",
+                identity=identity,
+                config=config,
+                runtime_paths=paths,
+                decisions={"write-call": True},
+            )
+
+    assert tools.handed_off == []
+    stored = create_session_storage("code", config, paths, identity).get_run("run")
+    assert stored is not None
+    assert stored.status is RunStatus.paused
+    # The resume fails naming the waiting call before the reply's continuation runs, not with the run's stale
+    # pause notice ("I have tools to execute, but I need confirmation.").
+    assert str(raised.value) == "agent run 'run' paused on ['hand_off'] without an approval to ask for"
 
 
 @pytest.mark.asyncio
@@ -1168,8 +1330,7 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
         ):
             await execution._drive_delegations(
                 parent.record,
-                storage=parent.runner.storage,
-                continue_parent=parent.runner.continue_run,
+                continue_parent=parent.runner,
                 agent_name="leader",
                 run_child=run_delegated_child_response,
                 config=config,

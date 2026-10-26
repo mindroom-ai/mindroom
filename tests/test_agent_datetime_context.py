@@ -20,7 +20,13 @@ from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
 from mindroom.system_prompt import render_date_context
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
-from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    runtime_paths_for,
+    test_runtime_paths,
+    unstored_team_scope_context,
+)
 from tests.fakes.scripted_model import ScriptedModel
 
 if TYPE_CHECKING:
@@ -189,7 +195,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            scope_context=None,
+            scope_context=unstored_team_scope_context(config, ["general"], team_name=None),
             execution_identity=None,
             model_name="default",
             configured_team_name=None,

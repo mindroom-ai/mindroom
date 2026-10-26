@@ -72,7 +72,6 @@
     ],
     "embedder": {
       "config": {
-        "dimensions": 768,
         "host": "http://ollama.local:11434",
         "model": "nomic-embed-text"
       },

@@ -2,14 +2,13 @@
 """Gemini provider adapter over google-genai, for the Gemini API and Vertex AI (``vertexai: true``).
 
 The provider registry imports this module, and with it the SDK, when it builds a Gemini model.
-Credentials resolve to the configured or shared Google key, then ``GOOGLE_API_KEY``, and on Vertex AI
-``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, and the SDK's application default credentials from the
-process environment.
+The Gemini API authenticates with the configured or shared Google key. Vertex AI takes its project, location, and
+credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, and
+``GOOGLE_APPLICATION_CREDENTIALS`` in the runtime env, else the SDK's application default credentials.
 """
 
 from __future__ import annotations
 
-import os
 import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -21,12 +20,11 @@ from google.genai.errors import APIError
 from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
-from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.llm.errors import InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.providers.assistant_turn import finished_assistant_message, output_started
-from mindroom.providers.credentials import uses_alternative_auth
+from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
@@ -43,6 +41,7 @@ from mindroom.providers.gemini.wire import (
     tool_config,
     without_tool_selection,
 )
+from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
@@ -66,7 +65,6 @@ class GeminiProvider:
     identity: ModelIdentity
     capabilities: Capabilities
     settings: GeminiSettings
-    vertexai: bool
     _client: Client | None = field(default=None, init=False, repr=False)
     # Gemini keeps no history of its own, and its replayed history is sized canonically.
     native_history_route: ClassVar[None] = None
@@ -201,18 +199,13 @@ class GeminiProvider:
 
     def _client_params(self) -> dict[str, Any]:
         settings = self.settings
-        # The environment variables are read here as well as by google-genai, which ranks an explicit argument above
-        # an environment value; Agno passed them explicitly too, so a ``client_params`` key and a set project conflict.
-        if self.vertexai:
-            params: dict[str, Any] = {
-                "vertexai": True,
-                "project": settings.project_id or os.getenv("GOOGLE_CLOUD_PROJECT"),
-                "location": settings.location or os.getenv("GOOGLE_CLOUD_LOCATION"),
-                "credentials": settings.credentials,
-            }
+        if settings.vertexai:
+            params: dict[str, Any] = {"project": settings.project_id, "location": settings.location}
         else:
-            params = {"api_key": settings.api_key or os.getenv("GOOGLE_API_KEY")}
+            params = {"api_key": settings.api_key}
         params = {key: value for key, value in params.items() if value is not None}
+        # The route is always explicit, so google-genai never chooses it from its own environment variables.
+        params["vertexai"] = settings.vertexai
         if settings.timeout is not None:
             params["http_options"] = {"timeout": int(settings.timeout * 1000)}
         return {**params, **(settings.client_params or {})}
@@ -233,13 +226,32 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     raise error
 
 
+def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Fill a Vertex AI model's project, location, and Google credentials from the runtime env where it sets none.
+
+    A model in express mode, with an ``api_key`` in ``client_params``, gets none of them, since google-genai refuses a
+    key beside a project, a location, or credentials.
+    """
+    kwargs = dict(authored)
+    if (kwargs.get("client_params") or {}).get("api_key"):
+        return kwargs
+    for key, variable in (("project_id", "GOOGLE_CLOUD_PROJECT"), ("location", "GOOGLE_CLOUD_LOCATION")):
+        if not kwargs.get(key) and (value := runtime_paths.env_value(variable)):
+            kwargs[key] = value
+    return with_runtime_application_credentials(kwargs, runtime_paths)
+
+
 def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> GeminiProvider:
-    """Build the adapter for a ``google`` or ``gemini`` model config."""
-    api_key = model_config.configured_api_key()
+    """Build the adapter for a ``google`` or ``gemini`` model config; its settings record the resolved route."""
+    vertexai = gemini_uses_vertexai(model_config, runtime_paths)
     # Vertex AI authenticates with Google Cloud credentials, so it never takes the shared key.
-    if api_key is None and not uses_alternative_auth(model_config):
-        api_key = get_api_key_for_provider("google", runtime_paths=runtime_paths)
-    extra_kwargs = {**(model_config.extra_kwargs or {}), "api_key": api_key}
+    extra_kwargs = {
+        **(model_config.extra_kwargs or {}),
+        "vertexai": vertexai,
+        "api_key": model_api_key(model_config, runtime_paths),
+    }
+    if vertexai:
+        extra_kwargs = _vertex_kwargs(extra_kwargs, runtime_paths)
     settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
     return GeminiProvider(
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
@@ -250,7 +262,6 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
             ),
         ),
         settings=settings,
-        vertexai=settings.vertexai or os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "false").lower() == "true",
     )
 
 

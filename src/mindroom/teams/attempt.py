@@ -2,6 +2,7 @@
 
 A streamed attempt records ``TeamReplyText``, the reply's text without tool markers, however it ends; a blocking
 attempt renders and records its reply from the records the run hands over, which give every attempt's run metadata.
+An attempt of either kind that pauses shows the document its events built.
 """
 
 from __future__ import annotations
@@ -46,8 +47,11 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
     unless that is not its content: a failed run hands over why it failed. What a resumed run carried over from its
-    pause the document the resume continues already accounts for.
+    pause the document the resume continues already accounts for. A paused run shows nothing more: beyond the text
+    it streamed, its content is a paused notice, which a team reply never shows, as a pause of a live turn does not.
     """
+    if run.status is RunStatus.paused:
+        return None
     handover = run.new_handover_content
     return None if streamed and handover == run.content else handover
 
@@ -104,7 +108,8 @@ class TeamAttempt:
     run_id: str
     members: ResolvedExactTeamMembers
     presentation: TeamStreamPresentation
-    # Whether the document streams as it grows; a blocking turn renders its reply from the run's records instead.
+    # Whether the document streams as it grows; a blocking turn renders a reply that does not pause from the run's
+    # records instead.
     stream: bool
     team_name: str
     runtime_model_name: str

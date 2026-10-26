@@ -39,5 +39,11 @@ async def remove_redacted_history_like_next_response(
             matrix_run_metadata=None,
             redacted_history_events=partial(store.redacted_history_events, target),
         ),
-        ScopeSessionContext(scope=scope, storage=storage, session=session, session_id=target.session_id),
+        ScopeSessionContext(
+            scope=scope,
+            storage=storage,
+            session=session,
+            session_id=target.session_id,
+            storage_factory=lambda: storage,
+        ),
     )

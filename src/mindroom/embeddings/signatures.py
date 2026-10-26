@@ -58,20 +58,11 @@ def effective_mem0_embedder_signature(
     Prefixes change every vector the OpenAI-compatible client returns, so they mark the model; without them the
     signature is unchanged and existing collections keep their names.
     """
-    effective_host = host if provider in {"openai", "ollama"} else ""
-    effective_dimensions = dimensions
-    if provider == "openai" and effective_dimensions is None:
-        effective_dimensions = OPENAI_EMBEDDING_DIMENSIONS.get(model)
-    elif provider in {"ollama", "sentence_transformers"}:
-        effective_dimensions = None
+    if provider == "openai" and dimensions is None:
+        dimensions = OPENAI_EMBEDDING_DIMENSIONS.get(model)
     if provider == "openai" and (query_prefix or document_prefix):
         model = f"{model}#prefixes={json.dumps([query_prefix or '', document_prefix or ''])}"
-    return (
-        provider,
-        model,
-        effective_host or "",
-        str(effective_dimensions) if effective_dimensions is not None else "",
-    )
+    return (provider, model, host or "", str(dimensions) if dimensions is not None else "")
 
 
 def ensure_sentence_transformers_dependencies(runtime_paths: RuntimePaths) -> None:

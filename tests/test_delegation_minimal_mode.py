@@ -378,10 +378,10 @@ async def test_minimal_parent_runs_a_minimal_child_through_its_cli(
     turn = _leader_turn(identity, agent_mode="minimal")
     continued: list[str] = []
 
-    async def continue_turn_run(*_args: object, **_kwargs: object) -> None:
+    def continue_turn_run(*_args: object, **_kwargs: object) -> None:
         continued.append("parent")
 
-    monkeypatch.setattr(ai, "_continue_turn_run", continue_turn_run)
+    monkeypatch.setattr(ai._TurnRunContinuation, "events", continue_turn_run)
 
     with tool_runtime_context(live):
         result = await ai.ai_response(

@@ -768,12 +768,10 @@ def _worker_attachment_tool(
 )
 async def test_get_attachment_worker_save_accepts_attachments_over_16_mib_unless_lowered(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     inline_limit_env: dict[str, str],
     expected_error: str | None,
 ) -> None:
     """A received file above 16 MiB reaches the worker unless an operator lowers the inline cap."""
-    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
     runtime_env = {**_WORKER_RUNTIME_ENV, **inline_limit_env}
     tool = _worker_attachment_tool(tmp_path, runtime_env=runtime_env, worker_tools_override=["file"])
     size_bytes = 16 * 1024 * 1024 + 1

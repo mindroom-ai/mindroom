@@ -23,6 +23,7 @@ from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, E
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
+from mindroom.llm.media import Image
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.mid_turn import MidTurnGate
@@ -35,8 +36,9 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
+from mindroom.tool_system.agno_toolkits import AgnoImage, ToolResult
 from mindroom.tool_system.events import ToolTraceEntry
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
@@ -1435,6 +1437,34 @@ async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answer
         '- The `fetch` tool failed with input preview "url=https://example.com" '
         'and error preview "RuntimeError: HTTP 500 from https://example.com".',
         '- The `schedule` tool failed with error preview "Scheduled call `nightly` did not run: it was cancelled.".',
+    ]
+
+
+async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answered(tmp_path: Path) -> None:
+    """A restart's account of a call that returned media shows the text the model read, as for any other call."""
+    bot = await _streaming_bot(tmp_path)
+    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+    picture = "https://example.com/cat.png"
+
+    async def draw(prompt: str) -> ToolValue:
+        return ToolValue(content=f"Drew a {prompt}.", images=(Image(url=picture, mime_type="image/png"),))
+
+    async def render(prompt: str) -> ToolResult:
+        return ToolResult(content=f"Rendered a {prompt}.", images=[AgnoImage(url=picture)])
+
+    async def answer(*_args: object, **_kwargs: object) -> str:
+        await bridge("draw", draw, {"prompt": "cat"})
+        await bridge("render", render, {"prompt": "dog"})
+        return "Drawn."
+
+    assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
+
+    reply = await _reply(bot)
+    recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
+    account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
+    assert account.splitlines()[-2:] == [
+        '- The `draw` tool finished with input preview "prompt=cat" and output preview "Drew a cat.".',
+        '- The `render` tool finished with input preview "prompt=dog" and output preview "Rendered a dog.".',
     ]
 
 

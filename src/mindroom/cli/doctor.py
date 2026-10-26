@@ -614,8 +614,7 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         )
         return 0, 0, 1
 
-    base_url = emb.config.host
-    valid, detail = _validate_provider_key(emb.provider, api_key or "", base_url)
+    valid, detail = _validate_provider_key(emb.provider, api_key or "")
     return _print_validation(
         valid,
         detail,

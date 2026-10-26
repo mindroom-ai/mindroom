@@ -30,16 +30,22 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ResponseOutcome:
-    """Terminal response facts needed for post-delivery side effects."""
+    """Terminal response facts needed for post-delivery side effects.
+
+    ``response_target`` names the conversation the response went to: its session, and the thread a thread summary
+    is queued for.
+    """
 
     response_run_id: str | None = None
-    session_id: str | None = None
     run_succeeded: bool = True
     response_target: MessageTarget | None = None
-    thread_summary_room_id: str | None = None
-    thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
     thread_summary_entity_name: str | None = None
+
+    @property
+    def session_id(self) -> str | None:
+        """Return the session of the conversation the response went to."""
+        return self.response_target.session_id if self.response_target is not None else None
 
 
 @dataclass(frozen=True)
@@ -260,26 +266,27 @@ async def apply_post_response_effects(
                 run_id=outcome.response_run_id,
             )
 
+    target = outcome.response_target
     if (
         outcome.run_succeeded
         and final_delivery_outcome.terminal_status == "completed"
         and response_event_id is not None
         and not final_delivery_outcome.suppressed
-        and outcome.thread_summary_room_id is not None
-        and outcome.thread_summary_thread_id is not None
+        and target is not None
+        and target.resolved_thread_id is not None
         and (
             deps.should_queue_thread_summary is None
             or deps.should_queue_thread_summary(
-                outcome.thread_summary_room_id,
-                outcome.thread_summary_thread_id,
+                target.room_id,
+                target.resolved_thread_id,
                 outcome.thread_summary_message_count_hint,
             )
         )
         and deps.queue_thread_summary is not None
     ):
         deps.queue_thread_summary(
-            outcome.thread_summary_room_id,
-            outcome.thread_summary_thread_id,
+            target.room_id,
+            target.resolved_thread_id,
             outcome.thread_summary_entity_name,
             # Nothing has echoed this event back yet, so the projection the
             # summary reads stops one message before the answer it is being

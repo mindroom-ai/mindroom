@@ -16,7 +16,7 @@ import asyncio
 import time
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from mindroom.agent_loop.model_loop import NO_HOOKS, LoopEnded, LoopHooks, run_model_loop
 from mindroom.agent_loop.tools import PreparedTools
@@ -37,13 +37,41 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.events import RunEvent
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.tool_system.tool_function import ToolkitClose
 
 logger = get_logger(__name__)
 
 type Persist[R] = Callable[[R], Awaitable[None]]
+
+
+class _StartedRunFields(TypedDict):
+    """What every run record starts with, an agent's or a team's: its run, session, requester, model, and metadata."""
+
+    run_id: str
+    session_id: str
+    parent_run_id: str | None
+    user_id: str | None
+    model: str
+    model_provider: str
+    metrics: RunMetrics
+    metadata: dict[str, Any] | None
+
+
+def started_run_fields(ctx: RunContext, model: ModelProvider, *, metadata: dict[str, Any] | None) -> _StartedRunFields:
+    """Return the fields of the record a run in ``ctx`` on ``model`` starts with, storing ``metadata``."""
+    identity = model.identity
+    return _StartedRunFields(
+        run_id=ctx.run_id,
+        session_id=ctx.session_id,
+        parent_run_id=ctx.parent_run_id,
+        user_id=ctx.user_id,
+        model=identity.id,
+        model_provider=identity.provider,
+        metrics=RunMetrics(),
+        metadata=metadata,
+    )
 
 
 class ApprovedCall(Protocol):
@@ -84,16 +112,8 @@ def run_agent(
     content is the exception's text when the model had said nothing, then re-raises. The ``ERROR`` record's
     ``error`` holds the exception's text with credentials redacted.
     """
-    identity = spec.model.identity
     record = RunRecord(
-        run_id=ctx.run_id,
-        session_id=ctx.session_id,
-        parent_run_id=ctx.parent_run_id,
-        user_id=ctx.user_id,
-        model=identity.id,
-        model_provider=identity.provider,
-        metrics=RunMetrics(),
-        metadata=metadata,
+        **started_run_fields(ctx, spec.model, metadata=metadata),
         agent_id=spec.id,
         agent_display_name=spec.name,
     )
@@ -438,4 +458,5 @@ __all__ = [
     "resume_planned",
     "resumed_record",
     "run_agent",
+    "started_run_fields",
 ]

@@ -24,7 +24,13 @@ from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, write_config_yaml
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    unstored_team_scope_context,
+    write_config_yaml,
+)
 from tests.identity_helpers import entity_ids
 from tests.providers.bare_adapter import bare_adapter
 
@@ -129,7 +135,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         mode=TeamMode.COORDINATE,
         config=config,
         runtime_paths=runtime.runtime_paths,
-        scope_context=None,
+        scope_context=unstored_team_scope_context(config, ["general"], team_name="team"),
         execution_identity=None,
         model_name=config.resolve_entity("team").model_name,
         configured_team_name="team",

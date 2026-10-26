@@ -569,7 +569,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     # `mindroom run` binds its scheduler before it serves this app, so without one the API runs on its own.
     standalone = knowledge_refresh_scheduler is None
     if standalone:
-        api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
+        api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
         knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
         standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
         app_state.knowledge_source_watcher = standalone_knowledge_source_watcher

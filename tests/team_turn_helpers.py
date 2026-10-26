@@ -376,7 +376,6 @@ def build_team_turn(
         team_name=team_name,
         execution_identity=identity,
     )
-    assert scope is not None
     orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
     return TeamTurn(

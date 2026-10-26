@@ -108,15 +108,11 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
         default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
         general=[calls(_switch("next-turn"))],
     )
-    run_ids: list[str] = []
-
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
-        text = await team.reply(
-            stream=stream,
-            message=PROMPT,
-            run_id_callback=run_ids.append,
-            show_tool_calls=show_tool_calls,
-        )
+        text = await team.reply(stream=stream, message=PROMPT, show_tool_calls=show_tool_calls)
+    session = team.storage.load_session(SESSION_ID, "team")
+    assert session is not None
+    run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 
     assert text.endswith("Finished the task.")
     assert "Switching." not in text
@@ -129,6 +125,8 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
     assert run_ids[0] == "run-1"
     assert len(run_ids) == 2
     assert run_ids[1] != "run-1"
+    # The recorder holds the run id of the attempt that answered.
+    assert team.recorder.run_id == run_ids[1]
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text.endswith("Finished the task.")
     # The turn's trace still carries the first attempt's model switch.
@@ -151,9 +149,7 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
         general=[calls(_switch("next-turn"))],
     )
     assert team.storage.load_session(SESSION_ID, "team") is None
-    run_ids: list[str] = []
-
-    await team.reply(stream=stream, message=PROMPT, run_id_callback=run_ids.append)
+    await team.reply(stream=stream, message=PROMPT)
 
     first, *_, continued = team.models["default"].requests
     contents = [str(message.content) for message in continued.messages]
@@ -163,7 +159,9 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
     assert CONTINUATION_MARK in contents[-1]
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
-    assert [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)] == run_ids
+    run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
+    assert len(run_ids) == 2
+    assert team.recorder.run_id == run_ids[-1]
 
 
 @pytest.mark.asyncio
@@ -203,6 +201,39 @@ async def test_model_changes_made_mid_turn_do_not_reach_the_rebuilt_members(
 
 
 @pytest.mark.asyncio
+async def test_a_config_reload_mid_turn_does_not_reach_the_rebuilt_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn runs on the config it started with: the members its continuation rebuilds keep that config's roles."""
+
+    async def reload_the_config() -> None:
+        reloaded = team.config.model_copy(deep=True)
+        reloaded.agents["general"].role = "Reloaded role."
+        team.orchestrator.config = reloaded
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        default=[
+            delegate("call-team", "general", "Switch"),
+            answer("Switching."),
+            delegate("call-again", "general", "Finish"),
+            answer("Finished the task."),
+        ],
+        general=[[Await(reload_the_config), *calls(_switch("next-turn"))], answer("Done.")],
+    )
+
+    text = await team.respond(message=PROMPT)
+
+    assert text.endswith("Finished the task.")
+    first, rebuilt = (str(request.messages[0].content) for request in team.models["general-model"].requests)
+    assert "Answers." in first
+    assert "Answers." in rebuilt
+    assert "Reloaded role." not in rebuilt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_model(
     tmp_path: Path,
@@ -231,6 +262,37 @@ async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_m
     # A member's tools run under the member's own model: its configured one first, the switched one after the rebuild.
     assert probe.active_models == ["general-model", "large"]
     assert len(team.models["large"].requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_later_rebuild_keeps_the_model_an_after_call_switch_gave_the_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A rebuild after a switch's rebuild keeps the switched model; the members never fall back to their configured one."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
+        general=[calls(tool_call("model", "call-model")), calls(_switch("after-toolcall"))],
+        large=[
+            delegate("call-again", "general", "Again"),
+            calls(tool_call("model", "call-model-2")),
+            # A next-turn switch runs the turn once more without applying a model to the members.
+            calls(_switch("next-turn", call_id="call-switch-2")),
+            answer("Switching again."),
+            delegate("call-third", "general", "Finish"),
+            calls(tool_call("model", "call-model-3")),
+            answer("Member finished."),
+            answer("Finished with the new model."),
+        ],
+    )
+
+    text = await team.respond(message=PROMPT)
+
+    assert text.endswith("Finished with the new model.")
+    assert probe.active_models == ["general-model", "large", "large"]
 
 
 @pytest.mark.asyncio

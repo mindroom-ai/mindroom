@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import agents
-from mindroom.approval.resume import ResumeDecisions, ResumeRunner
+from mindroom.approval.resume import ResumeDecisions, ResumeRunner, forward_resume
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
@@ -193,7 +193,7 @@ async def _resume(
         storage=RunStorage(store, session, HistoryScope(kind="agent", scope_id="general")),
         user_id=identity.requester_id,
     )
-    await runner.continue_run(paused, ResumeDecisions(denied={"call-1": "Declined"}), None)
+    await forward_resume(runner.events(paused, ResumeDecisions(denied={"call-1": "Declined"})), None, paused=paused)
     return build
 
 

@@ -308,7 +308,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 cli_call=cli_call,
             ),
             paused_answer=PausedAnswer(),
-            execution_identity=identity,
             tool_dispatch=(
                 LiveToolDispatchContext.from_runtime_context(context)
                 if is_cli
