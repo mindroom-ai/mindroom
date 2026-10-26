@@ -8,12 +8,13 @@ as its next candidate. Loaded vector matrices are therefore keyed by the file's 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import struct
 import threading
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,9 +42,25 @@ _MAX_KEYWORD_TERMS = 32
 _WORD = re.compile(r"\w+")
 #: What a collection name may be: one plain file-name component, the same characters Chroma allowed.
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-#: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one. Two mid-sized
-#: bases fit side by side (a 40k-chunk base at 3072 dimensions is about 0.5 GB), well within a 2 GiB container.
-_MATRIX_CACHE_BYTES = 1024 * 1024 * 1024
+#: Where a container's memory limit is read from: cgroup v2, then cgroup v1.
+_CGROUP_MEMORY_LIMIT_FILES = ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
+
+def _default_matrix_cache_bytes(limit_files: Sequence[str] = _CGROUP_MEMORY_LIMIT_FILES) -> int:
+    """Return a quarter of the memory this process may use: its container's limit, else the machine's RAM."""
+    for limit_file in limit_files:
+        with suppress(OSError, ValueError):
+            limit = int(Path(limit_file).read_text(encoding="utf-8"))
+            # cgroup v2 writes "max" for no limit, which int() rejects; v1 writes a number near 2**63.
+            if limit < 1 << 60:
+                return limit // 4
+    with suppress(OSError, ValueError, AttributeError):
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // 4
+    return 512 * 1024 * 1024
+
+
+#: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
+_MATRIX_CACHE_BYTES = _default_matrix_cache_bytes()
 #: The keyword index's tokenizer, also used to normalize query words the same way.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
 _SCHEMA = f"""

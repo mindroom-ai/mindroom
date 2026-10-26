@@ -449,3 +449,23 @@ def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
 
     assert [hit.content for hit in collection.search([1.0, 0.0], limit=2)] == expected
     assert len(vector_store_module._index_cache) == 1, "the outdated matrix stayed cached beside the new one"
+
+
+def test_the_matrix_cache_takes_a_quarter_of_the_memory_the_process_may_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container's memory limit sizes the cache budget; without one, the machine's RAM does."""
+    cgroup_v2 = tmp_path / "memory.max"
+    cgroup_v1 = tmp_path / "memory.limit_in_bytes"
+    cgroup_v2.write_text("2147483648\n", encoding="utf-8")
+    assert vector_store_module._default_matrix_cache_bytes((str(cgroup_v2), str(cgroup_v1))) == 512 * 1024 * 1024
+
+    cgroup_v2.write_text("max\n", encoding="utf-8")
+    cgroup_v1.write_text(f"{2**63 - 4096}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        vector_store_module.os,
+        "sysconf",
+        {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 4 * 1024 * 1024}.__getitem__,
+    )
+    assert vector_store_module._default_matrix_cache_bytes((str(cgroup_v2), str(cgroup_v1))) == 4 * 1024**3
