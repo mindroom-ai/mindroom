@@ -676,6 +676,28 @@ def test_long_tool_output_keeps_its_start_and_end() -> None:
     assert len(transcript) <= 40_000 // 8 + 64
 
 
+def test_a_failed_tool_result_reads_as_an_error() -> None:
+    """A reviewer can tell a call that failed from one that returned, so it does not learn a failed command as working."""
+    transcript = _transcript(
+        _run(
+            "r1",
+            Message(
+                role="tool",
+                content="make: *** No rule to make target 'deploy'.",
+                tool_name="shell",
+                tool_call_error=True,
+            ),
+            Message(role="tool", content="Deployed.", tool_name="shell", tool_call_error=False),
+        ),
+        budget_chars=40_000,
+    )
+
+    assert (
+        transcript
+        == "TOOL ERROR (shell):\nmake: *** No rule to make target 'deploy'.\n\nTOOL RESULT (shell):\nDeployed."
+    )
+
+
 def test_model_replies_count_only_model_visible_runs() -> None:
     """Each message the run's model answered is one request; copies, thread replies, and hidden runs do not count."""
     errored = _tool_turn("r4")

@@ -288,6 +288,9 @@ def _message_open_tag(message: Message) -> str:
         attrs.append(f'tool_call_id="{escape(message.tool_call_id, quote=True)}"')
     if message.role == "tool" and message.tool_name:
         attrs.append(f'tool_name="{escape(message.tool_name, quote=True)}"')
+    if message.tool_call_error:
+        # A failed call's error text reads like any result, so the summary would record it as one.
+        attrs.append('error="true"')
     return f"<message {' '.join(attrs)}>"
 
 
