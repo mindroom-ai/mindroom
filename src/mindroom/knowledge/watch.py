@@ -14,13 +14,18 @@ from mindroom.knowledge.file_listing import include_semantic_knowledge_relative_
 from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     KnowledgeSourceRoot,
+    load_published_index_state,
     mark_knowledge_source_changed_async,
+    published_index_metadata_path,
+    resolve_published_index_key,
     resolve_refresh_target,
     source_root_for_refresh_target,
 )
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -127,6 +132,26 @@ def _shared_poll_targets(
     return targets
 
 
+# LEGACY_COMPAT: Shared semantic bases still published from Chroma.
+# Legacy format: The published indexing_settings.json has no vector_store; the base's vectors are in Chroma.
+# Last legacy release: v2026.10.568; replacement: the next release stores semantic indexes in owned SQLite files.
+# Handling: Watcher sync schedules each such base's refresh, so its copy out of Chroma starts at boot, not on first use.
+# Coverage: tests/test_knowledge_manager.py::test_source_watcher_sync_converts_chroma_era_bases_once.
+def _chroma_era_shared_base_ids(config: Config, runtime_paths: RuntimePaths) -> Iterator[str]:
+    for base_id in sorted(config.knowledge_bases):
+        if config.get_knowledge_base_config(base_id).mode != "semantic":
+            continue
+        if config.get_private_knowledge_base_agent(base_id) is not None:
+            continue
+        try:
+            key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths)
+        except (OSError, ValueError):
+            continue
+        state = load_published_index_state(published_index_metadata_path(key))
+        if state is not None and state.settings.mode == "semantic" and not state.settings.vector_store:
+            yield base_id
+
+
 def _changed_path_is_indexable(target: _WatchTarget, config: Config, changed_path: Path) -> bool:
     try:
         relative_path = changed_path.relative_to(target.path)
@@ -160,7 +185,7 @@ class KnowledgeSourceWatcher:
         self._poll_tasks: dict[KnowledgeRefreshTarget, _WatchTask] = {}
 
     async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
-        """Replace watcher tasks so they match the current shared knowledge config."""
+        """Replace watcher tasks so they match the current shared knowledge config, and start Chroma-era conversions."""
         await self.shutdown()
         if config is None:
             return
@@ -189,6 +214,10 @@ class KnowledgeSourceWatcher:
                 poll_interval_seconds=poll_target.poll_interval_seconds,
                 git=poll_target.git,
             )
+
+        for base_id in _chroma_era_shared_base_ids(config, runtime_paths):
+            if not self._refresh_scheduler.is_refreshing(base_id, config=config, runtime_paths=runtime_paths):
+                self._refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
     async def shutdown(self) -> None:
         """Stop all source watchers owned by this instance."""

@@ -69,6 +69,7 @@ from mindroom.knowledge.file_listing import (
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.knowledge.index_metadata import state_for_publication
 from mindroom.knowledge.index_reader import PublishedIndexReader
 from mindroom.knowledge.indexing_config import IndexingSettings, indexing_settings_key, knowledge_git_dir
 from mindroom.knowledge.manager import KnowledgeManager, _knowledge_source_signature, _PreparedFile
@@ -1391,6 +1392,54 @@ def test_local_knowledge_without_poll_interval_starts_no_poller(tmp_path: Path) 
     """Without poll_interval_seconds a local base gets no poll target, so the watcher starts no poller for it."""
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     assert _shared_poll_targets(config, runtime_paths_for(config)) == {}
+
+
+@pytest.mark.asyncio
+async def test_source_watcher_sync_converts_chroma_era_bases_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Watcher sync schedules one refresh for a base Chroma published, so its conversion starts at boot; an owned base gets none."""
+    config = _config(
+        tmp_path,
+        bases={"legacy": tmp_path / "legacy", "owned": tmp_path / "owned"},
+        agent_bases=["legacy", "owned"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    for base_id in ("legacy", "owned"):
+        manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
+        settings = manager._indexing_settings
+        save_published_index_state(
+            manager._indexing_settings_path,
+            state_for_publication(
+                settings=replace(settings, vector_store="") if base_id == "legacy" else settings,
+                collection=manager._collections.default_collection,
+                indexed_count=1,
+                source_signature="published",
+                published_revision=None,
+            ),
+        )
+    refreshed: list[str] = []
+    release = asyncio.Event()
+
+    async def _fake_refresh(base_id: str, **_kwargs: object) -> None:
+        refreshed.append(base_id)
+        await release.wait()
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    scheduler = KnowledgeRefreshScheduler()
+    source_watcher = KnowledgeSourceWatcher(scheduler)
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await _wait_until(lambda: bool(refreshed), "the Chroma-era base was not refreshed")
+    # A config reload syncs again while the conversion runs; that must not queue a second conversion.
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    release.set()
+    await _wait_until(lambda: not scheduler._tasks, "the conversion did not finish")
+    await source_watcher.shutdown()
+    await scheduler.shutdown()
+
+    assert refreshed == ["legacy"]
 
 
 @pytest.mark.asyncio
