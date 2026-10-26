@@ -374,6 +374,7 @@ def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_p
             for run in runs:
                 replayed = [message["data"] for message in reported[run.run_id]["messages"] if not message["folded_by"]]
                 assert replayed == [message.to_dict() for message in run.messages]
+                assert reported[run.run_id]["tools"] == run.to_dict().get("tools")
 
 
 def test_read_runs_matches_a_run_id_alone(tmp_path: Path) -> None:

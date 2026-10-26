@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from collections import defaultdict
 from contextlib import closing, contextmanager
 from dataclasses import astuple, dataclass, fields, replace
 from datetime import UTC, datetime
@@ -857,14 +858,7 @@ def _decoded_runs(
     messages = _rows_by_run(connection, names.log_messages, run_ids, "folded_by IS NULL")
     tools = _rows_by_run(connection, names.log_tools, run_ids)
     return [
-        run_record(
-            run_id,
-            session_id,
-            parent_run_id,
-            RunColumns(*columns),
-            messages.get(run_id, []),
-            tools.get(run_id, []),
-        )
+        run_record(run_id, session_id, parent_run_id, RunColumns(*columns), messages[run_id], tools[run_id])
         for run_id, session_id, parent_run_id, *columns in rows
     ]
 
@@ -876,13 +870,13 @@ def _rows_by_run(
     condition: str = "TRUE",
 ) -> dict[str, list[dict[str, Any]]]:
     """Decode the ``data`` of ``table``'s rows of the runs ``run_ids`` that meet ``condition``, by run, in ``ord`` order."""
-    decoded: dict[str, list[dict[str, Any]]] = {}
+    decoded: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for run_id, data in connection.execute(
         f"SELECT run_id, data FROM {quote_identifier(table)} WHERE {condition} "  # noqa: S608
         "AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_id, ord",
         (json.dumps(run_ids),),
     ):
-        decoded.setdefault(run_id, []).append(json.loads(data))
+        decoded[run_id].append(json.loads(data))
     return decoded
 
 

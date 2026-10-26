@@ -333,7 +333,8 @@ def _read_run_database(
     runs = [{"database": str(database), "table": runs_table, **_decode_json_columns(row)} for row in reversed(rows)]
     for run in runs:
         run["messages"] = messages.get(run["run_id"], [])
-        run["tools"] = tools.get(run["run_id"], [])
+        # A run without a tool list reports none; a row worker code wrote without the flag does too, not a failure.
+        run["tools"] = tools.get(run["run_id"], []) if run.pop("has_tools", None) else None
     return counted["matches"], runs
 
 
