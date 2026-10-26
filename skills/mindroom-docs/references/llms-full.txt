@@ -3251,7 +3251,7 @@ Use `credentials_service` when the embedding endpoint needs a different key than
 With no key at all, keyless local OpenAI-compatible endpoints still work, while a keyed endpoint fails with an authentication error.
 
 The `ollama` embedder ignores `config.api_key` and `config.credentials_service`; an Ollama server that requires a key gets `OLLAMA_API_KEY`.
-For knowledge bases and semantic file-memory search, MindRoom reads it from the process environment, then the `.env` beside `config.yaml`.
+For knowledge bases, the knowledge graph, and semantic file-memory search, MindRoom reads it from the process environment, then the `.env` beside `config.yaml`.
 Mem0's own Ollama clients, for its embedder and an `ollama` memory LLM, read it only from the process environment.
 When the embedder rejects its credential, semantic memory search reports the cause in `memory` tool output and in the agent's prompt instead of returning empty results, and `/api/health` includes an `embedder` block until a request succeeds again.
 
