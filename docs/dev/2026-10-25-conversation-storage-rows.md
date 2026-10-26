@@ -8,7 +8,7 @@ It is the design behind #3095; paths are relative to `src/mindroom/` unless they
 The [runtime replacement](2026-10-20-replace-agno-design.md) rejected a new storage schema with a one-time run rewrite, because rewriting every stored run risked replay and approval regressions for no user-visible gain.
 That held for the replacement, which changed no stored byte so that a regression would point at the runtime alone.
 Storage v2 ships in a release of its own after the replacement has run for one, so a regression points at the format alone.
-Its gain is not user-visible either: the Agno layout was the root cause of a recurring class of storage bugs, and most of the rules that kept it consistent existed only because of that layout.
+The gain is still not user-visible, but the Agno layout was the root cause of a recurring class of storage bugs, and most of the rules that kept it consistent existed only because of that layout.
 The maintainer's bar was to do it only if the code became significantly cleaner and easier to maintain, ideally shorter, not counting the conversion module.
 The checkpoint taken once the new store worked beside the old one measured the format change itself at about 30 more runtime lines, against an estimate of 160 fewer, and the maintainer continued on maintainability alone.
 The regression risk is carried by the oracle and the backups instead: the old store's behavior was recorded before any new code existed, and every converted database keeps a byte-for-byte copy.
@@ -94,7 +94,7 @@ The oracle exists because each review round of the earlier storage designs found
   Keeping such a row would cost about six lines in the cut, for a race that needs a folding voice turn and a concurrent edit or redaction of an earlier turn.
 - A downgrade restores the backups and loses every write made since the upgrade; [Upgrade Notes](../deployment/upgrades.md#upgrading-to-conversation-storage-v2) holds the operator procedure.
 - A converted file keeps the pages its Agno tables used until later writes reuse them.
-- Python's `sqlite3` cannot open a database without following links, so a sessions directory swapped for a link inside SQLite's own open can still point that one open at a missing or empty file; the conversion's checks before and after connecting refuse every earlier swap.
+- Python's `sqlite3` cannot open a database without following links, so a sessions directory swapped for a link inside SQLite's own open still steers that one open, which writes the v2 tables at the link's target only when the file there is missing or empty; the conversion's checks before and after connecting refuse every earlier swap.
 - Not verified: how often released databases hold the odd shapes the conversion handles, such as members of members, a repeated message id in one run, `RUNNING` rows, workflow rows, and runs that do not decode; whether any deployment runs in write-ahead-log mode; and how long the largest real databases take to convert.
 
 ## Follow-ups
