@@ -44,7 +44,9 @@ Set up the homeserver (examples use `chat.example.com`):
 5. Run a homeserver that allows the `cf-access-token` header in CORS, such as the MindRoom fork of Tuwunel.
 
 Access application paths include everything below them, so answer 404 for anything under the public advert path.
-Accounts that were signed in before the homeserver moved behind Access need to sign out and in again, and their earlier push registrations stay on the server until removed.
+Before moving an existing homeserver behind Access, delete its pushers for the app (app ID `chat.mindroom.app`) that point at the public push gateway, for example with the homeserver's admin tools.
+The app does not remove earlier registrations, and they would keep sending message content outside the organization.
+Accounts that were signed in before the move need to sign out and in again.
 
 ## Reporting Issues
 
