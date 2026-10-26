@@ -413,3 +413,4 @@ def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
         expected = ["beta"]
 
     assert [hit.content for hit in collection.search([1.0, 0.0], limit=2)] == expected
+    assert len(vector_store_module._index_cache) == 1, "the outdated matrix stayed cached beside the new one"
