@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.delegation.state import SubagentPersona
     from mindroom.dispatch_source import ScheduledHistoryBudget
+    from mindroom.event_journal import ApprovalCall
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
@@ -93,9 +94,10 @@ __all__ = [
     "apply_exact_approval_decisions",
     "build_llm_request_log_context",
     "build_matrix_run_metadata",
-    "local_approval_requirements",
+    "own_approved_calls",
     "pause_without_approval_error",
     "paused_attempt_from_response",
+    "pending_approval_requirements",
     "run_blocking_response_turn",
     "skip_unapproved_attempt",
     "stream_response_turn",
@@ -518,15 +520,27 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     return RuntimeError(msg)
 
 
-def local_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
-    """Return copies of the requirements this actor's approval cards ask about.
+def own_approved_calls(
+    record: AnyRunRecord,
+    calls: Sequence[ApprovalCall],
+    decisions: Mapping[str, bool],
+) -> tuple[ApprovalCall, ...]:
+    """Return the approved calls among ``calls`` that the paused run ``record`` asked about itself.
 
-    A delegation driver that asked about its own calls lists them as pending requirements; projected child calls
-    belong to the child executor, so a run waiting on a child has none of its own.
+    Projected child calls belong to the child executor, so a run waiting on a child asked about none of its own.
+    """
+    if DelegationState.from_metadata(record.metadata).pending_child_id is not None:
+        return ()
+    return tuple(call for call in calls if decisions.get(call.tool_call_id))
+
+
+def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:
+    """Return copies of the requirements the paused run ``record``'s approval cards ask about.
+
+    A delegation driver lists the calls it asked about as pending requirements, its own or those of the child it
+    waits on, whose approved calls ``own_approved_calls`` leaves to the child executor.
     """
     delegation = DelegationState.from_metadata(record.metadata)
-    if delegation.pending_child_id is not None:
-        return []
     if delegation.pending_requirements:
         return [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
     return deepcopy(record.requirements or [])

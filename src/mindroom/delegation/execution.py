@@ -73,8 +73,9 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import (
     ResponsePausedForApproval,
     apply_exact_approval_decisions,
-    local_approval_requirements,
+    own_approved_calls,
     paused_attempt_from_response,
+    pending_approval_requirements,
 )
 from mindroom.run_storage import RunStorage, TerminalRecord
 from mindroom.runtime_resolution import resolve_agent_runtime, resolve_agent_storage
@@ -327,9 +328,7 @@ async def _execute_child(
     if persisted.status != RunStatus.paused or decisions is None:
         # A retained pause must never acquire ownership from a later reconstruction.
         return _ChildOutcome(persisted, {})
-    child_state = DelegationState.from_metadata(persisted.metadata)
-    local_calls = () if child_state.pending_child_id is not None else approval_calls
-    approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
+    approved_calls = own_approved_calls(persisted, approval_calls, decisions)
     required_tool_names = await required_approval_tool_names(
         child.child_agent_name,
         approved_calls,
@@ -382,7 +381,7 @@ async def _execute_child(
         msg = "Delegated run's session is no longer available"
         raise RuntimeError(msg)
     toolkit_owners = tool_owners_by_agent(build)
-    validate_approval_tool_owners(toolkit_owners, approved_calls, local_approval_requirements(persisted))
+    validate_approval_tool_owners(toolkit_owners, approved_calls, pending_approval_requirements(persisted))
     runner = ResumeRunner(
         build=build,
         config=config,

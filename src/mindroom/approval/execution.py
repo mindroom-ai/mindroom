@@ -28,7 +28,6 @@ from mindroom.approval.tool_owners import (
     validate_approval_tool_owners,
 )
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -43,8 +42,9 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     ResumedAttempt,
-    local_approval_requirements,
+    own_approved_calls,
     paused_attempt_from_response,
+    pending_approval_requirements,
 )
 from mindroom.run_storage import TerminalRecord, scope_run_storage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -434,9 +434,7 @@ class AgentApprovalExecution:
         ):
             msg = f"Paused run {continuation.run_id!r} is no longer available"
             raise RuntimeError(msg)
-        delegation = DelegationState.from_metadata(persisted.metadata)
-        local_calls = () if delegation.pending_child_id is not None else continuation.calls
-        approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
+        approved_calls = own_approved_calls(persisted, continuation.calls, decisions)
         # Generated CLI functions have no configured toolkit to restore.
         # Their exact current binding is checked by continue_cli_approval
         # and authorize_prepared_tool_call after this agent is rebuilt.
@@ -545,7 +543,7 @@ class AgentApprovalExecution:
                         validate_approval_tool_owners(
                             tool_owners_by_agent(build),
                             approved_calls,
-                            local_approval_requirements(persisted),
+                            pending_approval_requirements(persisted),
                         )
                         operation = partial(
                             _continue_persisted_agent,
