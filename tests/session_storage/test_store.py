@@ -808,6 +808,14 @@ def test_load_returns_uncovered_and_non_visible_runs_with_their_members_in_seq_o
     assert _loaded_ids(store, "team") == ["m-paused", "t-paused", "t-cancelled", "t-new"]
 
 
+def test_cancelled_and_errored_runs_behind_the_summary_still_load(store: ConversationStore) -> None:
+    """Every non-visible run loads wherever it sits."""
+    _save(store, _run("c0", RunStatus.cancelled), _run("e1", RunStatus.error), _run("r2"), _run("r3"))
+    _summary(store, 3)
+
+    assert _loaded_ids(store) == ["c0", "e1", "r3"]
+
+
 def test_load_covers_runs_by_their_own_scopes_latest_summary_and_replays_the_owner_scopes(
     store: ConversationStore,
 ) -> None:
