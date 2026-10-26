@@ -226,9 +226,10 @@ def test_ai_run_metadata_separates_compaction_and_prepared_context_tokens(tmp_pa
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="test-model",
         model_provider="openai",
+        tool_count=0,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=123, output_tokens=45, total_tokens=168)),
         prepared_history=prepared_history,
     )
@@ -279,9 +280,10 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         model_name="default",
         run_id="run-1",
         session_id="session-1",
-        status="completed",
+        status=RunStatus.completed,
         model="test-model",
         model_provider="OpenAI",
+        tool_count=0,
         metrics=RunMetrics(tokens=counts),
         context_run=RunRecord(run_id="run-1", agent_id="test_agent", status=RunStatus.completed, messages=[answer]),
     )

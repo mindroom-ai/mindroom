@@ -1110,9 +1110,10 @@ class TestChatCompletions:
                         model_name="default",
                         run_id="run-1",
                         session_id="session-1",
-                        status="completed",
+                        status=RunStatus.completed,
                         model="claude-sonnet-5-5",
                         model_provider="Anthropic",
+                        tool_count=0,
                         metrics=RunMetrics(
                             tokens=TokenCounts(
                                 input_tokens=40,
