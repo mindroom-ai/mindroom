@@ -232,8 +232,6 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 - Use `nodeSelector`, `affinity`, `tolerations`, and `topologySpreadConstraints` for cluster-specific scheduling policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.
 - Override `probes.*.custom` when a deployment needs custom Kubernetes readiness or liveness probes.
-- Set `extraVolumes` and `extraVolumeMounts` to mount additional files into the client container.
-
 ## Render Locally
 
 ```bash

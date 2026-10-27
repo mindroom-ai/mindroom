@@ -139,9 +139,6 @@ spec:
               mountPath: /var/cache/nginx
             - name: nginx-run
               mountPath: /run
-            {{- with .Values.extraVolumeMounts }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -159,6 +156,3 @@ spec:
           emptyDir: {}
         - name: nginx-run
           emptyDir: {}
-        {{- with .Values.extraVolumes }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}

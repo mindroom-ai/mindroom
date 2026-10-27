@@ -189,17 +189,6 @@ def test_client_chart_mounts_operator_notices_so_edits_reach_running_pods(tmp_pa
     assert "notices" not in {volume["name"] for volume in default_pod["volumes"]}
 
 
-def test_client_chart_appends_extra_volumes_and_mounts(tmp_path: Path) -> None:
-    """Operators can mount their own files into the client container without patching the Deployment."""
-    volume = {"name": "branding", "configMap": {"name": "client-branding"}}
-    mount = {"name": "branding", "mountPath": "/opt/branding", "readOnly": True}
-
-    pod = _client_pod(tmp_path, json.dumps({"extraVolumes": [volume], "extraVolumeMounts": [mount]}))
-
-    assert pod["volumes"][-1] == volume
-    assert pod["containers"][0]["volumeMounts"][-1] == mount
-
-
 # Historical uppercase localparts, ports, and IPv6 server names are valid Matrix user IDs the client accepts.
 _BUG_REPORT_ADMINS = ["@admin:chat.example.com", "@Ops=Team/1+x:chat.example.com:8448", "@admin:[2001:db8::1]"]
 _MATRIX_RTC = """

@@ -133,10 +133,6 @@ notices:
   # Leave empty to serve the image's empty notice list.
   existingConfigMap: ""
 
-# Raw Kubernetes Volume and VolumeMount entries appended to the pod and the client container.
-extraVolumes: []
-extraVolumeMounts: []
-
 # Chart-managed nginx server configuration.
 nginx:
   # Container port nginx listens on. Ports below 1024 require extra privileges.
