@@ -1792,7 +1792,7 @@ How a private agent behaves:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `private.per` | `user` or `user_agent` | *required* | Requester boundary that gets its own private instance; it also sets the agent's [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
+| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `mem0`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
 | `private.template_dir` | string | `null` | Directory copied into each private root; relative paths resolve from `config.yaml`, absolute paths are allowed, and a missing directory is a config error (`Agent '<name>' has invalid private.template_dir`) |
 | `private.context_files` | list | `null` | Private-root-relative files preloaded into the prompt; cannot escape the private root |
 | `private.knowledge` | object | `null` | Per-requester knowledge index built from the private root; see [Private Agent Knowledge](https://docs.mindroom.chat/knowledge/#private-agent-knowledge). Omit it or set `enabled: false` for no index |
@@ -20495,6 +20495,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
+- `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
@@ -21091,6 +21092,7 @@ Smaller changes that need operator action:
   The proxy must allow `CONNECT` to ports 80 and 443, and for the primary also to IP addresses; the chart-managed approved egress proxy needs the [minimum proxy image version](https://docs.mindroom.chat/deployment/approved-egress/#enable-with-the-runtime-chart).
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](https://docs.mindroom.chat/tools/web-scraping-and-browser/#egress-proxy-for-browsers) for the full rules.
+- **Mem0 history file**: Mem0 memory keeps its history in `mem0/` in each agent's state root, and stored memories carry over; MindRoom does not read the `history.db` in Mem0's own directory (`~/.mem0/`, or `MEM0_DIR` when set), which can hold the text of deleted memories, so delete that file unless an agent uses the [`mem0` tool](https://docs.mindroom.chat/tools/memory-and-storage/#mem0) without an API key, which keeps its history there.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
 - **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
   Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.

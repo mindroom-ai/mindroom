@@ -11,15 +11,16 @@ import httpx
 import pytest
 from anthropic import AuthenticationError
 from anthropic.types import Message as AnthropicMessage
-from mem0.memory.storage import SQLiteManager
 
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory import add_agent_memory, list_all_agent_memories, search_agent_memories, store_conversation_memory
+from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -96,11 +97,13 @@ def _claude_reply(*, facts: list[str], thinking_first: bool) -> AnthropicMessage
 class _FakeAnthropicClient:
     """Answer every Messages API request with one canned reply, or raise it when it is an error."""
 
-    def __init__(self, reply: AnthropicMessage | Exception) -> None:
+    def __init__(self, reply: AnthropicMessage | Exception, prompts: list[str]) -> None:
         self.messages = self
         self._reply = reply
+        self._prompts = prompts
 
-    def create(self, **_: object) -> AnthropicMessage:
+    def create(self, **request: object) -> AnthropicMessage:
+        self._prompts.append(json.dumps(request["messages"]))
         if isinstance(self._reply, Exception):
             raise self._reply
         return self._reply
@@ -125,6 +128,7 @@ def config(tmp_path: Path) -> Config:
     agents = {
         "general": AgentConfig(display_name="General", role="General assistant"),
         "calculator": AgentConfig(display_name="Calculator", role="Calculator assistant"),
+        "mind": AgentConfig(display_name="Mind", role="Personal assistant", private=AgentPrivateConfig(per="user")),
     }
     teams = {"pair": TeamConfig(display_name="Pair", role="Pair of agents", agents=["general", "calculator"])}
     return bind_runtime_paths(Config(agents=agents, teams=teams, memory=memory), runtime_paths)
@@ -136,13 +140,21 @@ def claude_reply() -> list[AnthropicMessage | Exception]:
     return [_claude_reply(facts=[], thinking_first=False)]
 
 
+@pytest.fixture
+def extraction_prompts() -> list[str]:
+    """Collect the messages of every request the memory model receives."""
+    return []
+
+
 @pytest.fixture(autouse=True)
-def offline_mem0(tmp_path: Path, claude_reply: list[AnthropicMessage | Exception]) -> Iterator[None]:
-    """Run real Mem0 and Chroma with table embeddings, a canned Claude reply, and history kept under ``tmp_path``."""
+def offline_mem0(claude_reply: list[AnthropicMessage | Exception], extraction_prompts: list[str]) -> Iterator[None]:
+    """Run real Mem0 and Chroma with table embeddings and a canned Claude reply."""
     with (
         patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_TableEmbedder()),
-        patch("anthropic.Anthropic", side_effect=lambda **_: _FakeAnthropicClient(claude_reply[0])),
-        patch("mem0.memory.main.SQLiteManager", side_effect=lambda _path: SQLiteManager(str(tmp_path / "history.db"))),
+        patch(
+            "anthropic.Anthropic",
+            side_effect=lambda **_: _FakeAnthropicClient(claude_reply[0], extraction_prompts),
+        ),
     ):
         yield
 
@@ -248,3 +260,45 @@ async def test_a_failed_memory_model_call_reaches_the_memory_tool_without_the_re
 
     assert result.startswith("Failed to store memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
     assert rejected_key not in result
+
+
+def _requester(requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=f"session-{requester_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_requesters_messages_never_reach_another_requesters_private_memory_extraction(
+    config: Config,
+    extraction_prompts: list[str],
+) -> None:
+    """Each private instance keeps Mem0's recent-message context beside its own memories, not in one shared file."""
+    runtime_paths = runtime_paths_for(config)
+    alice = _requester("@alice:example.org")
+    bob = _requester("@bob:example.org")
+    for identity, prompt in ((alice, "My locker code is 4512."), (bob, "Plan my week.")):
+        await store_conversation_memory(
+            prompt,
+            "mind",
+            runtime_paths.storage_root,
+            identity.session_id,
+            config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+    alice_extraction, bob_extraction = extraction_prompts
+    assert "4512" in alice_extraction
+    assert "Plan my week." in bob_extraction
+    assert "4512" not in bob_extraction
+    assert set(runtime_paths.storage_root.rglob("history.db")) == {
+        resolve_agent_storage("mind", config, runtime_paths, identity).state_root / "mem0" / "history.db"
+        for identity in (alice, bob)
+    }
