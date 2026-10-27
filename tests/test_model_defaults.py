@@ -178,21 +178,40 @@ def test_native_compaction_covers_current_claude_models() -> None:
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
-def test_thinking_prefix_check_covers_current_claude_models() -> None:
-    """Every Claude preset on a Claude wire must get the thinking binding, so a default bump cannot leave one out."""
-    presets = [
+def _current_presets() -> list[model_defaults.ModelPreset]:
+    """Return every model preset config init and the hosted platform write."""
+    return [
         *model_defaults.CONFIG_INIT_MODEL_PRESETS.values(),
         *(
             preset
             for alternatives in model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES.values()
             for _, preset in alternatives
         ),
+        *model_defaults.SAAS_MODEL_PRESETS.values(),
     ]
+
+
+def test_thinking_prefix_check_covers_current_claude_models() -> None:
+    """Every Claude preset on a Claude wire must get the thinking binding, so a default bump cannot leave one out."""
     claude_ids = {
-        preset.id for preset in presets if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
+        preset.id
+        for preset in _current_presets()
+        if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
     }
     assert len(claude_ids) >= 6
     assert [model_id for model_id in sorted(claude_ids) if not checks_thinking_prefix(model_id)] == []
+
+
+def test_sampling_rule_covers_current_claude_models() -> None:
+    """Every current Claude default must count as rejecting non-default sampling, on its own route or a gateway.
+
+    A default bump to a model the rule does not name would send it the thread summary temperature.
+    """
+    claude_ids = {preset.id for preset in _current_presets() if "claude" in preset.id}
+    assert len(claude_ids) >= 12
+    assert [
+        model_id for model_id in sorted(claude_ids) if not model_defaults.claude_rejects_sampling_controls(model_id)
+    ] == []
 
 
 def test_current_google_and_openrouter_specialist_models() -> None:
