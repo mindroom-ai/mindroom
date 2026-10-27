@@ -336,7 +336,7 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
 - Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
 - The [agent CLI](tools/agent-cli.md)'s variables, the egress proxy variables from the [egress broker](deployment/egress-broker.md) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](deployment/sandbox-proxy.md#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
-- A failing or timed-out hook loses its changes and the call still runs, so decline the call in a `tool:before_call` hook when it must not run without them.
+- A failing or timed-out hook loses its changes and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
 
 ## Custom events
 
