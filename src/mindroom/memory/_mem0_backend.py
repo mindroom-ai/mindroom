@@ -488,7 +488,6 @@ class Mem0MemoryBackend:
             logger.warning("Mem0 memory search degraded by embedder failure", agent=agent_name, error=degraded_reason)
             return MemorySearchOutcome(results=[], degraded_reason=degraded_reason)
 
-        existing_memories = {result.get("memory", "") for result in results}
         degraded_reason: str | None = None
         for team_id in get_team_ids_for_agent(agent_name, config):
             try:
@@ -505,18 +504,18 @@ class Mem0MemoryBackend:
                     error=scope_failure,
                 )
                 continue
-            for memory_result in team_memories:
-                if memory_result.get("memory", "") not in existing_memories:
-                    results.append(memory_result)
-                    existing_memories.add(memory_result.get("memory", ""))
+            results.extend(team_memories)
             logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
 
         logger.debug("Total memories found", count=len(results), agent=agent_name)
         if degraded_reason is None:
             health_recorder.record(None)
-        # Both scopes share one Mem0 collection and score scale, so the limit keeps the best hits of either scope.
-        results.sort(key=lambda result: result.get("score", 0.0), reverse=True)
-        return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
+        # Both scopes share one Mem0 collection and score scale, so the limit keeps the best hits of either scope, and
+        # a memory both scopes return keeps its better-scored copy.
+        best_by_text: dict[str, MemoryResult] = {}
+        for result in sorted(results, key=lambda result: result.get("score", 0.0), reverse=True):
+            best_by_text.setdefault(result.get("memory", ""), result)
+        return MemorySearchOutcome(results=list(best_by_text.values())[:limit], degraded_reason=degraded_reason)
 
     async def list_all(
         self,

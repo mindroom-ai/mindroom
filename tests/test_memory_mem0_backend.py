@@ -37,6 +37,7 @@ from mindroom.memory import (
     store_conversation_memory,
     update_agent_memory,
 )
+from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
 from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
 from mindroom.redaction import REDACTED, REDACTION_FAILED
@@ -1180,3 +1181,45 @@ def test_memory_text_removes_a_pasted_private_key_whole() -> None:
     redacted = redact_memory_text(f"The mirror uses this key:\n{key}\nRotate it yearly.")
 
     assert redacted == f"The mirror uses this key:\n{REDACTED}\nRotate it yearly."
+
+
+@pytest.mark.asyncio
+async def test_a_memory_both_scopes_return_keeps_its_better_scored_copy_within_the_limit(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Agent and team hits rank together, and a text both scopes return keeps the copy that scored higher."""
+    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
+    hits_by_scope: dict[str, list[dict[str, object]]] = {
+        "agent_general": [
+            {"id": "agent-shared", "memory": "Shared fact", "score": 0.4},
+            {"id": "agent-a", "memory": "Agent fact A", "score": 0.6},
+            {"id": "agent-b", "memory": "Agent fact B", "score": 0.5},
+        ],
+        "team_calculator+general": [{"id": "team-shared", "memory": "Shared fact", "score": 0.9}],
+    }
+
+    class ScopedSearch:
+        async def search(
+            self,
+            query: str,
+            *,
+            filters: dict[str, object],
+            top_k: int,
+            threshold: float,
+        ) -> dict[str, list[dict[str, object]]]:
+            del query, threshold
+            return {"results": hits_by_scope[str(filters["user_id"])][:top_k]}
+
+    async def create_memory(_storage_path: Path, _config: Config) -> ScopedSearch:
+        return ScopedSearch()
+
+    backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
+
+    outcome = await backend.search("shared", "general", storage_path, config, limit=3)
+
+    assert [(result["id"], result["score"]) for result in outcome.results] == [
+        ("team-shared", 0.9),
+        ("agent-a", 0.6),
+        ("agent-b", 0.5),
+    ]
