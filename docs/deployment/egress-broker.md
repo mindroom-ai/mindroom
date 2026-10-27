@@ -265,6 +265,7 @@ For each request the broker picks the secret in this order:
 
 1. The API key stored for the scope, if there is one.
    An explicit key always wins over a connected account, and removing the key falls back to the account.
+   A service with [its own account](#a-services-own-account) skips this step.
 2. Otherwise, the connected account's access token, if Agent Keys may use the account for the service; the primary refreshes the token when it is near expiry.
 3. Otherwise, a 403 `credential_not_configured`, with `oauth_reuse: "off"` when nobody allowed the account, or a connect link when the user can connect an account Agent Keys may use (see [Error responses](#error-responses)).
 
@@ -434,7 +435,7 @@ A user service that signs in with a connected account on a `user` or `user_agent
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
 That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
-Until its own account is connected the service has none: it never uses the tools' account instead.
+It uses only that account, so its row offers no key: until the account is connected the service has none, and it never uses the tools' account or a key stored under its name instead.
 Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
 
 Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
