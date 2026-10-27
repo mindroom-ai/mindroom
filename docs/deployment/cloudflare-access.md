@@ -9,13 +9,31 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 ## Tunnel
 
-Make the client chart the only origin of `chat.example.com` with its [single-origin `proxy` values](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#single-origin), which forward the homeserver and the runtime's public routes, and send [the dashboard host](trusted-upstream-auth.md#dashboard-on-its-own-host) straight to the runtime:
+`cloudflared` uses the first ingress rule that matches, so order the rules for `chat.example.com` like this:
+
+| Order | Paths | Service |
+| --- | --- | --- |
+| 1 | Paths with a `.` or `..` segment between `/` or `\` separators, or with a control character | `http_status:404` |
+| 2 | `/_matrix/`, `/_synapse/`, `/_tuwunel/`, and `/.well-known/matrix/server` with everything below it | Tuwunel |
+| 3 | Each runtime feature's public paths, as its page lists them | MindRoom runtime |
+| 4 | Everything else, including `/.well-known/matrix/client`, `/livekit/jwt/`, and `/livekit/sfu/` | MindRoom Chat |
+
+The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
+The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
+Runtime features with public paths are the [Connections portal](../connections-portal.md#trusted-upstream-sign-in), the [MCP gateway](mcp-gateway.md#route-browser-and-machine-traffic), the [worker computer](../tools/worker-computer.md#reverse-proxy-and-host-routing), [external triggers](../external-triggers.md), the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services, and [published](../tools/agent-orchestration.md#report_publishing) and [private](../tools/agent-orchestration.md#dynamic_workflow) reports.
+`admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](trusted-upstream-auth.md#dashboard-on-its-own-host), behind the same first rule.
 
 ```yaml
 ingress:
   - hostname: chat.example.com
     path: '[/\\][.]{1,2}([/\\]|$)|[\x00-\x1F\x7F]'
     service: http_status:404
+  - hostname: chat.example.com
+    path: ^/(_matrix|_synapse|_tuwunel)/|^/\.well-known/matrix/server(/|$)
+    service: http://matrix-mindroom-tuwunel:8008
+  - hostname: chat.example.com
+    path: ^/(connections|api/connections)(/.*)?$|^/api/oauth/
+    service: http://mindroom-runtime:8765
   - hostname: chat.example.com
     service: http://mindroom-client:80
   - hostname: admin.example.com
@@ -26,7 +44,7 @@ ingress:
   - service: http_status:404
 ```
 
-`cloudflared` uses the first rule that matches, so each host's first rule refuses paths with a `.` or `..` segment between `/` or `\` separators, or with a control character, which Access, the tunnel, and the origin can resolve differently.
+The example routes only the Connections paths to the runtime; add a rule like it for each other feature you use.
 
 Point the runtime's `MATRIX_HOMESERVER` (runtime chart `matrix.homeserverUrl`) at Tuwunel's in-cluster Service, as in [Pairing With mindroom-runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#pairing-with-mindroom-runtime), because its Matrix, OpenID, and `/_matrix/client/versions` requests carry no Access session.
 
@@ -47,11 +65,12 @@ Access applies the most specific path application, so every other path keeps the
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](../external-triggers.md).
 Everything else stays behind Access, including `/authentication-recovery-probe` and `/connections`.
 Published reports under `/reports/public/` need no MindRoom login, so behind Access only the people Access admits can open them.
-An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery).
+An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery), and the tunnel sends everything below `/.well-known/matrix/server` to Tuwunel, which answers 404.
 
 ## Service Worker
 
-Chat's service worker answers browser navigations on its origin with its cached app, so exclude the other browser pages on this host in the client chart:
+Chat's service worker answers browser navigations on its origin with its cached app.
+Chat images built from [mindroom-chat#516](https://github.com/mindroom-ai/mindroom-chat/pull/516) or later leave `/connections`, `/mcp`, and `/reports` to the network, so list only the other browser pages on this host in the client chart:
 
 ```yaml
 serviceWorker:
@@ -73,16 +92,20 @@ serviceWorker:
 
 ## MindRoom Settings
 
+Configure [trusted upstream auth](trusted-upstream-auth.md#setup) with the Access assertion:
+
 ```bash
 MINDROOM_PUBLIC_URL=https://chat.example.com
 MINDROOM_DASHBOARD_URL=https://admin.example.com
-MINDROOM_CLOUDFLARE_ACCESS_TEAM=<team>
 MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
+MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=Cf-Access-Jwt-Assertion
+MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://<team>.cloudflareaccess.com/cdn-cgi/access/certs
+MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://<team>.cloudflareaccess.com
 MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=<AUD tag>
 ```
 
-`<team>` is the Zero Trust team name, the part before `.cloudflareaccess.com`, and `<AUD tag>` is the Application Audience (AUD) tag of the host-wide application.
-Each feature behind its own Access application, such as MCP external authorization or the usage export and budget services, takes that application's AUD tag as its audience; [Trusted Upstream Browser Auth](trusted-upstream-auth.md) describes what the team name sets.
+`<team>` is the Zero Trust team name, and `<AUD tag>` is the Application Audience (AUD) tag of the host-wide application, which must cover both hosts.
+Each feature behind its own Access application, such as MCP external authorization or the usage export and budget services, takes that application's AUD tag as its audience.
 
 For voice agents, set `calls.livekit_service_url: https://chat.example.com/livekit/jwt` in `config.yaml`, because the runtime cannot read `/.well-known/matrix/client` through Access and agents otherwise ignore calls ([Calls configuration](../voice-calls.md#calls-configuration)).
 Desktop bridge clients sign in through Access as described in [Homeservers Behind an Identity-Aware Proxy](../tools/desktop.md#homeservers-behind-an-identity-aware-proxy).
