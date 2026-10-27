@@ -588,6 +588,25 @@ def test_doctor_checks_a_shared_key_at_the_provider_s_own_api_beside_a_custom_en
     assert "OPENAI_API_KEY not checked: models.gateway.extra_kwargs.client_params.base_url may send" in output
 
 
+def test_doctor_names_a_setting_it_did_not_check_as_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A model name that looks like Rich markup appears verbatim in the setting path doctor reports."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        models={"[/fast]": ModelConfig(provider="openai", id="m", extra_kwargs={"base_url": _GATEWAY})},
+        router=RouterConfig(model="[/fast]"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert "OPENAI_API_KEY not checked: models.[/fast].extra_kwargs.base_url may send" in output
+
+
 def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

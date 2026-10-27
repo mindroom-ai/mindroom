@@ -788,7 +788,7 @@ def config_validate(
     """Validate config.yaml and check for common issues.
 
     Parses the YAML config using Pydantic and reports errors in a friendly format.
-    Also checks whether required API keys are set as environment variables.
+    Also warns about provider API keys and settings a model leaves unset; a key saved in the dashboard counts as set.
     """
     runtime_paths = activate_cli_runtime(path)
     config_path = runtime_paths.config_path
@@ -821,9 +821,11 @@ def config_validate(
     console.print("[green]Configuration is valid.[/green]\n")
     console.print(f"  Agents: {len(config.agents)} ({', '.join(config.agents.keys()) or 'none'})")
     console.print(f"  Teams:  {len(config.teams)} ({', '.join(config.teams.keys()) or 'none'})")
-    console.print(f"  Models: {len(config.models)} ({', '.join(config.models.keys()) or 'none'})")
+    # Model names and room references may contain brackets, which Rich would read as markup; agent and team names
+    # cannot.
+    console.print(f"  Models: {len(config.models)} ({escape(', '.join(config.models.keys())) or 'none'})")
     rooms = config.get_all_configured_rooms()
-    console.print(f"  Rooms:  {len(rooms)} ({', '.join(sorted(rooms)) or 'none'})")
+    console.print(f"  Rooms:  {len(rooms)} ({escape(', '.join(sorted(rooms))) or 'none'})")
 
     # Check for missing API keys based on configured providers
     check_env_keys(config, runtime_paths=runtime_paths)
@@ -978,20 +980,24 @@ class _MissingEnvVariable(NamedTuple):
     model_names: tuple[str, ...]
 
 
-def _models_with_own_credential(config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    """Return the names of the models whose own key replaces their route's shared key."""
-    # providers.credentials opens the credential store, which CLI startup must not import.
-    from mindroom.providers.credentials import model_uses_own_credential  # noqa: PLC0415
+def _models_with_a_key(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Return the names of the models that need no key from the environment, by the dashboard's missing-key check.
 
-    own_credential: set[str] = set()
-    for name, model in config.models.items():
+    That check asks the runtime's key lookup: a key of the model's own, or its route's shared key in the credential
+    store.
+    """
+    # providers.credentials opens the credential store, which CLI startup must not import.
+    from mindroom.providers.credentials import missing_model_api_key_provider  # noqa: PLC0415
+
+    with_key: set[str] = set()
+    for name in config.models:
         try:
-            if model_uses_own_credential(name, model, runtime_paths):
-                own_credential.add(name)
+            if missing_model_api_key_provider(config, runtime_paths, name) is None:
+                with_key.add(name)
         except (OSError, ValueError):
-            # Without the credential store, the model's dashboard key is unknown, so it needs the shared key.
+            # Without the credential store, the model's stored keys are unknown, so it needs its route's variable.
             continue
-    return own_credential
+    return with_key
 
 
 def _model_sets(model: ModelConfig, *settings: str) -> bool:
@@ -1001,7 +1007,7 @@ def _model_sets(model: ModelConfig, *settings: str) -> bool:
     return any(extra_kwargs.get(setting) or client_params.get(setting) for setting in settings)
 
 
-def _variables_a_model_reads(route: str, model: ModelConfig, *, own_credential: bool) -> list[tuple[str, ...]]:
+def _variables_a_model_reads(route: str, model: ModelConfig, *, has_key: bool) -> list[tuple[str, ...]]:
     """Return, for each value the model leaves to the environment, the variables any one of which supplies it.
 
     A warning names the first variable of each group.
@@ -1017,7 +1023,7 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, own_credential: 
             ),
         ]
     if route == "azure":
-        variables: list[tuple[str, ...]] = [] if own_credential else [(AZURE_OPENAI_ENV_BY_KEY["api_key"],)]
+        variables: list[tuple[str, ...]] = [] if has_key else [(AZURE_OPENAI_ENV_BY_KEY["api_key"],)]
         if not _model_sets(model, "azure_endpoint", "base_url"):
             variables.append((AZURE_OPENAI_ENV_BY_KEY["endpoint"],))
         return variables
@@ -1028,19 +1034,22 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, own_credential: 
     env_key = constants.env_key_for_provider(route)
     # OLLAMA_HOST is the server of an Ollama model that sets none, as ``host`` or ``client_params.host``; a key never
     # replaces it.
-    needed = not (model.host or _model_sets(model, "host")) if route == "ollama" else not own_credential
+    needed = not (model.host or _model_sets(model, "host")) if route == "ollama" else not has_key
     return [(env_key,)] if env_key and needed else []
 
 
 def _find_missing_env_keys(config: Config, runtime_paths: RuntimePaths) -> list[_MissingEnvVariable]:
-    """Return each environment variable a model reads for a value that neither the model nor the environment sets."""
+    """Return each environment variable a model reads for a value that neither the model nor the environment sets.
+
+    A key the credential store holds for the model or its route counts as set, as it does for the runtime.
+    """
     from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
 
-    own_credential = _models_with_own_credential(config, runtime_paths)
+    with_key = _models_with_a_key(config, runtime_paths)
     missing: dict[tuple[str, str], list[str]] = {}
     for name, model in config.models.items():
         route = provider_route(model.provider)
-        for variables in _variables_a_model_reads(route, model, own_credential=name in own_credential):
+        for variables in _variables_a_model_reads(route, model, has_key=name in with_key):
             if not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in variables):
                 missing.setdefault((route, variables[0]), []).append(name)
     return [
