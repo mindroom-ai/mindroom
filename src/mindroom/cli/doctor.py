@@ -357,7 +357,7 @@ def _validate_vertexai_claude_connection(
     probe_config = model_config.model_copy(update={"extra_kwargs": probe_kwargs})
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
-        overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
+        overrides=RequestOverrides(prompt_cache=False, omit_authored_thinking=True),
     )
     try:
         provider = build_provider(probe_config, runtime_paths)

@@ -439,7 +439,7 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
     authored, _ = await run_adapter(config, _request(), tmp_path, response)
     overridden, _ = await run_adapter(
         config,
-        _request(overrides=RequestOverrides(temperature=0.7, disable_thinking=True)),
+        _request(overrides=RequestOverrides(temperature=0.7, omit_authored_thinking=True)),
         tmp_path,
         gemini_sse(_gemini_chunk({"text": "ok"})),
     )

@@ -164,8 +164,9 @@ class GeminiProvider:
             "include_thoughts": settings.include_thoughts,
             "thinking_level": settings.thinking_level,
         }
-        # ``overrides.disable_thinking`` leaves the authored thinking config alone: Gemini 2.5 and 3 think by
-        # default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn it off.
+        # Gemini ignores ``overrides.omit_authored_thinking`` and keeps the authored thinking config: Gemini 2.5 and 3
+        # think by default, so dropping a ``thinking_budget: 0`` would turn thinking on, and the Pro models cannot turn
+        # it off.
         if thinking := {key: value for key, value in thinking.items() if value is not None}:
             config["thinking_config"] = thinking
         if settings.search:

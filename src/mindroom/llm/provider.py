@@ -80,13 +80,15 @@ class RequestOverrides:
 
     ``caller_retries`` says the caller retries a failed request itself, so nothing below it may: neither the SDK's
     own HTTP retries nor the pipeline's stream retry reissues the request. ``prompt_cache=False`` turns the route's
-    configured prompt caching off for the request.
+    configured prompt caching off for the request. ``omit_authored_thinking`` leaves the model's authored thinking
+    setting out of a Claude request, so a model that thinks by default, such as every Claude 5 model, still thinks;
+    Gemini keeps its authored thinking config.
     """
 
     temperature: float | None = None
     caller_retries: bool = False
     prompt_cache: bool = True
-    disable_thinking: bool = False
+    omit_authored_thinking: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
