@@ -37,6 +37,8 @@ from mindroom.cli.main import (
     _threads_export,
     app,
 )
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
@@ -67,8 +69,6 @@ from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from mindroom.config.main import Config
 
 runner = CliRunner()
 
@@ -2087,6 +2087,68 @@ class TestConfigValidate:
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
 
+    @pytest.mark.parametrize(
+        ("models", "missing"),
+        [
+            (
+                {"default": ModelConfig(provider="VertexAI-Claude", id="claude-sonnet-5-5")},
+                [("vertexai_claude", "ANTHROPIC_VERTEX_PROJECT_ID"), ("vertexai_claude", "CLOUD_ML_REGION")],
+            ),
+            (
+                {"default": ModelConfig(provider="Azure", id="deployment")},
+                [("azure", "AZURE_OPENAI_API_KEY"), ("azure", "AZURE_OPENAI_ENDPOINT")],
+            ),
+            (
+                {
+                    "default": ModelConfig(provider="azure", id="deployment", api_key="sk-own"),
+                    "shared": ModelConfig(provider=" AZURE ", id="deployment"),
+                },
+                [("azure", "AZURE_OPENAI_API_KEY"), ("azure", "AZURE_OPENAI_ENDPOINT")],
+            ),
+            ({"default": ModelConfig(provider="Bedrock-Claude", id="claude")}, [("bedrock_claude", "AWS_REGION")]),
+            ({"default": ModelConfig(provider="Gemini", id="gemini-3.8-flash")}, [("google", "GOOGLE_API_KEY")]),
+        ],
+    )
+    def test_validate_names_a_route_s_missing_variables_in_any_provider_spelling(
+        self,
+        tmp_path: Path,
+        models: dict[str, ModelConfig],
+        missing: list[tuple[str, str]],
+    ) -> None:
+        """Each spelling config load accepts gets its route's variable checks, reported under the route's name."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        config = Config(models=models, router=RouterConfig(model="default"))
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == missing
+
+    def test_validate_asks_every_route_for_its_shared_key_when_the_credential_store_is_unreadable(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without the credential store, a route counts as needing its shared key under any provider spelling."""
+
+        def unreadable_store(*_args: object) -> bool:
+            raise OSError
+
+        monkeypatch.setattr("mindroom.providers.credentials.model_uses_own_credential", unreadable_store)
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        config = Config(
+            models={"default": ModelConfig(provider="Azure", id="deployment", api_key="sk-own")},
+            router=RouterConfig(model="default"),
+        )
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == [
+            ("azure", "AZURE_OPENAI_API_KEY"),
+            ("azure", "AZURE_OPENAI_ENDPOINT"),
+        ]
+
     @pytest.mark.parametrize("provider", ["gemini", "Gemini"])
     def test_validate_names_the_google_key_for_a_gemini_model(
         self,
@@ -2094,7 +2156,7 @@ class TestConfigValidate:
         monkeypatch: pytest.MonkeyPatch,
         provider: str,
     ) -> None:
-        """Config validate asks for GOOGLE_API_KEY for a model whose provider is ``gemini``, in any letter case."""
+        """Config validate asks for GOOGLE_API_KEY, under the route's name, for a ``gemini`` model in any letter case."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             f"models:\n  default:\n    provider: {provider}\n    id: gemini-3.8-flash\n"
@@ -2107,7 +2169,7 @@ class TestConfigValidate:
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
         assert result.exit_code == 0
-        assert f"{provider}: Set GOOGLE_API_KEY" in normalize_console_output(result.output)
+        assert "google: Set GOOGLE_API_KEY" in normalize_console_output(result.output)
 
     def test_validate_warns_for_missing_bedrock_claude_region(
         self,

@@ -41,6 +41,7 @@ from mindroom.model_defaults import (
     llama_cpp_server_command,
 )
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
+from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import (
     AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.model_defaults import ModelPreset
 
@@ -968,71 +970,75 @@ def config_use_local_model(
     apply_local_model(model=model, base_url=base_url, api_key=api_key, path=path)
 
 
-def _shared_key_providers(config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    """Return the providers with a model that has no credential of its own, so it needs the shared key."""
+def _shared_key_routes(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Return the routes, as ``provider_route`` names them, with a model that has no credential of its own."""
     # providers.credentials opens the credential store, which CLI startup must not import.
     from mindroom.providers.credentials import model_uses_own_credential  # noqa: PLC0415
 
     try:
-        return {
-            model.provider
-            for name, model in config.models.items()
-            if not model_uses_own_credential(name, model, runtime_paths)
-        }
+        models = [
+            model for name, model in config.models.items() if not model_uses_own_credential(name, model, runtime_paths)
+        ]
     except (OSError, ValueError):
-        # Without the credential store, dashboard keys are unknown, so every provider needs its shared key.
-        return {model.provider for model in config.models.values()}
+        # Without the credential store, dashboard keys are unknown, so every route needs its shared key.
+        models = list(config.models.values())
+    return {provider_route(model.provider) for model in models}
+
+
+def _bedrock_claude_region_missing(models: list[ModelConfig], runtime_paths: RuntimePaths) -> bool:
+    """Return whether no Bedrock Claude model's settings, AWS profile, or region variable gives the AWS region."""
+    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
+
+    if any((model.extra_kwargs or {}).get("aws_region") for model in models):
+        return False
+    if any((model.extra_kwargs or {}).get("aws_profile") for model in models) or get_secret_from_env(
+        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+        runtime_paths=runtime_paths,
+    ):
+        return False
+    region_keys = (AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"], AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"])
+    return not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in region_keys)
 
 
 def _find_missing_env_keys(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> list[tuple[str, str]]:
-    """Return (provider, env_key) pairs for configured providers missing env vars."""
+    """Return (route, env_key) pairs for the configured routes missing env vars, as ``provider_route`` names them."""
     from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
 
-    providers_used: set[str] = {model.provider for model in config.models.values()}
-    shared_key_providers = _shared_key_providers(config, runtime_paths)
+    models_by_route: dict[str, list[ModelConfig]] = {}
+    for model in config.models.values():
+        models_by_route.setdefault(provider_route(model.provider), []).append(model)
+    shared_key_routes = _shared_key_routes(config, runtime_paths)
     missing: list[tuple[str, str]] = []
-    for provider in sorted(providers_used):
-        if provider == "bedrock_claude":
-            provider_models = [model for model in config.models.values() if model.provider == provider]
-            if any((model.extra_kwargs or {}).get("aws_region") for model in provider_models):
-                continue
-            if any((model.extra_kwargs or {}).get("aws_profile") for model in provider_models) or get_secret_from_env(
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
-                runtime_paths=runtime_paths,
-            ):
-                continue
-            region_keys = (
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
-            )
-            if not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in region_keys):
-                missing.append((provider, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
+    for route, route_models in sorted(models_by_route.items()):
+        if route == "bedrock_claude":
+            if _bedrock_claude_region_missing(route_models, runtime_paths):
+                missing.append((route, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
             continue
-        if provider == "azure":
+        if route == "azure":
             azure_env_keys = [AZURE_OPENAI_ENV_BY_KEY["endpoint"]]
-            if provider in shared_key_providers:
+            if route in shared_key_routes:
                 azure_env_keys.insert(0, AZURE_OPENAI_ENV_BY_KEY["api_key"])
             missing.extend(
-                (provider, env_key)
+                (route, env_key)
                 for env_key in azure_env_keys
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
-        if provider == "vertexai_claude":
+        if route == "vertexai_claude":
             missing.extend(
-                (provider, env_key)
+                (route, env_key)
                 for env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.values()
                 if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
             )
             continue
-        env_key = constants.env_key_for_provider(provider)
+        env_key = constants.env_key_for_provider(route)
         # OLLAMA_HOST is a host, not a key, so a model's own key never replaces it.
-        needs_env_key = provider == "ollama" or provider in shared_key_providers
+        needs_env_key = route == "ollama" or route in shared_key_routes
         if env_key and needs_env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
-            missing.append((provider, env_key))
+            missing.append((route, env_key))
     return missing
 
 
@@ -1074,8 +1080,8 @@ def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     missing = _find_missing_env_keys(config, runtime_paths)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
-        for provider, env_key in missing:
-            console.print(f"  [yellow]*[/yellow] {provider}: Set {env_key}")
+        for route, env_key in missing:
+            console.print(f"  [yellow]*[/yellow] {route}: Set {env_key}")
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 
