@@ -1393,7 +1393,7 @@ SCENARIOS: dict[str, Scenario] = {
     ),
     **_structured_helper(
         "team_mode",
-        "mindroom.teams._select_team_mode",
+        "mindroom.teams.formation.select_ad_hoc_team_mode",
         _team_mode,
         '{"mode": "coordinate", "reasoning": "Separate sub-tasks."}',
     ),
