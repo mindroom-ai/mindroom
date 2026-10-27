@@ -85,6 +85,10 @@ class _CollectionNotFoundError(LookupError):
     """The collection's file does not exist."""
 
 
+class _KnowledgeIndexTooLargeError(ValueError):
+    """The collection's vectors exceed what its search may load into memory."""
+
+
 @dataclass(frozen=True)
 class StoredRow:
     """One chunk as stored: its row id, text, metadata, and vector."""
@@ -208,17 +212,25 @@ class KnowledgeCollection:
         with closing(self._connect()) as connection:
             return connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
 
-    def search(self, embedding: Sequence[float], *, limit: int, query: str | None = None) -> list[SearchHit]:
+    def search(
+        self,
+        embedding: Sequence[float],
+        *,
+        limit: int,
+        query: str | None = None,
+        max_matrix_bytes: int | None = None,
+    ) -> list[SearchHit]:
         """Return the ``limit`` best chunks, each document's repeats dropped.
 
         Chunks rank by cosine distance to ``embedding``; with ``query`` text, that ranking is fused with an FTS5 BM25
         ranking of the query's words by reciprocal rank fusion, so exact names and identifiers the embedding blurs
-        still surface. Every hit reports its cosine distance either way.
+        still surface. Every hit reports its cosine distance either way. A collection whose vectors take more than
+        ``max_matrix_bytes`` raises ``_KnowledgeIndexTooLargeError`` instead of loading.
         """
         import numpy as np  # noqa: PLC0415 - only searching needs numpy, which installs on first use.
 
         with closing(self._connect(read_only=True)) as connection:
-            index = _vector_index(connection, self.file)
+            index = _vector_index(connection, self.file, max_matrix_bytes)
             if not len(index.rowids):
                 return []
             query_vector = np.asarray(embedding, dtype=np.float32)
@@ -455,7 +467,7 @@ def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
     return (str(file), status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
 
 
-def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
+def _vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: int | None) -> _VectorIndex:
     """Return the file's vectors, loading them once per file version and keeping recent ones within the cache budget."""
     version = _file_version(file)
     if version is None:
@@ -483,10 +495,12 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
                 if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
             ]:
                 del _index_cache[stale]
-        # A file swept since the connection opened still loads through it, so reading ahead is only best effort.
-        with suppress(OSError):
-            _read_ahead(file)
-        index = _load_vector_index(connection)
+        # A file swept since the connection opened still loads through it, so reading ahead is only best effort. A
+        # limited base loads in time without it, and one past its limit is refused without reading its file.
+        if max_matrix_bytes is None:
+            with suppress(OSError):
+                _read_ahead(file)
+        index = _load_vector_index(connection, max_matrix_bytes)
         with _index_cache_lock:
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
@@ -513,7 +527,7 @@ def _read_ahead(file: Path) -> None:
             pass
 
 
-def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
+def _load_vector_index(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> _VectorIndex:
     import numpy as np  # noqa: PLC0415
 
     # One read transaction, so the count and the rows come from the same snapshot.
@@ -522,6 +536,9 @@ def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
         count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         first = connection.execute("SELECT length(embedding) FROM chunks LIMIT 1").fetchone()
         dimension = 0 if first is None else first[0] // 4
+        if max_matrix_bytes is not None and count * dimension * 4 > max_matrix_bytes:
+            message = f"Knowledge collection holds {count} vectors, more than its {max_matrix_bytes}-byte search limit"
+            raise _KnowledgeIndexTooLargeError(message)
         rowids = np.empty(count, dtype=np.int64)
         matrix = np.empty((count, dimension), dtype=np.float32)
         rows = connection.execute("SELECT rowid, embedding FROM chunks ORDER BY rowid")
