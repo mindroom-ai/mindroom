@@ -20,6 +20,7 @@ from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_v
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
+from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.llm.errors import AuthenticationFailed, ProviderError
 from mindroom.llm.messages import Message
@@ -36,7 +37,6 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.credentials import model_uses_own_credential
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.names import provider_route
@@ -380,14 +380,6 @@ def _validate_vertexai_claude_connection(
     return True, ""
 
 
-def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
-    """Get the Ollama host from config or environment."""
-    for model in config.models.values():
-        if provider_route(model.provider) == "ollama" and model.host:
-            return model.host
-    return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
-
-
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Print the providers by route and validate their API keys. Returns (passed, failed, warnings)."""
     provider_models: dict[str, list[str]] = {}
@@ -458,16 +450,31 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
         return passed, failed, warnings
 
     if provider == "ollama":
-        host = _get_ollama_host(config, runtime_paths=runtime_paths)
-        url = f"{host.rstrip('/')}/api/tags"
-        valid, detail = _http_check(url)
-        return _print_validation(
-            valid,
-            detail,
-            f"{provider} reachable ({host})",
-            f"{provider} unreachable: {host}",
-            f"{provider}: could not reach {host}",
+        # The adapter loads the ollama SDK, so it is imported only when an Ollama model is checked.
+        from mindroom.providers.ollama.adapter import build_provider  # noqa: PLC0415
+
+        # Each model's adapter resolves the server its requests reach; check each server once.
+        hosts = dict.fromkeys(
+            build_provider(model_config, runtime_paths).identity.endpoint
+            for model_config in config.models.values()
+            if provider_route(model_config.provider) == provider
         )
+        passed = 0
+        failed = 0
+        warnings = 0
+        for host in hosts:
+            valid, detail = _http_check(f"{host}/api/tags")
+            p, f, w = _print_validation(
+                valid,
+                detail,
+                f"{provider} reachable ({host})",
+                f"{provider} unreachable: {host}",
+                f"{provider}: could not reach {host}",
+            )
+            passed += p
+            failed += f
+            warnings += w
+        return passed, failed, warnings
 
     env_key = env_key_for_provider(provider)
     if not env_key:
@@ -544,8 +551,11 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
 
 def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM configuration. Returns (passed, failed, warnings)."""
+    # The memory runtime imports Agno and the model HTTP stack, so it loads only when the memory LLM is checked.
+    from mindroom.memory.config import memory_llm_ollama_host  # noqa: PLC0415
+
     if config.memory.llm is None:
-        ollama_host = _get_ollama_host(config, runtime_paths=runtime_paths)
+        ollama_host = memory_llm_ollama_host(config, runtime_paths)
         console.print(
             "[yellow]![/yellow] Memory LLM not configured"
             f" (defaults to ollama at {ollama_host};"
@@ -561,9 +571,8 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return 0, 0, 1
 
     llm_provider = config.memory.llm.provider
-    llm_base_url = config.memory.llm.config.get("openai_base_url") or config.memory.llm.config.get("base_url")
     if llm_provider == "ollama":
-        host = config.memory.llm.config.get("host") or llm_base_url or _get_ollama_host(config, runtime_paths)
+        host = memory_llm_ollama_host(config, runtime_paths)
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,
@@ -610,7 +619,9 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
     """Check memory embedder configuration. Returns (passed, failed, warnings)."""
     emb = config.memory.embedder
     if emb.provider == "ollama":
-        host = emb.config.host or _get_ollama_host(config, runtime_paths=runtime_paths)
+        host = resolve_embedder_settings(config, runtime_paths).host
+        # The resolver always resolves an Ollama host; only the other providers leave it unset.
+        assert host is not None
         valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
         return _print_validation(
             valid,

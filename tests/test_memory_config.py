@@ -798,6 +798,30 @@ class TestMemoryConfig:
             "ollama_base_url": "http://credential-ollama:11434",
         }
 
+    @pytest.mark.parametrize("llm_settings", [{"host": "http://config-ollama:11434"}, {}], ids=["host", "no-host"])
+    def test_get_memory_config_ollama_llm_uses_credential_host_before_config(
+        self,
+        tmp_path: Path,
+        llm_settings: dict[str, str],
+    ) -> None:
+        """The credential-backed Ollama host beats the memory LLM's own host, and applies when it sets none."""
+        runtime_paths = _runtime_paths(tmp_path)
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            "ollama",
+            {"host": "http://credential-ollama:11434"},
+        )
+        config = Config(
+            memory={"llm": {"provider": "ollama", "config": {"model": "gemma4", **llm_settings}}},
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, runtime_paths)
+
+        assert result["llm"] == {
+            "provider": "ollama",
+            "config": {"model": "gemma4", "ollama_base_url": "http://credential-ollama:11434"},
+        }
+
     @pytest.mark.parametrize(
         ("model", "effective_dimensions"),
         [

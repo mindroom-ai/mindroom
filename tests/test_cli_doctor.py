@@ -30,7 +30,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import env_key_for_provider, resolve_primary_runtime_paths
-from mindroom.credentials.sync import get_embedder_api_key
+from mindroom.credentials.sync import get_embedder_api_key, sync_env_to_credentials
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
 
@@ -259,10 +259,105 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
         router=RouterConfig(model="default"),
     )
 
-    assert _check_providers(config, runtime_paths) == (2, 0, 0)
+    assert _check_providers(config, runtime_paths) == (3, 0, 0)
     assert "Providers: ollama (2 models), vertexai_claude (1 model)" in capsys.readouterr().out
-    assert probed == ["http://gpu.example:11434/api/tags"]
+    assert probed == ["http://gpu.example:11434/api/tags", "http://localhost:11434/api/tags"]
     assert vertex_models == ["claude-sonnet-5-5"]
+
+
+def _record_reachability_checks(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Answer every doctor HTTP request with 200 and return the URLs it requested."""
+    probed: list[str] = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        probed.append(url)
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    return probed
+
+
+def _runtime_with_synced_ollama_host(tmp_path: Path) -> RuntimePaths:
+    """Return runtime paths whose ``.env`` sets ``OLLAMA_HOST``, synced into the credential store as doctor does."""
+    (tmp_path / ".env").write_text("OLLAMA_HOST=http://env-ollama:11434\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    sync_env_to_credentials(runtime_paths=runtime_paths)
+    return runtime_paths
+
+
+def test_doctor_checks_each_ollama_server_a_model_s_requests_reach(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Doctor checks every server the Ollama models reach, ``client_params.host`` first, once per server."""
+    runtime_paths = _runtime_with_synced_ollama_host(tmp_path)
+    probed = _record_reachability_checks(monkeypatch)
+    config = Config(
+        models={
+            "default": ModelConfig(
+                provider="ollama",
+                id="gemma4",
+                host="http://model-ollama:11434",
+                extra_kwargs={"client_params": {"host": "http://client-ollama:11434"}},
+            ),
+            "plain": ModelConfig(provider="ollama", id="gemma4"),
+            "other": ModelConfig(provider="Ollama", id="qwen3.8:27b"),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_single_provider("ollama", config, runtime_paths) == (2, 0, 0)
+    assert probed == ["http://client-ollama:11434/api/tags", "http://env-ollama:11434/api/tags"]
+
+
+@pytest.mark.parametrize(
+    "llm",
+    [
+        {"provider": "ollama", "config": {"model": "gemma4", "host": "http://config-ollama:11434"}},
+        {"provider": "ollama", "config": {"model": "gemma4"}},
+        None,
+    ],
+    ids=["configured-host", "no-host", "default-llm"],
+)
+def test_doctor_checks_the_memory_llm_s_ollama_server_where_the_runtime_sends_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    llm: dict[str, object] | None,
+) -> None:
+    """A configured ``OLLAMA_HOST`` beats ``memory.llm.config.host``, and a chat model's host never applies."""
+    runtime_paths = _runtime_with_synced_ollama_host(tmp_path)
+    probed = _record_reachability_checks(monkeypatch)
+    config = Config(
+        models={"default": ModelConfig(provider="ollama", id="gemma4", host="http://chat-ollama:11434")},
+        memory={"backend": "mem0", "llm": llm},
+        router=RouterConfig(model="default"),
+    )
+
+    _check_memory_llm(config, runtime_paths)
+
+    assert probed == ["http://env-ollama:11434/api/tags"]
+
+
+def test_doctor_checks_the_ollama_embedder_where_the_runtime_sends_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured ``OLLAMA_HOST`` beats ``memory.embedder.config.host`` in doctor, as in the embedder it builds."""
+    runtime_paths = _runtime_with_synced_ollama_host(tmp_path)
+    probed = _record_reachability_checks(monkeypatch)
+    config = Config(
+        memory={
+            "backend": "mem0",
+            "embedder": {
+                "provider": "ollama",
+                "config": {"model": "nomic-embed-text", "host": "http://config-ollama:11434"},
+            },
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_embedder(config, runtime_paths) == (1, 0, 0)
+    assert probed == ["http://env-ollama:11434/api/tags"]
 
 
 def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
