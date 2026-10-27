@@ -141,7 +141,7 @@ def load_user_services(manager: CredentialsManager, target: ResolvedWorkerTarget
             service = service.model_copy(update={"placeholder_env": allowed})
         if service.oauth_provider is not None and (not is_personal_target(target) or _oauth_hosts_error(service)):
             logger.warning("egress_broker_user_service_oauth_ignored", service=name)
-            service = service.model_copy(update={"oauth_provider": None})
+            service = service.model_copy(update={"oauth_provider": None, "oauth_separate_account": False})
         services[name] = service
     return services
 

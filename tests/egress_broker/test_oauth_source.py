@@ -23,7 +23,12 @@ from mindroom.egress_broker.oauth_reuse import (
     oauth_reuse_access,
     set_oauth_reuse,
 )
-from mindroom.egress_broker.oauth_source import broker_credential_context, oauth_status, resolve_oauth_token
+from mindroom.egress_broker.oauth_source import (
+    broker_credential_context,
+    oauth_status,
+    resolve_oauth_token,
+    separate_account_provider,
+)
 from mindroom.egress_broker.secrets import (
     OAuthStatus,
     Secret,
@@ -40,6 +45,7 @@ from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.egress_broker.conftest import (
@@ -1149,3 +1155,13 @@ def test_read_write_entry_ignores_method(
     ]
 
     assert results == [Secret("alice-access")] * 3
+
+
+def test_a_separate_account_is_stored_under_its_services_own_credential_service() -> None:
+    """A service's own account is the provider with only the stored name changed, still ending in `_oauth`."""
+    provider = google_calendar_oauth_provider()
+
+    separate = separate_account_provider(provider, "team_calendar")
+
+    assert separate.credential_service == "google_calendar__team_calendar_oauth"
+    assert separate == replace(provider, credential_service="google_calendar__team_calendar_oauth")

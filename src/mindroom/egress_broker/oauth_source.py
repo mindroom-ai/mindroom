@@ -65,6 +65,7 @@ __all__ = [
     "oauth_connection_for_display",
     "oauth_status",
     "resolve_oauth_token",
+    "separate_account_provider",
     "shared_worker_oauth",
     "shared_worker_unavailable_status",
 ]
@@ -224,6 +225,16 @@ def oauth_connection_for_display(context: OAuthCredentialContext) -> tuple[bool,
             credentials = load_oauth_credentials_snapshot_sync(context).credentials
     connected = oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
     return connected, oauth_account_label(credentials) if connected and credentials else None
+
+
+def separate_account_provider(provider: OAuthProvider, service: str) -> OAuthProvider:
+    """Return the provider whose connection is a user service's own account (`oauth_separate_account`).
+
+    Only the stored name changes, to `<base>__<service>_oauth` beside the tools' `<base>_oauth`, so connect, refresh,
+    and the opt-in work on it unchanged in the same scope store, and the name stays an OAuth token service's.
+    """
+    base = provider.credential_service.removesuffix("_oauth")
+    return replace(provider, credential_service=f"{base}__{service}_oauth")
 
 
 def shared_worker_oauth(
