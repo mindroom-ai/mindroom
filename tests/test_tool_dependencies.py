@@ -583,15 +583,9 @@ def old_mem0_distribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.syspath_prepend(str(dist_info.parent))
 
 
-@pytest.fixture(params=["source checkout", "installed package"])
-def extra_requirements_source(
-    request: pytest.FixtureRequest,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[None]:
-    """Read the extras' requirements from pyproject.toml, or from the installed metadata as a wheel install does."""
-    if request.param == "installed package":
-        monkeypatch.setattr("mindroom.tool_system.dependencies._PROJECT_ROOT", tmp_path / "no-checkout")
+@pytest.fixture
+def fresh_extra_requirements() -> Iterator[None]:
+    """Read the extras and their requirements again in this test and after it."""
     caches = (
         dependencies._pyproject_optional_dependencies,
         dependencies._available_optional_extras,
@@ -602,6 +596,19 @@ def extra_requirements_source(
     yield
     for cached in caches:
         cached.cache_clear()
+
+
+@pytest.fixture(params=["source checkout", "installed package"])
+def extra_requirements_source(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_extra_requirements: None,
+) -> None:
+    """Read the extras' requirements from pyproject.toml, or from the installed metadata as a wheel install does."""
+    del fresh_extra_requirements
+    if request.param == "installed package":
+        monkeypatch.setattr("mindroom.tool_system.dependencies._PROJECT_ROOT", tmp_path / "no-checkout")
 
 
 @pytest.mark.usefixtures("old_mem0_distribution", "extra_requirements_source")
@@ -634,6 +641,32 @@ def test_an_installed_version_the_extra_does_not_allow_names_the_version_when_in
     )
     with pytest.raises(ImportError, match=re.escape(message)):
         ensure_optional_deps(["mem0ai"], "mem0", runtime_paths, missing_message="Missing dependencies: mem0ai")
+
+
+@pytest.mark.usefixtures("fresh_extra_requirements")
+def test_requirements_absent_or_for_another_platform_start_no_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only installed requirements that apply on this platform are compared with the versions the extra allows."""
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._pyproject_optional_dependencies",
+        lambda: {
+            "demo": [
+                "pytest>=1",
+                "nonexistent-package-xyz-123>=1",
+                "pytest>=999; sys_platform == 'no-such-platform'",
+            ],
+        },
+    )
+
+    def unexpected_install(_extras: list[str], **_kwargs: object) -> bool:
+        pytest.fail("A requirement that is absent or for another platform must not start an install")
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", unexpected_install)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    assert ensure_optional_deps(["pytest"], "demo", runtime_paths) is False
 
 
 def test_auto_install_enabled_uses_runtime_env(tmp_path: Path) -> None:
