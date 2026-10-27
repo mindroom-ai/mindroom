@@ -230,6 +230,8 @@ export interface AuthoredEgressService {
   rules?: EgressRule[];
   placeholder_env?: Record<string, string>;
   oauth_provider?: string | null;
+  /** A user's own service logs in with an account of its own, not the one the agent's tools use. */
+  oauth_separate_account?: boolean;
   /** Operator-only; the personal API rejects it. */
   oauth_on_shared_workers?: boolean;
   restrict_to_rules?: boolean;

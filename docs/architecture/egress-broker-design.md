@@ -89,6 +89,13 @@ The broker checks the level right after the opt-in and before reading the connec
 An entry without a level reads as read and write, so existing opt-ins keep working unmigrated, and a stored API key is never limited, since a key is scoped where it is issued.
 The record is [Read-Only Access for Agent Keys Account Opt-Ins](../dev/2026-10-27-agent-keys-read-only-access-design.md).
 
+**A service of a user's own can have its own account, and a request picks such a service by naming it.**
+Agent Keys hands commands the scope's one connection per provider, the one the tools use, so a second account of a provider, such as a shared mailbox, had no place.
+The service's connection is the provider with only its stored name changed, so connecting, refreshing, allowing, and removing it reuse the per-service paths and the tools never see it; the broker offers no connect link for it, since the provider's link connects the tools' account.
+Such a service usually ties with an operator's service on host and path, and the operator's wins a tie, so a request picks it with `X-Agent-Keys-Service` rather than by a changed tie-break, which would move other requests onto a user's service unasked.
+Rejected: labelled accounts beside each provider connection, which made each account a second kind of thing to list, connect, allow, and remove.
+The record is [Separate Accounts for Agent Keys Services](../dev/2026-10-27-agent-keys-separate-accounts-design.md).
+
 **Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
 A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.

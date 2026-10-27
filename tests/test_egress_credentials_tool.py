@@ -820,3 +820,24 @@ def test_note_on_a_shared_agent_says_who_can_allow_an_account(tmp_path: Path, wo
         "On this shared agent only its credential managers or an administrator can allow its accounts, "
         "except a per-user account such as GitHub, which each user allows for themselves."
     ) in str(payload["note"])
+
+
+def test_a_service_with_its_own_account_is_marked_and_the_note_names_the_header(tmp_path: Path) -> None:
+    """The agent learns which service logs in with an account of its own and how a request picks a service."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    context = _context(runtime_paths, _PRESET_SERVICES)
+    save_user_service(
+        manager,
+        worker_target(),
+        "mine",
+        EgressService.model_validate({"preset": "github", "oauth_separate_account": True}),
+        config_services=context.config.egress_broker.services,
+        oauth_providers={"github"},
+    )
+
+    payload = _list(_tool(runtime_paths), context)
+
+    assert _entry(payload, "mine")["separate_account"] is True
+    assert "separate_account" not in _entry(payload, "github")
+    assert "`X-Agent-Keys-Service: <name>`" in str(payload["note"])

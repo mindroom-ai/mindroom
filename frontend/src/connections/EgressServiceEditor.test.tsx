@@ -569,6 +569,50 @@ describe("the editor form", () => {
     });
   });
 
+  it("offers its own account only for a service of one's own that logs in", async () => {
+    const ownAccount = () =>
+      screen.queryByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      );
+    const { onSave } = await renderEditor();
+    type("Name", "team_calendar");
+    openMoreOptions();
+    expect(ownAccount()).toBeNull();
+    type("Preset", "google_calendar");
+    fireEvent.click(ownAccount()!);
+    expect(
+      screen.getByText(
+        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+      ),
+    ).toBeInTheDocument();
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("team_calendar", {
+      preset: "google_calendar",
+      oauth_separate_account: true,
+    });
+  });
+
+  it("offers no own account on a shared agent or on the dashboard", async () => {
+    for (const props of [
+      { sharedTarget: true },
+      { context: "operator" as const },
+    ]) {
+      await renderEditor({
+        service: { preset: "google_calendar" },
+        name: "calendar",
+        ...props,
+      });
+      openMoreOptions();
+      expect(
+        screen.queryByLabelText(
+          "Use its own account, not the one the agent's tools use",
+        ),
+      ).toBeNull();
+      cleanup();
+    }
+  });
+
   it("keeps oauth_on_shared_workers when an operator edits a service", async () => {
     const { onSave } = await renderEditor({
       context: "operator",

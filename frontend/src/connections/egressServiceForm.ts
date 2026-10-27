@@ -82,6 +82,8 @@ export interface EgressServiceForm {
   /** A service that only limits paths: no key, account, or placeholders, and rules that never pick a credential. */
   restrictOnly: boolean;
   oauthProvider: string;
+  /** A user's own service with a login keeps an account of its own (`oauth_separate_account`). */
+  separateAccount: boolean;
   explicitlyEmpty: ExplicitlyEmpty;
 }
 
@@ -139,6 +141,7 @@ export function formFromService(
     restrictToRules: service?.restrict_to_rules ?? false,
     restrictOnly: service?.restrict_only ?? false,
     oauthProvider: service?.oauth_provider ?? "",
+    separateAccount: service?.oauth_separate_account ?? false,
     explicitlyEmpty: {
       displayName:
         displayName === null || displayName === "" ? displayName : undefined,
@@ -264,6 +267,11 @@ export function serializeService(
     // An override written for this preset; another preset has its own login.
     authored.oauth_provider = initial.oauth_provider;
   }
+  if (
+    form.separateAccount &&
+    offersSeparateAccount(form, options, presetOf(options.presets, form.preset))
+  )
+    authored.oauth_separate_account = true;
   if (form.restrictToRules) authored.restrict_to_rules = true;
   if (
     options.context === "operator" &&
@@ -271,6 +279,18 @@ export function serializeService(
   )
     authored.oauth_on_shared_workers = initial.oauth_on_shared_workers;
   return authored;
+}
+
+/** Whether the form is a personal agent's own service with an account login, which may have an account of its own. */
+export function offersSeparateAccount(
+  form: EgressServiceForm,
+  { context, sharedTarget }: Pick<EditorOptions, "context" | "sharedTarget">,
+  preset: EgressPreset | undefined,
+): boolean {
+  if (context !== "personal" || sharedTarget) return false;
+  return form.preset === ""
+    ? form.oauthProvider.trim() !== ""
+    : preset?.oauth_provider != null;
 }
 
 /** Whether a preset carries an account login. */
@@ -338,6 +358,7 @@ export function usesMoreOptions(form: EgressServiceForm): boolean {
       (first.pathPrefix.trim() !== "" || first.port.trim() !== "")) ||
     form.restrictToRules ||
     form.oauthProvider.trim() !== "" ||
+    form.separateAccount ||
     form.placeholders.length > 0
   );
 }

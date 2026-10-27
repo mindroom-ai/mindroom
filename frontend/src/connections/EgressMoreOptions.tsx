@@ -12,6 +12,7 @@ import {
   type PlaceholderForm,
   type RuleForm,
   emptyRule,
+  offersSeparateAccount,
   usesOwnRules,
 } from "./egressServiceForm";
 import { configPlaceholderWarning } from "./egressServiceNotes";
@@ -324,6 +325,28 @@ export function MoreOptions({
       </div>
 
       {loginField}
+
+      {offersSeparateAccount(form, { context, sharedTarget }, preset) && (
+        <div className="space-y-1">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4"
+              checked={form.separateAccount}
+              disabled={disabled}
+              onChange={(event) =>
+                set({ separateAccount: event.target.checked })
+              }
+            />
+            <span className="font-medium">
+              Use its own account, not the one the agent's tools use
+            </span>
+          </label>
+          <p className="pl-6 text-xs text-muted-foreground">
+            {`Requests choose this service with the header X-Agent-Keys-Service: ${form.name || "<name>"}.`}
+          </p>
+        </div>
+      )}
 
       {/* The placeholder variables: what they are for, the rules for their names, one row each with its problem or warning. */}
       <div className="space-y-3">
