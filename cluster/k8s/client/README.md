@@ -190,6 +190,7 @@ nginx:
 The chart rejects `nginx.serverSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
 
 The app shell responses send `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the signed-in client.
+The device pairing page at `basePath/connect` sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
 nginx ignores server-level `add_header` directives in any location that sets its own headers, as the app shell, configuration, and asset locations do, so response headers added through `nginx.serverSnippet` do not reach those responses.
 
 ## Custom nginx Config
