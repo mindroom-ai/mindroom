@@ -49,8 +49,16 @@ _MESSAGES = {
     "proxy_authentication_required": "The sandbox's proxy credentials are missing or expired. Start a new tool call.",
 }
 # A reconnect whose body carries no connect link: a service's own account, a shared connection, or one to reset first.
+# A shared agent's account is its managers' to reconnect, and a requester's own account on a shared agent is theirs.
 _RECONNECT_WITHOUT_LINK = (
     "The {provider} account for {service} must be connected again. Ask the user to reconnect it at manage_url."
+)
+_RECONNECT_SHARED_ACCOUNT = "This shared agent's {provider} account for {service} must be connected again. "
+_RECONNECT_SHARED = (
+    _RECONNECT_SHARED_ACCOUNT + "Only its credential managers ({managers}) can reconnect it, at manage_url."
+)
+_RECONNECT_SHARED_WITHOUT_MANAGERS = (
+    _RECONNECT_SHARED_ACCOUNT + "Only an administrator can reconnect it, at manage_url."
 )
 # A service's own account, which only the service's row on the egress page connects, so there is no connect link.
 _OWN_ACCOUNT_MISSING = (
@@ -187,7 +195,7 @@ def _template(  # noqa: C901, PLR0911 - one text per case, checked in order
     if code == "bad_request" and path is None:
         return _MALFORMED
     if code == "oauth_connection_required" and not connectable and not without_page:
-        return _RECONNECT_WITHOUT_LINK
+        return _reconnect_template(managers, shared=shared, requester_owned=requester_owned)
     texts = _MESSAGES
     if without_page:
         texts = _WITHOUT_PAGE_LINKED if connectable else _WITHOUT_PAGE
@@ -206,6 +214,12 @@ def _reuse_off_template(managers: Sequence[str], *, shared: bool, without_page: 
     if requester_owned:
         return _REUSE_OFF_OWN_ACCOUNT
     return _REUSE_OFF_SHARED if managers else _REUSE_OFF_SHARED_WITHOUT_MANAGERS
+
+
+def _reconnect_template(managers: Sequence[str], *, shared: bool, requester_owned: bool) -> str:
+    if not shared or requester_owned:
+        return _RECONNECT_WITHOUT_LINK
+    return _RECONNECT_SHARED if managers else _RECONNECT_SHARED_WITHOUT_MANAGERS
 
 
 def _read_only_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
@@ -247,7 +261,8 @@ def refusal_body(
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
     writes the same way. `own_account` (the service's own account is not connected) asks the user to connect it at
-    `manage_url`, and an `oauth_connection_required` without a connect link names only `manage_url`.
+    `manage_url`, and an `oauth_connection_required` without a connect link names only `manage_url`, and on a `shared`
+    agent its `managers` (or an administrator) as the ones who can reconnect, unless the account is `requester_owned`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.

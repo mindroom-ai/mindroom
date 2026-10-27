@@ -682,7 +682,12 @@ def test_unreadable_connection_requires_reset(
     result = _resolve(config, runtime_paths, manager, target)
     status = _status(config, runtime_paths, manager, target)
 
-    assert result == SecretNeedsReconnect(provider="github", connect_url=None, reset_required=True)
+    assert result == SecretNeedsReconnect(
+        provider="github",
+        connect_url=None,
+        reset_required=True,
+        requester_owned=True,
+    )
     assert status is not None
     assert (status.connected, status.reset_required) == (False, True)
 

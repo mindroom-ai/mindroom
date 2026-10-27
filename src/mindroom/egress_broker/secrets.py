@@ -244,11 +244,13 @@ class SecretNeedsReconnect:
     """The scope's OAuth connection cannot supply a token until the user reconnects: its grant was revoked.
 
     `reset_required` means the stored credential is unreadable and must be reset before reconnecting.
+    `requester_owned` says the account is the requester's own, which only they can reconnect.
     """
 
     provider: str
     connect_url: str | None = field(default=None, repr=False)
     reset_required: bool = False
+    requester_owned: bool = False
 
 
 @dataclass(frozen=True)

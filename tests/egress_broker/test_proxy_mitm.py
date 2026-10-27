@@ -844,6 +844,45 @@ async def test_oauth_reconnect_required_gets_403_without_reaching_upstream(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (
+            SecretNeedsReconnect(provider="google_drive", reset_required=True),
+            "This shared agent's google_drive account for svc must be connected again. "
+            "Only its credential managers (@alice:example.org) can reconnect it, at manage_url.",
+        ),
+        (
+            SecretNeedsReconnect(provider="github", reset_required=True, requester_owned=True),
+            RECONNECT_WITHOUT_LINK_MESSAGE,
+        ),
+    ],
+    ids=["shared-account", "requester-owned"],
+)
+async def test_reconnect_on_a_shared_agent_names_who_can_reconnect(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    result: SecretNeedsReconnect,
+    message: str,
+) -> None:
+    """A shared agent's account is its credential managers' to reconnect; a requester's own account stays theirs."""
+    await broker(
+        single_rule_config(),
+        resolve_secret=lambda _claims, _service, _routed, _request: result,
+        manage_url=MANAGE_URL,
+        scope_info=lambda _claims: ScopeInfo(shared=True, managers=("@alice:example.org",), personal_page=True),
+    )
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json()["message"] == message
+    assert tls_upstream.hits == []
+
+
+@pytest.mark.asyncio
 async def test_oauth_refresh_outage_gets_retryable_503(
     broker: BrokerFactory,
     tls_upstream: Upstream,

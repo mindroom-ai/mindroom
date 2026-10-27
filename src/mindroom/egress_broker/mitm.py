@@ -282,9 +282,11 @@ class TlsInterceptor:
                 "oauth_connection_required",
                 service=service,
                 provider=result.provider,
+                managers=scope.managers,
                 shared=scope.shared,
                 personal_page=scope.personal_page,
                 connectable=result.connect_url is not None,
+                requester_owned=result.requester_owned,
                 connect_url=result.connect_url,
                 manage_url=manage_url,
             )

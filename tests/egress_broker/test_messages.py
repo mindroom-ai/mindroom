@@ -62,6 +62,29 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             "The github account for github must be connected again. Ask the user to reconnect it at manage_url.",
         ),
         (
+            "oauth_connection_required",
+            {"service": "drive", "provider": "google_drive", "shared": True, "managers": ["@alice:example.org"]},
+            "This shared agent's google_drive account for drive must be connected again. "
+            "Only its credential managers (@alice:example.org) can reconnect it, at manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {"service": "drive", "provider": "google_drive", "shared": True},
+            "This shared agent's google_drive account for drive must be connected again. "
+            "Only an administrator can reconnect it, at manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {
+                "service": "github",
+                "provider": "github",
+                "shared": True,
+                "managers": ["@alice:example.org"],
+                "requester_owned": True,
+            },
+            "The github account for github must be connected again. Ask the user to reconnect it at manage_url.",
+        ),
+        (
             "oauth_refresh_failed",
             {"service": "drive", "provider": "google_drive"},
             "google_drive did not refresh the account token. "
