@@ -872,10 +872,8 @@ async def test_an_approved_member_call_resumes_the_stored_team_run_and_renders_t
     assert record.requirements == []
     assert member.tools is not None
     assert (member.tools[0].confirmed, member.tools[0].result) == (True, "touched dangerous")
-    # The leader reads the member's result where it read the pause notice.
-    assert team.models["default"].requests[-1].messages[-1].content == (
-        "Member results after human-in-the-loop resolution:\n[Checker]: Touched."
-    )
+    # The leader reads the member's result where it read the pause notice, as it reads a member that never paused.
+    assert team.models["default"].requests[-1].messages[-1].content == "Touched."
 
 
 class _HandOffProbe(ProbeToolkit):
@@ -1696,6 +1694,110 @@ async def test_a_chained_approval_shows_the_text_each_run_wrote_once(
     assert result.response_text == _WROTE_BEFORE_THE_PAUSE
 
 
+_TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_approval")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
+async def test_a_collaborate_resume_hands_the_leader_the_sibling_that_finished_before_the_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream: bool,
+) -> None:
+    """The writer finished before the checker paused; once the checker's call is approved, the leader reads both.
+
+    The collaborate result keeps the writer's piece as the first run wrote it, and the checker's pause notice
+    becomes the checker's result under the notice's label.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[calls(tool_call("delegate_task_to_members", "call-all", task="Touch it"), metrics=usage(40, 4))],
+        writer=[answer("Writer drafted.")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        mode="collaborate",
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.reply(stream=stream, show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("Both answered.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert ProbeToolkit.calls == ["dangerous"]
+    answered = "Agent Writer: Writer drafted.\n\nAgent Checker: Touched."
+    [request] = team.models["default"].requests
+    assert request.messages[-1].content == answered
+    record, _members = team.stored_runs()
+    assert record.tools is not None
+    assert [tool.result for tool in record.tools] == [answered]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["coordinate", "collaborate"])
+async def test_a_chained_team_approval_hands_the_leader_each_member_s_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mode: str,
+) -> None:
+    """Both members pause; the first approval finishes the writer and leads the checker to a second gated call.
+
+    The leader's request after the second approval reads the writer's result beside the checker's, though no call of
+    that approval was the writer's: a coordinate leader reads each member's result on the call that delegated to
+    it, and a collaborate leader reads both pieces under their labels.
+    """
+    if mode == "coordinate":
+        delegations = calls(
+            tool_call("delegate_task_to_member", "call-w", member_id="writer", task="Touch a"),
+            tool_call("delegate_task_to_member", "call-c", member_id="checker", task="Touch b"),
+            metrics=usage(40, 4),
+        )
+    else:
+        delegations = calls(tool_call("delegate_task_to_members", "call-all", task="Touch it"), metrics=usage(40, 4))
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegations],
+        writer=[calls(tool_call("touch", "touch-w", label="a"), metrics=usage(10, 1))],
+        checker=[calls(tool_call("touch", "touch-c", label="b"), metrics=usage(10, 1))],
+        mode=mode,
+        approval_rules=_TOUCH_NEEDS_APPROVAL,
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("Both touched.")])
+    team.models["writer-model"] = ScriptedModel([answer("Writer touched.")])
+    team.models["checker-model"] = ScriptedModel(
+        [calls(tool_call("touch", "touch-c2", label="b again")), answer("Checker touched.")],
+    )
+
+    repaused = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("touch-w", "a", agent="writer"), member_approval("touch-c", "b")),
+    )
+    assert isinstance(repaused, PausedAttempt)
+    result = await team.resume(repaused, approved=True, approvals=(member_approval("touch-c2", "b again"),))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert sorted(ProbeToolkit.calls) == ["a", "b", "b again"]
+    [request] = team.models["default"].requests
+    answered = (
+        ["Writer touched.", "Checker touched."]
+        if mode == "coordinate"
+        else ["Agent Writer: Writer touched.\n\nAgent Checker: Checker touched."]
+    )
+    assert [message.content for message in request.messages if message.role == "tool"] == answered
+
+
 @pytest.mark.asyncio
 async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_approved_tool_once(
     tmp_path: Path,
@@ -1934,9 +2036,7 @@ async def test_a_member_s_delegation_runs_its_child_and_the_team_continues_with_
     assert (helper_run.status, helper_run.content) == (RunStatus.completed, "Helper found it.")
     # The writer read the helper's result where its call paused; the leader read the writer's answer.
     assert "Helper found it." in str(team.models["writer-model"].requests[-1].messages[-1].content)
-    assert team.models["default"].requests[-1].messages[-1].content == (
-        "Member results after human-in-the-loop resolution:\n[Writer]: Writer: the helper found it."
-    )
+    assert team.models["default"].requests[-1].messages[-1].content == "Writer: the helper found it."
 
 
 def _cut_off(call_id: str) -> list[ScriptStep]:

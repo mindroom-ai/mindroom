@@ -37,10 +37,20 @@ _PAGE_SIZE_COLUMNS = "logical_event_id, created_ts, octet_length(content_json) A
 # message in a thread name one, so a row limit alone does not bound a read.
 PAGE_CONTENT_BUDGET_BYTES = 16 * 1024 * 1024
 
-# The version of hydration walk whose markers stand. Version 1 looks up the
-# edits of every message a thread walk left mid-stream, which a recursive
-# relations walk can miss.
-_HYDRATION_WALK_VERSION = 1
+# The version of hydration walk whose markers stand, kept per kind of
+# conversation because the thread walk and the room walk change separately, and
+# a new thread walk is no reason to walk every room again.
+#
+# Thread walk 1 looks up the edits of every message a thread walk left
+# mid-stream, which a recursive relations walk can miss. Thread walk 2 also
+# looks up every reply's edits after a walk that stopped above them, and moving
+# to it walks every thread once more on its next read. That gives a thread
+# walked before the Tuwunel fork served recursive relations whole and in order
+# (v1.9.4-mindroom.17) back the ordinary edits that older paging dropped.
+#
+# The room walk has been version 1 since walks had versions.
+_THREAD_WALK_VERSION = 2
+_ROOM_WALK_VERSION = 1
 
 # What the loaded rows of one page may decode to, estimated before decoding.
 # Prose decodes to about its stored size, but every JSON value becomes a Python
@@ -344,6 +354,11 @@ def latest_visible_event_id(
     return None if row is None else str(row["reply_target"])
 
 
+def _walk_version(thread_id: str | None) -> int:
+    """Return the walk version whose marker stands for one conversation."""
+    return _ROOM_WALK_VERSION if thread_id is None else _THREAD_WALK_VERSION
+
+
 def _current_hydration(
     transaction: Transaction,
     principal_id: str,
@@ -380,7 +395,7 @@ def _current_hydration(
     )
     if row is None or int(row["hydrated_epoch"]) != int(row["current_epoch"]):
         return None
-    if int(row["walk_version"]) != _HYDRATION_WALK_VERSION:
+    if int(row["walk_version"]) != _walk_version(thread_id):
         return None
     if row["recovery_state"] == "repairable":
         return None
@@ -568,7 +583,7 @@ def publish_conversation_hydration(
             membership_epoch,
             int(complete),
             attempted_policy_rank,
-            _HYDRATION_WALK_VERSION,
+            _walk_version(thread_id),
         ),
     )
 

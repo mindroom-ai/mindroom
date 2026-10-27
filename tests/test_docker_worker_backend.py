@@ -1022,6 +1022,8 @@ def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWor
 def _install_health_by_image(
     monkeypatch: pytest.MonkeyPatch,
     fake_client: _FakeDockerClient,
+    *,
+    stale_protocol: int = 0,
 ) -> None:
     class _HealthByImage:
         def __init__(self, *, timeout: float) -> None:
@@ -1045,7 +1047,7 @@ def _install_health_by_image(
                 None,
             )
             assert container is not None, f"no running fake container publishes host port {port}"
-            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else 0
+            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else stale_protocol
             return httpx.Response(
                 200,
                 json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
@@ -3511,6 +3513,8 @@ def test_docker_worker_health_accepts_matching_protocol() -> None:
         {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
         # Workers from releases that mounted whole state roots write private identity records the new mounts forbid.
         {"status": "ok", "mindroom_version": "2026.9.324", "worker_protocol": 1},
+        # Workers from releases before plugin environment removals would hand commands variables a plugin removed.
+        {"status": "ok", "mindroom_version": "2026.10.580", "worker_protocol": 3},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
     ],
@@ -3578,16 +3582,18 @@ def test_docker_worker_readiness_rejects_incompatible_image(
         DockerWorkerBackend._wait_for_ready(backend, container)
 
 
+@pytest.mark.parametrize("stale_protocol", [0, 3], ids=["no-protocol", "before-environment-removals"])
 def test_docker_worker_stale_image_pulls_and_relaunches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    stale_protocol: int,
 ) -> None:
-    """A stale-image protocol mismatch pulls the configured image and relaunches once."""
+    """A stale-image protocol mismatch pulls the configured image and relaunches once, before any call reaches it."""
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     fake_client.images.pull_image_id = "sha256:image-v2"
     _use_real_wait_for_ready(monkeypatch, backend)
 
-    _install_health_by_image(monkeypatch, fake_client)
+    _install_health_by_image(monkeypatch, fake_client, stale_protocol=stale_protocol)
 
     progress_events: list[WorkerReadyProgress] = []
 

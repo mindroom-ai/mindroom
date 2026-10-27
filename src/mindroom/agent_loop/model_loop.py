@@ -192,7 +192,8 @@ async def run_model_loop(
         request_template=request_template,
     )
     max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
-    progress = _Progress()
+    # A resume continues its run, so the calls that run already made count toward its limit.
+    progress = _Progress(calls_so_far=len(record.tools or ()))
     if resumed is not None:
         async for event in _answer_resumed(resumed, state, progress, hooks):
             yield event

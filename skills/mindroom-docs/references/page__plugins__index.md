@@ -205,6 +205,8 @@ my-plugin/
 ```
 
 Only the manifest `name` is required; a plugin may provide any combination of tools, hooks, automations, OAuth providers, and skills.
+Import MindRoom's plugin entry points from `mindroom.plugin_api`; only `GoogleCloudToolkit` and the memory helpers stay in the modules their sections name.
+Other `mindroom` modules can change in any release.
 
 ## Manifest format
 
@@ -242,13 +244,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import (
+from mindroom.plugin_api import (
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolStatus,
+    register_tool_with_metadata,
 )
-from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools import Toolkit
@@ -312,7 +314,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 `ToolFileAccess` values:
 
 - `NONE`: the tool takes no local file paths.
-- `AGENT`: the tool resolves every model-supplied path through `mindroom.file_access.resolve_agent_file`, so it follows the agent's `file_access` setting.
+- `AGENT`: the tool resolves every model-supplied path through `mindroom.plugin_api.resolve_agent_file`, so it follows the agent's `file_access` setting.
 - `UNCONFINED`: the tool reaches local files in a way `file_access` does not confine, such as running programs, queries, or model-chosen paths.
 
 See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/#file-access) for how each class is treated.
@@ -375,14 +377,14 @@ A `ConfigField` `default` only pre-fills the dashboard form and is not passed to
 When no value is stored or configured, the constructor's Python default applies, so give optional parameters matching defaults, such as `units: str = "metric"` below.
 
 ```python
-from mindroom.tool_system.declarations import (
+from mindroom.plugin_api import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolStatus,
+    register_tool_with_metadata,
 )
-from mindroom.tool_system.registration import register_tool_with_metadata
 
 @register_tool_with_metadata(
     name="weather",
@@ -431,8 +433,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 
 ```python
 from agno.tools import Toolkit
-from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
-from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.plugin_api import ToolCategory, ToolFileAccess, ToolManagedInitArg, register_tool_with_metadata
 
 
 @register_tool_with_metadata(
@@ -454,7 +455,7 @@ def needs_runtime_tools() -> type[Toolkit]:
 
 ### Tool runtime context
 
-Inside a Matrix-connected agent run, `mindroom.tool_system.runtime_context.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
+Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
 
@@ -465,10 +466,10 @@ A tool that runs its own model calls, such as a research loop, builds a provider
 ```python
 from pydantic import BaseModel
 
-from mindroom.agent_loop.helper import complete_prompt
-from mindroom.providers.registry import build_model_provider
-from mindroom.tool_system.runtime_context import (
+from mindroom.plugin_api import (
     build_execution_identity_from_runtime_context,
+    build_model_provider,
+    complete_prompt,
     get_tool_runtime_context,
 )
 
@@ -498,10 +499,10 @@ Each call is one request with no tools and no conversation history.
 
 ### Dispatch-time worker targets
 
-A tool that builds other registered tools while handling a call, for example a sub-toolkit from `get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
+A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
 
 ```python
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.plugin_api import get_tool_runtime_context
 
 context = get_tool_runtime_context()
 worker_target = context.resolve_worker_target()
@@ -527,7 +528,7 @@ Then define `register_oauth_providers(settings, runtime_paths)`, which receives 
 ```python
 from __future__ import annotations
 
-from mindroom.oauth import OAuthProvider
+from mindroom.plugin_api import OAuthProvider
 
 
 def register_oauth_providers(settings, runtime_paths):
@@ -560,7 +561,7 @@ Never write tokens or client secrets to `config.yaml`, prompt files, logs, or to
 Providers that publish protected-resource metadata can discover their endpoints and optionally register a client automatically:
 
 ```python
-from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+from mindroom.plugin_api import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
 
 provider = OAuthProvider(
     id="acme_drive",
@@ -584,7 +585,7 @@ provider = OAuthProvider(
 
 OAuth-backed tools set `setup_type=SetupType.OAUTH` and `auth_provider="<provider_id>"`.
 When credentials are missing, return an instruction with a browser-openable connect link so the user can connect and retry the request.
-Build the link with `oauth_connect_url(provider, runtime_paths, worker_target=...)` and the message with `build_oauth_connect_instruction(provider, connect_url)`, both from `mindroom.oauth.service`.
+Build the link with `oauth_connect_url(provider, runtime_paths, worker_target=...)` and the message with `build_oauth_connect_instruction(provider, connect_url)`, both from `mindroom.plugin_api`.
 
 ### Additional Google workspaces
 
@@ -603,7 +604,7 @@ One module can register both the tools and the OAuth providers:
 
 ```python
 # workspaces.py
-from mindroom.tool_system.google_workspaces import (
+from mindroom.plugin_api import (
     GoogleWorkspaceConfig,
     google_workspace_oauth_providers,
     register_google_workspace_tools,
@@ -660,7 +661,7 @@ Subclass `GoogleCloudToolkit`, set `_oauth_provider` and `_oauth_tool_name`, and
 import json
 
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.plugin_api import google_cloud_oauth_provider
 
 
 class CloudStorageBrowserTools(GoogleCloudToolkit):
@@ -697,15 +698,15 @@ class CloudStorageBrowserTools(GoogleCloudToolkit):
 Register the tool in the same module with an OAuth setup, the Google Cloud provider, the primary runtime, and the four managed init args that the constructor receives:
 
 ```python
-from mindroom.tool_system.declarations import (
+from mindroom.plugin_api import (
     ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    register_tool_with_metadata,
 )
-from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 @register_tool_with_metadata(
@@ -760,13 +761,13 @@ Use a plugin only when you need a custom wrapper around Agno `MCPTools`:
 
 ```python
 from agno.tools.mcp import MCPTools
-from mindroom.tool_system.declarations import (
+from mindroom.plugin_api import (
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolStatus,
+    register_tool_with_metadata,
 )
-from mindroom.tool_system.registration import register_tool_with_metadata
 
 
 class FilesystemMCPTools(MCPTools):
@@ -824,8 +825,7 @@ Operators enable it per agent under [`automations:`](https://docs.mindroom.chat/
 from datetime import UTC, datetime
 from functools import partial
 
-from mindroom.automations import Ask, AutomationContext, Done, automation
-from mindroom.path_confinement import read_regular_file_within_root
+from mindroom.plugin_api import Ask, AutomationContext, Done, automation, read_regular_file_within_root
 
 
 # The digest lives in the agent's file memory, so skip agents without it.
@@ -898,11 +898,11 @@ For plugin code, MindRoom also guarantees:
 - Checks and steps run off the event loop, so ordinary replies and other agents are not held back by them.
 - The one-hour limit applies to the agent's answer, not to a check or step that hangs.
 - `OSError` and `ValueError` from a check or step post a warning in the room and end the chain; other exceptions are logged.
-- `automation_threads(runtime_paths)` from `mindroom.automations` returns the threads automations started, so an automation that reads exported conversations can skip them.
+- `automation_threads(runtime_paths)` from `mindroom.plugin_api` returns the threads automations started, so an automation that reads exported conversations can skip them.
 - A chain finishes with the code that started it; after a plugin reload, the next fire uses the new code on the same schedule, but resources the old module kept, such as tasks in module-level variables, may already be cancelled.
 
 ### Helpers the built-ins use
 
-Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.path_confinement` do that.
+Agent workspaces can contain files worker code wrote, so read and write them without following links: `read_regular_file_within_root`, `write_file_within_root`, and `open_directory_within_root` from `mindroom.plugin_api` do that.
 To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to make changed memory searchable at once, return `Done(..., on_loop=partial(refresh_agent_memory_search, agent_name, root, config, runtime_paths, ctx.execution_identity))` with `refresh_agent_memory_search` from `mindroom.memory`.
 [`prompt_curation.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/prompt_curation.py) and [`dreaming.py`](https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/automations/dreaming.py) are complete examples: a single prompt with a re-check, and a proposal reviewed in a second thread before code applies it.

@@ -357,6 +357,7 @@ To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` 
 Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Use `shell_path_prepend` to add directories, such as wrapper directories, ahead of the existing `PATH`.
 Both options are documented with the [shell tool](../tools/execution-and-coding.md#shell).
+A plugin's [`tool:environment` hook](../hooks.md#shell-command-environment-toolenvironment) can also set, remove, or pass through variables for one call's commands.
 
 ### Workspace home contract
 
@@ -384,6 +385,7 @@ How it behaves:
 - Only exported variables apply: write `export FOO=bar`, because plain `FOO=bar`, aliases, functions, and `cd` do not carry over.
 - The script starts from the prepared request environment, not the runner's full environment.
 - Exported values pass through, including tokens you export on purpose, except MindRoom's control variables (the same ones dropped from [shell passthrough](#shell-environment-and-path)), bash bookkeeping variables such as `PWD` and `SHLVL`, the [workspace home](#workspace-home-contract) variables, and values larger than 32 KiB.
+- A variable a plugin's [`tool:environment` hook](../hooks.md#shell-command-environment-toolenvironment) sets or removes for a `shell` call wins over the script's export.
 
 Limits and errors:
 

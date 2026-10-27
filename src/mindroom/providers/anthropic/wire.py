@@ -32,7 +32,7 @@ from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_re
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES
+from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE_PREFIX_CHECKED_THINKING_MODELS
 from mindroom.providers.claude_wire_blocks import as_dict
 
 if TYPE_CHECKING:
@@ -149,6 +149,11 @@ def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
     return not manual_thinking and not _core_model_id(model_id).startswith(CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES)
 
 
+def checks_thinking_prefix(model_id: str) -> bool:
+    """Return whether the API rejects or drops this model's replayed thinking once the context before it changed."""
+    return _core_model_id(model_id).startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
+
+
 def stop_reason_of(raw: str | None) -> StopReason | None:
     """Map Claude's ``stop_reason`` onto the shared vocabulary; a reason this map does not know is incomplete."""
     return None if raw is None else _STOP_REASONS.get(raw, "incomplete")
@@ -166,13 +171,16 @@ def format_claude_messages(
     messages: Sequence[Message],
     *,
     append_trailing_user_message: bool,
+    earlier_thinking: bool,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
     System messages are extracted, each its own system text. Consecutive same-role turns merge into one, dropping
     the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
-    original response. A conversation that ends with an assistant turn gets a trailing ``continue`` user turn when
-    the model rejects prefill. Documents ask for no citations, which no MindRoom reply shows.
+    original response. Without ``earlier_thinking``, the turns before the current tool loop replay without their
+    thinking (``_without_earlier_thinking``). A conversation that ends with an assistant turn gets a trailing
+    ``continue`` user turn when the model rejects prefill. Documents ask for no citations, which no MindRoom reply
+    shows.
     """
     turns: list[dict[str, Any]] = []
     for message in messages:
@@ -191,6 +199,8 @@ def format_claude_messages(
             raise ValueError(msg)
         turns.append({"role": "assistant" if message.role == "assistant" else "user", "content": content})
     merged = _merged_turns(turns)
+    if not earlier_thinking:
+        merged = _merged_turns(_without_earlier_thinking(merged))
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
     return FormattedConversation(messages=merged, system=system_texts(messages))
@@ -213,6 +223,30 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             merged.append(turn)
     return merged
+
+
+def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Leave the thinking out of the assistant turns before the current tool loop; a turn left empty goes too.
+
+    The loop starts after the last user turn without a tool result, where the API itself starts a new turn. The
+    API requires the loop's own thinking as received and allows leaving out every earlier turn's.
+    """
+    starts = [index for index, turn in enumerate(turns) if turn["role"] == "user" and not _answers_tool_calls(turn)]
+    start = starts[-1] if starts else 0
+    kept: list[dict[str, Any]] = []
+    for index, turn in enumerate(turns):
+        if index >= start or turn["role"] != "assistant":
+            kept.append(turn)
+            continue
+        content = [block for block in turn["content"] if _block_type(block) not in _THINKING_BLOCK_TYPES]
+        if content:
+            kept.append({**turn, "content": content})
+    return kept
+
+
+def _answers_tool_calls(turn: dict[str, Any]) -> bool:
+    """Return whether a user turn carries tool results, which continue the tool loop instead of starting a turn."""
+    return any(_block_type(block) == "tool_result" for block in turn["content"])
 
 
 def _user_blocks(message: Message) -> list[Any]:
@@ -595,6 +629,7 @@ def assistant_message_from_response(
 __all__ = [
     "FormattedConversation",
     "assistant_message_from_response",
+    "checks_thinking_prefix",
     "format_claude_messages",
     "format_claude_tools",
     "inline_url_media",

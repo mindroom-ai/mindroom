@@ -32,6 +32,8 @@ class PublishedIndexReader:
     path: str
     embedder: Embedder
     published_settings: IndexingSettings | None = None
+    #: The most bytes of vectors a search may load, or None for no limit.
+    max_matrix_bytes: int | None = None
 
     def _published_metadata(self) -> dict[str, str] | None:
         """Return the settings that select this handle's compatible publication, or None to read its collection."""
@@ -60,4 +62,5 @@ class PublishedIndexReader:
                 embedding,
                 limit=limit,
                 query=query,
+                max_matrix_bytes=self.max_matrix_bytes,
             )

@@ -15,9 +15,13 @@ from mindroom.cli.doctor import (
     _check_matrix_homeserver,
     _check_memory_config,
     _check_memory_embedder,
+    _check_memory_llm,
     _check_pairing,
+    _check_providers,
     _check_single_provider,
     _classify_vertexai_claude_error,
+    _endpoint_settings,
+    _endpoint_variables,
     _validate_provider_key,
     _validate_vertexai_claude_connection,
     doctor,
@@ -25,7 +29,7 @@ from mindroom.cli.doctor import (
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.constants import env_key_for_provider, resolve_primary_runtime_paths
 from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
@@ -177,7 +181,7 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         router=RouterConfig(model="default"),
     )
 
-    result = _check_single_provider("openai", config, set(), runtime_paths)
+    result = _check_single_provider("openai", config, runtime_paths)
 
     assert result == (0, 0, 1)
     assert validated == []
@@ -185,26 +189,19 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
 
 
 @pytest.mark.parametrize(
-    ("provider", "base_url", "url", "headers"),
+    ("provider", "url", "headers"),
     [
         # The request the dashboard's provider setup sends for the same key.
-        ("openrouter", None, "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
-        (
-            "anthropic",
-            None,
-            "https://api.anthropic.com/v1/models",
-            {"x-api-key": "k", "anthropic-version": "2023-06-01"},
-        ),
-        ("openai", None, "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
-        ("gemini", None, "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": "k"}),
-        ("groq", None, "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
-        ("openai", "https://proxy.example/v1/", "https://proxy.example/v1/models", {"Authorization": "Bearer k"}),
+        ("openrouter", "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
+        ("anthropic", "https://api.anthropic.com/v1/models", {"x-api-key": "k", "anthropic-version": "2023-06-01"}),
+        ("openai", "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": "k"}),
+        ("groq", "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
     ],
 )
 def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
-    base_url: str | None,
     url: str,
     headers: dict[str, str],
 ) -> None:
@@ -217,31 +214,397 @@ def test_a_provider_key_is_checked_with_the_request_that_proves_it_valid(
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
 
-    assert _validate_provider_key(provider, "k", base_url) == (True, "")
+    assert _validate_provider_key(provider, "k") == (True, "")
     assert sent == [(url, headers)]
 
 
-@pytest.mark.parametrize(
-    ("provider", "base_url"),
-    [
-        ("zai", "https://zai-proxy.example/v4"),
-        ("huggingface", "http://embeddings.local:8080"),
-        ("zai", None),
-    ],
-)
-def test_a_provider_without_a_key_check_is_not_probed_even_at_a_custom_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-    provider: str,
-    base_url: str | None,
-) -> None:
-    """Only a route with a known key check is probed, so a custom endpoint cannot misreport a valid key as invalid."""
+@pytest.mark.parametrize("provider", ["zai", "huggingface"])
+def test_a_provider_without_a_key_check_is_not_probed(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    """Only a route with a known key check is probed, so an unknown key style cannot misreport a valid key."""
 
     def get(url: str, **_kwargs: object) -> httpx.Response:
         raise AssertionError(url)
 
     monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
 
-    assert _validate_provider_key(provider, "k", base_url) == (None, "no key check for this provider")
+    assert _validate_provider_key(provider, "k") == (None, "no key check for this provider")
+
+
+def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_uses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Spellings config load accepts group under the runtime's route and get that route's checks."""
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    probed: list[str] = []
+    vertex_models: list[str] = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        probed.append(url)
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    def validate_vertex(model_config: ModelConfig, _runtime_paths: RuntimePaths) -> tuple[bool, str]:
+        vertex_models.append(model_config.id)
+        return True, ""
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    monkeypatch.setattr("mindroom.cli.doctor._validate_vertexai_claude_connection", validate_vertex)
+    config = Config(
+        models={
+            "default": ModelConfig(provider="Ollama", id="qwen3.8:27b", host="http://gpu.example:11434"),
+            "small": ModelConfig(provider=" ollama ", id="qwen3.8:27b"),
+            "claude": ModelConfig(provider="VertexAI-Claude", id="claude-sonnet-5-5"),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (2, 0, 0)
+    assert "Providers: ollama (2 models), vertexai_claude (1 model)" in capsys.readouterr().out
+    assert probed == ["http://gpu.example:11434/api/tags"]
+    assert vertex_models == ["claude-sonnet-5-5"]
+
+
+def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
+    """Answer every doctor HTTP request with 200 and return the requests it sent."""
+    sent: list[tuple[str, dict[str, str]]] = []
+
+    def get(url: str, *, headers: dict[str, str], **_kwargs: object) -> httpx.Response:
+        sent.append((url, headers))
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+    return sent
+
+
+def _runtime_with_env(tmp_path: Path, env_file: dict[str, str], exported: dict[str, str] | None = None) -> RuntimePaths:
+    """Return runtime paths whose ``.env`` holds ``env_file`` and whose process exports ``exported``."""
+    (tmp_path / ".env").write_text("".join(f"{name}={value}\n" for name, value in env_file.items()), encoding="utf-8")
+    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env=exported or {})
+
+
+@pytest.mark.parametrize(
+    ("value", "found"),
+    [
+        (
+            {"base_url": "https://a", "client_params": {"api_base": "https://b"}},
+            ["m.base_url", "m.client_params.api_base"],
+        ),
+        ({"client_params": {"http_options": {"baseUrl": "https://a"}}}, ["m.client_params.http_options.baseUrl"]),
+        (
+            {"client_params": {"apiBase": "https://a", "defaultHeaders": {"X": "y"}}},
+            ["m.client_params.apiBase", "m.client_params.defaultHeaders"],
+        ),
+        ({"host": "https://a", "azure_endpoint": "https://b"}, ["m.host", "m.azure_endpoint"]),
+        ({"client_params": {"default_headers": {"Authorization": "Bearer g"}}}, ["m.client_params.default_headers"]),
+        ({"base_url": "", "host": None, "default_headers": {}, "temperature": 0.2, "api_key": "k"}, []),
+        (None, []),
+    ],
+)
+def test_every_set_base_host_endpoint_or_header_key_counts_as_an_endpoint_setting(
+    value: object,
+    found: list[str],
+) -> None:
+    """Doctor never learns which keys a client reads: any set key with an endpoint-like name counts, at any depth."""
+    assert _endpoint_settings(value, "m") == found
+
+
+def test_a_provider_family_s_set_endpoint_variables_count(tmp_path: Path) -> None:
+    """Only a set variable of the key's own family whose name ends like an endpoint's counts."""
+    runtime_paths = _runtime_with_env(
+        tmp_path,
+        {"OPENAI_BASE_URL": "https://a", "OPENAI_PROXY_HOST": "h", "GROQ_BASE_URL": " "},
+        {
+            "OPENAI_API_BASE": "https://b",
+            "OPENAI_API_ENDPOINT": "https://c",
+            "OPENAI_ORGANIZATION": "org",
+            "GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS": "example.com",
+        },
+    )
+
+    assert _endpoint_variables("OPENAI_API_KEY", runtime_paths) == [
+        "OPENAI_API_BASE",
+        "OPENAI_API_ENDPOINT",
+        "OPENAI_BASE_URL",
+        "OPENAI_PROXY_HOST",
+    ]
+    assert _endpoint_variables("GROQ_API_KEY", runtime_paths) == []
+    assert _endpoint_variables("GOOGLE_API_KEY", runtime_paths) == []
+
+
+_GATEWAY = "https://gateway.example/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_settings", "env_file", "exported", "reason"),
+    [
+        pytest.param(
+            "openai",
+            {"extra_kwargs": {"client_params": {"base_url": _GATEWAY}, "base_url": "https://other.example/v1"}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.client_params.base_url, models.gateway.extra_kwargs.base_url",
+            id="client-params-base-url-over-base-url",
+        ),
+        pytest.param(
+            "groq",
+            {"extra_kwargs": {"base_url": "https://groq-proxy.example"}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.base_url",
+            id="groq-host",
+        ),
+        pytest.param(
+            "OpenAI",
+            {"extra_kwargs": {"base_url": _GATEWAY}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.base_url",
+            id="accepted-provider-spelling",
+        ),
+        pytest.param(
+            "Anthropic",
+            {"extra_kwargs": {"client_params": {"base_url": "https://gateway.example/anthropic"}}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.client_params.base_url",
+            id="anthropic-client-params",
+        ),
+        pytest.param(
+            "openrouter",
+            {"extra_kwargs": {"client_params": {"base_url": "https://openrouter.ai/api/v1"}}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.client_params.base_url",
+            id="openrouter-client-params",
+        ),
+        pytest.param("openai", {"host": _GATEWAY}, {}, {}, "models.gateway.host", id="model-host"),
+        # The SDK sends a configured Authorization header in place of the key it is given.
+        pytest.param(
+            "openai",
+            {
+                "extra_kwargs": {
+                    "client_params": {"base_url": _GATEWAY, "default_headers": {"Authorization": "Bearer gateway-key"}},
+                },
+            },
+            {},
+            {},
+            "models.gateway.extra_kwargs.client_params.base_url, models.gateway.extra_kwargs.client_params.default_headers",
+            id="authorization-header-at-a-gateway",
+        ),
+        pytest.param(
+            "openai",
+            {"extra_kwargs": {"default_headers": {"Authorization": "Bearer gateway-key"}}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.default_headers",
+            id="authorization-header-alone",
+        ),
+        # google-genai takes the endpoint from http_options, in either spelling.
+        pytest.param(
+            "google",
+            {"extra_kwargs": {"client_params": {"http_options": {"base_url": "https://gemini-gateway.example"}}}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.client_params.http_options.base_url",
+            id="gemini-http-options",
+        ),
+        pytest.param(
+            "gemini",
+            {"extra_kwargs": {"client_params": {"http_options": {"baseUrl": "https://gemini-gateway.example"}}}},
+            {},
+            {},
+            "models.gateway.extra_kwargs.client_params.http_options.baseUrl",
+            id="gemini-http-options-camel-case",
+        ),
+        # client_params.vertexai moves the model to Vertex AI, which reads GOOGLE_VERTEX_BASE_URL.
+        pytest.param(
+            "google",
+            {"extra_kwargs": {"client_params": {"vertexai": True}}},
+            {"GOOGLE_VERTEX_BASE_URL": "https://vertex-gateway.example"},
+            {},
+            "GOOGLE_VERTEX_BASE_URL",
+            id="vertexai-client-override",
+        ),
+        pytest.param(
+            "gemini",
+            {},
+            {},
+            {"GOOGLE_GEMINI_BASE_URL": "https://gemini-gateway.example"},
+            "GOOGLE_GEMINI_BASE_URL",
+            id="gemini-variable-exported",
+        ),
+        pytest.param("openai", {}, {"OPENAI_BASE_URL": _GATEWAY}, {}, "OPENAI_BASE_URL", id="openai-variable"),
+        pytest.param(
+            "anthropic",
+            {},
+            {},
+            {"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
+            "ANTHROPIC_BASE_URL",
+            id="anthropic-variable-exported",
+        ),
+    ],
+)
+def test_doctor_skips_the_shared_key_check_wherever_an_endpoint_setting_or_variable_is_set(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provider: str,
+    model_settings: dict[str, object],
+    env_file: dict[str, str],
+    exported: dict[str, str],
+    reason: str,
+) -> None:
+    """The shared key goes nowhere, neither to the custom server nor to the provider, and doctor says why."""
+    env_key = env_key_for_provider(provider)
+    assert env_key is not None
+    runtime_paths = _runtime_with_env(tmp_path, {env_key: "shared", **env_file}, exported)
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        models={"gateway": ModelConfig(provider=provider, id="m", **model_settings)},
+        router=RouterConfig(model="gateway"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert f"{env_key} not checked: {reason} may send it elsewhere or send another key in its place" in output
+
+
+@pytest.mark.parametrize(
+    ("provider", "env_file", "url"),
+    [
+        ("openai", {}, "https://api.openai.com/v1/models"),
+        ("groq", {}, "https://api.groq.com/openai/v1/models"),
+        # Another family's endpoint variable and a Google name containing HOST do not count.
+        ("anthropic", {"OPENAI_BASE_URL": _GATEWAY}, "https://api.anthropic.com/v1/models"),
+        (
+            "google",
+            {"GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS": "example.com"},
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        ),
+    ],
+)
+def test_doctor_checks_a_shared_key_at_the_provider_s_own_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    env_file: dict[str, str],
+    url: str,
+) -> None:
+    """A model without an endpoint setting or variable gets the shared key checked at its provider's API."""
+    env_key = env_key_for_provider(provider)
+    assert env_key is not None
+    runtime_paths = _runtime_with_env(tmp_path, {env_key: "shared", **env_file})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(models={"default": ModelConfig(provider=provider, id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert [sent_url for sent_url, _headers in sent] == [url]
+
+
+@pytest.mark.parametrize(
+    ("provider", "extra_kwargs", "env_file"),
+    [
+        # The documented Azure setup: AZURE_OPENAI_ENDPOINT in .env, and a model may also set azure_endpoint.
+        (
+            "azure",
+            {"azure_endpoint": "https://res.openai.azure.com", "azure_deployment": "d"},
+            {"AZURE_OPENAI_ENDPOINT": "https://res.openai.azure.com"},
+        ),
+        ("zai", {"base_url": "https://api.z.ai/api/coding/paas/v4"}, {}),
+    ],
+)
+def test_a_provider_without_a_key_check_gets_one_no_key_check_warning_whatever_its_endpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provider: str,
+    extra_kwargs: dict[str, str],
+    env_file: dict[str, str],
+) -> None:
+    """Doctor never probes such a key, so its endpoint settings are no reason for a not-checked warning per model."""
+    env_key = env_key_for_provider(provider)
+    assert env_key is not None
+    runtime_paths = _runtime_with_env(tmp_path, {env_key: "k", **env_file})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        models={
+            "first": ModelConfig(provider=provider, id="m", extra_kwargs=extra_kwargs),
+            "second": ModelConfig(provider=provider, id="m", extra_kwargs=extra_kwargs),
+        },
+        router=RouterConfig(model="first"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert f"{provider}: could not validate key (no key check for this provider)" in output
+    assert "not checked" not in output
+
+
+def test_doctor_skips_an_endpoint_model_when_the_credential_store_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the store, a model with an endpoint setting may read the shared key, so it is not checked."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+
+    def unreadable(*_args: object) -> bool:
+        raise OSError
+
+    monkeypatch.setattr("mindroom.cli.doctor.model_uses_own_credential", unreadable)
+    gateway = {"client_params": {"base_url": _GATEWAY, "api_key": "proxy-key"}}
+    config = Config(
+        models={"gateway": ModelConfig(provider="openai", id="m", extra_kwargs=gateway)},
+        router=RouterConfig(model="gateway"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+
+
+def test_doctor_checks_a_shared_key_at_the_provider_s_own_api_beside_a_custom_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A model on the provider's own API still gets the shared key checked there; the gateway model is not checked."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+    gateway = {"client_params": {"base_url": _GATEWAY}}
+    config = Config(
+        models={
+            "hosted": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "gateway": ModelConfig(provider="openai", id="m", extra_kwargs=gateway),
+        },
+        router=RouterConfig(model="hosted"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 1)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer shared"})]
+    output = " ".join(capsys.readouterr().out.split())
+    assert "OPENAI_API_KEY not checked: models.gateway.extra_kwargs.client_params.base_url may send" in output
+
+
+def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``client_params`` set an endpoint and a key, so the shared key goes only to the provider."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+    client_params = {"base_url": "https://proxy.example/v1", "api_key": "proxy-key"}
+    config = Config(
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra", extra_kwargs={"client_params": client_params}),
+        },
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_single_provider("openai", config, runtime_paths) == (1, 0, 0)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer shared"})]
 
 
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -273,6 +636,166 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
     config = _openai_embedder_config(host="http://embeddings.local:9292/v1")
 
     assert _check_memory_embedder(config, _doctor_runtime_paths(tmp_path)) == (0, 0, 1)
+
+
+@pytest.mark.parametrize(
+    ("provider", "llm_config", "exported", "key_name", "reason"),
+    [
+        # Mem0 sends the shared key to the memory LLM's configured endpoint.
+        (
+            "openai",
+            {"model": "m", "openai_base_url": "https://mem-gateway.example/v1"},
+            {},
+            "OPENAI_API_KEY",
+            "memory.llm.config.openai_base_url",
+        ),
+        # Mem0's OpenAI client reads OPENAI_BASE_URL itself, for the shared key and a configured one alike.
+        (
+            "openai",
+            {"model": "m"},
+            {"OPENAI_BASE_URL": "https://mem-gateway.example/v1"},
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+        ),
+        (
+            "openai",
+            {"model": "m", "api_key": "sk-litellm"},
+            {"OPENAI_BASE_URL": "https://litellm.internal/v1"},
+            "memory.llm.config.api_key",
+            "OPENAI_BASE_URL",
+        ),
+        # Mem0's Anthropic client leaves the endpoint to the SDK, which reads ANTHROPIC_BASE_URL.
+        (
+            "anthropic",
+            {"model": "m", "api_key": "sk-litellm"},
+            {"ANTHROPIC_BASE_URL": "https://litellm.internal"},
+            "memory.llm.config.api_key",
+            "ANTHROPIC_BASE_URL",
+        ),
+        # A configured key is skipped too: doctor never works out which endpoint Mem0 sends it to.
+        (
+            "openai",
+            {"model": "m", "api_key": "sk-mem", "openai_base_url": "https://mem.example/v1"},
+            {},
+            "memory.llm.config.api_key",
+            "memory.llm.config.openai_base_url",
+        ),
+        # An OpenRouter gateway: an exported OPENROUTER_API_KEY sends Mem0's OpenAI client, for openrouter and openai
+        # alike, to openrouter_base_url with that key.
+        (
+            "openrouter",
+            {"model": "m", "api_key": "gateway-key", "openrouter_base_url": "https://gateway.example/v1"},
+            {"OPENROUTER_API_KEY": "gateway-key"},
+            "memory.llm.config.api_key",
+            "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
+        ),
+        (
+            "openai",
+            {"model": "m", "api_key": "gateway-key", "openrouter_base_url": "https://gateway.example/v1"},
+            {"OPENROUTER_API_KEY": "gateway-key"},
+            "memory.llm.config.api_key",
+            "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
+        ),
+        # The exported OPENROUTER_API_KEY alone takes an openai memory LLM to OpenRouter, and it replaces a configured
+        # openrouter key.
+        ("openai", {"model": "m"}, {"OPENROUTER_API_KEY": "or-key"}, "OPENAI_API_KEY", "OPENROUTER_API_KEY"),
+        (
+            "openrouter",
+            {"model": "m", "api_key": "sk-or-config"},
+            {"OPENROUTER_API_KEY": "or-key"},
+            "memory.llm.config.api_key",
+            "OPENROUTER_API_KEY",
+        ),
+    ],
+)
+def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_may_send_it_elsewhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provider: str,
+    llm_config: dict[str, str],
+    exported: dict[str, str],
+    key_name: str,
+    reason: str,
+) -> None:
+    """A memory LLM key that Mem0 may send to another server is sent nowhere, neither there nor to the provider."""
+    env_key = env_key_for_provider(provider)
+    assert env_key is not None
+    runtime_paths = _runtime_with_env(tmp_path, {env_key: "shared"}, exported)
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": provider, "config": llm_config}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert (
+        f"Memory LLM: {key_name} not checked: {reason} may send it elsewhere or send another key in its place" in output
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "llm_config", "exported", "sent_request"),
+    [
+        (
+            "openai",
+            {"model": "m", "api_key": "sk-mem"},
+            {},
+            ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}),
+        ),
+        # Mem0 sends the exported OPENROUTER_API_KEY itself, which doctor checks at OpenRouter's own API.
+        (
+            "openrouter",
+            {"model": "m"},
+            {"OPENROUTER_API_KEY": "or-key"},
+            ("https://openrouter.ai/api/v1/key", {"Authorization": "Bearer or-key"}),
+        ),
+    ],
+)
+def test_memory_llm_key_is_checked_at_the_provider_s_own_api_without_endpoint_settings_or_variables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    llm_config: dict[str, str],
+    exported: dict[str, str],
+    sent_request: tuple[str, dict[str, str]],
+) -> None:
+    """A memory LLM key with nothing that could redirect it is checked at its provider's own API."""
+    runtime_paths = _runtime_with_env(tmp_path, {}, exported)
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": provider, "config": llm_config}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
+    assert sent == [sent_request]
+
+
+@pytest.mark.parametrize(
+    ("env_file", "expected", "urls"),
+    [
+        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models"]),
+        ({"GOOGLE_GEMINI_BASE_URL": "https://embed-gateway.example"}, (0, 0, 1), []),
+    ],
+)
+def test_memory_embedder_shared_key_is_checked_only_without_an_endpoint_variable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_file: dict[str, str],
+    expected: tuple[int, int, int],
+    urls: list[str],
+) -> None:
+    """A Mem0 gemini embedder reads GOOGLE_GEMINI_BASE_URL through google-genai, so doctor skips its key then."""
+    runtime_paths = _runtime_with_env(tmp_path, {"GOOGLE_API_KEY": "shared", **env_file})
+    sent = _record_key_checks(monkeypatch)
+    embedder = {"provider": "gemini", "config": {"model": "gemini-embedding-2"}}
+    config = Config(memory={"backend": "mem0", "embedder": embedder}, router=RouterConfig(model="default"))
+
+    assert _check_memory_embedder(config, runtime_paths) == expected
+    assert [url for url, _headers in sent] == urls
 
 
 def test_memory_config_probes_embedder_for_knowledge_only_config(

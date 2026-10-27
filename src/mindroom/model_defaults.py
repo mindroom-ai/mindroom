@@ -15,6 +15,7 @@ __all__ = (
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES",
+    "CLAUDE_PREFIX_CHECKED_THINKING_MODELS",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "CODEX_GPT_ALIAS",
     "CODEX_GPT_ENDPOINT",
@@ -177,6 +178,11 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     "claude-sonnet-5.5",
     "claude-sonnet-5",
 )
+
+# The Claude models whose API checks each replayed thinking block against the system prompt, tools, and messages sent
+# before it (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join them.
+# Literal ids, because a model keeps the check after the preferred defaults move on from it.
+CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:

@@ -1463,6 +1463,20 @@ def test__attachment_ids_for_visible_message_prefers_metadata() -> None:
     assert _attachment_ids_for_visible_message(text_message) == []
 
 
+@pytest.mark.parametrize("msgtype", [[], {}], ids=["list", "dict"])
+def test_edit_with_a_msgtype_that_is_not_text_carries_no_media_attachment(msgtype: object) -> None:
+    """An edit installs whatever msgtype its sender writes, so one that is not text names no media."""
+    message = make_visible_message(event_id="$img", content={"msgtype": "m.image", "body": "photo.jpg"})
+    message.apply_edit(
+        body="photo.jpg",
+        timestamp=1,
+        latest_event_id="$edit",
+        content={"msgtype": msgtype, "body": "photo.jpg"},
+    )
+
+    assert _attachment_ids_for_visible_message(message) == []
+
+
 def test_filter_attachments_for_context_enforces_room_and_thread(tmp_path: Path) -> None:
     """Thread mode should keep only exact room/thread matches."""
     file_path = tmp_path / "payload.txt"

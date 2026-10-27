@@ -16,6 +16,7 @@ import httpx2
 import pytest
 from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.config.models import ModelConfig
@@ -45,7 +46,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from mindroom.providers.anthropic.wire import supports_prefill, supports_structured_outputs
+from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill, supports_structured_outputs
 from mindroom.providers.pipeline import retry as retry_stage
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
@@ -59,7 +60,7 @@ from tests.providers.anthropic_family_support import (
     route_provider,
     sse_reply,
 )
-from tests.providers.golden_support import Wire, pipeline_provider, sse_response
+from tests.providers.golden_support import Wire, claude_stream_events, pipeline_provider, sse_response
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -68,6 +69,9 @@ _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
 )
 _GIF = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+# Sonnet 5.5, the model these tests default to, asks the Anthropic and Vertex routes to drop stale replayed thinking.
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_DROP_STALE = {"prefix_mismatch_behavior": "drop_block"}
 
 
 def _user(text: str = "Hello") -> list[Message]:
@@ -196,7 +200,7 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     assert provider_data["mindroom_model"] == {"id": "claude-sonnet-5-5", "provider": "Anthropic"}
     assert provider_data["mindroom_native_compaction"] is None
     assert [block["type"] for block in provider_data["content_blocks"]] == ["thinking", "text", "tool_use"]
-    assert wire.body()["thinking"] == {"type": "adaptive"}
+    assert wire.body()["thinking"] == {"type": "adaptive", "block_binding": _DROP_STALE}
 
 
 @pytest.mark.asyncio
@@ -626,7 +630,7 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
     )
     request = wire.requests[0]
     assert str(request.url) == "https://api.anthropic.com/v1/messages?beta=true"
-    assert request.headers["anthropic-beta"] == "structured-outputs-2025-11-13"
+    assert request.headers["anthropic-beta"] == f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"
     body = wire.body()
     assert body["stream"] is True
     assert body["tools"][0]["strict"] is True
@@ -734,18 +738,365 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, output_schema=_Answer))
     request = wire.requests[0]
     assert request.url.path.endswith(":streamRawPredict")
-    assert "anthropic-beta" not in request.headers
+    assert request.headers["anthropic-beta"] == _THINKING_BINDING_BETA
     body = wire.body()
     assert "strict" not in body["tools"][0]
     assert "output_config" not in body
 
 
 @pytest.mark.asyncio
+async def test_a_beta_authored_in_request_params_stays_beside_the_thinking_binding_beta(tmp_path: Path) -> None:
+    """A beta an operator writes into ``request_params`` is still sent when MindRoom adds the binding beta."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        extra_kwargs={"request_params": {"betas": ["authored-beta-2026-01-01"]}},
+    )
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    assert wire.requests[0].headers["anthropic-beta"] == f"authored-beta-2026-01-01,{_THINKING_BINDING_BETA}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "extra_kwargs"),
+    [
+        pytest.param(
+            "anthropic",
+            {"request_params": {"extra_headers": {"Anthropic-Beta": "mcp-a, mcp-b", "x-trace": "1"}}},
+            id="request-headers",
+        ),
+        pytest.param(
+            "anthropic",
+            {"default_headers": {"anthropic-beta": "mcp-a,mcp-b", "x-trace": "1"}},
+            id="defaults",
+        ),
+        pytest.param(
+            "anthropic",
+            {"client_params": {"default_headers": {"ANTHROPIC-BETA": "mcp-a,mcp-b", "x-trace": "1"}}},
+            id="client-params-defaults",
+        ),
+        pytest.param(
+            "vertexai_claude",
+            {"request_params": {"extra_headers": {"anthropic-beta": "mcp-a,mcp-b", "x-trace": "1"}}},
+            id="vertex-request-headers",
+        ),
+        pytest.param(
+            "bedrock_claude",
+            {"default_headers": {"anthropic-beta": "mcp-a,mcp-b", "x-trace": "1"}},
+            id="bedrock-defaults",
+        ),
+    ],
+)
+async def test_a_beta_authored_in_a_header_map_joins_the_request_s_betas_in_one_header(
+    tmp_path: Path,
+    route: str,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    """A request's ``extra_headers`` would replace the betas the SDK sends, and those would replace a default one.
+
+    So an authored ``anthropic-beta`` joins the request's betas, first, and the request sends exactly one header; the
+    other authored headers go out unchanged.
+    """
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"betas": ["mcp-b"], **extra_kwargs})
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    headers = wire.requests[0].headers
+    added = [] if route == "bedrock_claude" else [_THINKING_BINDING_BETA]
+    assert [value for name, value in headers.multi_items() if name.lower() == "anthropic-beta"] == [
+        ",".join(["mcp-b", "mcp-a", *added]),
+    ]
+    assert headers["x-trace"] == "1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "bound"),
+    [("anthropic", True), ("vertexai_claude", True), ("bedrock_claude", False)],
+)
+async def test_replayed_thinking_whose_context_changed_is_dropped_where_the_route_takes_the_binding(
+    tmp_path: Path,
+    route: str,
+    *,
+    bound: bool,
+) -> None:
+    """A request whose earlier context changed drops the stale thinking instead of failing, on routes that accept it.
+
+    Sonnet 5.5 checks replayed thinking against the system prompt, tools, and messages before it, which MindRoom's
+    date and turn context change; Bedrock has not shown that it accepts the beta, so it sends no binding.
+    """
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    await claude_turn(route_provider(route, tmp_path, wire), ModelRequest(messages=_user()))
+    request, body = wire.requests[0], wire.body()
+    if bound:
+        assert request.headers["anthropic-beta"] == _THINKING_BINDING_BETA
+        assert body["thinking"] == {"type": "adaptive", "block_binding": _DROP_STALE}
+    else:
+        assert "anthropic-beta" not in request.headers
+        assert "thinking" not in body
+
+
+_EARLIER_THINKING = {"type": "thinking", "thinking": "", "signature": "sig-earlier"}
+_LOOP_THINKING = {"type": "thinking", "thinking": "", "signature": "sig-loop"}
+_LOOP_REDACTED = {"type": "redacted_thinking", "data": "opaque"}
+_LOOP_CALL = {"type": "tool_use", "id": "toolu_1", "name": "look", "input": {}}
+
+
+def _two_turns_with_a_tool_loop() -> list[Message]:
+    """An earlier answered turn, then the current turn's first tool call and its result, each reply with thinking."""
+    call = {"id": "toolu_1", "type": "function", "function": {"name": "look", "arguments": "{}"}}
+    return [
+        *_user("First?"),
+        Message(
+            role="assistant",
+            content="First answer.",
+            provider_data={"content_blocks": [dict(_EARLIER_THINKING), {"type": "text", "text": "First answer."}]},
+        ),
+        Message(role="user", content="Second?"),
+        Message(
+            role="assistant",
+            tool_calls=[call],
+            provider_data={"content_blocks": [dict(_LOOP_THINKING), dict(_LOOP_REDACTED), dict(_LOOP_CALL)]},
+        ),
+        Message(role="tool", content="Seen.", tool_call_id="toolu_1"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id", "extra_kwargs", "bound", "earlier_kept"),
+    [
+        pytest.param("anthropic", "claude-sonnet-5-5", {}, True, True, id="anthropic-bound"),
+        pytest.param("vertexai_claude", "claude-sonnet-5-5", {}, True, True, id="vertex-bound"),
+        pytest.param(
+            "anthropic",
+            "claude-opus-5-5",
+            {
+                "thinking": {"type": "between_tools"},
+                "request_params": {"extra_body": {"thinking": {"type": "adaptive"}}},
+            },
+            True,
+            True,
+            id="raw-override-bound",
+        ),
+        pytest.param(
+            "anthropic",
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "between_tools"}},
+            False,
+            False,
+            id="between-tools",
+        ),
+        pytest.param(
+            "vertexai_claude",
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "between_tools"}},
+            False,
+            False,
+            id="vertex-between-tools",
+        ),
+        pytest.param(
+            "anthropic",
+            "claude-haiku-5-5",
+            {"thinking": {"type": "disabled"}},
+            False,
+            False,
+            id="haiku-disabled",
+        ),
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, False, id="bedrock"),
+        pytest.param(
+            "bedrock_claude",
+            "anthropic.claude-sonnet-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}},
+            True,
+            True,
+            id="bedrock-authored-binding",
+        ),
+        pytest.param(
+            "bedrock_claude",
+            "anthropic.claude-sonnet-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": None}},
+            False,
+            False,
+            id="bedrock-null-binding",
+        ),
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5", {}, False, True, id="bedrock-unchecked-model"),
+    ],
+)
+async def test_a_request_without_the_binding_replays_thinking_only_inside_the_current_tool_loop(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+    *,
+    bound: bool,
+    earlier_kept: bool,
+) -> None:
+    """Where no binding is sent, a stale earlier block would fail the request, so earlier turns lose thinking.
+
+    The API requires the current tool loop's thinking exactly as received and allows leaving out earlier turns'.
+    An authored binding is the operator's choice and gets the beta it needs on every route, and a model without
+    the check keeps every block.
+    """
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
+    provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
+    await claude_turn(provider, ModelRequest(messages=_two_turns_with_a_tool_loop()))
+    assistant_turns = [
+        [{key: value for key, value in block.items() if key != "cache_control"} for block in message["content"]]
+        for message in wire.body()["messages"]
+        if message["role"] == "assistant"
+    ]
+    earlier = [{"type": "text", "text": "First answer."}]
+    assert assistant_turns == [
+        [_EARLIER_THINKING, *earlier] if earlier_kept else earlier,
+        [_LOOP_THINKING, _LOOP_REDACTED, _LOOP_CALL],
+    ]
+    assert (wire.requests[0].headers.get("anthropic-beta") == _THINKING_BINDING_BETA) is bound
+    assert ("block_binding" in (wire.body().get("thinking") or {})) is bound
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path) -> None:
+    """The API rejects an empty assistant turn, so one that had only thinking goes, and the user turns around it merge."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
+    thought = Message(role="assistant", provider_data={"content_blocks": [dict(_EARLIER_THINKING)]})
+    messages = [*_user("First?"), thought, Message(role="user", content="Second?")]
+    await claude_turn(route_provider("bedrock_claude", tmp_path, wire), ModelRequest(messages=messages))
+    (turn,) = wire.body()["messages"]
+    assert turn["role"] == "user"
+    assert [block["text"] for block in turn["content"]] == ["First?", "Second?"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_id", "extra_kwargs", "overrides", "sent"),
+    [
+        pytest.param(
+            "claude-fable-5-1",
+            {"thinking": {"type": "adaptive", "display": "summarized"}},
+            RequestOverrides(),
+            {"type": "adaptive", "display": "summarized", "block_binding": _DROP_STALE},
+            id="authored-adaptive",
+        ),
+        pytest.param(
+            "claude-opus-5-5",
+            {"thinking": {"type": "adaptive"}, "request_params": {"extra_body": {"thinking": {"type": "adaptive"}}}},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="raw-override",
+        ),
+        pytest.param(
+            "claude-haiku-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}},
+            id="authored-binding",
+        ),
+        pytest.param(
+            "claude-haiku-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": {}}},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": {}},
+            id="authored-default-binding",
+        ),
+        pytest.param(
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": None}},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="authored-null-binding",
+        ),
+        pytest.param(
+            "claude-opus-5",
+            {"thinking": {"type": "adaptive", "block_binding": None}},
+            RequestOverrides(),
+            {"type": "adaptive"},
+            id="unchecked-null-binding",
+        ),
+        pytest.param(
+            "anthropic/claude-sonnet-5-5",
+            {},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="gateway-id",
+        ),
+        pytest.param(
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "between_tools"}},
+            RequestOverrides(),
+            {"type": "between_tools"},
+            id="between-tools",
+        ),
+        pytest.param("claude-sonnet-5-5", {}, RequestOverrides(disable_thinking=True), None, id="thinking-disabled"),
+        pytest.param("claude-opus-5", {}, RequestOverrides(), None, id="unchecked-model"),
+        pytest.param("claude-mythos-5-1", {}, RequestOverrides(), None, id="unchecked-mythos"),
+    ],
+)
+async def test_the_thinking_binding_rides_on_adaptive_thinking_of_checked_models(
+    tmp_path: Path,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+    overrides: RequestOverrides,
+    sent: dict[str, Any] | None,
+) -> None:
+    """The API rejects a binding beside other thinking types, an authored one is kept, and older models get none."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider("anthropic", tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
+    await claude_turn(provider, ModelRequest(messages=_user(), overrides=overrides))
+    assert wire.body().get("thinking") == sent
+    bound = sent is not None and "block_binding" in sent
+    assert (wire.requests[0].headers.get("anthropic-beta") == _THINKING_BINDING_BETA) is bound
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["message_start", "message_delta"])
+async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_path: Path, event: str) -> None:
+    """Only blocks the API dropped are logged; a block it let through despite the changed context is not.
+
+    The API reports them on ``message_start``, and on the final ``message_delta`` after a mid-stream fallback.
+    """
+    events = claude_stream_events(claude_message([{"type": "text", "text": "Hi."}]))
+    reported = events[0]["message"] if event == "message_start" else events[-2]
+    reported["input_transformations"] = [
+        {"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_binding_mismatch"},
+        {"type": "thinking_dropped", "path": "messages.3.content.0", "reason": "model_binding_mismatch"},
+        {"type": "thinking_mismatch_allowed", "path": "messages.5.content.0", "reason": "prefix_binding_mismatch"},
+    ]
+    wire = Wire(sse_response(events, named=True))
+    with capture_logs() as logs:
+        await claude_turn(route_provider("vertexai_claude", tmp_path, wire), ModelRequest(messages=_user()))
+    (entry,) = [log for log in logs if log["event"] == "claude_replayed_thinking_dropped"]
+    assert (entry["model_id"], entry["blocks"], entry["reasons"]) == (
+        "claude-sonnet-5-5",
+        2,
+        ["model_binding_mismatch", "prefix_binding_mismatch"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "checked"),
+    [
+        ("claude-fable-5-1", True),
+        ("anthropic.claude-opus-5-5", True),
+        ("claude-sonnet-5-5@20261001", True),
+        ("anthropic/claude-haiku-5-5", True),
+        ("claude-fable-5", False),
+        ("claude-mythos-5-1", False),
+        ("claude-sonnet-4-5", False),
+    ],
+)
+def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(model_id: str, *, checked: bool) -> None:
+    """Fable 5.1 and the 5.5 models check replayed thinking under every route's spelling; older models and Mythos 5.1 do not."""
+    assert checks_thinking_prefix(model_id) is checked
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("route", "strict_sent", "url_suffix", "beta_header"),
     [
-        ("anthropic", True, "/v1/messages?beta=true", "structured-outputs-2025-11-13"),
-        ("vertexai_claude", False, ":streamRawPredict", None),
+        ("anthropic", True, "/v1/messages?beta=true", f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"),
+        ("vertexai_claude", False, ":streamRawPredict", _THINKING_BINDING_BETA),
         ("bedrock_claude", True, "/v1/messages?beta=true", None),
     ],
 )
@@ -919,7 +1270,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         ),
     )
     request = wire.requests[0]
-    assert request.headers["anthropic-beta"] == "compact-2026-01-12"
+    assert request.headers["anthropic-beta"] == f"compact-2026-01-12,{_THINKING_BINDING_BETA}"
     assert str(request.url).endswith("?beta=true")
     edit = wire.body(0)["context_management"]["edits"][0]
     assert (edit["type"], edit["trigger"], edit["pause_after_compaction"]) == (
@@ -968,7 +1319,7 @@ async def test_authored_compaction_edits_keep_their_policy_and_cannot_pause(tmp_
     assert replay.threshold is None
     await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
     assert wire.body()["context_management"] == authored
-    assert wire.requests[0].headers["anthropic-beta"] == "compact-2026-01-12"
+    assert wire.requests[0].headers["anthropic-beta"] == f"compact-2026-01-12,{_THINKING_BINDING_BETA}"
 
     paused = {"edits": [{"type": "compact_20260112", "pause_after_compaction": True}]}
     pausing = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": paused})
@@ -1202,7 +1553,7 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     )
     await claude_turn(direct, ModelRequest(messages=_user()))
     request = wire.requests[-1]
-    assert str(request.url) == "https://gateway.example/anthropic/v1/messages"
+    assert str(request.url) == "https://gateway.example/anthropic/v1/messages?beta=true"
     assert request.headers["x-api-key"] == "params-key"
     assert request.headers["x-mindroom"] == "authored"
 

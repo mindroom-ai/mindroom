@@ -922,11 +922,15 @@ async def test_a_second_malformed_tool_call_fails_the_request(runtime_paths: Run
 
 
 def test_source_modules_build_models_through_the_registry_module() -> None:
-    """``src`` calls ``build_model_provider`` on its module, the one attribute tests install their models at."""
+    """``src`` calls ``build_model_provider`` on its module, the one attribute tests install their models at.
+
+    ``plugin_api`` only re-exports it for plugins, and Tach keeps every MindRoom module from importing ``plugin_api``.
+    """
     source_root = Path(__file__).resolve().parents[2] / "src" / "mindroom"
     bindings = [
         f"{path.relative_to(source_root)}:{node.lineno}"
         for path in sorted(source_root.rglob("*.py"))
+        if path != source_root / "plugin_api.py"
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
         if isinstance(node, ast.ImportFrom) and any(alias.name == "build_model_provider" for alias in node.names)
     ]

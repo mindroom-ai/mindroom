@@ -26,7 +26,7 @@ from mindroom.model_defaults import (
     ZAI_BASE_URL_DEFAULT,
     claude_rejects_sampling_controls,
 )
-from mindroom.providers.credentials import model_api_key, uses_alternative_auth
+from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -198,7 +198,7 @@ class ProviderRuntime:
 def _configured_key(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> str | None:
     """Return the configured key, else the provider's shared key; routes in ``_NO_SHARED_KEY`` take no shared key."""
     if route_key in _NO_SHARED_KEY:
-        return model_config.configured_api_key()
+        return own_api_key(model_config)
     key = model_api_key(model_config, runtime.runtime_paths)
     # Azure and Z.ai keys may also come straight from their variables, including the ``_FILE`` forms.
     if key or uses_alternative_auth(model_config, runtime.runtime_paths) or route_key not in _ROUTE_KEY_VARIABLES:

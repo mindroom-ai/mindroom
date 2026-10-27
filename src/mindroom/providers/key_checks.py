@@ -28,10 +28,9 @@ class ProviderKeyCheck:
     header_prefix: str = ""
     extra_headers: tuple[tuple[str, str], ...] = ()
 
-    def request(self, api_key: str, *, url: str | None = None) -> tuple[str, dict[str, str]]:
-        """Return the URL and headers that send ``api_key`` to ``url``, the check's own URL unless given."""
-        target = url or self.url
-        return target, {self.header_name: f"{self.header_prefix}{api_key}", **dict(self.extra_headers)}
+    def request(self, api_key: str) -> tuple[str, dict[str, str]]:
+        """Return the URL and headers that send ``api_key`` to the check's URL."""
+        return self.url, {self.header_name: f"{self.header_prefix}{api_key}", **dict(self.extra_headers)}
 
 
 def _bearer(url: str) -> ProviderKeyCheck:

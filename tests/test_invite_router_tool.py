@@ -17,6 +17,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
+from mindroom.matrix.personal_room_store import (
+    PersonalRoomAdoption,
+    PersonalRoomRecord,
+    personal_room_record_path,
+    write_personal_room,
+)
 from mindroom.message_target import MessageTarget
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -511,3 +517,54 @@ async def test_invite_router_reports_matrix_invite_failure(tmp_path: Path) -> No
         result = await InviteRouterTools().invite_router()
 
     assert result == "Error: Router invite failed; current agent may lack invite permission."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["code", "helper"])
+@pytest.mark.parametrize("router_admitted_by", [None, "router_user_id", "additional_user_ids"])
+async def test_invite_router_refuses_an_adopted_personal_room_that_does_not_admit_the_router(
+    tmp_path: Path,
+    owner: str,
+    router_admitted_by: str | None,
+) -> None:
+    """The room's guest check would remove the router again, so inviting it would only start a loop."""
+    context, client = _tool_context(tmp_path)
+    router_id = "@mindroom_router:localhost"
+    write_personal_room(
+        personal_room_record_path(context.runtime_paths, owner, "@alice:localhost"),
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal:localhost",
+            source_room_id="!lobby:localhost",
+            room_id="!project:localhost",
+            adoption=PersonalRoomAdoption(
+                creator_user_id="@alice:localhost",
+                agent_user_id=f"@mindroom_{owner}:localhost",
+                router_user_id=router_id if router_admitted_by == "router_user_id" else None,
+                # Another agent's room admits the calling agent explicitly.
+                additional_user_ids=[
+                    *(["@mindroom_code:localhost"] if owner != "code" else []),
+                    *([router_id] if router_admitted_by == "additional_user_ids" else []),
+                ],
+            ),
+        ),
+    )
+    client.room_get_state_event.side_effect = [
+        nio.RoomGetStateEventError("Not found", status_code="M_NOT_FOUND", room_id="!project:localhost"),
+        nio.RoomGetStateEventResponse(
+            content={"membership": "join"},
+            event_type="m.room.member",
+            state_key=router_id,
+            room_id="!project:localhost",
+        ),
+    ]
+    client.room_invite.return_value = nio.RoomInviteResponse()
+
+    with tool_runtime_context(context):
+        result = await InviteRouterTools().invite_router()
+
+    if router_admitted_by is None:
+        assert result.startswith("Error: This adopted personal room does not admit the router")
+        client.room_invite.assert_not_awaited()
+    else:
+        assert result == "Router joined."

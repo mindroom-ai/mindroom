@@ -234,6 +234,7 @@ Each requester's private knowledge path becomes `<their private root>/memory`, a
 The fields are listed under [Private Fields](configuration/agents.md#private-fields).
 `private.knowledge.path` is required unless `private.knowledge.enabled` is `false`; it must be relative to the private root (`.` allowed) and cannot be absolute or escape with `..`.
 Private knowledge has no background file watcher: with `watch: true` or `git`, it refreshes when the agent uses it, and with `watch: false` and no `git`, external edits are not picked up automatically.
+A private knowledge base can hold 256 MiB of vectors, about 43,000 chunks with the default `text-embedding-3-small` embedder; past that its searches fail until files are removed.
 An agent can combine private knowledge with shared top-level `knowledge_bases`, which stay the mechanism for documents shared across agents or users.
 Private knowledge is available in normal agent conversations, not through the OpenAI-compatible `/v1` API.
 With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoom rejects `.` and any path that overlaps private file memory (`memory/`, `MEMORY.md`) or content copied from `template_dir`.
@@ -249,22 +250,27 @@ Each result still reports its cosine distance as `distance`.
 ### Reranking
 
 A reranker reads the query together with each candidate chunk and reorders them.
-A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, `BAAI/bge-reranker-v2-m3` put the right page first for 86% of questions instead of 79%, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
-Strong rerankers need a GPU or a hosted API to answer quickly; `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3`, and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
 knowledge_reranker:
-  provider: cohere                 # or sentence_transformers
+  provider: cohere                 # or sentence_transformers, vertex_ai
   model: rerank-v3.5
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | `cohere` or `sentence_transformers` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use |
-| `model` | string | required | Rerank model name |
+| `provider` | `cohere`, `sentence_transformers`, or `vertex_ai` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use; `vertex_ai` calls Google's Vertex AI ranking API |
+| `model` | string | required | Rerank model name, such as `semantic-ranker-default@latest` for `vertex_ai` |
 | `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
 | `api_key` | string | `null` | API key for `cohere` |
 | `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
+
+`vertex_ai` signs in with the credential file `GOOGLE_APPLICATION_CREDENTIALS` names, or else Google Application Default Credentials, and ranks in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name, such as the cluster's project on GKE.
+Both variables may be set in MindRoom's `.env`, as for Gemini on Vertex AI.
+That project needs the `discoveryengine.googleapis.com` API, and the identity needs `roles/discoveryengine.viewer`, the smallest predefined role that may rank.
+The ranking API reads the first 1024 tokens of each chunk with its default models, 512 with older ones; MindRoom sends candidates in concurrent requests of 100, the unit Google bills as one query.
 
 The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
 It applies to `search_knowledge_base` only; automatic memory search keeps the merged ranking, so it adds no latency to replies.

@@ -264,6 +264,15 @@ def test_plan_prefixes_relayed_media_caption() -> None:
     assert captioned.content["body"] == "Dominic: look"
 
 
+@pytest.mark.parametrize("msgtype", [[], {}], ids=["list", "dict"])
+def test_plan_relays_a_msgtype_that_is_not_text_as_plain_content(msgtype: object) -> None:
+    """An edit can install any msgtype its sender writes, so one that is not text is not media."""
+    [copy] = _plan(_message(HUMAN_ID, {"msgtype": msgtype, "body": "photo.png"}))
+
+    assert copy.content["body"] == "Dominic: photo.png"
+    assert "filename" not in copy.content
+
+
 def test_plan_name_falls_back_to_user_id() -> None:
     """A sender without a display name is named by Matrix user ID."""
     [copy] = _plan(_message(HUMAN_ID, {"msgtype": "m.text", "body": "hi"}), display_names={})
