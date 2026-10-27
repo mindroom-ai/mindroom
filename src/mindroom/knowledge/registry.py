@@ -186,6 +186,8 @@ def prefetch_shared_collections(config: Config, runtime_paths: RuntimePaths, sto
     """Read every configured shared semantic base's published collection file into the page cache, until ``stop``."""
     files: list[Path] = []
     for base_id in config.knowledge_bases:
+        if stop.is_set():
+            return
         if config.get_knowledge_base_config(base_id).mode != "semantic":
             continue
         if config.get_private_knowledge_base_agent(base_id) is not None:

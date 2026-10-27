@@ -464,6 +464,8 @@ def read_into_page_cache(files: Iterable[Path], stop: threading.Event) -> None:
     """
     buffer = bytearray(_PREFETCH_CHUNK_BYTES)
     for file in files:
+        if stop.is_set():
+            return
         try:
             with file.open("rb", buffering=0) as handle:
                 while not stop.is_set() and handle.readinto(buffer):
