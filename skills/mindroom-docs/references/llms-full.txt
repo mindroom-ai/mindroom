@@ -18853,6 +18853,54 @@ If the runtime log shows `The bound Matrix device store is missing`, `Matrix str
 Restore the matching backups instead of deleting state, because automatic device replacement is unsupported.
 See [Moving a journal safely](https://docs.mindroom.chat/deployment/storage/#moving-a-journal-safely) for copying or adopting a journal database, and [Device recovery after the upgrade](https://docs.mindroom.chat/deployment/upgrades/#device-recovery-after-the-upgrade) for device-store recovery.
 
+### Checking a restore
+
+Before letting users back in, check that:
+
+1. Files on the restored volumes keep the owners and modes of the backup, by default uid and gid 1000 for the runtime's files.
+2. Every database under `tracking/` and a sample of session databases pass `PRAGMA quick_check`, with no `-journal` file beside them (see [Inspecting copies](#inspecting-copies)).
+3. Tuwunel runs the image it ran when the backup was taken, so its first start runs no database migration, and answers `/_matrix/client/versions`.
+4. The runtime becomes ready and logs none of the errors named under [Restore units](#restore-units) and [Restoring](#restoring).
+5. A message to an agent in a test room gets exactly one reply, and older messages are not answered again.
+6. A tool that uses a connected account works, and `!list_schedules` shows the expected schedules.
+7. Your backup schedule covers the restored volumes.
+
+### Inspecting copies
+
+Run bulk reads, such as scans across session databases, on a restored copy instead of the live volumes.
+Session databases use SQLite's rollback journal, so a long read of a live one blocks the agent's writes and can make them fail.
+
+Copy each database together with any `-journal`, `-wal`, or `-shm` file beside it.
+A `-journal` file left beside a database means a write was cut off: SQLite undoes it the next time the database is opened read-write, and refuses to read it read-only until then.
+Check a copy with Python's `sqlite3` module, which the runtime image includes; it prints `ok` for an intact database:
+
+```bash
+python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA quick_check").fetchone()[0])' /copy/path/to/database.db
+```
+
+On a read-only mount, open databases as `file:<path>?immutable=1`, which reads without locks or side files, and only when no `-journal` or `-wal` file sits beside them.
+
+One-off pods that mount the storage volume, for example to copy or inspect it, should run as uid and gid 1000, the runtime image's user, so files they create stay writable for MindRoom.
+Give them `fsGroupChangePolicy: OnRootMismatch`, as the chart's own pods have, or no `fsGroup`.
+Otherwise, on volume types that support it, the kubelet changes the group of every file on the volume before the pod starts and gives that group read and write access, including to private files, which on a large volume also delays the start for a long time.
+
+### Starting a copy beside the original
+
+A restored copy holds the original's Matrix accounts, OAuth tokens, and schedules, so a copy with network access acts as the original:
+
+- With the original's homeserver in reach, it answers messages and runs due schedules in real rooms.
+- With a provider that rotates refresh tokens, the copy's first token refresh invalidates the token the original holds, and the user has to connect that account again.
+- Tools with outside effects, such as sending email, run for real.
+
+Start a copy while the original runs only in isolation:
+
+- Its own namespaces for the runtime and its workers, each with a default-deny egress NetworkPolicy and rules that allow only cluster DNS and traffic within the copy's namespaces, on a cluster that enforces NetworkPolicy.
+  Before starting MindRoom, check from a test pod in each namespace that outside connections fail.
+- No cloud identity: no workload identity annotations on its service accounts and no access to the node's metadata server.
+- Dummy values for provider API keys and other Secrets, except the keys the copied data needs, such as the credentials encryption key from [Restore units](#restore-units).
+- With `appservice` accounts, new tokens in the copied homeserver's registration and the runtime, so the copy cannot sign in to the original homeserver as the application service.
+- No Ingress, LoadBalancer Service, CronJobs, or tunnel connector; a connector started with the original's tunnel credentials joins that tunnel and receives users' traffic.
+
 See [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/#secrets-management) and [Database Migrations](https://docs.mindroom.chat/deployment/saas-platform/#database-migrations).
 
 # Sandbox Proxy Isolation
