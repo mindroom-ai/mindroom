@@ -28,7 +28,7 @@ class ConversionSpaceError(RuntimeError):
 # LEGACY_COMPAT: Agno-layout conversation databases kept as a backup before their conversion.
 # Legacy format: A conversation database without `<s>_log_meta`, in the Agno 3 run-row layout, or the Agno 2 layout
 # the conversion's Agno-era steps still read.
-# Last legacy release: v2026.10.569; replacement: the next release, storage v2's `<s>_log_*` tables.
+# Last legacy release: v2026.10.604; replacement: the next release, storage v2's `<s>_log_*` tables.
 # Handling: Before the conversion writes anything, copy the file byte for byte to `<name>.db.pre-storage-v2` beside
 # it, so a downgrade can restore it; a retry replaces an earlier attempt's backup, and MindRoom never deletes the backup
 # of a converted database.
