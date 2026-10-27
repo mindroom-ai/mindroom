@@ -1,4 +1,4 @@
-"""``NextBackend``: the action vocabulary through the conversation store and the helpers production calls.
+"""``StoreBackend``: the action vocabulary through the conversation store and the helpers production calls.
 
 Each primitive calls what production calls at that point, or, where production binds the call to a bot or a lane,
 the same store methods in the same order. A production helper that returns nothing of what it stored runs on
@@ -170,7 +170,7 @@ def replay_view(messages: Sequence[dict[str, Any]], status: str, folded: Collect
     ]
 
 
-class NextBackend(Driver):
+class StoreBackend(Driver):
     """The oracle's backend for the conversation store.
 
     It keeps what each run's writes stored, so a test can check what the store shows against it: the last message

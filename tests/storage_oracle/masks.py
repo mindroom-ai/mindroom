@@ -8,7 +8,7 @@ run the other refuses) cannot be undone that way; its mask asserts the new behav
 sequence (``Diverged``).
 
 To undo message differences, the backend checks every run the v2 store shows against what its writes left
-(``NextBackend.expected_view``), and keeps the message list the Agno-layout store held of each run, which kept history
+(``StoreBackend.expected_view``), and keeps the message list the Agno-layout store held of each run, which kept history
 copies, and the messages a fold took until a whole-run rewrite of a loaded copy. It also keeps where that store's
 copy of a manual compaction request in the session state was: in each loaded session's state, as each one last
 stored it, and in the stored row.
@@ -36,8 +36,8 @@ from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES
 from mindroom.session_storage.store import ConversationStore
 from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.backend import SESSION_ID
-from tests.storage_oracle.next_backend import (
-    NextBackend,
+from tests.storage_oracle.store_backend import (
+    StoreBackend,
     edit_cut,
     redaction_cut,
 )
@@ -182,8 +182,8 @@ class _Listed:
         return self._runs
 
 
-class MaskedBackend(NextBackend):
-    """``NextBackend``, reporting what the Agno-layout store would have reported, change by named change."""
+class MaskedBackend(StoreBackend):
+    """``StoreBackend``, reporting what the Agno-layout store would have reported, change by named change."""
 
     def __init__(self, root: Path, kind: ScenarioKind, determinism: Determinism) -> None:
         self.used: set[str] = set()

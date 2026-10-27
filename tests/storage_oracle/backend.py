@@ -1,9 +1,9 @@
-"""The backend protocol and the driver that interprets the action vocabulary over a store's primitives.
+"""The driver that interprets the action vocabulary over a store's primitives.
 
-``Driver`` owns everything a backend shares: which run an action picks, which records and messages it builds, and the
-order of the storage calls a turn makes. A backend implements only the primitives, one per writer or reader of spec
-v4 section 3.7, through its store's own API, so two backends driven by one scenario differ exactly where their stores
-behave differently. Every decision reads the driver's own state or a load, never a store's tables.
+``Driver`` owns which run an action picks, which records and messages it builds, and the order of the storage calls a
+turn makes. ``StoreBackend`` (``store_backend.py``) implements the primitives, one per writer or reader of spec v4
+section 3.7, through the conversation store's own API; ``MaskedBackend`` (``masks.py``) reports through it what the
+Agno-layout store would have reported. Every decision reads the driver's own state or a load, never a store's tables.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.run import resumed_record
 from mindroom.constants import (
@@ -64,18 +64,6 @@ LEGACY_EVENTS: dict[int, tuple[str, ...]] = {
     1: ("$legacy-0", "$a0", "$read-by-a0", "$a1", "$read-by-a1"),
     2: ("$legacy-0", "$a0", "$read-by-a0"),
 }
-
-
-class Backend(Protocol):
-    """One store under the oracle: it applies actions and reports the observables of spec v4 section 4.7."""
-
-    def apply(self, action: Action) -> object:
-        """Apply one action and return its JSON-safe outcome."""
-        ...
-
-    def observe(self) -> dict[str, object]:
-        """Return the conversation's observables now, JSON-safe."""
-        ...
 
 
 @dataclass(frozen=True)

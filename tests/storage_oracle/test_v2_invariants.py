@@ -1,6 +1,6 @@
 """The storage v2 layout keeps its own invariants after every action of generated conversations.
 
-The conversations are the oracle's vocabulary (``tests/storage_oracle/actions.py``) through ``NextBackend``, drawn by
+The conversations are the oracle's vocabulary (``tests/storage_oracle/actions.py``) through ``StoreBackend``, drawn by
 hypothesis, except that a fold never follows a member's pause within one attempt, since a team run's loop sends no
 request after a member pauses. After every action the raw tables are read and checked against the invariants of
 PLAN-3095 task 7. The replay check (I6) takes its expectations from an independent model: the place spec 3.2 gives
@@ -30,7 +30,7 @@ from mindroom.usage.storage import quote_identifier
 from tests.storage_oracle.actions import KIND_WEIGHTS, NAMED, OPENING_KINDS, Action, Scenario
 from tests.storage_oracle.backend import SESSION_ID, summary_tokens
 from tests.storage_oracle.determinism import deterministic
-from tests.storage_oracle.next_backend import NextBackend
+from tests.storage_oracle.store_backend import StoreBackend
 
 if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationState
@@ -88,7 +88,7 @@ class _Tables:
         return [row for row in self.rows if row.scope_key == scope_key]
 
 
-def _read(backend: NextBackend) -> _Tables:
+def _read(backend: StoreBackend) -> _Tables:
     names = backend.names
     with closing(sqlite3.connect(backend.store.path)) as connection:
         (next_seq,) = connection.execute(f"SELECT next_seq FROM {quote_identifier(names.log_meta)}").fetchone()  # noqa: S608
@@ -139,8 +139,8 @@ def _latest_barrier_through(rows: list[_Row]) -> int:
     return next((row.through for row in reversed(rows) if row.summary is None), 0)
 
 
-class _InvariantBackend(NextBackend):
-    """``NextBackend`` that checks the v2 invariants after every action, against what earlier actions left."""
+class _InvariantBackend(StoreBackend):
+    """``StoreBackend`` that checks the v2 invariants after every action, against what earlier actions left."""
 
     folds_after_member_pause = False
 

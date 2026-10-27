@@ -1,6 +1,6 @@
 """Comparison 3: a converted end state and the native one, driven by the same further actions, stay equal.
 
-Each recorded sequence is driven twice through ``NextBackend``. One backend keeps its database, the native end state.
+Each recorded sequence is driven twice through ``StoreBackend``. One backend keeps its database, the native end state.
 The other's database is replaced by the recorded Agno-layout end state, which it then opens as the runtime does,
 converting it, so both backends hold the same driver state over the two databases. Where both show the same
 observables, they take the same further random actions, and both must report the same outcome and show the same
@@ -20,8 +20,8 @@ import pytest
 
 from tests.storage_oracle.actions import Scenario, draw
 from tests.storage_oracle.determinism import deterministic
-from tests.storage_oracle.next_backend import NextBackend
 from tests.storage_oracle.record import SEQUENCES, decode, first_difference, sequence_id
+from tests.storage_oracle.store_backend import StoreBackend
 
 if TYPE_CHECKING:
     from tests.storage_oracle.determinism import Determinism
@@ -63,11 +63,11 @@ def _json[Value](value: Value) -> Value:
     return json.loads(json.dumps(value, sort_keys=True))
 
 
-def _pair(path: Path, root: Path, determinism: Determinism) -> tuple[Scenario, NextBackend, NextBackend]:
+def _pair(path: Path, root: Path, determinism: Determinism) -> tuple[Scenario, StoreBackend, StoreBackend]:
     """Return the recorded sequence, its native end state, and its converted recorded one, under one driver state."""
     scenario = Scenario.from_json(decode(path.read_text(encoding="utf-8"))["scenario"])
-    native = NextBackend(root / "native", scenario.kind, determinism)
-    converted = NextBackend(root / "converted", scenario.kind, determinism)
+    native = StoreBackend(root / "native", scenario.kind, determinism)
+    converted = StoreBackend(root / "converted", scenario.kind, determinism)
     for action in scenario.actions:
         native.apply(action)
         converted.apply(action)
@@ -78,7 +78,7 @@ def _pair(path: Path, root: Path, determinism: Determinism) -> tuple[Scenario, N
     return scenario, native, converted
 
 
-def _observed(determinism: Determinism, native: NextBackend, converted: NextBackend) -> tuple[Any, Any]:
+def _observed(determinism: Determinism, native: StoreBackend, converted: StoreBackend) -> tuple[Any, Any]:
     """Observe both backends as of one moment: the second sees the ids the first saw minted."""
     with determinism.ids_repeated():
         seen = _json(native.observe())
