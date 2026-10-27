@@ -17,6 +17,15 @@ class _Mem0Client:
 
     def __init__(self) -> None:
         self.filters: dict[str, object] = {}
+        self.top_level: dict[str, dict[str, object]] = {}
+
+    def add(self, messages: list[dict[str, str]], **kwargs: object) -> dict[str, list[dict[str, str]]]:
+        self.top_level["add"] = kwargs
+        return {"results": [{"id": "m2", "memory": messages[-1]["content"], "event": "ADD"}]}
+
+    def delete_all(self, **kwargs: object) -> dict[str, str]:
+        self.top_level["delete_all"] = kwargs
+        return {"message": "Memories deleted successfully!"}
 
     def search(self, query: str, **kwargs: object) -> dict[str, list[dict[str, str]]]:
         _reject_top_level_entity_params(kwargs, "search")
@@ -34,7 +43,7 @@ def test_mem0_tool_search_and_listing_pass_the_user_as_a_filter(
     monkeypatch: pytest.MonkeyPatch,
     api_key: str | None,
 ) -> None:
-    """The toolkit's search and get-all return memories from Mem0 2, local or platform, instead of its error text."""
+    """Every toolkit function works on Mem0 2, local or platform; search and get-all pass the user as a filter."""
     monkeypatch.delenv("MEM0_API_KEY", raising=False)
     client = _Mem0Client()
     with (
@@ -45,9 +54,15 @@ def test_mem0_tool_search_and_listing_pass_the_user_as_a_filter(
     # The toolkit reads its configured user and never this run's context.
     run_context: Any = None
 
+    added = toolkit.add_memory(run_context, "Likes green tea")
     found = toolkit.search_memory(run_context, "tea")
     listed = toolkit.get_all_memories(run_context)
+    deleted = toolkit.delete_all_memories(run_context)
 
+    assert json.loads(added) == {"results": [{"id": "m2", "memory": "Likes green tea", "event": "ADD"}]}
     assert json.loads(found) == [{"id": "m1", "memory": "Likes green tea"}]
     assert json.loads(listed) == [{"id": "m1", "memory": "Likes green tea"}]
+    assert deleted == "Successfully deleted all memories for user_id: alice."
     assert client.filters == {"search tea": {"user_id": "alice"}, "get_all": {"user_id": "alice"}}
+    # Mem0 2 still takes the user of an add or a delete-all as a top-level argument.
+    assert client.top_level == {"add": {"user_id": "alice", "infer": True}, "delete_all": {"user_id": "alice"}}
