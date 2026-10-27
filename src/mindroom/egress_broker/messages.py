@@ -76,6 +76,12 @@ _READ_ONLY = (
     "Ask the user to allow read and write at manage_url if the agent needs it, then retry."
 )
 _READ_ONLY_SHARED_ACCOUNT = "Agent Keys may use this shared agent's {provider} account for {service} only to read, so this request was refused. "
+_READ_ONLY_SHARED = (
+    _READ_ONLY_SHARED_ACCOUNT + "Only its credential managers ({managers}) can allow read and write, at manage_url."
+)
+_READ_ONLY_SHARED_WITHOUT_MANAGERS = (
+    _READ_ONLY_SHARED_ACCOUNT + "Only an administrator can allow read and write, at manage_url."
+)
 _PATH_SHARED = _PATH_OUTSIDE + "Only its credential managers ({managers}) can change this, at manage_url."
 _PATH_ADMINISTRATOR = _PATH_OUTSIDE + "Only an administrator can change this, at manage_url."
 # The spec words `bad_request` for the ambiguous-path refusal; a request the broker cannot read at all has no path.
@@ -118,35 +124,6 @@ _WITHOUT_PAGE_LINKED = {
 
 
 @dataclass(frozen=True)
-class _AllowTexts:
-    """The texts of a refusal that names who may allow an account: by scope, and whether it is the requester's own."""
-
-    personal: str
-    without_page: str
-    shared: str
-    shared_without_managers: str
-    own_account: str
-
-
-_REUSE_OFF_TEXTS = _AllowTexts(
-    personal=_REUSE_OFF,
-    without_page=_REUSE_OFF_WITHOUT_PAGE,
-    shared=_REUSE_OFF_SHARED,
-    shared_without_managers=_REUSE_OFF_SHARED_WITHOUT_MANAGERS,
-    own_account=_REUSE_OFF_OWN_ACCOUNT,
-)
-_READ_ONLY_TEXTS = _AllowTexts(
-    personal=_READ_ONLY,
-    without_page=_READ_ONLY_WITHOUT_PAGE,
-    shared=_READ_ONLY_SHARED_ACCOUNT
-    + "Only its credential managers ({managers}) can allow read and write, at manage_url.",
-    shared_without_managers=_READ_ONLY_SHARED_ACCOUNT
-    + "Only an administrator can allow read and write, at manage_url.",
-    own_account=_READ_ONLY,
-)
-
-
-@dataclass(frozen=True)
 class ScopeInfo:
     """Who can fix a missing key for one requester's scope.
 
@@ -173,17 +150,10 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
     requester_owned: bool,
 ) -> str:
     without_page = not (shared or personal_page)
-    allow_texts = _REUSE_OFF_TEXTS if code == "credential_not_configured" and reuse_off else None
+    if code == "credential_not_configured" and reuse_off:
+        return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "read_only":
-        allow_texts = _READ_ONLY_TEXTS
-    if allow_texts is not None:
-        return _allow_template(
-            allow_texts,
-            managers,
-            shared=shared,
-            without_page=without_page,
-            requester_owned=requester_owned,
-        )
+        return _read_only_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "credential_not_configured" and connectable and not without_page:
         return _CONNECTABLE
     if code == "credential_not_configured" and shared:
@@ -204,21 +174,22 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
         raise ValueError(msg) from None
 
 
-def _allow_template(
-    texts: _AllowTexts,
-    managers: Sequence[str],
-    *,
-    shared: bool,
-    without_page: bool,
-    requester_owned: bool,
-) -> str:
+def _reuse_off_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
     if without_page:
-        return texts.without_page
+        return _REUSE_OFF_WITHOUT_PAGE
     if not shared:
-        return texts.personal
+        return _REUSE_OFF
     if requester_owned:
-        return texts.own_account
-    return texts.shared if managers else texts.shared_without_managers
+        return _REUSE_OFF_OWN_ACCOUNT
+    return _REUSE_OFF_SHARED if managers else _REUSE_OFF_SHARED_WITHOUT_MANAGERS
+
+
+def _read_only_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
+    if without_page:
+        return _READ_ONLY_WITHOUT_PAGE
+    if not shared or requester_owned:
+        return _READ_ONLY
+    return _READ_ONLY_SHARED if managers else _READ_ONLY_SHARED_WITHOUT_MANAGERS
 
 
 def refusal_body(
