@@ -1684,3 +1684,26 @@ async def test_a_named_service_still_reads_only_with_an_account_allowed_to_read(
     assert read.status_code == 200
     assert lookup.requests == [SecretRequest(method="POST", path="/echo"), SecretRequest(method="GET", path="/echo")]
     assert tls_upstream.hits == ["/echo"]
+
+
+@pytest.mark.asyncio
+async def test_a_service_without_its_own_account_asks_to_connect_it_on_the_page(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """The refusal sends the user to connect the service's own account, never to the tools' connect link."""
+    await broker(single_rule_config(), resolve_secret=lambda *_: SecretMissing(own_account=True), manage_url=MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "svc",
+        "manage_url": MANAGE_URL,
+        "message": "No svc account is connected for this agent. "
+        "Ask the user to connect the service's own account at manage_url, then retry.",
+    }
+    assert tls_upstream.hits == []

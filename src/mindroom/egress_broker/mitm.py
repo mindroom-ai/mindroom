@@ -303,6 +303,7 @@ class TlsInterceptor:
             connectable=lookup.provider is not None and lookup.connect_url is not None,
             reuse_off=lookup.reuse_off,
             requester_owned=lookup.requester_owned,
+            own_account=lookup.own_account,
             manage_url=manage_url,
         )
         if lookup.provider is not None and not lookup.reuse_off:

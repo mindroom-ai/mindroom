@@ -48,6 +48,11 @@ _MESSAGES = {
     "broker_error": "The credential broker hit an internal error. Retry; if it keeps failing, tell an administrator.",
     "proxy_authentication_required": "The sandbox's proxy credentials are missing or expired. Start a new tool call.",
 }
+# A service's own account, which only the service's row on the egress page connects, so there is no connect link.
+_OWN_ACCOUNT_MISSING = (
+    "No {service} account is connected for this agent. "
+    "Ask the user to connect the service's own account at manage_url, then retry."
+)
 _CONNECTABLE = (
     "No {service} credential is set for this agent. "
     "Ask the user to connect it at connect_url or add a key at manage_url, then retry."
@@ -144,7 +149,7 @@ class ScopeInfo:
     personal_page: bool
 
 
-def _template(  # noqa: PLR0911 - one text per case, checked in order
+def _template(  # noqa: C901, PLR0911 - one text per case, checked in order
     code: str,
     *,
     path: str | None,
@@ -155,12 +160,16 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
     by_operator: bool,
     reuse_off: bool,
     requester_owned: bool,
+    own_account: bool,
+    service_header: bool,
 ) -> str:
     without_page = not (shared or personal_page)
     if code == "credential_not_configured" and reuse_off:
         return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "read_only":
         return _read_only_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
+    if code == "credential_not_configured" and own_account and not without_page:
+        return _OWN_ACCOUNT_MISSING
     if code == "credential_not_configured" and connectable and not without_page:
         return _CONNECTABLE
     if code == "credential_not_configured" and shared:
@@ -169,6 +178,8 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
         return _PATH_ADMINISTRATOR
     if code == "path_not_allowed" and shared:
         return _PATH_SHARED
+    if code == "bad_request" and service_header:
+        return _BAD_SERVICE_HEADER
     if code == "bad_request" and path is None:
         return _MALFORMED
     texts = _MESSAGES
@@ -215,6 +226,7 @@ def refusal_body(
     reuse_off: bool = False,
     requester_owned: bool = False,
     service_header: bool = False,
+    own_account: bool = False,
     **extra: object,
 ) -> dict[str, object]:
     """Return the JSON body for a refusal: its `error` code, `message`, `service` and `provider` when given, and `extra`.
@@ -228,7 +240,8 @@ def refusal_body(
     edits it. A `credential_not_configured` with `reuse_off` (nobody allowed Agent Keys to use the `provider` account)
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
-    writes the same way.
+    writes the same way. `own_account` (the service's own account is not connected) asks the user to connect it at
+    `manage_url`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.
@@ -236,20 +249,18 @@ def refusal_body(
     that names no service once; without either, the request itself was malformed.
     Raises ValueError for a code without a text and KeyError when the text needs a value that was not given.
     """
-    template = (
-        _BAD_SERVICE_HEADER
-        if code == "bad_request" and service_header
-        else _template(
-            code,
-            path=path,
-            managers=managers or (),
-            shared=shared,
-            personal_page=personal_page,
-            connectable=connectable,
-            by_operator=by_operator,
-            reuse_off=reuse_off,
-            requester_owned=requester_owned,
-        )
+    template = _template(
+        code,
+        path=path,
+        managers=managers or (),
+        shared=shared,
+        personal_page=personal_page,
+        connectable=connectable,
+        by_operator=by_operator,
+        reuse_off=reuse_off,
+        requester_owned=requester_owned,
+        own_account=own_account,
+        service_header=service_header,
     )
     if "manage_url" not in template:
         # A body carries the manage link only where its text names it.

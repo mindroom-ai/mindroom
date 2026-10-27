@@ -160,7 +160,7 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
         return credentials
     token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
     if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
-        return SecretMissing() if separate_account else _missing(context)
+        return SecretMissing(own_account=True) if separate_account else _missing(context)
     return Secret(token)
 
 

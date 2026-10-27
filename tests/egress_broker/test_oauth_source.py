@@ -1222,7 +1222,8 @@ def test_a_separate_account_yields_only_its_own_connection(
     _connect_demo(manager, "own-access", _OWN_DEMO)
     own = _resolve_mine(config, runtime_paths, manager)
 
-    assert before == SecretMissing()
+    assert before == SecretMissing(own_account=True)
+    assert before.connect_url is None
     assert own == Secret("own-access")
 
 

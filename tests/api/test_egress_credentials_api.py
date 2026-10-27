@@ -2269,7 +2269,7 @@ def test_allowing_a_service_with_its_own_account_unlocks_only_that_account(
     row = _egress_row(portal, "alice", "personal", "mine")
 
     assert allowed.status_code == 204, allowed.text
-    assert before == secrets.SecretMissing()
+    assert before == secrets.SecretMissing(own_account=True)
     assert after == secrets.Secret("google_drive-access-token")
     assert (row["oauth"]["reuse_enabled"], row["active_source"]) == (True, "oauth")
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["reuse_enabled"] is False

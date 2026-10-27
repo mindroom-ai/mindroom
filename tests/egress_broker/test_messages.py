@@ -45,6 +45,12 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             "No openai key is set for this shared agent. Only an administrator can add one, at manage_url.",
         ),
         (
+            "credential_not_configured",
+            {"service": "team_calendar", "own_account": True},
+            "No team_calendar account is connected for this agent. "
+            "Ask the user to connect the service's own account at manage_url, then retry.",
+        ),
+        (
             "oauth_connection_required",
             {"service": "github", "provider": "github"},
             "The github account for github must be connected again. "
