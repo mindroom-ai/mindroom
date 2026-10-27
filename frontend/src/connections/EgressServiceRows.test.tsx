@@ -614,6 +614,12 @@ describe("connected accounts", () => {
     await expectNoAction(/^(Set|Replace|Remove) key for /);
   });
 
+  it("says a service's own account is not connected yet, not that it is not set", () => {
+    renderRows([withAccount({}, { separate_account: true })]);
+    expect(within(row("GitHub")).getByText("Not connected")).toBeVisible();
+    expect(screen.queryByText("Not set")).toBeNull();
+  });
+
   it("lets a user without key rights connect a requester-scoped account", async () => {
     renderRows([withAccount({}, { is_shared: true, can_manage: false })], {
       agentName: "shared_dev",

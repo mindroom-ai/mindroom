@@ -116,7 +116,8 @@ export function statusLabel(service: EgressCredentialService): string {
       return service.separate_account
         ? "Connected, not used for Agent Keys yet"
         : "Connected for tools only";
-    return oauth.reset_required ? "Reset required" : "Not set";
+    if (oauth.reset_required) return "Reset required";
+    return service.separate_account ? "Not connected" : "Not set";
   }
   if (!service.configured) return "Not set";
   return keySavedLabel(service.key_updated_at);
