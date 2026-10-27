@@ -243,12 +243,14 @@ async def create_memory_instance(
     llm_config = memory.llm.config
     if (
         memory_llm is not None
-        and memory_llm.provider == "openai"
-        and str(llm_config.model).startswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
+        and memory_llm.provider in {"openai", "openrouter"}
+        and llm_config.is_reasoning_model is None
+        and str(llm_config.model).rsplit("/", 1)[-1].startswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
     ):
         # Mem0 knows only a few GPT-5 IDs as reasoning models and sends every other model temperature, top_p, and a
-        # token cap. GPT-5 and GPT-6 models reject max_tokens and most of them those sampling values, and their
-        # max_completion_tokens cap would also count reasoning, so they get Mem0's reasoning-model request instead.
+        # token cap. GPT-5 and GPT-6 models, directly or through OpenRouter, reject max_tokens and most of them those
+        # sampling values, and their max_completion_tokens cap would also count reasoning, so they get Mem0's
+        # reasoning-model request instead, unless the config sets ``is_reasoning_model`` itself.
         llm_config.is_reasoning_model = True
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     if config.memory.embedder.provider == "openai":

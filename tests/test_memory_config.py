@@ -250,6 +250,48 @@ class TestMemoryConfig:
         assert "max_completion_tokens" not in request_params
         assert request_params.get("reasoning_effort") == expected_reasoning_effort
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("provider", "authored_config", "expected_reasoning_model"),
+        [
+            ("openrouter", {"model": "openai/gpt-6-luna"}, True),
+            ("openrouter", {"model": "anthropic/claude-sonnet-5.5"}, None),
+            ("openai", {"model": OPENAI_GPT_LUNA, "is_reasoning_model": False}, False),
+        ],
+        ids=["openrouter-gpt-6", "openrouter-claude", "authored-false"],
+    )
+    async def test_mem0_reasoning_model_request_follows_the_routed_model_and_the_authored_setting(
+        self,
+        tmp_path: Path,
+        provider: str,
+        authored_config: dict[str, object],
+        expected_reasoning_model: bool | None,
+    ) -> None:
+        """GPT-5 and GPT-6 models get the reasoning-model request through OpenRouter too, unless config sets it."""
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="ollama",
+                config=EmbedderConfig(model="nomic-embed-text", host="http://localhost:11434"),
+            ),
+            llm=_MemoryLLMConfig(provider=provider, config={"api_key": "test-key", **authored_config}),
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        runtime_paths = _runtime_paths(tmp_path)
+        create_completion = MagicMock(
+            return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]),
+        )
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_completion)))
+        with patch("mem0.llms.openai.OpenAI", return_value=fake_client):
+            mem0_llm = OpenAILLM(_get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"])
+
+        with patch.object(AsyncMemory, "from_config", return_value=SimpleNamespace(llm=mem0_llm)):
+            instance = await create_memory_instance(tmp_path / "memory", config, runtime_paths)
+        instance.llm.generate_response([{"role": "user", "content": "remember this"}])
+
+        assert instance.llm.config.is_reasoning_model is expected_reasoning_model
+        # Mem0 sends its default temperature to every model that does not get the reasoning-model request.
+        assert ("temperature" in create_completion.call_args.kwargs) is (expected_reasoning_model is not True)
+
     @pytest.mark.parametrize(
         ("authored_config", "expected_sampling"),
         [
