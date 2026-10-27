@@ -189,7 +189,7 @@ def build_resume_request(
     # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
     # copied or its storage v2 message rows, hold no ``add_to_agent_memory: false`` message, because the run ended
     # without storing its memory results, transient enrichment, job notes, and approval receipt.
-    # Last legacy release: v2026.10.609, whose runs stored no such message; replacement: the first release after it,
+    # Last legacy release: v2026.10.611, whose runs stored no such message; replacement: the first release after it,
     # whose paused runs store them in place.
     # Handling: such a run resumes from the messages it stored, without that context, as it did before; nothing
     # else changes, and the run it resumes into stores the current shape when it pauses again.

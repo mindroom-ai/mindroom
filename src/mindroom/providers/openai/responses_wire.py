@@ -177,7 +177,7 @@ def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bo
     # but no ``mindroom_conversation_sha256`` and whose ``mindroom_response_stored`` is not false: replies through
     # v2026.10.525 recorded no digest, and replies from v2026.10.526 recorded only ``mindroom_system_sha256``, the
     # digest of their system text. An unstored reply records no digest by design and is not legacy.
-    # Last legacy release: v2026.10.609, which recorded only the system-text digest; replacement: the first release
+    # Last legacy release: v2026.10.611, which recorded only the system-text digest; replacement: the first release
     # after it, which records the conversation digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once and continues the response it stores from then on; ``mindroom_system_sha256`` is ignored.
