@@ -981,12 +981,15 @@ With the steps below in place, the sign-in screen asks for the organization's si
 When the Access session ends, the bar at the top asks for that sign-in again.
 The sign-in sheet shares Safari's cookies, so if it ends on Cloudflare's "Invalid session" page, delete the website data for `cloudflareaccess.com` and the homeserver's domain in Settings › Apps › Safari › Advanced › Website Data, then sign in again.
 Push notifications for such a homeserver carry no message content: the public push gateway sees only event and room IDs and the unread count, and the notification reads "New message".
+Room IDs end in the homeserver's name, so even these pushes tell the gateway which server is active and when; the advert can turn push off instead.
 
 Set up the homeserver (examples use `chat.example.com`):
 
 1. Publish the advert at `https://chat.example.com/.well-known/mindroom/cloudflare-access`, outside Access, as JSON with `Access-Control-Allow-Origin: *`:
    `{"handoff_url": "https://chat.example.com/native/cloudflare-access"}`.
    The handoff URL must use HTTPS on the homeserver's own origin.
+   Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
+   Accounts that are already signed in pick up a change at their next sign-in.
 2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
 
     ```nginx
