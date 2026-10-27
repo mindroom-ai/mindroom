@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -2316,6 +2316,50 @@ def test_unticking_its_own_account_removes_that_account(oauth_egress_portal: dic
     row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
     assert (row["connected"], row["reuse_enabled"]) == (False, False)
     assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"])[0] is True
+
+
+def _assert_mine_starts_clean(portal: dict[str, Any]) -> None:
+    """Check Alice's service `mine` has no own account connected or allowed, in its row and in the broker's store."""
+    own = oauth_source.separate_account_provider(portal["providers"]["google_drive"], "mine")
+    row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
+    assert (row["connected"], row["reuse_enabled"]) == (False, False)
+    assert _stored_connection(portal, "@alice:example.org", "personal", own) == (False, None)
+
+
+def test_an_own_account_left_by_a_shadowed_delete_never_comes_back(oauth_egress_portal: dict[str, Any]) -> None:
+    """A delete while an administrator's service shadows the name keeps the account, so a new one must not reuse it."""
+    portal = oauth_egress_portal
+    _put_own_account_service(portal)
+    _connect_and_allow(portal, "alice", "personal", "mine", "google_drive")
+    services = portal["payload"]["egress_broker"]["services"]
+    services["mine"] = _NOTES
+    _republish(portal)
+    assert _delete_service(portal, "alice", "personal", "mine").status_code == 204
+    del services["mine"]
+    _republish(portal)
+
+    _put_own_account_service(portal)
+
+    _assert_mine_starts_clean(portal)
+
+
+def test_an_own_account_left_by_a_failed_delete_never_comes_back(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delete whose reset failed after the service was gone leaves the account; ticking the box again starts clean."""
+    portal = oauth_egress_portal
+    _put_own_account_service(portal)
+    _connect_and_allow(portal, "alice", "personal", "mine", "google_drive")
+    with monkeypatch.context() as failing:
+        failing.setattr(egress_credentials, "reset_oauth_credentials_blocking", Mock(side_effect=RuntimeError("down")))
+        with pytest.raises(RuntimeError, match="down"):
+            _delete_service(portal, "alice", "personal", "mine")
+    assert _put_service(portal, "alice", "personal", "mine", {"preset": "google_drive"}).status_code == 204
+
+    _put_own_account_service(portal)
+
+    _assert_mine_starts_clean(portal)
 
 
 def test_changing_the_provider_of_a_service_with_its_own_account_removes_the_old_account(

@@ -566,6 +566,13 @@ def put_user_service(
         )
         raise _unprocessable(msg)
     stored = load_user_services(agent.manager, agent.target).get(name)
+    same_own_account = (
+        stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
+    )
+    if service.oauth_separate_account and not same_own_account:
+        # A delete that could not remove an own account, such as one while a config service shadowed the name, left
+        # it behind; it goes before the service can use it.
+        _remove_account(request, agent, name, service, by=requester_id)
     try:
         save_user_service(
             agent.manager,
