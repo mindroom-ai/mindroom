@@ -187,6 +187,7 @@ def _current_presets() -> list[model_defaults.ModelPreset]:
             for alternatives in model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES.values()
             for _, preset in alternatives
         ),
+        *(preset for additions in model_defaults.CONFIG_INIT_ADDITIONAL_MODELS.values() for _, preset in additions),
         *model_defaults.SAAS_MODEL_PRESETS.values(),
     ]
 

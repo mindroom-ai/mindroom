@@ -524,7 +524,7 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
     assert not {"temperature", "top_p", "top_k"} & body.keys()
-    # The conversation ends with a user turn already, and thinking is off, yet Sonnet 5.5 rejects prefill.
+    # The request ends with the conversation's own user turn and adds none: these models reject prefill.
     assert body["messages"][-1]["content"][0]["text"] == "Hello"
 
 
