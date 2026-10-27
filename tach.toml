@@ -9625,6 +9625,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.custom_tools.knowledge_graph"
 depends_on = [
+    "mindroom.config.knowledge_graph",
     "mindroom.knowledge.read_protocol",
     "mindroom.knowledge.search",
     "mindroom.knowledge_graph.scope",

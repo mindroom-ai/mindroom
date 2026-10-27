@@ -16,7 +16,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
-from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS, KNOWLEDGE_GRAPH_SOURCE_ID
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
@@ -38,9 +38,8 @@ type Progress = tuple[int, str, int]
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
 
-# The knowledge_graph tool's functions, and the knowledge search, which returns a graph-enabled agent's graph facts
-# beside its documents; their results came from the graph, so they are never evidence for it.
-_GRAPH_FUNCTIONS = ("search_graph", "graph_entity", KNOWLEDGE_SEARCH_TOOL_NAME, *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS)
+# The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
+_GRAPH_FUNCTIONS = ("search_graph", "graph_entity", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS)
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.
@@ -70,10 +69,30 @@ def is_evidence(execution: ToolExecution) -> bool:
     """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
     if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
         return False
-    # A shell or `mindroom-agent` call can look the graph up too, and returns its facts as the command's output; the
-    # whole arguments are searched, since the rendered ones are clipped.
+    if execution.tool_name == KNOWLEDGE_SEARCH_TOOL_NAME:
+        return bool(_observed(execution))
+    # A shell or `mindroom-agent` call can look the graph up too, directly or through the knowledge search, and returns
+    # its facts as the command's output; the whole arguments are searched, since the rendered ones are clipped.
     arguments = json.dumps(execution.tool_args or {}, default=str)
-    return not any(name in arguments for name in _GRAPH_FUNCTIONS)
+    return not any(name in arguments for name in (*_GRAPH_FUNCTIONS, KNOWLEDGE_SEARCH_TOOL_NAME))
+
+
+def _observed(execution: ToolExecution) -> str:
+    """Return a call's result, keeping only the documents a knowledge search returns beside the agent's graph facts."""
+    result = execution.result or ""
+    if execution.tool_name != KNOWLEDGE_SEARCH_TOOL_NAME:
+        return result
+    try:
+        hits = json.loads(result)
+    except json.JSONDecodeError:
+        # The search's no-result and failure texts hold no documents.
+        return ""
+    documents = (
+        [hit for hit in hits if hit["meta_data"].get("source") != KNOWLEDGE_GRAPH_SOURCE_ID]
+        if isinstance(hits, list)
+        else []
+    )
+    return json.dumps(documents, indent=2, ensure_ascii=False) if documents else ""
 
 
 def classify_thread(runs: Sequence[RunRecord], automation_thread_ids: set[str]) -> _ThreadKind:
@@ -226,7 +245,7 @@ def _episode(
 
 def _tool_line(execution: ToolExecution, settings: KnowledgeGraphIngestConfig) -> str:
     outcome = "error" if execution.is_error else "result"
-    output = _clean(str(execution.result or ""), settings.max_tool_result_chars)
+    output = _clean(_observed(execution), settings.max_tool_result_chars)
     # Clipped to half a result, so arguments and result together stay within an episode.
     arguments = tool_arguments(execution)[: settings.max_tool_result_chars // 2]
     return f"call {execution.tool_name}({arguments}) {outcome}: {output}"

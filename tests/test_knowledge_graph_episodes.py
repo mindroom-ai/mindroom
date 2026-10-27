@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 
 from mindroom.config.agent import AgentConfig
-from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID, KnowledgeGraphIngestConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
     RenderedEpisode,
@@ -305,8 +307,9 @@ def test_automation_thread_renders_nothing() -> None:
         # A graph-enabled agent's knowledge search returns graph facts beside its documents, directly or through a shell.
         pytest.param(
             [_tool("search_knowledge_base", '[{"meta_data": {"source": "knowledge_graph"}}]', query="Atlas owner")],
-            id="knowledge-search",
+            id="knowledge-search-of-only-graph-facts",
         ),
+        pytest.param([_tool("search_knowledge_base", "No documents found", query="Atlas owner")], id="no-documents"),
         pytest.param(
             [
                 _tool(
@@ -347,6 +350,36 @@ def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecut
     run = _run("r1", tools=tools)
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+class _Index:
+    def __init__(self, hit: SearchHit) -> None:
+        self.hit = hit
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        del query, limit
+        return [self.hit]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_documents_are_evidence_but_its_graph_facts_are_not() -> None:
+    """The documents a knowledge search finds feed the graph, but the graph facts it returns beside them do not."""
+    docs = KnowledgeSource(
+        KnowledgeSourceDescription("docs", "Runbooks."),
+        _Index(SearchHit(content="Bob runs the Atlas launch.", name="atlas.md")),
+    )
+    graph = KnowledgeSource(
+        KnowledgeSourceDescription(KNOWLEDGE_GRAPH_SOURCE_ID, "Facts."),
+        _Index(SearchHit(content="- Alice leads Project Atlas", meta_data={"source": KNOWLEDGE_GRAPH_SOURCE_ID})),
+    )
+    search = AgentKnowledge(sources=(docs, graph)).search_function(memory_search_available=False)
+    result = await search.entrypoint(query="Atlas")
+    run = _run("r1", tools=[_tool("search_knowledge_base", result, query="Atlas")])
+
+    _, tool_results = (item.episode for item in _episodes([run], "conversation"))
+
+    assert "Bob runs the Atlas launch." in tool_results.body
+    assert "Alice leads Project Atlas" not in tool_results.body
 
 
 def test_no_knowledge_graph_function_is_evidence() -> None:

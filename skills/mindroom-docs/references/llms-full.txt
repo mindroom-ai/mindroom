@@ -4087,7 +4087,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, `search_knowledge_base` results, which hold graph facts too, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -13641,7 +13641,7 @@ An agent whose own name is in `delegate_to` can write the prompt of a fresh copy
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](https://docs.mindroom.chat/knowledge/) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
-Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) through `search_knowledge_base`.
+Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) and [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) through `search_knowledge_base`.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](https://docs.mindroom.chat/configuration/history/), the summary of its earlier turns.

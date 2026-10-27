@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.scope import graph_scope
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_LIMIT = 50
-_KNOWLEDGE_SOURCE_ID = "knowledge_graph"
 _KNOWLEDGE_SOURCE_DESCRIPTION = (
     "Facts about people, projects, documents, and events that your conversations and tools revealed, "
     "with when each held and its sources."
@@ -65,7 +65,9 @@ class _GraphFactIndex:
             raise RuntimeError(msg)
         scope = graph_scope(self.agent_name, self.config, self.runtime_paths, self.execution_identity)
         facts = await store.search_facts(scope, query, limit)
-        return [SearchHit(content=_render_fact(fact), meta_data={"source": _KNOWLEDGE_SOURCE_ID}) for fact in facts]
+        return [
+            SearchHit(content=_render_fact(fact), meta_data={"source": KNOWLEDGE_GRAPH_SOURCE_ID}) for fact in facts
+        ]
 
 
 def with_knowledge_graph(
@@ -77,7 +79,10 @@ def with_knowledge_graph(
 ) -> AgentKnowledge:
     """Return ``knowledge`` with the caller's graph as one more source, so a knowledge search also finds its facts."""
     graph = KnowledgeSource(
-        description=KnowledgeSourceDescription(base_id=_KNOWLEDGE_SOURCE_ID, description=_KNOWLEDGE_SOURCE_DESCRIPTION),
+        description=KnowledgeSourceDescription(
+            base_id=KNOWLEDGE_GRAPH_SOURCE_ID,
+            description=_KNOWLEDGE_SOURCE_DESCRIPTION,
+        ),
         index=_GraphFactIndex(agent_name, config, runtime_paths, execution_identity),
     )
     if knowledge is None:
