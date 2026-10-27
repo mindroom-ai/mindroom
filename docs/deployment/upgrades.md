@@ -8,6 +8,12 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading from `MCPTools` plugin toolkits
+
+MindRoom no longer runs plugin toolkits that subclass Agno `MCPTools` (see [MCP servers](../plugins.md#mcp-servers)).
+Before upgrading, configure each such server under `mcp_servers:` in `config.yaml` as [MCP](../mcp.md) describes, and replace the plugin tool's name in agents' `tools:` lists with `mcp_<server_id>`.
+The [community plugins](../plugins.md#community-plugins) are not affected.
+
 ## Upgrading to conversation storage v2
 
 The first start after this upgrade converts the conversation database of every agent and team, private instances included, and the internal usage database under `system/`, to a new layout before any agent comes online.
