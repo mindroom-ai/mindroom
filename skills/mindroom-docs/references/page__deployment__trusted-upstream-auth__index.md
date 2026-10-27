@@ -37,6 +37,7 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 | `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | The single email domain allowed for template derivation; required with the template |
 
 MindRoom verifies the signature, expiry, issuer, audience, and every configured claim, and picks up gateway key rotation without a restart.
+Behind Cloudflare Access, the header is `Cf-Access-Jwt-Assertion`, the JWKS URL is `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, the issuer is `https://<team>.cloudflareaccess.com`, and the audience is the Access application's AUD tag.
 
 ## Matrix Identity
 
@@ -48,7 +49,7 @@ Domain matching is case-insensitive, emails from any other domain or a subdomain
 
 ## Helm Charts
 
-For the hosted instance chart, set the equivalent values:
+For the hosted instance chart or the runtime chart, set the equivalent values:
 
 ```yaml
 trustedUpstreamAuth:
@@ -64,9 +65,9 @@ trustedUpstreamAuth:
   emailDomain: example.com
 ```
 
-The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
+Either chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables, and the runtime chart fails to render when `env.extra` sets one of the same variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
-Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
+All three charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
 ## Dashboard On Its Own Host
 

@@ -323,6 +323,21 @@ apiAuth:
   # Key in existingSecret that holds the API key.
   key: MINDROOM_API_KEY
 
+# Dashboard sign-in through an identity gateway that signs a JWT for each request.
+# Each key sets the matching MINDROOM_TRUSTED_UPSTREAM_* variable; see docs/deployment/trusted-upstream-auth.md.
+# enabled requires jwtHeader, jwksUrl, jwtAudience, and jwtIssuer, and emailToMatrixUserIdTemplate requires emailDomain.
+trustedUpstreamAuth:
+  enabled: false
+  emailToMatrixUserIdTemplate: ""
+  emailDomain: ""
+  jwtHeader: ""
+  jwksUrl: ""
+  jwtAudience: ""
+  jwtIssuer: ""
+  jwtEmailClaim: email
+  jwtUserIdClaim: ""
+  jwtMatrixUserIdClaim: ""
+
 matrix:
   homeserverUrl: ""
   serverName: ""

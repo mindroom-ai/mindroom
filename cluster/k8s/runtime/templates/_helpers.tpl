@@ -735,6 +735,36 @@ Arguments: list <root context> <list or map> <values path>.
 {{- toJson $env -}}
 {{- end -}}
 
+{{/*
+MINDROOM_TRUSTED_UPSTREAM_* EnvVar entries from trustedUpstreamAuth, mirroring the instance chart; empty unless enabled.
+validate.yaml checks the required settings and rejects env.extra entries with the same names.
+*/}}
+{{- define "mindroom-runtime.trustedUpstreamAuthEnv" -}}
+{{- $auth := .Values.trustedUpstreamAuth -}}
+{{- $env := list -}}
+{{- if has (lower (toString $auth.enabled)) (list "1" "true" "yes" "on") -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED" "value" "true") -}}
+{{- with $auth.emailDomain -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN" "value" (toString .)) -}}
+{{- end -}}
+{{- with $auth.emailToMatrixUserIdTemplate -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE" "value" (toString .)) -}}
+{{- end -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER" "value" (toString $auth.jwtHeader)) -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL" "value" (toString $auth.jwksUrl)) -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE" "value" (toString $auth.jwtAudience)) -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER" "value" (toString $auth.jwtIssuer)) -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM" "value" (toString ($auth.jwtEmailClaim | default "email"))) -}}
+{{- with $auth.jwtUserIdClaim -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM" "value" (toString .)) -}}
+{{- end -}}
+{{- with $auth.jwtMatrixUserIdClaim -}}
+{{- $env = append $env (dict "name" "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM" "value" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- toJson $env -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerExtraEnvJson" -}}
 {{- $extraEnv := dict -}}
 {{- if and (include "mindroom-runtime.egressProxyEnabled" .) .Values.egressProxy.injectWorkerProxyEnv -}}

@@ -880,31 +880,32 @@ It cannot be combined with `workers.kubernetes.agentVault`; to switch an existin
 ### Self-service for users
 
 With the broker on, users without dashboard access manage their own keys, services, account connections, and request log on the personal Connections page at `/connections/egress`; see [Connections pages](../../../docs/deployment/egress-broker.md#connections-pages).
-Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings, which the chart does not render for you:
+Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings:
 
 - **Trusted upstream auth.** The gateway in front of the runtime must authenticate users and sign a JWT.
-  This chart has no values for it, so set the `MINDROOM_TRUSTED_UPSTREAM_*` variables and an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
+  Configure it with the `trustedUpstreamAuth` values, and set an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
   The chart creates no ingress.
 - **`MINDROOM_CONNECTIONS_AGENT`.** Set it to a private agent (`private.per: user` or `user_agent`), as in the example, whenever more than one user can sign in through the gateway.
   Without it, every user the gateway admits gets full dashboard access, whatever `administrators` lists.
 
 ```yaml
+trustedUpstreamAuth:
+  enabled: true
+  jwtHeader: X-Trusted-Jwt
+  jwksUrl: https://gateway.example.com/.well-known/jwks.json
+  jwtAudience: mindroom-dashboard
+  jwtIssuer: https://gateway.example.com
+  jwtEmailClaim: email
+  jwtUserIdClaim: sub
+  jwtMatrixUserIdClaim: matrix_user_id
 env:
   extra:
     MINDROOM_PUBLIC_URL: "https://assistant.example.org"
     MINDROOM_CONNECTIONS_AGENT: personal
-    MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED: "true"
-    MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER: X-Trusted-Jwt
-    MINDROOM_TRUSTED_UPSTREAM_JWKS_URL: https://gateway.example.com/.well-known/jwks.json
-    MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE: mindroom-dashboard
-    MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER: https://gateway.example.com
-    MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM: email
-    MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: sub
-    MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: matrix_user_id
 ```
 
-See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and what users outside `administrators` can reach.
+See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every setting and what the chart checks, the Matrix identity options, and what users outside `administrators` can reach.
 Connecting accounts also needs the providers' [OAuth clients](../../../docs/oauth-framework.md#built-in-providers), and personal GitHub and Atlassian accounts need agents with worker scope `user` or `user_agent` unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](../../../docs/deployment/egress-broker.md#personal-accounts-and-shared-sandboxes).
 
 ## Matrix Managed Account Authentication
