@@ -497,12 +497,13 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
 
 
 def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
-    """Check one route's shared ``env_key`` at the provider's own API. Returns (passed, failed, warnings).
+    """Check one route's shared key at the provider's own API. Returns (passed, failed, warnings).
 
-    Doctor never works out where the runtime sends a key, which a header, a stored credential, or an SDK variable can
-    change. So it skips the check while the provider's endpoint variable is set, reports each model that reads the key
-    and sets an endpoint-like setting as not checked, and checks the key unless every model that reads it was skipped.
-    A provider without a key check is never probed, so it gets one "no key check" warning whatever its settings.
+    The key is the one the runtime reads, from ``env_key`` or saved in the dashboard. Doctor never works out where the
+    runtime sends a key, which a header, a stored credential, or an SDK variable can change. So it skips the check while
+    the provider's endpoint variable is set, reports each model that reads the key and sets an endpoint-like setting as
+    not checked, and checks the key unless every model that reads it was skipped. A provider without a key check is
+    never probed, so it gets one "no key check" warning whatever its settings.
     """
     # Models with their own credential never read the shared key.
     shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
