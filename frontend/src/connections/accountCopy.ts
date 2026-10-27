@@ -54,11 +54,11 @@ export function egressDisconnectDescription(
 
 /**
  * Asked before Agent Keys may use an account: the agent's commands then act
- * as it without the approval prompts its tools ask for. `sharedAgent` names a
- * shared agent whose own account this is, which everyone using it gets, or
- * with `unscoped` every agent without a scope, which all share one account;
- * otherwise the opt-in covers the user's agents whose service uses this
- * account.
+ * as it, with only read access when `readOnly`, without the approval prompts
+ * its tools ask for. `sharedAgent` names a shared agent whose own account
+ * this is, which everyone using it gets, or with `unscoped` every agent
+ * without a scope, which all share one account; otherwise the opt-in covers
+ * the user's agents whose service uses this account.
  */
 export function accountReuseDescription({
   provider,
@@ -66,19 +66,22 @@ export function accountReuseDescription({
   service,
   sharedAgent,
   unscoped,
+  readOnly,
 }: {
   provider: string;
   account: string;
   service: string;
   sharedAgent: string | null;
   unscoped: boolean;
+  readOnly: boolean;
 }): string {
   const who = !sharedAgent
     ? `This covers each of your agents whose ${service} service uses this account.`
     : unscoped
       ? "Every agent without a scope gets this."
       : `Everyone using ${sharedAgent} gets this.`;
-  return `Commands this agent runs (shell, python) will act as ${account} with its full access, without the approval prompts ${provider} tools ask for. ${who}`;
+  const access = readOnly ? "read-only access" : "its full access";
+  return `Commands this agent runs (shell, python) will act as ${account} with ${access}, without the approval prompts ${provider} tools ask for. ${who}`;
 }
 
 /**

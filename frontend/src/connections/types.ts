@@ -103,7 +103,12 @@ export interface EgressOAuthStatus {
    * it, a connected account serves only its tools.
    */
   reuse_enabled: boolean;
+  /** What Agent Keys may do with the account: only read, or read and write; `null` while it is not allowed. */
+  reuse_access: EgressAccess | null;
 }
+
+/** How much an allowed account may do through Agent Keys. */
+export type EgressAccess = "read" | "read_write";
 
 /** Who defined a service: the administrator in config.yaml or the caller's own scope. */
 export type EgressServiceSource = "config" | "user";
@@ -140,6 +145,8 @@ export interface EgressCredentialService {
    * pick a credential, and it has no key or account.
    */
   restrict_only: boolean;
+  /** The service's account can be allowed read-only as well as read and write. */
+  read_only_supported: boolean;
   /**
    * The names of the variables the service sets in the sandbox, a preset's
    * included, so a service of one's own that sets the same one can be warned
