@@ -979,6 +979,7 @@ The app can instead send the Access token in a `cf-access-token` header, which A
 
 With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
 When the Access session ends, the bar at the top asks for that sign-in again.
+The sign-in sheet shares Safari's cookies, so if it ends on Cloudflare's "Invalid session" page, delete the website data for `cloudflareaccess.com` and the homeserver's domain in Settings › Apps › Safari › Advanced › Website Data, then sign in again.
 Push notifications for such a homeserver carry no message content: the public push gateway sees only event and room IDs and the unread count, and the notification reads "New message".
 
 Set up the homeserver (examples use `chat.example.com`):
