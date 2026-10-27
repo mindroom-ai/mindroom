@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from tests.test_helm_instance_worker_isolation import _render_chart, _run_helm_template, _values_files
+from tests.test_helm_instance_worker_isolation import _render_chart, _resource, _run_helm_template, _values_files
 
 _NGINX_IMAGE = "mirror.gcr.io/library/nginx:alpine"
 _IMMUTABLE = "public, max-age=31536000, immutable"
@@ -162,6 +162,42 @@ def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_p
     )
 
     assert responses == expected
+
+
+def _client_pod(tmp_path: Path, values: str) -> dict[str, Any]:
+    docs = _render_chart(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, values),
+    )
+    return _resource(docs, "Deployment", "mindroom-client")["spec"]["template"]["spec"]
+
+
+def test_client_chart_mounts_operator_notices_so_edits_reach_running_pods(tmp_path: Path) -> None:
+    """A subPath mount would pin the file the pod started with, so notice edits would wait for a restart.
+
+    The ConfigMap is optional so the client still starts, without notices, before an operator creates it.
+    """
+    pod = _client_pod(tmp_path, "notices:\n  existingConfigMap: client-notices\n")
+
+    assert {"name": "notices", "configMap": {"name": "client-notices", "optional": True}} in pod["volumes"]
+    assert {"name": "notices", "mountPath": "/opt/mindroom/notices", "readOnly": True} in pod["containers"][0][
+        "volumeMounts"
+    ]
+
+    default_pod = _client_pod(tmp_path, "{}\n")
+    assert "notices" not in {volume["name"] for volume in default_pod["volumes"]}
+
+
+def test_client_chart_appends_extra_volumes_and_mounts(tmp_path: Path) -> None:
+    """Operators can mount their own files into the client container without patching the Deployment."""
+    volume = {"name": "branding", "configMap": {"name": "client-branding"}}
+    mount = {"name": "branding", "mountPath": "/opt/branding", "readOnly": True}
+
+    pod = _client_pod(tmp_path, json.dumps({"extraVolumes": [volume], "extraVolumeMounts": [mount]}))
+
+    assert pod["volumes"][-1] == volume
+    assert pod["containers"][0]["volumeMounts"][-1] == mount
 
 
 # Historical uppercase localparts, ports, and IPv6 server names are valid Matrix user IDs the client accepts.

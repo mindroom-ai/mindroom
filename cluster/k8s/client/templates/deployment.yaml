@@ -129,10 +129,19 @@ spec:
               subPath: {{ .Values.nginx.cleanupWorkerKey }}
               readOnly: true
             {{- end }}
+            {{- if .Values.notices.existingConfigMap }}
+            # No subPath, so the kubelet propagates ConfigMap edits to the pod.
+            - name: notices
+              mountPath: /opt/mindroom/notices
+              readOnly: true
+            {{- end }}
             - name: nginx-cache
               mountPath: /var/cache/nginx
             - name: nginx-run
               mountPath: /run
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -140,7 +149,16 @@ spec:
         - name: nginx-config
           configMap:
             name: {{ include "mindroom-client.nginxConfigMapName" . }}
+        {{- with .Values.notices.existingConfigMap }}
+        - name: notices
+          configMap:
+            name: {{ . | quote }}
+            optional: true
+        {{- end }}
         - name: nginx-cache
           emptyDir: {}
         - name: nginx-run
           emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

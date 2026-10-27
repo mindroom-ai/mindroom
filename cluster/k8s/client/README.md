@@ -97,6 +97,23 @@ nginx then serves that well-known path even without MatrixRTC; route it from the
 Without administrators the item is called **Download bug report** and saves the report as a file.
 See [Bug Reports](../../../docs/bug-reports.md) for what a report contains and where it goes.
 
+## Operator Notices
+
+The web client shows banners from `basePath/notices.json`, which nginx serves without caching; the [MindRoom Chat README](https://github.com/mindroom-ai/mindroom-chat#notices) documents the file format.
+Store the list under the `notices.json` key of a ConfigMap and name it in `notices.existingConfigMap`:
+
+```bash
+kubectl -n mindroom create configmap mindroom-client-notices --from-file=notices.json
+```
+
+```yaml
+notices:
+  existingConfigMap: mindroom-client-notices
+```
+
+Edits to the ConfigMap reach running pods within one to two minutes without a restart, and open tabs pick them up within another minute.
+Without `notices.existingConfigMap` the client serves the image's empty list, and while the named ConfigMap does not exist it shows no notices.
+
 ## Base Path
 
 Set `basePath` to serve the client under a URL prefix instead of the origin root:
@@ -215,6 +232,7 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 - Use `nodeSelector`, `affinity`, `tolerations`, and `topologySpreadConstraints` for cluster-specific scheduling policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.
 - Override `probes.*.custom` when a deployment needs custom Kubernetes readiness or liveness probes.
+- Set `extraVolumes` and `extraVolumeMounts` to mount additional files into the client container.
 
 ## Render Locally
 
