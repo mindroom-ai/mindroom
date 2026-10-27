@@ -21,9 +21,11 @@ from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_pa
 from mindroom.egress_broker import service as egress_service
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
+    EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
     HookRegistry,
+    ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
     default_timeout_ms_for_event,
@@ -432,6 +434,46 @@ async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path:
     assert tool_output == "from-venv"
 
 
+_REFUSAL = (
+    "[TOOL CALL DECLINED]\n"
+    "Tool: run_shell_command\n"
+    "Reason: The proxy session is unavailable.\n\n"
+    "Adjust your approach — try a different tool or different arguments."
+)
+
+
+@pytest.mark.asyncio
+async def test_a_declining_hook_stops_the_command_wherever_it_would_run(shell: _Shell, tmp_path: Path) -> None:
+    """A hook that cannot prepare the call refuses it, as a `tool:before_call` hook declines one.
+
+    The command never runs or reaches a worker, the first declining hook in hook order gives the reason, and the model
+    and the after-call hooks read the refusal.
+    """
+    marker = tmp_path / "command-ran"
+    observed: list[tuple[object, bool]] = []
+
+    @hook(EVENT_TOOL_ENVIRONMENT, priority=10)
+    async def session_unavailable(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("PLUGIN_VALUE", "unused")
+        ctx.decline("The proxy session is unavailable.")
+
+    @hook(EVENT_TOOL_ENVIRONMENT, priority=20)
+    async def also_declines(ctx: ToolEnvironmentContext) -> None:
+        ctx.decline("A later hook's reason.")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def audit(ctx: ToolAfterCallContext) -> None:
+        observed.append((ctx.result, ctx.blocked))
+
+    registry = _registry(session_unavailable, also_declines, audit)
+    outcome = await shell.call(registry, {"args": ["bash", "-c", f"touch {marker}"]})
+
+    assert (outcome.is_error, outcome.content) == (True, _REFUSAL)
+    assert observed == [(_REFUSAL, True)]
+    assert not marker.exists()
+    assert shell.sent == []
+
+
 @pytest.mark.asyncio
 async def test_concurrent_calls_in_two_replies_each_get_only_their_own_variables(tmp_path: Path) -> None:
     """Both calls collect before either command starts, so a process-wide environment would mix them up."""
@@ -460,7 +502,10 @@ async def test_concurrent_calls_in_two_replies_each_get_only_their_own_variables
 
 @pytest.mark.asyncio
 async def test_hooks_merge_in_hook_order_and_a_failing_hook_loses_its_changes(tmp_path: Path) -> None:
-    """A later hook's value wins, each hook edits only its own copy of the arguments, and a raising hook adds nothing."""
+    """A later hook's value wins, each hook edits only its own copy of the arguments, and a raising hook adds nothing.
+
+    A raising hook's decline is lost with its changes, so the call still runs.
+    """
     shell = _local_shell(tmp_path)
     seen_arguments: list[dict[str, Any]] = []
 
@@ -478,6 +523,7 @@ async def test_hooks_merge_in_hook_order_and_a_failing_hook_loses_its_changes(tm
     async def broken(ctx: ToolEnvironmentContext) -> None:
         ctx.set_env("PLUGIN_VALUE", "broken")
         ctx.unset_env("PLUGIN_SECRET")
+        ctx.decline("broken")
         msg = "hook bug"
         raise RuntimeError(msg)
 
