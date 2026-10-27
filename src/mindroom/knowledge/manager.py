@@ -1839,7 +1839,7 @@ class KnowledgeManager:
         if changed_files is None and scanned is not None:
             signatures = scanned
         elif changed_files is None:
-            signatures = await self._file_signatures_for(await asyncio.to_thread(self.list_files), run.completed)
+            signatures = await self._file_signatures_for(await asyncio.to_thread(self.list_files))
         else:
             files = await asyncio.to_thread(self.list_files)
             files_by_relative_path = {self._relative_path(file_path): file_path for file_path in files}
@@ -2055,10 +2055,13 @@ class KnowledgeManager:
         index -- and the unchanged fast path would then republish it at the same
         revision forever.
 
-        Hashing the corpus proves both at once, but reads every byte. For a Git
-        checkout the revision proves content, because the checkout is
-        program-owned and realigned with a hard reset, and re-listing proves
-        coverage. Neither reads file contents.
+        For a local base, the corpus signature proves both at once: it re-lists
+        the files, and reads only those whose ctime or size no longer matches the
+        candidate's signature. On a network filesystem that stat may come from the
+        client's attribute cache, so a change in the last moments of a pass can
+        surface at the next refresh instead. For a Git checkout the revision proves
+        content, because the checkout is program-owned and realigned with a hard
+        reset, and re-listing proves coverage. Neither reads unchanged contents.
         """
         if round_revision is None:
             return await self.source_signature(candidate_signatures) == candidate_source_signature

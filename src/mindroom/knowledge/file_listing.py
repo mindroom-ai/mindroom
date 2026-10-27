@@ -219,7 +219,7 @@ def open_knowledge_file(path: Path) -> Iterator[int]:
 
 
 @contextmanager
-def pinned_directories(root: Path | int) -> Iterator[Callable[[Path], int]]:
+def pinned_directories(root: Path) -> Iterator[Callable[[Path], int]]:
     """Yield a function that pins a directory below ``root`` by a no-follow walk, reusing the one it pinned last.
 
     Files signed in listing order arrive grouped by directory, so each directory costs one walk instead of one per

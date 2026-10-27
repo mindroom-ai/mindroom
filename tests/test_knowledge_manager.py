@@ -1872,8 +1872,12 @@ def _signed(config: Config, docs_path: Path, known: Mapping[str, FileSignature] 
     return signature
 
 
-def test_a_file_signed_right_after_a_write_records_a_stamp_no_stat_matches(tmp_path: Path) -> None:
+def test_a_file_signed_right_after_a_write_records_a_stamp_no_stat_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A signature taken within the racy window records stamp 0, so the next scan reads the file again."""
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 10**18)
     docs_path = (tmp_path / "docs").resolve()
     docs_path.mkdir()
     (docs_path / "note.md").write_text("one", encoding="utf-8")
@@ -1899,6 +1903,38 @@ def test_a_same_size_rewrite_that_restores_the_mtime_is_read_again(
     os.utime(note, ns=(written.st_atime_ns, written.st_mtime_ns))
 
     assert _signed(config, docs_path, known={"note.md": signature})[2] != signature[2]
+
+
+def test_a_link_swapped_onto_a_listed_file_is_not_trusted_by_its_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link swapped onto a path after listing never inherits a signature, even one matching its target's stat."""
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 0)
+    docs_path = (tmp_path / "docs").resolve()
+    docs_path.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret", encoding="utf-8")
+    note = docs_path / "note.md"
+    note.write_text("public", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    [listed] = list_knowledge_files(config, "docs", docs_path)
+    note.unlink()
+    note.symlink_to(secret)
+
+    scanned = list(
+        knowledge_manager_module._scan_file_signatures(
+            [("note.md", listed)],
+            {"note.md": _descriptor_signature_of(secret)},
+        ),
+    )
+
+    assert scanned == []
+
+
+def _descriptor_signature_of(path: Path) -> FileSignature:
+    with knowledge_file_listing_module.open_knowledge_file(path) as descriptor:
+        return knowledge_manager_module._descriptor_signature(descriptor, path)
 
 
 def test_tracked_path_listing_skips_per_file_strict_resolution(
