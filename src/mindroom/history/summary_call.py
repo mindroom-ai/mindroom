@@ -40,9 +40,10 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 # A provider that times out on its own side says so only in the text of its HTTP error or stream error event, such as
 # a gateway's "upstream request timed out": no status or code marks it, so provider errors are matched by wording.
 _PROVIDER_TIMEOUT_FRAGMENT = "timed out"
-# ``SummaryRetryPolicy`` alone retries a failed summary, a one-off summary never reuses its prefix, and thinking would
-# spend the output budget the summary needs. The transport timeout stays the route's own, so a shorter authored
-# provider timeout still applies; the summary call's wall deadline bounds every request.
+# ``SummaryRetryPolicy`` alone retries a failed summary, and a one-off summary never reuses its prefix. Leaving out the
+# authored thinking setting keeps a model that thinks only when asked, such as Claude before 5, from spending the
+# output budget the summary needs; a model that thinks by default still thinks. The transport timeout stays the route's
+# own, so a shorter authored provider timeout still applies; the summary call's wall deadline bounds every request.
 _SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
 
 
