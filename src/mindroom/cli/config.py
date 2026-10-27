@@ -821,9 +821,8 @@ def config_validate(
     console.print("[green]Configuration is valid.[/green]\n")
     console.print(f"  Agents: {len(config.agents)} ({', '.join(config.agents.keys()) or 'none'})")
     console.print(f"  Teams:  {len(config.teams)} ({', '.join(config.teams.keys()) or 'none'})")
-    # Model names and room references may contain brackets, which Rich would read as markup; agent and team names
-    # cannot.
-    console.print(f"  Models: {len(config.models)} ({escape(', '.join(config.models.keys())) or 'none'})")
+    console.print(f"  Models: {len(config.models)} ({', '.join(config.models.keys()) or 'none'})")
+    # Room references may contain brackets, which Rich would read as markup; agent, team, and model names cannot.
     rooms = config.get_all_configured_rooms()
     console.print(f"  Rooms:  {len(rooms)} ({escape(', '.join(sorted(rooms))) or 'none'})")
 
