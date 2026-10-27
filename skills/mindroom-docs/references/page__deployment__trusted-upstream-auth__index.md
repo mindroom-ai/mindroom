@@ -64,7 +64,7 @@ trustedUpstreamAuth:
   emailDomain: example.com
 ```
 
-Either chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables, and the runtime chart fails to render when `env.extra` sets one of the same variables.
+Either chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables, and with `enabled` true the runtime chart fails to render when `env.extra` also sets one of those variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
 All three charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
