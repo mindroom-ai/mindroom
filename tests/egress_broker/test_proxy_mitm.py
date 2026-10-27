@@ -1614,24 +1614,36 @@ async def test_a_named_service_without_a_rule_for_the_request_is_refused(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "headers",
-    [[(_SERVICE_HEADER, "")], [(_SERVICE_HEADER, "svc"), (_SERVICE_HEADER.lower(), "svc")]],
-    ids=["empty", "repeated"],
+    [
+        [(_SERVICE_HEADER, "")],
+        [(_SERVICE_HEADER, "svc"), (_SERVICE_HEADER.lower(), "svc")],
+        [(_SERVICE_HEADER, "Mine")],
+        [(_SERVICE_HEADER, "mine, other")],
+        [(_SERVICE_HEADER, "x" * 64)],
+    ],
+    ids=["empty", "repeated", "not-a-name", "list", "too-long"],
 )
-async def test_an_empty_or_repeated_agent_keys_service_header_is_a_400(
+async def test_an_agent_keys_service_header_without_one_service_name_is_a_400(
     broker: BrokerFactory,
     tls_upstream: Upstream,
     proxy_client: ProxyClient,
+    audit: AuditLog,
     headers: list[tuple[str, str]],
 ) -> None:
-    """A request must name one service, or none."""
+    """A request must name one service by a valid name, or none; what it sent is never echoed or audited."""
     await broker(single_rule_config(), secrets={"svc": SECRET})
     client = proxy_client(broker.token())
 
     response = await client.get(tls_upstream.url("/echo"), headers=headers)
 
     assert response.status_code == 400
-    assert response.json() == MALFORMED
+    assert response.json() == {
+        "error": "bad_request",
+        "message": "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own "
+        "services.",
+    }
     assert tls_upstream.hits == []
+    await assert_audited(audit, kind="denied", status=400, code="bad_request", service=None)
 
 
 @pytest.mark.asyncio

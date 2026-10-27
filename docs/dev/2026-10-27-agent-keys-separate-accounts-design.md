@@ -25,7 +25,7 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
   Deleting the service, unticking the box, or changing its `oauth_provider` removes its own connection and its opt-in, so no refresh token stays behind and ticking the box again starts unconnected.
 - **A request picks such a service with a header.** Routing is unchanged without it, so a user service that ties with an operator's service on host and path is never chosen by accident.
   A request may add `X-Agent-Keys-Service: <name>`; routing then matches only that service's rules, after the same restriction checks as today, and a request no rule of that service matches is refused with 403 `service_not_matched`.
-  A missing, empty or repeated header value is a 400 `bad_request`. The broker removes the header before forwarding.
+  A header sent twice, or whose value is not a valid service name (empty included), is a 400 `bad_request` whose message names the header and never repeats the value. The broker removes the header before forwarding.
   This holds on hosts with rules, the only ones whose HTTPS the broker reads: a request to another host is tunneled blind, so the header selects nothing there and reaches the host as sent, which exposes only a service name the agent itself chose.
   The header names one of the requester's own (user) services, separate-account or not, so an agent can also pick a user service with its own API key the same way.
   An operator's service cannot be named: the most specific operator rule keeps choosing among the operator's credentials, and an agent cannot override it.

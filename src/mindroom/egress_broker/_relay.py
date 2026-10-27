@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import h11
 
+from mindroom.config.egress_broker import EGRESS_SERVICE_NAME_PATTERN
 from mindroom.egress_broker.audit import AuditRecord
 from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy, open_upstream
 from mindroom.egress_broker.messages import git_error_text, refusal_body
@@ -454,8 +455,9 @@ class Relay:
     ) -> tuple[EgressRules, Route] | None:
         """Return the rules and the route for the entry's host, `port`, and path; otherwise answer, audit, return None.
 
-        An `X-Agent-Keys-Service` header among the request's `headers` names the only service that may route it; an
-        empty or repeated one is a 400 `bad_request`, and a name none of whose rules matches a 403 `service_not_matched`.
+        An `X-Agent-Keys-Service` header among the request's `headers` names the only service that may route it; one
+        that is repeated or holds no valid service name is a 400 `bad_request`, which never repeats what it held, and a
+        name none of whose rules matches a 403 `service_not_matched`.
 
         A host without rules is denied under `unmatched_hosts: deny`. On a host with rules, `TRACE` and `TRACK` (in any
         letter case) get 405 `method_not_allowed`, since the upstream would echo the injected credential back. A path
@@ -463,11 +465,11 @@ class Relay:
         restricting service of a `path_not_allowed` refusal, as a matched rule's row does. A failing rules provider or
         scope callback is a 502.
         """
-        named = [value for name, value in headers if name == _SERVICE_HEADER]
-        if len(named) > 1 or named == [b""]:
-            await self.deny(client, entry, refusal_body("bad_request"), status=400)
+        named = [value.decode("latin-1") for name, value in headers if name == _SERVICE_HEADER]
+        if named and (len(named) > 1 or not EGRESS_SERVICE_NAME_PATTERN.fullmatch(named[0])):
+            await self.deny(client, entry, refusal_body("bad_request", service_header=True), status=400)
             return None
-        requested = named[0].decode("latin-1") if named else None
+        requested = named[0] if named else None
         rules = await self.read_rules(client, entry)
         if rules is None:
             return None

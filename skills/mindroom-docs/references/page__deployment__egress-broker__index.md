@@ -631,7 +631,7 @@ The broker returns these errors to worker code:
 | Plain HTTP request matching a rule | 403 JSON `{"error": "tls_required", "service": "<name>", "message": "..."}` |
 | `Host` header inside an intercepted tunnel naming a different host than the CONNECT target | 403 JSON `{"error": "host_mismatch", "message": "..."}` |
 | Client TLS server name (SNI) that differs from the CONNECT host | No response: the TLS handshake is aborted with an `unrecognized_name` alert, and nothing is forwarded |
-| Request the broker cannot read unambiguously, such as an invalid CONNECT target, an HTTP protocol error, or an empty or repeated `X-Agent-Keys-Service` header | 400 JSON `{"error": "bad_request", "message": "..."}`; 431 with the same body when the request head is over 64 KiB, usually a huge `Cookie` or custom header |
+| Request the broker cannot read unambiguously, such as an invalid CONNECT target, an HTTP protocol error, or an `X-Agent-Keys-Service` header sent twice or without a valid service name | 400 JSON `{"error": "bad_request", "message": "..."}`; 431 with the same body when the request head is over 64 KiB, usually a huge `Cookie` or custom header |
 | Ambiguous path on a host with rules (see [Limiting paths and repositories](#limiting-paths-and-repositories)) | 400 JSON `{"error": "bad_request", "message": "..."}` with the ambiguous-path text |
 | `TRACE` or `TRACK` request to a host with rules | 405 JSON `{"error": "method_not_allowed", "message": "..."}`; the upstream would echo the injected credential back |
 | `X-Agent-Keys-Service` naming no service of the user's own whose rules match the request (see [A service's own account](#a-services-own-account)) | 403 JSON `{"error": "service_not_matched", "service": "<name>", "message": "..."}` |

@@ -374,7 +374,7 @@ class EgressService(BaseModel):
         return value
 
 
-_SERVICE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+EGRESS_SERVICE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
 def validate_egress_service_name(name: str) -> None:
@@ -382,8 +382,8 @@ def validate_egress_service_name(name: str) -> None:
 
     A name starts with `[a-z0-9]`, so no service's secret can take a reserved `egress__*` store name.
     """
-    if not _SERVICE_NAME_PATTERN.fullmatch(name):
-        msg = f"service name '{name}' must match {_SERVICE_NAME_PATTERN.pattern}"
+    if not EGRESS_SERVICE_NAME_PATTERN.fullmatch(name):
+        msg = f"service name '{name}' must match {EGRESS_SERVICE_NAME_PATTERN.pattern}"
         raise ValueError(msg)
     # Secrets are stored as `egress_<name>`; OAuth suffixes there would read as OAuth services.
     credential_service = egress_credential_service(name)

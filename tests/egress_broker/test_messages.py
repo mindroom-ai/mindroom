@@ -70,6 +70,11 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
         ),
         (
             "bad_request",
+            {"service_header": True},
+            "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own services.",
+        ),
+        (
+            "bad_request",
             {"path": "/repos/o/a/../b"},
             "The request path is ambiguous (dot segments, //, backslashes, or encoded forms of them) and was refused. "
             "Use a plain path.",

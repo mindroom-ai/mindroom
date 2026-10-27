@@ -90,6 +90,9 @@ _PATH_SHARED = _PATH_OUTSIDE + "Only its credential managers ({managers}) can ch
 _PATH_ADMINISTRATOR = _PATH_OUTSIDE + "Only an administrator can change this, at manage_url."
 # The spec words `bad_request` for the ambiguous-path refusal; a request the broker cannot read at all has no path.
 _MALFORMED = "The request is malformed and was refused."
+_BAD_SERVICE_HEADER = (
+    "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own services."
+)
 # A personal scope's keys, accounts, and services are set only on the personal page. Where it is not served, its
 # refusals take their texts from `_WITHOUT_PAGE`, which names no page, or `_WITHOUT_PAGE_LINKED` when the body carries
 # a connect link, and `refusal_body` drops `manage_url`, the dashboard. The `egress_credentials` tool ends its note
@@ -211,6 +214,7 @@ def refusal_body(
     by_operator: bool = False,
     reuse_off: bool = False,
     requester_owned: bool = False,
+    service_header: bool = False,
     **extra: object,
 ) -> dict[str, object]:
     """Return the JSON body for a refusal: its `error` code, `message`, `service` and `provider` when given, and `extra`.
@@ -228,19 +232,24 @@ def refusal_body(
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.
-    A `bad_request` with a `path` is the ambiguous-path refusal; without one, the request itself was malformed.
+    A `bad_request` with a `path` is the ambiguous-path refusal, with `service_header` an `X-Agent-Keys-Service` header
+    that names no service once; without either, the request itself was malformed.
     Raises ValueError for a code without a text and KeyError when the text needs a value that was not given.
     """
-    template = _template(
-        code,
-        path=path,
-        managers=managers or (),
-        shared=shared,
-        personal_page=personal_page,
-        connectable=connectable,
-        by_operator=by_operator,
-        reuse_off=reuse_off,
-        requester_owned=requester_owned,
+    template = (
+        _BAD_SERVICE_HEADER
+        if code == "bad_request" and service_header
+        else _template(
+            code,
+            path=path,
+            managers=managers or (),
+            shared=shared,
+            personal_page=personal_page,
+            connectable=connectable,
+            by_operator=by_operator,
+            reuse_off=reuse_off,
+            requester_owned=requester_owned,
+        )
     )
     if "manage_url" not in template:
         # A body carries the manage link only where its text names it.
