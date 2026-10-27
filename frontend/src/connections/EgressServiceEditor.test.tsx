@@ -626,13 +626,17 @@ describe("the editor form", () => {
       ),
     );
     expect(screen.queryByText(instead)).toBeNull();
-    // A request picks it by the header, so one note replaces the warnings.
+    // A request picks it by the header, so one note replaces the warnings,
+    // and the box's own hint stays the one place that names the header.
     expect(screen.queryByText(/already sends a key/)).toBeNull();
     expect(
       screen.getByText(
-        "Requests choose this service with X-Agent-Keys-Service: team_calendar; without the header the usual routing order applies.",
+        "Without this service's header, the usual routing order applies.",
       ),
     ).toBeVisible();
+    expect(
+      screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
+    ).toHaveLength(1);
   });
 
   it("drops the API key from a custom service's login hint while it uses its own account", async () => {
