@@ -52,9 +52,14 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
         ),
         (
             "oauth_connection_required",
-            {"service": "github", "provider": "github"},
+            {"service": "github", "provider": "github", "connectable": True},
             "The github account for github must be connected again. "
             "Ask the user to reconnect at connect_url or manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {"service": "github", "provider": "github"},
+            "The github account for github must be connected again. Ask the user to reconnect it at manage_url.",
         ),
         (
             "oauth_refresh_failed",
