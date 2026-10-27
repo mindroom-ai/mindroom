@@ -48,8 +48,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.audit import AuditRecord
-    from mindroom.egress_broker.oauth_reuse import OAuthAccess
-    from mindroom.egress_broker.secrets import SecretRequest, SecretResult
+    from mindroom.egress_broker.secrets import OAuthAccess, SecretRequest, SecretResult
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
     from tests.egress_broker.raw_http import Script, UpstreamFactory

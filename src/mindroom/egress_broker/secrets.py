@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 __all__ = [
     "PERSONAL_WORKER_SCOPES",
     "EgressServiceStatus",
+    "OAuthAccess",
     "OAuthStatus",
     "OAuthStatusReader",
     "Secret",
@@ -42,6 +43,10 @@ __all__ = [
 _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
 # Worker scopes whose sandbox and egress store belong to one requester.
 PERSONAL_WORKER_SCOPES: frozenset[str] = frozenset({"user", "user_agent"})
+
+# What Agent Keys may do with an allowed account: only read (the service's `read_only` says how its API reads), or
+# read and write.
+type OAuthAccess = Literal["read", "read_write"]
 
 
 def is_personal_target(target: ResolvedWorkerTarget | None) -> bool:
@@ -285,7 +290,7 @@ class OAuthStatus:
     accounts in the scope (`shared_sandbox`: a requester's own account in a sandbox that several requesters share).
     `shared_worker_opt_in` marks such a sandbox where the service allows it anyway, so every user of the agent can
     act with the connected account. `reuse_enabled` says whether Agent Keys may use the connection for this service;
-    without it a connected account serves only its tools.
+    without it a connected account serves only its tools. `reuse_access` is the level it may use it at, None while off.
     """
 
     provider: str
@@ -298,6 +303,7 @@ class OAuthStatus:
     unavailable_reason: Literal["shared_sandbox"] | None = None
     shared_worker_opt_in: bool = False
     reuse_enabled: bool = False
+    reuse_access: OAuthAccess | None = None
 
 
 type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]

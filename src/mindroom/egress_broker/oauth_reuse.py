@@ -14,29 +14,20 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.egress_broker.secrets import delete_egress_document, load_egress_document, save_egress_document
 
 if TYPE_CHECKING:
+    from mindroom.egress_broker.secrets import OAuthAccess
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-__all__ = [
-    "OAUTH_REUSE_CREDENTIAL_SERVICE",
-    "OAuthAccess",
-    "oauth_reuse_access",
-    "oauth_reuse_enabled",
-    "set_oauth_reuse",
-]
+__all__ = ["OAUTH_REUSE_CREDENTIAL_SERVICE", "oauth_reuse_access", "set_oauth_reuse"]
 
 OAUTH_REUSE_CREDENTIAL_SERVICE = "egress__oauth_reuse"
 # Serializes read-modify-write of the opt-in documents in this process, so concurrent changes lose nothing.
 _write_lock = threading.Lock()
-
-# What Agent Keys may do with an allowed account: only read (the service's `read_only` says how its API reads), or
-# read and write.
-type OAuthAccess = Literal["read", "read_write"]
 
 
 def oauth_reuse_access(context: OAuthCredentialContext, service: str, provider_id: str) -> OAuthAccess | None:
@@ -60,11 +51,6 @@ def oauth_reuse_access(context: OAuthCredentialContext, service: str, provider_i
     # Coverage: tests/egress_broker/test_oauth_source.py::test_entry_without_access_reads_read_write.
     # Any other value than "read_write" reads as "read", so a damaged entry never allows writes.
     return "read_write" if access == "read_write" else "read"
-
-
-def oauth_reuse_enabled(context: OAuthCredentialContext, service: str, provider_id: str) -> bool:
-    """Return whether Agent Keys may use the context's connection for `service` at all, given for `provider_id`."""
-    return oauth_reuse_access(context, service, provider_id) is not None
 
 
 def set_oauth_reuse(

@@ -173,7 +173,7 @@ def _oauth_services() -> dict[str, Any]:
     """Return services on an agent-scoped (Drive), a requester-scoped (GitHub), and an unknown OAuth provider."""
     rules = [{"host": "www.googleapis.com", "auth": {"type": "bearer"}}]
     return {
-        "drive": {"description": "Drive", "oauth_provider": "google_drive", "rules": rules},
+        "drive": {"description": "Drive", "oauth_provider": "google_drive", "rules": rules, "read_only": {}},
         "gh": {"display_name": "GH", "oauth_provider": "github", "rules": rules},
         "ghost": {"description": "Unknown provider", "oauth_provider": "no_such_provider", "rules": rules},
     }
@@ -371,13 +371,15 @@ def _reuse_url(agent: str, service: str) -> str:
     return f"{_key_url(agent, service)}/oauth-reuse"
 
 
-def _allow_reuse(portal: dict[str, Any], user: str, agent: str, service: str) -> Any:  # noqa: ANN401
-    """Let Agent Keys use the service's connected account, as `user`, confirming the approval bypass."""
-    return portal["client"].put(
-        _reuse_url(agent, service),
-        headers=portal["headers"][user],
-        json={"acknowledge_approval_bypass": True},
-    )
+def _allow_reuse(portal: dict[str, Any], user: str, agent: str, service: str, access: str | None = None) -> Any:  # noqa: ANN401
+    """Let Agent Keys use the service's connected account, as `user`, confirming the approval bypass.
+
+    `access` is sent only when given, as a client that predates access levels would leave it out.
+    """
+    body: dict[str, object] = {"acknowledge_approval_bypass": True}
+    if access is not None:
+        body["access"] = access
+    return portal["client"].put(_reuse_url(agent, service), headers=portal["headers"][user], json=body)
 
 
 def _stop_reuse(portal: dict[str, Any], user: str, agent: str, service: str) -> Any:  # noqa: ANN401
@@ -404,6 +406,7 @@ def _oauth_block(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
         "unavailable_reason": None,
         "shared_worker_opt_in": False,
         "reuse_enabled": False,
+        "reuse_access": None,
         **changes,
     }
 
@@ -1439,6 +1442,7 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
         can_connect=False,
         service_account=True,
         reuse_enabled=True,
+        reuse_access="read_write",
     )
     assert row["active_source"] == "oauth"
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
@@ -1502,7 +1506,10 @@ def test_a_personal_connection_beside_a_service_account_stays_visible_to_allow_s
     assert placeholder_status is not None
     assert (placeholder_status.connected, placeholder_status.reuse_enabled) == (False, False)
     assert (allowed.status_code, stopped.status_code) == (204, 204), (allowed.text, stopped.text)
-    assert (after_allow["oauth"], after_allow["active_source"]) == ({**tools_only, "reuse_enabled": True}, "oauth")
+    assert (after_allow["oauth"], after_allow["active_source"]) == (
+        {**tools_only, "reuse_enabled": True, "reuse_access": "read_write"},
+        "oauth",
+    )
     assert (after_stop["oauth"], after_stop["active_source"]) == (tools_only, None)
 
 
@@ -1861,17 +1868,25 @@ def _broker_target(portal: dict[str, Any], requester_id: str, agent: str) -> Res
     return claims.to_worker_target()
 
 
-def _broker_reads(portal: dict[str, Any], requester_id: str, agent: str, service: str, provider: str) -> object:
-    """Return what the broker resolves for `service` in a tool call by `requester_id` on `agent`."""
+def _broker_reads(
+    portal: dict[str, Any],
+    requester_id: str,
+    agent: str,
+    service: str,
+    provider: str,
+    method: str = "GET",
+) -> object:
+    """Return what the broker resolves for `service` in a tool call by `requester_id` on `agent`, for a `method`."""
+    config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
     return resolve_oauth_token(
         service=service,
         provider_id=provider,
-        config=Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]}),
+        config=config,
         runtime_paths=portal["paths"],
         credentials_manager=get_runtime_credentials_manager(portal["paths"]),
         worker_target=_broker_target(portal, requester_id, agent),
-        request=secrets.SecretRequest(method="GET", path="/"),
-        read_only=None,
+        request=secrets.SecretRequest(method=method, path="/"),
+        read_only=config.egress_broker.services[service].read_only,
     )
 
 
@@ -1953,10 +1968,74 @@ def test_allowing_an_account_requires_acknowledging_the_approval_bypass(oauth_eg
         portal["client"].put(url, headers=headers, json={}),
         portal["client"].put(url, headers=headers, json={"acknowledge_approval_bypass": False}),
         portal["client"].put(url, headers=headers, json={"acknowledge_approval_bypass": True, "agent_name": "x"}),
+        portal["client"].put(url, headers=headers, json={"acknowledge_approval_bypass": True, "access": "write"}),
     ]
 
-    assert [response.status_code for response in responses] == [422] * 4
+    assert [response.status_code for response in responses] == [422] * 5
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["reuse_enabled"] is False
+
+
+def test_allow_reuse_stores_requested_access(oauth_egress_portal: dict[str, Any]) -> None:
+    """Allowing an account read-only is what the broker enforces, and allowing it again changes the level."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+
+    read = _allow_reuse(portal, "alice", "personal", "drive", access="read")
+    read_row = _egress_row(portal, "alice", "personal", "drive")
+    reads = _broker_reads(portal, "@alice:example.org", "personal", "drive", "google_drive")
+    writes = _broker_reads(portal, "@alice:example.org", "personal", "drive", "google_drive", method="DELETE")
+    changed = _allow_reuse(portal, "alice", "personal", "drive", access="read_write")
+    changed_row = _egress_row(portal, "alice", "personal", "drive")
+
+    assert (read.status_code, changed.status_code) == (204, 204), (read.text, changed.text)
+    assert (read_row["oauth"]["reuse_access"], read_row["active_source"]) == ("read", "oauth")
+    assert isinstance(reads, secrets.Secret)
+    assert writes == secrets.SecretReadOnly(provider="google_drive")
+    assert changed_row["oauth"]["reuse_access"] == "read_write"
+    assert isinstance(
+        _broker_reads(portal, "@alice:example.org", "personal", "drive", "google_drive", method="DELETE"),
+        secrets.Secret,
+    )
+
+
+def test_allow_reuse_defaults_to_read_write(oauth_egress_portal: dict[str, Any]) -> None:
+    """A client that sends no level allows reads and writes, as it always did."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+
+    allowed = _allow_reuse(portal, "alice", "personal", "drive")
+
+    assert allowed.status_code == 204, allowed.text
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["reuse_access"] == "read_write"
+
+
+def test_read_access_refused_with_409_without_read_only(oauth_egress_portal: dict[str, Any]) -> None:
+    """A service that does not declare how its API reads cannot be allowed read-only, and nothing is stored."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "gh", "github")
+
+    refused = _allow_reuse(portal, "alice", "personal", "gh", access="read")
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "This service does not offer read-only access"
+    assert _egress_row(portal, "alice", "personal", "gh")["oauth"]["reuse_enabled"] is False
+
+
+def test_status_reports_access_and_support(oauth_egress_portal: dict[str, Any]) -> None:
+    """Each row says whether its service offers read-only access, and its account the level it is allowed at."""
+    portal = oauth_egress_portal
+    _connect_account(portal, "alice", "personal", "gh", "github")
+    before = _egress_row(portal, "alice", "personal", "drive")
+    _allow_reuse(portal, "alice", "personal", "drive", access="read")
+    _allow_reuse(portal, "alice", "personal", "gh")
+    drive, gh = (_egress_row(portal, "alice", "personal", name) for name in ("drive", "gh"))
+
+    assert (before["read_only_supported"], before["oauth"]["reuse_access"]) == (True, None)
+    assert (drive["read_only_supported"], drive["oauth"]["reuse_access"]) == (True, "read")
+    assert (gh["read_only_supported"], gh["oauth"]["reuse_access"]) == (False, "read_write")
+    assert [
+        row["read_only_supported"] for row in _state_egress(portal, "alice", "personal") or [] if row["name"] == "drive"
+    ] == [True]
 
 
 @pytest.mark.parametrize("method", ["put", "delete"])

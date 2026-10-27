@@ -36,6 +36,7 @@ can_use  # JSON response field consumed by connections portal (src/mindroom/api/
 key_configured  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 key_updated_at  # Egress service status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
 shared_worker_opt_in  # Egress OAuth status field reported by the egress APIs (src/mindroom/egress_broker/secrets.py)
+read_only_supported  # Egress service row field reported by the egress APIs (src/mindroom/api/egress_credentials.py)
 acknowledge_approval_bypass  # Request body field that enabling account use requires (src/mindroom/api/egress_status.py)
 inactive_services  # JSON response field consumed by the personal egress page (src/mindroom/api/egress_credentials.py)
 scope_agents  # JSON response field consumed by the personal egress page (src/mindroom/api/egress_credentials.py)

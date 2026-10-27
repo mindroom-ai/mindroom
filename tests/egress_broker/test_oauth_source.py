@@ -21,7 +21,6 @@ from mindroom.egress_broker import oauth_source
 from mindroom.egress_broker.oauth_reuse import (
     OAUTH_REUSE_CREDENTIAL_SERVICE,
     oauth_reuse_access,
-    oauth_reuse_enabled,
     set_oauth_reuse,
 )
 from mindroom.egress_broker.oauth_source import broker_credential_context, oauth_status, resolve_oauth_token
@@ -807,6 +806,7 @@ def test_status_reports_connection_without_refreshing(
         can_connect=True,
         reset_required=False,
         reuse_enabled=True,
+        reuse_access="read_write",
     )
     assert bob == OAuthStatus(
         provider="github",
@@ -816,6 +816,7 @@ def test_status_reports_connection_without_refreshing(
         can_connect=True,
         reset_required=False,
         reuse_enabled=True,
+        reuse_access="read_write",
     )
     assert presented == []
 
@@ -1029,7 +1030,6 @@ def test_entry_without_access_reads_read_write(
 
     assert oauth_reuse_access(context, "github", "github") == "read_write"
     assert oauth_reuse_access(context, "gists", "github") == "read"
-    assert oauth_reuse_enabled(context, "github", "github") is True
     assert oauth_reuse_access(context, "github", "other") is None
     assert oauth_reuse_access(context, "pages", "github") is None
 
@@ -1054,7 +1054,6 @@ def test_set_oauth_reuse_stores_access(
     assert stored["services"]["github"]["access"] == "read"
     assert default == "read_write"
     assert oauth_reuse_access(context, "github", "github") is None
-    assert oauth_reuse_enabled(context, "github", "github") is False
 
 
 def test_changing_access_keeps_other_entries(
