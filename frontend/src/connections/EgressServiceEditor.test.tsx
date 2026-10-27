@@ -1989,6 +1989,30 @@ describe("saving the API key with the service", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(saveKey).toHaveBeenCalledWith("ghp_x", "github");
   });
+
+  it("has no key field while the service uses its own account, which signs in through Connect", async () => {
+    const saveKey = vi.fn(async () => undefined);
+    const onClose = vi.fn();
+    const { onSave } = await renderEditor({ saveKey, onClose });
+    type("Preset", "google_calendar");
+    type("API key", "sk-1");
+    openMoreOptions();
+    const ownAccount = screen.getByLabelText(
+      "Use its own account, not the one the agent's tools use",
+    );
+    fireEvent.click(ownAccount);
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    fireEvent.click(ownAccount);
+    expect(screen.getByLabelText("API key")).toHaveValue("sk-1");
+    fireEvent.click(ownAccount);
+    save();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("google_calendar", {
+      preset: "google_calendar",
+      oauth_separate_account: true,
+    });
+    expect(saveKey).not.toHaveBeenCalled();
+  });
 });
 
 describe("a placeholder an administrator's service also sets", () => {

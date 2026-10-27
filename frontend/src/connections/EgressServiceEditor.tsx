@@ -223,6 +223,8 @@ export function EgressServiceEditor({
   });
   // A service that only limits repositories has no key, login, or website of its own.
   const limiting = form.restrictOnly;
+  // One with its own account signs in through Connect, so the form asks for no key and saves none typed before.
+  const takesKey = !limiting && !form.separateAccount;
   const [apiKey, setApiKey] = useState("");
   const [moreOpen, setMoreOpen] = useState(() => usesMoreOptions(form));
   const loadPresetsRef = useRef(loadPresets);
@@ -479,7 +481,7 @@ export function EgressServiceEditor({
       setBusy(null);
       return;
     }
-    if (!limiting && saveKey && apiKey.trim() !== "") {
+    if (takesKey && saveKey && apiKey.trim() !== "") {
       try {
         await saveKey(apiKey, current.name);
       } catch (cause) {
@@ -598,7 +600,7 @@ export function EgressServiceEditor({
           />
         )}
       </Field>
-      {saveKey && !limiting && (
+      {saveKey && takesKey && (
         <Field
           label="API key"
           id={`${id}-key`}
