@@ -293,8 +293,8 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
 
 
 @pytest.mark.parametrize("name", ["gpt-6.1", "my model", "team/sol", ""])
-def test_config_load_rejects_a_model_name_the_registry_cannot_build(name: str) -> None:
-    """A model's name names its dashboard key, so config load rejects a name that key cannot carry, naming the key."""
+def test_config_load_rejects_an_empty_model_name_or_one_its_dashboard_key_cannot_carry(name: str) -> None:
+    """A model's name names its dashboard key, so config load rejects an empty name or a character it cannot carry."""
     synthetic = {"provider": "synthetic", "id": "lorem-ipsum"}
 
     with pytest.raises(ValidationError) as info:

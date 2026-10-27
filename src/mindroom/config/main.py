@@ -562,7 +562,7 @@ class Config(BaseModel):
     @field_validator("models")
     @classmethod
     def validate_model_names(cls, models: dict[str, ModelConfig]) -> dict[str, ModelConfig]:
-        """Reject a model name the credential store cannot keep the model's dashboard key under, as ``model:<name>``."""
+        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry."""
         invalid = sorted(name for name in models if not SERVICE_NAME_PATTERN.fullmatch(name))
         if invalid:
             keys = ", ".join(f"models.{name}" for name in invalid)
