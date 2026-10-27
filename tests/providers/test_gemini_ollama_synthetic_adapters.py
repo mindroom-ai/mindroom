@@ -193,7 +193,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         loaded.append(path)
         return credentials
 
-    monkeypatch.setattr(google_adc, "_load_google_application_credentials", load)
+    monkeypatch.setattr(google_adc, "load_google_application_credentials", load)
     (tmp_path / ".env").write_text(
         "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
         encoding="utf-8",
@@ -356,7 +356,7 @@ async def test_vertex_express_mode_takes_no_project_location_or_credentials_from
 ) -> None:
     """A Vertex AI key in ``client_params`` excludes a project, a location, and credentials, so none are filled in."""
     env_credentials = Credentials(token="env-token")  # noqa: S106 - synthetic SDK credential
-    monkeypatch.setattr(google_adc, "_load_google_application_credentials", lambda _path: env_credentials)
+    monkeypatch.setattr(google_adc, "load_google_application_credentials", lambda _path: env_credentials)
     (tmp_path / ".env").write_text(
         "GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_CLOUD_LOCATION=europe-west4\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n",
         encoding="utf-8",

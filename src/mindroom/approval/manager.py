@@ -61,6 +61,7 @@ _TransportSenderProvider = Callable[[], str | None]
 _SendingDeviceProvider = Callable[[], str | None]
 _ContinuationReadyHandler = Callable[[str, str, tuple[str, ...]], Awaitable[None] | None]
 _ResponderPrincipalProvider = Callable[[str], str | None]
+_RouterMissingProvider = Callable[[str], bool]
 
 _STARTUP_RECOVERY_SCAN_PAGE = 256
 _DEADLINE_SWEEP_SECONDS = 60.0
@@ -236,6 +237,8 @@ class ApprovalManager:
     recovery: ApprovalRecovery | None = None
     # Names the journal principal of an entity's Matrix account, which timed approvals on detached cards bind to.
     responder_principal: _ResponderPrincipalProvider | None = None
+    # Says whether a room lacks the router, so gated calls there are denied before any card is attempted.
+    router_missing: _RouterMissingProvider | None = None
     _resolving_card_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _live_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _deadline_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
@@ -259,6 +262,7 @@ class ApprovalManager:
         continuation_ready: _ContinuationReadyHandler | None = None,
         recovery: ApprovalRecovery | None = None,
         responder_principal: _ResponderPrincipalProvider | None = None,
+        router_missing: _RouterMissingProvider | None = None,
     ) -> None:
         """Rebind transport collaborators after runtime reload."""
         if prepare_event is not None:
@@ -282,6 +286,8 @@ class ApprovalManager:
             recovery.bind(self)
         if responder_principal is not None:
             self.responder_principal = responder_principal
+        if router_missing is not None:
+            self.router_missing = router_missing
 
     async def prepare_detached_approval(
         self,
@@ -1310,6 +1316,7 @@ def initialize_approval_store(
     continuation_ready: _ContinuationReadyHandler | None,
     recovery: ApprovalRecovery | None,
     responder_principal: _ResponderPrincipalProvider | None,
+    router_missing: _RouterMissingProvider | None,
 ) -> ApprovalManager:
     """Initialize the module-level approval domain for one runtime context."""
     global _MANAGER
@@ -1325,6 +1332,7 @@ def initialize_approval_store(
             continuation_ready=continuation_ready,
             recovery=recovery,
             responder_principal=responder_principal,
+            router_missing=router_missing,
         )
         return _MANAGER
     if _MANAGER is not None and _MANAGER._has_live_work():
@@ -1342,6 +1350,7 @@ def initialize_approval_store(
         continuation_ready=continuation_ready,
         recovery=recovery,
         responder_principal=responder_principal,
+        router_missing=router_missing,
     )
     return _MANAGER
 

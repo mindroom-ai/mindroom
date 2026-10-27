@@ -426,6 +426,19 @@ async def test_action_delivery_resolver_ignores_a_room_the_router_does_not_serve
     client.room_get_event.assert_not_awaited()
 
 
+def test_router_missing_only_when_the_running_router_does_not_serve_the_room() -> None:
+    router = MagicMock(agent_name="router", running=True, client=MagicMock(), approval_room_ids=frozenset({"!room:a"}))
+    transport = approval_transport.ApprovalMatrixTransport(
+        bot_provider=lambda name: router if name == "router" else None,
+    )
+
+    assert not transport.router_missing("!room:a")
+    assert transport.router_missing("!personal:a")
+    # A router that is not running yet says nothing about the room, so the card path reports its own failure.
+    router.running = False
+    assert not transport.router_missing("!personal:a")
+
+
 @pytest.mark.asyncio
 async def test_action_delivery_resolver_retries_an_unreadable_exact_card() -> None:
     client = MagicMock(

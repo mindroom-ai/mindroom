@@ -684,6 +684,7 @@ def initialize_approval_store_for_test(runtime_paths: RuntimePaths, **collaborat
             "continuation_ready",
             "recovery",
             "responder_principal",
+            "router_missing",
         ),
     )
     return initialize_approval_store(runtime_paths, **(unset | collaborators))

@@ -175,6 +175,7 @@ from tests.approval_continuation_helpers import (
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    initialize_approval_store_for_test,
     install_model_providers,
     live_turn_tools_for_test,
     make_matrix_client_mock,
@@ -2887,6 +2888,41 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("router_missing", [True, False])
+async def test_missing_router_denies_a_gated_call_so_the_agent_can_invite_it(
+    tmp_path: Path,
+    router_missing: bool,
+) -> None:
+    """A card cannot reach a room without the router, so the run resumes with a denial that says how to recover."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    initialize_approval_store_for_test(runner.deps.runtime_paths, router_missing=lambda _room_id: router_missing)
+    tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
+
+    with (
+        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
+        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
+    ):
+        plan = await plan_approval_calls(
+            ((tool, "general"),),
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
+            requester_id="@user:localhost",
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            room_id="!room:test",
+            thread_id="$thread",
+        )
+
+    if router_missing:
+        assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
+        assert plan.calls[0].reason is not None
+        assert "call `invite_router`" in plan.calls[0].reason
+        assert plan.waiting_text is None
+    else:
+        assert plan.calls[0].decision is None
+        assert plan.waiting_text == "Waiting for approval: `dangerous`"
+
+
+@pytest.mark.asyncio
 async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -> None:
     """A mixed tool generation must not copy its final policy decision onto every call."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
@@ -2961,6 +2997,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3019,6 +3056,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3145,6 +3183,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
 
     with (
@@ -4028,6 +4067,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
+        router_missing=None,
     )
     retry_sources = Mock()
     runner._approval_responses.retry_sources = retry_sources
