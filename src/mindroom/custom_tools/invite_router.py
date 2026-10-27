@@ -69,16 +69,16 @@ class InviteRouterTools(Toolkit):
         membership = _membership(membership_response)
         if membership == "join":
             return "Router already joined."
-        transport_agent_id = identities.current_id(context.recipient).full_id
-        if not is_inviter_allowed(config, context.runtime_paths, ROUTER_AGENT_NAME, transport_agent_id):
-            return "Error: Router auto-accept does not allow this Matrix transport account."
-        if membership == "invite":
-            return "Router invite pending; retry after it joins."
         if personal_room_excludes_router(context.runtime_paths, context.room_id, router_id):
             # Its guest check would remove the router again.
             return (
                 "Error: This adopted personal room does not admit the router; "
                 "an operator can add router_user_id to its personal-room record."
             )
+        transport_agent_id = identities.current_id(context.recipient).full_id
+        if not is_inviter_allowed(config, context.runtime_paths, ROUTER_AGENT_NAME, transport_agent_id):
+            return "Error: Router auto-accept does not allow this Matrix transport account."
+        if membership == "invite":
+            return "Router invite pending; retry after it joins."
 
         return await _invite_and_wait(context.client, context.room_id, router_id)
