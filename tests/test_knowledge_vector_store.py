@@ -6,7 +6,6 @@ import math
 import sqlite3
 import subprocess
 import sys
-import threading
 import time
 import tracemalloc
 from collections import OrderedDict
@@ -23,7 +22,6 @@ from mindroom.knowledge.vector_store import (
     StoredRow,
     _CollectionNotFoundError,
     list_collection_names,
-    read_into_page_cache,
 )
 
 
@@ -473,21 +471,21 @@ def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
     assert len(vector_store_module._index_cache) == 1, "the outdated matrix stayed cached beside the new one"
 
 
-def test_reading_into_page_cache_stops_before_the_next_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stop that arrives while one file is read ends the reading; no further file is opened."""
-    first, second = tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"
-    first.write_bytes(b"1" * 10)
-    second.write_bytes(b"2" * 10)
-    stop = threading.Event()
-    opened: list[str] = []
-    real_open = Path.open
+def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first search reads the collection file front to back before loading its matrix; cached searches do not."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    collection = KnowledgeCollection(path=tmp_path, name="docs")
+    collection.reset()
+    collection.write_source_rows("a.md", [_row("a", "a.md", "alpha", [1.0, 0.0])])
+    reads: list[str] = []
+    real_read_ahead = vector_store_module._read_ahead
+    monkeypatch.setattr(
+        vector_store_module,
+        "_read_ahead",
+        lambda file: reads.append(file.name) or real_read_ahead(file),
+    )
 
-    def _open(self: Path, *args: object, **kwargs: object) -> object:
-        opened.append(self.name)
-        stop.set()
-        return real_open(self, *args, **kwargs)
+    for _search in range(2):
+        assert collection.search([1.0, 0.0], limit=1)[0].content == "alpha"
 
-    monkeypatch.setattr(Path, "open", _open)
-    read_into_page_cache([tmp_path / "swept.sqlite3", first, second], stop)
-
-    assert opened == ["swept.sqlite3"]
+    assert reads == ["docs.sqlite3"]

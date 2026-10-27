@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +16,6 @@ from mindroom.knowledge.registry import (
     KnowledgeRefreshTarget,
     KnowledgeSourceRoot,
     mark_knowledge_source_changed_async,
-    prefetch_shared_collections,
     resolve_refresh_target,
     source_root_for_refresh_target,
 )
@@ -161,14 +159,9 @@ class KnowledgeSourceWatcher:
         self._refresh_scheduler = refresh_scheduler
         self._filesystem_tasks: dict[KnowledgeSourceRoot, _WatchTask] = {}
         self._poll_tasks: dict[KnowledgeRefreshTarget, _WatchTask] = {}
-        self._prefetch: tuple[threading.Event, asyncio.Task[None]] | None = None
 
     async def sync(self, *, config: Config | None, runtime_paths: RuntimePaths) -> None:
-        """Replace watcher tasks so they match the current shared knowledge config, and start Chroma-era conversions.
-
-        It also reads the shared bases' published collections into the page cache in the background, so the first
-        searches after a restart do not wait on a cold disk.
-        """
+        """Replace watcher tasks so they match the current shared knowledge config, and start Chroma-era conversions."""
         await self.shutdown()
         if config is None:
             return
@@ -202,22 +195,8 @@ class KnowledgeSourceWatcher:
             if not self._refresh_scheduler.is_refreshing(base_id, config=config, runtime_paths=runtime_paths):
                 self._refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
-        stop = threading.Event()
-        self._prefetch = (
-            stop,
-            asyncio.create_task(asyncio.to_thread(prefetch_shared_collections, config, runtime_paths, stop)),
-        )
-
     async def shutdown(self) -> None:
         """Stop all source watchers owned by this instance."""
-        if self._prefetch is not None:
-            stop, prefetch = self._prefetch
-            self._prefetch = None
-            stop.set()
-            try:
-                await prefetch
-            except Exception:
-                logger.warning("Knowledge collection prefetch failed", exc_info=True)
         tasks = list(self._filesystem_tasks.values())
         tasks.extend(self._poll_tasks.values())
         self._filesystem_tasks.clear()
