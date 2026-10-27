@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+import google.oauth2.credentials
 import httpx
 import pytest
 
@@ -145,15 +146,12 @@ def test_cohere_reranker_reads_its_credential_service(tmp_path: Path, monkeypatc
     assert services == ["cohere", "jina"]
 
 
-class _GoogleCredentials:
-    """Application Default Credentials that hand out token ``t`` once refreshed."""
-
-    valid = False
-    token: str | None = None
+class _GoogleCredentials(google.oauth2.credentials.Credentials):
+    """User Application Default Credentials that hold token ``t`` once refreshed."""
 
     def refresh(self, request: object) -> None:
         del request
-        self.token, self.valid = "t", True
+        self.token = "t"  # noqa: S105
 
 
 @pytest.mark.asyncio
@@ -170,6 +168,7 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
             "/rankingConfigs/default_ranking_config:rank"
         )
         assert request.headers["Authorization"] == "Bearer t"
+        assert request.headers["x-goog-user-project"] == "quota"
         body = json.loads(request.content)
         bodies.append(body)
         # A zero score is left out of the JSON response, like other proto3 defaults.
@@ -177,7 +176,7 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
             {"id": record["id"], **({"score": int(record["id"]) / 1000} if record["id"] != "0" else {})}
             for record in body["records"]
         ]
-        return httpx.Response(200, json={"records": records})
+        return httpx.Response(200, json={"records": records[::-1]})
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
@@ -185,7 +184,8 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
         "AsyncClient",
         lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
     )
-    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (_GoogleCredentials(), "proj"))
+    credentials = _GoogleCredentials(token=None, quota_project_id="quota")
+    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (credentials, "proj"))
     reranker = create_reranker(
         KnowledgeRerankerConfig(provider="vertex_ai", model="semantic-ranker-default@latest"),
         test_runtime_paths(tmp_path),
@@ -201,7 +201,7 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
 
 def test_vertex_ai_reranker_needs_a_google_cloud_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a project in Application Default Credentials there is no ranking endpoint to call."""
-    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (_GoogleCredentials(), None))
+    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (_GoogleCredentials(token=None), None))
 
     with pytest.raises(ValueError, match="Google Cloud project"):
         create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))

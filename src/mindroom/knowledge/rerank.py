@@ -71,14 +71,14 @@ class _VertexAIReranker:
     project: str
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        token = await asyncio.to_thread(_google_access_token, self.credentials)
+        headers = await asyncio.to_thread(_google_auth_headers, self.credentials)
         records = [{"id": str(index), "content": document} for index, document in enumerate(documents)]
         async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client, asyncio.TaskGroup() as group:
             requests = [
                 group.create_task(
                     client.post(
                         _VERTEX_AI_RANK_URL.format(project=self.project),
-                        headers={"Authorization": f"Bearer {token}"},
+                        headers=headers,
                         json={
                             "model": self.model,
                             "query": query,
@@ -109,13 +109,16 @@ def _google_default_credentials() -> tuple[Any, str | None]:
 _google_credentials_lock = threading.Lock()
 
 
-def _google_access_token(credentials: Any) -> str:  # noqa: ANN401
+def _google_auth_headers(credentials: Any) -> dict[str, str]:  # noqa: ANN401
+    """Return the headers ``credentials`` sign a request with, such as its quota project, refreshing them first."""
     with _google_credentials_lock:
         if not credentials.valid:
             import google.auth.transport.requests  # noqa: PLC0415
 
             credentials.refresh(google.auth.transport.requests.Request())
-        return credentials.token
+        headers: dict[str, str] = {}
+        credentials.apply(headers)
+        return headers
 
 
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
