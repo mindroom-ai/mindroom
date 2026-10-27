@@ -5,7 +5,7 @@ icon: lucide/webhook
 # Hooks
 
 Hooks are async functions in a [plugin](plugins.md) that run when MindRoom events happen.
-Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
+Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, set the environment of the shell commands a tool call runs, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
 Each hook has a timeout, and a failing hook is logged without crashing the bot.
 The [Plugins](plugins.md) page covers manifests, `plugins:` entries, installation, and hot reload.
 
@@ -129,10 +129,11 @@ async def track_response(ctx):
 
 ### Collector
 
-Used by `message:enrich` and `system:enrich`.
+Used by `message:enrich`, `system:enrich`, and `tool:environment`.
 Hooks run concurrently, at most 10 at a time, so total latency is roughly that of the slowest hook rather than the sum.
-Each hook contributes `EnrichmentItem` entries, and a failing or timed-out hook loses only its own items.
-Items are merged in hook order.
+Each hook contributes `EnrichmentItem` entries or environment changes, and a failing or timed-out hook loses only its own contributions.
+Contributions are merged in hook order, so when two `tool:environment` hooks change the same variable, the later hook wins.
+A variable any `tool:environment` hook sets or removes wins over every hook's pass-through, whatever their order.
 
 ### Transformer
 
@@ -201,6 +202,7 @@ async def block_secret_reads(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
+| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
 Custom events default to 1000 ms.
@@ -308,6 +310,34 @@ async def required_instruction(ctx):
     )
 ```
 
+## Shell command environment (`tool:environment`)
+
+`tool:environment` sets environment variables for the shell commands of one tool call, whether the `shell` tool runs them in MindRoom's process or in a worker.
+Use it to give a command a credential or proxy setting only when it needs one, or to keep a variable away from commands, instead of changing MindRoom's process environment, which every call shares.
+
+```python
+from mindroom.plugin_api import ToolEnvironmentContext, hook
+
+
+@hook("tool:environment")
+async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
+    if ctx.function_name != "run_shell_command":
+        return
+    ctx.unset_env("GITHUB_TOKEN")
+    if "api.github.com" in str(ctx.arguments.get("args", "")):
+        ctx.set_env("HTTPS_PROXY", ctx.settings["proxy_url"])
+        ctx.pass_through("GH_CONFIG_DIR")
+```
+
+- `ctx.set_env(name, value)` gives the command `name` with `value`, even where the workspace's [`.mindroom/worker-env.sh`](deployment/sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh) exports `name` for a worker.
+- `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough` or the workspace's `.mindroom/worker-env.sh`.
+  `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
+- `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
+- The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
+- Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
+- The [agent CLI](tools/agent-cli.md)'s variables, the egress proxy variables from the [egress broker](deployment/egress-broker.md) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](deployment/sandbox-proxy.md#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
+- A failing or timed-out hook loses its changes and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+
 ## Custom events
 
 Plugins can define their own namespaced events and emit them from tool code:
@@ -368,7 +398,7 @@ async def pin_message(ctx):
 
 ### Base fields
 
-All contexts except the two tool contexts include these fields:
+All contexts except the three tool contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -383,6 +413,7 @@ All contexts except the two tool contexts include these fields:
 | `state_root` | `Path` | Plugin state directory |
 
 `ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
+`ToolEnvironmentContext` has only `event_name`, `plugin_name`, `settings`, `config`, `runtime_paths`, `logger`, and `correlation_id`, and its `config` and `runtime_paths` can be `None`.
 
 ### Event-specific fields
 
@@ -403,6 +434,7 @@ All contexts except the two tool contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
+| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.

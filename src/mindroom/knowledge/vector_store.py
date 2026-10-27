@@ -13,7 +13,7 @@ import sqlite3
 import struct
 import threading
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,6 +43,8 @@ _WORD = re.compile(r"\w+")
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
+#: Bytes per read while reading a collection file ahead of its matrix load.
+_READ_AHEAD_CHUNK_BYTES = 8 * 1024 * 1024
 #: Rows normalized at a time while a matrix loads.
 _NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
@@ -481,6 +483,9 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
                 if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
             ]:
                 del _index_cache[stale]
+        # A file swept since the connection opened still loads through it, so reading ahead is only best effort.
+        with suppress(OSError):
+            _read_ahead(file)
         index = _load_vector_index(connection)
         with _index_cache_lock:
             _index_cache[key] = index
@@ -494,6 +499,18 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
                 if cached != largest:
                     cached_bytes -= _index_cache.pop(cached).nbytes
     return index
+
+
+def _read_ahead(file: Path) -> None:
+    """Read the collection file front to back, so the row-order matrix load that follows reads from the page cache.
+
+    On a cold network disk a sequential read is several times faster than that load's own reads, which for a
+    collection of a few GB can otherwise exceed a search's budget.
+    """
+    buffer = bytearray(_READ_AHEAD_CHUNK_BYTES)
+    with file.open("rb", buffering=0) as handle:
+        while handle.readinto(buffer):
+            pass
 
 
 def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:

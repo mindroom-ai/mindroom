@@ -30,9 +30,11 @@ from mindroom.custom_tools.claude_agent import ClaudeAgentTools
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
     hook,
 )
 from mindroom.message_target import MessageTarget
@@ -130,13 +132,17 @@ def _hook_registry(events: list[str], *, decline: str | None = None) -> HookRegi
         if decline is not None:
             context.decline(decline)
 
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def environment(context: ToolEnvironmentContext) -> None:
+        events.append(f"tool:environment:{context.registered_toolkit}.{context.function_name}")
+
     @hook(EVENT_TOOL_AFTER_CALL)
     async def after(_context: ToolAfterCallContext) -> None:
         events.append("tool:after_call")
 
     plugin = SimpleNamespace(
         name="script-broker-test",
-        discovered_hooks=(before, after),
+        discovered_hooks=(before, environment, after),
         discovered_automations=(),
         entry_config=PluginEntryConfig(path="./plugins/script-broker-test"),
         plugin_order=0,
@@ -583,7 +589,7 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
-    assert events == ["tool:before_call", "tool:after_call"]
+    assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
 
 
 @pytest.mark.asyncio
@@ -942,7 +948,7 @@ async def test_script_broker_returns_existing_receipt_without_reexecution(tmp_pa
     second = await _call_through_gateway(broker, request, token)
 
     assert second == first
-    assert events == ["tool:before_call", "tool:after_call"]
+    assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
 
 
 @pytest.mark.asyncio

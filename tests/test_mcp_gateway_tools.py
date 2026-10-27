@@ -24,7 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, hook
+from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.oauth import mcp_oauth_provider
@@ -977,6 +977,30 @@ async def test_cache_cannot_skip_hooks_or_tool_body(
             "result": "fresh",
         }
     assert events == [("before", "@alice:example.org"), ("body", "called"), ("after", "@alice:example.org")] * 2
+
+
+@pytest.mark.asyncio
+async def test_an_environment_hook_reads_the_tool_a_gateway_call_names(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway call reaches `tool:environment` hooks under the registered tool it names, as a reply's call does."""
+    seen: list[tuple[str, str | None]] = []
+
+    @hook("tool:environment")
+    async def environment(event: ToolEnvironmentContext) -> None:
+        seen.append((event.function_name, event.registered_toolkit))
+
+    def account() -> str:
+        return "fresh"
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[account]))
+    _load_plugin_hooks(monkeypatch, "environment", environment)
+
+    result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
+
+    assert result == {"result": "fresh"}
+    assert seen == [("account", "calculator")]
 
 
 def test_a_declined_call_without_a_reason_still_reads_why(context: AgentToolContext) -> None:
