@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate
 from mindroom.response_lifecycle import _QueuedMessageState
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.consumption import ConsumptionOwner
@@ -520,7 +520,7 @@ async def test_consumption_repairs_failed_cancellation_save_before_reread(
 async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved(tmp_path: Path) -> None:
     """A claim is consumed once the parent run's stored row holds its finished call; one the run never saved is released."""
     runtime = await tool_job_runtime(tmp_path)
-    store = ConversationStore(tmp_path / "parent.db")
+    store = create_state_storage("parent", tmp_path)
     parent = RunRecord(
         run_id="parent-run",
         session_id="parent-session",
@@ -528,9 +528,10 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
         status=RunStatus.completed,
         tools=[ToolExecution(tool_call_id="saved-call", tool_name="tool", result="done")],
     )
-    store.save_runs(
+    store.save_run(
         ConversationSession(session_id="parent-session", kind="agent", owner_id="parent"),
-        [parent],
+        parent,
+        record_usage=False,
     )
     owner = ConsumptionOwner(storage_factory=lambda: store)
 

@@ -754,6 +754,7 @@ def _broker_reads(
         worker_target=claims.to_worker_target(),
         request=secrets.SecretRequest(method=method, path="/"),
         read_only=config.egress_broker.services[service].read_only,
+        separate_account=False,
     )
 
 

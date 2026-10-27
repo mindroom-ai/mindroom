@@ -755,56 +755,177 @@ _ROUTE_DECISION_CASES = [
         id="4-user-limit-on-an-operator-host-under-deny",
     ),
     pytest.param(
-        5,
+        6,
         {"op": EgressService(rules=[_rule(_HOST)])},
         {"limit": _limit(_rule(_HOST, "/ok"))},
         False,
         _HOST,
         "/ok/x",
         (True, None, None, False, "op"),
-        id="5-restrict-only-rules-never-choose-the-credential",
+        id="6-restrict-only-rules-never-choose-the-credential",
     ),
     pytest.param(
-        5,
+        6,
         {},
         {"limit": _limit(_rule(_HOST, "/ok"))},
         False,
         _HOST,
         "/ok/x",
         (True, None, None, False, None),
-        id="5-a-limit-alone-forwards-allowed-paths-without-credentials",
+        id="6-a-limit-alone-forwards-allowed-paths-without-credentials",
     ),
     pytest.param(
-        5,
+        6,
         {"op": EgressService(rules=[_rule(_HOST)])},
         {"mine": EgressService(rules=[_rule(_HOST, "/mine")])},
         False,
         _HOST,
         "/mine/x",
         (True, None, None, False, "mine"),
-        id="5-the-more-specific-user-rule-chooses-the-credential",
+        id="6-the-more-specific-user-rule-chooses-the-credential",
     ),
     pytest.param(
-        5,
+        6,
         {"op": _restricted(_rule(_HOST, "/a"))},
         {"mine": _restricted(_rule(_HOST, "/a/mine"))},
         False,
         _HOST,
         "/a/mine/x",
         (True, None, None, False, "mine"),
-        id="5-a-path-both-restrictions-allow-matches",
+        id="6-a-path-both-restrictions-allow-matches",
     ),
     pytest.param(
-        5,
+        6,
         {"op": EgressService(rules=[_rule(_HOST, "/a")])},
         {},
         True,
         _HOST,
         "/b",
         (True, None, None, False, None),
-        id="5-no-matching-rule-goes-out-without-credentials-even-under-deny",
+        id="6-no-matching-rule-goes-out-without-credentials-even-under-deny",
     ),
 ]
+
+
+# Each case: (row, operator services, user services, host, path, the service a request names, expected as above).
+_REQUESTED_ROUTE_CASES = [
+    pytest.param(
+        1,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {},
+        _OTHER,
+        "/x",
+        "op",
+        (False, None, None, False, None),
+        id="1-a-host-without-rules-ignores-the-name",
+    ),
+    pytest.param(
+        3,
+        {"op": _restricted(_rule(_HOST, "/a"))},
+        {"mine": EgressService(rules=[_rule(_HOST)])},
+        _HOST,
+        "/b",
+        "mine",
+        (True, "path_not_allowed", "op", True, None),
+        id="3-the-operator-restriction-wins-over-the-name",
+    ),
+    pytest.param(
+        4,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {"limit": _limit(_rule(_HOST, "/ok"))},
+        _HOST,
+        "/no",
+        "op",
+        (True, "path_not_allowed", "limit", False, None),
+        id="4-a-user-limit-wins-over-naming-the-operator-service",
+    ),
+    pytest.param(
+        5,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {},
+        _HOST,
+        "/x",
+        "unknown",
+        (True, "service_not_matched", None, False, None),
+        id="5-a-name-the-requester-does-not-have",
+    ),
+    pytest.param(
+        5,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {"mine": EgressService(rules=[_rule(_OTHER)])},
+        _HOST,
+        "/x",
+        "mine",
+        (True, "service_not_matched", None, False, None),
+        id="5-a-service-without-a-rule-for-the-host",
+    ),
+    pytest.param(
+        5,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {"mine": EgressService(rules=[_rule(_HOST, "/mine")])},
+        _HOST,
+        "/other",
+        "mine",
+        (True, "service_not_matched", None, False, None),
+        id="5-a-service-without-a-rule-for-the-path",
+    ),
+    pytest.param(
+        5,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {"limit": _limit(_rule(_HOST, "/ok"))},
+        _HOST,
+        "/ok",
+        "limit",
+        (True, "service_not_matched", None, False, None),
+        id="5-a-limit-never-chooses-a-credential",
+    ),
+    pytest.param(
+        6,
+        {"op": EgressService(rules=[_rule(_HOST, "/x")])},
+        {"mine": EgressService(rules=[_rule(_HOST, "/x")])},
+        _HOST,
+        "/x/y",
+        "mine",
+        (True, None, None, False, "mine"),
+        id="6-the-named-user-service-wins-a-tie-with-an-operator-service",
+    ),
+    pytest.param(
+        5,
+        {"op": EgressService(rules=[_rule(_HOST)])},
+        {"mine": EgressService(rules=[_rule(_HOST, "/x")])},
+        _HOST,
+        "/x/y",
+        "op",
+        (True, "service_not_matched", None, False, None),
+        id="5-an-operator-service-cannot-be-named",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("row", "operator", "user", "host", "path", "requested", "expected"),
+    _REQUESTED_ROUTE_CASES,
+)
+def test_route_request_with_a_named_service_follows_its_decision_table(
+    row: int,
+    operator: dict[str, EgressService],
+    user: dict[str, EgressService],
+    host: str,
+    path: str,
+    requested: str,
+    expected: tuple[bool, str | None, str | None, bool, str | None],
+) -> None:
+    """A request that names a service (`X-Agent-Keys-Service`) matches only its rules, after the same restrictions."""
+    route = route_request(_merged(operator, user), host, 443, path, requested=requested)
+
+    decision = (
+        route.host_has_rules,
+        route.refusal,
+        route.restricted_by,
+        route.restricted_by_operator,
+        route.match.service if route.match is not None else None,
+    )
+    assert decision == expected, f"row {row}"
 
 
 @pytest.mark.parametrize(
@@ -837,8 +958,8 @@ def test_route_decision_cases_cover_every_row_of_the_table() -> None:
     """The cases above name exactly the rows the `route_request` docstring table has."""
     table_rows = {int(row) for row in re.findall(r"^\s*\| (\d+) ", route_request.__doc__ or "", flags=re.MULTILINE)}
 
-    assert table_rows == {1, 2, 3, 4, 5}
-    assert {case.values[0] for case in _ROUTE_DECISION_CASES} == table_rows
+    assert table_rows == {1, 2, 3, 4, 5, 6}
+    assert {case.values[0] for case in [*_ROUTE_DECISION_CASES, *_REQUESTED_ROUTE_CASES]} == table_rows
 
 
 @pytest.mark.parametrize(

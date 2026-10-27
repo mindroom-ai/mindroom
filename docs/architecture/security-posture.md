@@ -37,6 +37,8 @@ The config sent to runners with each request, and the config file projected into
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
+Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
+The one-time conversion of a database from an earlier release reads its rows as untrusted input and writes its `.pre-storage-v2` backup without following links, so a database worker code changed fails only its own agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
@@ -49,6 +51,7 @@ Broker refusals never carry a secret, token, query string, or connect link, but 
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
 A service can also take its secret from an OAuth account that a user connected (GitHub, Google, Atlassian) when no API key is stored for the scope, and an explicit key always wins over the account.
 The broker uses such an account for a service only after someone allowed Agent Keys to use it, an opt-in kept primary-only beside the connection, so connecting an account for its tools, whose writes may ask for approval, never by itself lets an agent's commands act as it.
+A user's own service on a personal agent can instead have an account of its own (`oauth_separate_account`), stored and allowed the same way beside the tools' connection, which the provider's tools never use.
 An opt-in allowed read only, for a service that declares `read_only`, gets the token only for `GET`, `HEAD`, and `POST` to the service's listed read paths, and never for a WebSocket upgrade or a request with a method-override header; that limit holds only as far as the upstream API keeps its writes off those methods and paths.
 The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
 Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
@@ -209,6 +212,10 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   By default these tools run in a worker, where they see only what the worker already mounts.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
   For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
+- Opening a conversation store checks for links only once, because Python's `sqlite3` cannot open a database without following links.
+  A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name: a file there already in the current layout opens as the store, a file in an older layout stops at the conversion's backup, which follows no link, and a missing or empty one gets the storage v2 tables.
+  An open store then reconnects by path for each operation for the rest of the turn, so a swap made after the open is followed: that operation fails on the missing tables, and it can leave an empty `<name>.db` at the link's target.
+  Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
 
 ## Intentional behaviors
 

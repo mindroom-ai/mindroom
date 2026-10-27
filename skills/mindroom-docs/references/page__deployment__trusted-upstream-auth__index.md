@@ -48,7 +48,7 @@ Domain matching is case-insensitive, emails from any other domain or a subdomain
 
 ## Helm Charts
 
-For the hosted instance chart, set the equivalent values:
+For the hosted instance chart or the runtime chart, set the equivalent values:
 
 ```yaml
 trustedUpstreamAuth:
@@ -64,9 +64,9 @@ trustedUpstreamAuth:
   emailDomain: example.com
 ```
 
-The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
+Either chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables, and with `enabled` true the runtime chart fails to render when `env.extra` also sets one of those variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
-Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
+All three charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
 ## Dashboard On Its Own Host
 

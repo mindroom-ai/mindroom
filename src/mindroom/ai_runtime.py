@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.mid_turn import MidTurnGate, QueuedMessage
     from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import ConversationSession, SessionKind
+    from mindroom.session_storage.types import SessionKind
 
 __all__ = [
     "EMPTY_RESPONSE_NOTICE",
@@ -356,17 +357,12 @@ def _finalize_queued_notice_in_new_session_storage(
     target: _QueuedNoticeStorageTarget,
     response_turn_id: str,
 ) -> None:
-    """Finalize one response in a worker-owned session storage handle."""
-    storage = target.storage_factory()
-    session = storage.load_session(target.session_id, target.session_kind)
-    if session is None:
-        return
-    changed_runs = _finalize_queued_notice_in_runs(
-        session.runs,
-        response_turn_id=response_turn_id,
+    """Finalize one response in a worker-owned session storage handle, editing the messages of a fresh load."""
+    target.storage_factory().rewrite_run_messages(
+        target.session_id,
+        target.session_kind,
+        partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id),
     )
-    if changed_runs:
-        storage.save_runs(session, changed_runs)
 
 
 def register_scope_notice_storage(*, scope_context: ScopeSessionContext | None, entity_name: str) -> None:
@@ -461,12 +457,12 @@ def _has_notice_marker_for_response(
 
 
 def _recover_prior_queued_notices(
-    session: ConversationSession,
+    runs: Sequence[AnyRunRecord],
     *,
     active_response_turn_id: str | None,
 ) -> list[AnyRunRecord]:
     """Return copies of the runs whose crash-left notices from earlier responses are finalized."""
-    runs = list(session.runs)
+    runs = list(runs)
     changed: dict[str | None, AnyRunRecord] = {}
     for response_turn_id in _queued_notice_response_turn_ids(runs):
         if response_turn_id == active_response_turn_id:
@@ -498,20 +494,22 @@ def scrub_queued_notice_session_context(
     """Recover prior crash-left notices without touching the active response."""
     if scope_context is None or scope_context.session is None:
         return
+    session = scope_context.session
     notice_context = _queued_message_notice_context.get()
+    recover = partial(
+        _recover_prior_queued_notices,
+        active_response_turn_id=notice_context.response_turn_id if notice_context is not None else None,
+    )
     try:
-        changed_runs = _recover_prior_queued_notices(
-            scope_context.session,
-            active_response_turn_id=notice_context.response_turn_id if notice_context is not None else None,
-        )
-        if changed_runs:
-            scope_context.storage.save_runs(scope_context.session, changed_runs)
+        # Only a loaded run holding a crash-left notice makes the reply rewrite stored messages.
+        if recover(session.runs):
+            scope_context.storage.rewrite_run_messages(session.session_id, session.kind, recover, session=session)
     except Exception:
         logger.exception(
             "Failed to recover queued-message notice in loaded session history",
             entity=entity_name,
-            session_id=scope_context.session.session_id,
-            session_type=scope_context.session.kind,
+            session_id=session.session_id,
+            session_type=session.kind,
         )
 
 
@@ -546,7 +544,7 @@ def discard_empty_completed_run(
     if scope_context is None or not run_id:
         return
     try:
-        scope_context.storage.delete_run_subtrees(scope_context.stored_or_first_session(), [run_id])
+        scope_context.storage.delete_runs([run_id], session_id=scope_context.session_id, session=scope_context.session)
     except Exception:
         logger.exception(
             "Failed to remove empty run from session history",

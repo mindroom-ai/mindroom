@@ -73,9 +73,10 @@ async def test_history_sizing_allows_loop_progress(
     config, paths = _make_config(tmp_path)
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    original = deepcopy(session)
     storage = create_state_storage("test_agent", tmp_path)
+    # The session then holds its runs as the store does.
     seed_session(storage, session)
+    original = deepcopy(session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     resolved = _agent_inputs(config)
 

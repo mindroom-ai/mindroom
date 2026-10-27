@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The conversation message exchanged with models and stored in runs.
 
-Field names are the keys stored ``run_data`` messages and summary-row segments hold, so they decode without
-migration. The record is mutable: history replay, compaction, and notices rewrite fields in place.
+Field names are the keys a stored message row's data holds, and those of the Agno-layout messages only the storage v2
+conversion still reads. The record is mutable: history replay, compaction, and notices rewrite fields in place.
 """
 
 from __future__ import annotations

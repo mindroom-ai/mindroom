@@ -658,11 +658,10 @@ def test_a_turn_too_long_for_one_extraction_keeps_its_newest_lines(tmp_path: Pat
 
 
 def test_each_turn_is_read_as_who_said_what() -> None:
-    """Each line names its sender; history replayed into a turn, system and tool messages, and blank text are left out."""
+    """Each line names its sender; system and tool messages and blank text are left out."""
     coalesced = "<messages>" + render_msg_tag(sender=BOB, body="Bob owns Atlas.") + "</messages>"
     messages = [
         Message(role="system", content="system prompt"),
-        Message(role="user", content="earlier question", from_history=True),
         Message(role="user", content=coalesced),
         Message(role="user", content="question   with\n spaces"),
         Message(role="tool", content="tool output"),

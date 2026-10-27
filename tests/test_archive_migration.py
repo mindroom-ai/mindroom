@@ -1,13 +1,17 @@
-"""A compaction archive written by a released MindRoom becomes summary rows once, when its database opens."""
+"""A compaction archive written by a released MindRoom becomes summary rows once, when its database converts on open."""
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+
+import pytest
 
 from mindroom import constants
 from mindroom.history import summary_rows
@@ -16,10 +20,11 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import seed_session
 from tests.history_helpers import folded_run_ids, stored_run_ids
+from tests.session_storage.agno_layout import write_agno_database
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,10 +37,12 @@ _ARCHIVE_DDL = (
     "session_id TEXT NOT NULL REFERENCES code_sessions(session_id) ON DELETE CASCADE, "
     "scope_key TEXT NOT NULL, summary TEXT, summary_model TEXT, "
     "legacy INTEGER NOT NULL DEFAULT 0, legacy_event_ids TEXT, created_at INTEGER NOT NULL)",
+    "CREATE INDEX code_sessions_compactions_scope ON code_sessions_compactions (session_id, scope_key)",
     "CREATE TABLE code_sessions_compacted_runs (id INTEGER PRIMARY KEY, "
     "compaction_id INTEGER NOT NULL REFERENCES code_sessions_compactions(id) ON DELETE CASCADE, "
     "session_id TEXT NOT NULL, run_id TEXT NOT NULL, run_type TEXT, event_ids TEXT NOT NULL, "
     "seen_event_ids TEXT NOT NULL DEFAULT '[]', run_data TEXT, UNIQUE(session_id, run_id))",
+    "CREATE INDEX code_sessions_compacted_runs_generation ON code_sessions_compacted_runs (compaction_id)",
 )
 
 
@@ -85,16 +92,13 @@ def _main_database(
     blob: list[dict[str, object]] | None = None,
 ) -> None:
     """Write a conversation database as a release with the compaction archive left it."""
-    storage = _open(tmp_path)
     session = (
         ConversationSession(kind="team", session_id="s1", owner_id="eng", runs=live)
         if team
         else ConversationSession(kind="agent", session_id="s1", owner_id="code", runs=live)
     )
-    seed_session(storage, session)
+    write_agno_database(_db(tmp_path), session)
     with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
-        connection.execute("DROP TABLE IF EXISTS code_sessions_summaries")
-        connection.execute("DROP TABLE IF EXISTS code_sessions_removed_runs")
         for statement in _ARCHIVE_DDL:
             connection.execute(statement)
         for generation in generations:
@@ -189,6 +193,39 @@ def test_ordinary_generations_become_summary_rows_after_their_runs(tmp_path: Pat
     )
     assert "code_sessions_compactions" not in _tables(tmp_path)
     assert "code_sessions_compacted_runs" not in _tables(tmp_path)
+
+
+@pytest.mark.parametrize("spare", [-1, 0])
+def test_converting_the_archive_needs_room_for_the_runs_it_restores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spare: int,
+) -> None:
+    """Restoring archived runs is journaled, so the free space needed grows by their size beyond 2.5 times."""
+    _main_database(tmp_path, live=[_run("r3")], generations=[_Generation(summary="S1", runs=[_run("r1"), _run("r2")])])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        [(archived,)] = connection.execute(
+            "SELECT sum(length(CAST(run_data AS BLOB))) FROM code_sessions_compacted_runs",
+        ).fetchall()
+    needed = 5 * _db(tmp_path).stat().st_size // 2 + archived
+    statvfs = os.statvfs
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda target: (
+            SimpleNamespace(f_bavail=needed + spare, f_frsize=1) if isinstance(target, int) else statvfs(target)
+        ),
+    )
+
+    if spare == 0:
+        assert stored_run_ids(_open(tmp_path), "s1") == ["r1", "r2", "r3"]
+        return
+    with pytest.raises(
+        ConversionSpaceError,
+        match=rf"needs {needed} bytes .* plus the {archived} bytes of older run data",
+    ):
+        _open(tmp_path)
+    assert "code_sessions_compacted_runs" in _tables(tmp_path)
 
 
 def test_reopening_a_migrated_database_changes_nothing(tmp_path: Path) -> None:
@@ -334,6 +371,52 @@ def test_archived_member_runs_return_with_their_team_run(tmp_path: Path) -> None
     assert folded == ["t0"]
 
 
+def test_a_generation_of_several_runs_sorts_after_its_last_top_level_run_with_their_event_ids_once(
+    tmp_path: Path,
+) -> None:
+    """A generation covers all of its runs, members aside, and keeps each event id its runs carry once, sorted.
+
+    A generation that is not legacy keeps no captured ids of its own.
+    """
+    member = RunRecord(run_id="m1", agent_id="helper", session_id="s1", parent_run_id="t1")
+    team_runs = [
+        TeamRunRecord(run_id=f"t{n}", team_id="eng", session_id="s1", status=RunStatus.completed) for n in (0, 1, 2)
+    ]
+    _main_database(
+        tmp_path,
+        live=[team_runs[2]],
+        generations=[
+            _Generation(
+                "team summary",
+                [team_runs[0], team_runs[1], member],
+                legacy_event_ids=("$not-legacy",),
+                scope_key="team:eng",
+            ),
+        ],
+        team=True,
+    )
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        for run_id, event_ids, seen_event_ids in (
+            ("t0", ["$z", "$shared"], ["$shared"]),
+            ("t1", ["$shared", "$a"], ["$a", "$shared"]),
+        ):
+            connection.execute(
+                "UPDATE code_sessions_compacted_runs SET event_ids = ?, seen_event_ids = ? WHERE run_id = ?",
+                (json.dumps(event_ids), json.dumps(seen_event_ids), run_id),
+            )
+
+    session = _open(tmp_path).load_session("s1", "team")
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        rows = connection.execute(
+            "SELECT run.run_id, summary.event_ids, summary.seen_event_ids FROM code_sessions_log_summaries AS summary "
+            "LEFT JOIN code_sessions_log_runs AS run ON run.session_id = summary.session_id AND run.seq = summary.through",
+        ).fetchall()
+
+    assert session is not None
+    assert [run.run_id for run in session.runs or []] == ["t2"]
+    assert rows == [("t1", '["$a", "$shared", "$z"]', '["$a", "$shared"]')]
+
+
 def test_rows_without_an_index_keep_their_place(tmp_path: Path) -> None:
     """Rows an old writer stored without an index keep the place a read gave them: first among the live runs."""
     _main_database(tmp_path, live=[_run("r1"), _run("r2")], generations=[_Generation("summary of r0", [_run("r0")])])
@@ -398,3 +481,171 @@ def test_redacting_an_archived_message_after_migration_cuts_from_its_run(tmp_pat
     assert replay.summary == "summary of r0"
     assert replay.stored == ["r0"]
     assert replay.loaded == []
+
+
+def _set_archived(tmp_path: Path, column: str, value: str) -> None:
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute(f"UPDATE code_sessions_compacted_runs SET {column} = ?", (value,))  # noqa: S608
+
+
+@pytest.mark.parametrize(
+    "run_data",
+    ["not json", "[1]", "5", "[" * 100_000 + "]" * 100_000],
+    ids=["not-json", "list", "number", "too-deep"],
+)
+def test_an_archived_run_that_does_not_decode_stays_out(tmp_path: Path, run_data: str) -> None:
+    """Worker code can write the archive; a run that is no JSON object does not return, and the rest converts."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    _set_archived(tmp_path, "run_data", run_data)
+
+    replay = _replay(tmp_path)
+
+    assert (replay.loaded, replay.stored, replay.summary) == (["r1"], ["r1"], "summary of r0")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"created_at": "NaN"},
+        {"created_at": "1e400"},
+        {"created_at": "100000000000000000000000"},
+        {"team_id": '{"a": 1}'},
+        {"user_id": "[1]"},
+        {"run_id": "5"},
+    ],
+    ids=["nan-time", "infinite-time", "time-beyond-64-bits", "object-team", "list-requester", "number-id"],
+)
+def test_an_archived_run_with_unusable_values_returns_without_them(tmp_path: Path, change: dict[str, str]) -> None:
+    """A value no writer stored is left out of the restored row, so the run returns behind its summary."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    run_data = (
+        json.dumps(_run("r0").to_dict())[:-1] + "".join(f', "{key}": {value}' for key, value in change.items()) + "}"
+    )
+    _set_archived(tmp_path, "run_data", run_data)
+
+    replay = _replay(tmp_path)
+
+    assert (replay.loaded, replay.stored, replay.folded) == (["r1"], ["r0", "r1"], ["r0"])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection:
+        created = [created_at for (created_at,) in connection.execute("SELECT created_at FROM code_sessions_log_runs")]
+    assert all(isinstance(created_at, int) and created_at > 0 for created_at in created)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    ["not json", "5", "null", '{"at": 1}', '[1, "$odd", [2]]'],
+    ids=["not-json", "number", "null", "object", "mixed"],
+)
+def test_event_ids_the_archive_holds_in_odd_shapes_count_only_as_text(tmp_path: Path, stored: str) -> None:
+    """Event ids that are not text entries of valid JSON match no redaction, and the database still converts."""
+    _main_database(
+        tmp_path,
+        live=[_run("r1")],
+        generations=[
+            _Generation("legacy summary", legacy=True, legacy_event_ids=("$legacy",)),
+            _Generation("legacy summary and r0", [_run("r0")]),
+        ],
+    )
+    _set_archived(tmp_path, "event_ids", stored)
+    _set_archived(tmp_path, "seen_event_ids", stored)
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute("UPDATE code_sessions_compactions SET legacy_event_ids = ?", (stored,))
+
+    storage = _open(tmp_path)
+
+    expected = {"$odd"} if "$odd" in stored else set()
+    for kind in ("all", "seen"):
+        assert summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind=kind) == expected
+    assert _replay(tmp_path).loaded == ["r1"]
+
+
+def test_archive_text_that_is_not_utf8_reads_with_replacement_characters(tmp_path: Path) -> None:
+    """Worker code can write archive text that is not UTF-8, or JSON that escapes a lone surrogate; the database converts."""
+    _main_database(
+        tmp_path,
+        live=[_run("r1")],
+        generations=[
+            _Generation("legacy summary", legacy=True, legacy_event_ids=("$legacy",)),
+            _Generation("summary of r0", [_run("r0")]),
+        ],
+    )
+    run_data = json.dumps(_run("r0").to_dict()).encode().replace(b'"answer r0"', b'"answer r0 \x80"')
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        for table, column, value in (
+            ("code_sessions_compacted_runs", "run_data", run_data),
+            ("code_sessions_compacted_runs", "event_ids", b'["$r0", "$\xff"]'),
+            ("code_sessions_compacted_runs", "seen_event_ids", b'["$r0", "$\\ud800"]'),
+            ("code_sessions_compactions", "summary", b"summary \xfe"),
+            ("code_sessions_compactions", "summary_model", b"model \xfe"),
+            ("code_sessions_compactions", "legacy_event_ids", b'["$legacy\xfe"]'),
+        ):
+            connection.execute(f"UPDATE {table} SET {column} = CAST(? AS TEXT)", (value,))  # noqa: S608
+
+    storage = _open(tmp_path)
+    restored = storage.get_run("r0")
+    candidates = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="all")
+    seen = summary_rows.history_event_ids(storage, session_id="s1", scope_key=_SCOPE.key, kind="seen")
+    replay = _replay(tmp_path)
+
+    assert isinstance(restored, RunRecord)
+    assert restored.content == "answer r0 \ufffd"
+    assert (replay.loaded, replay.stored, replay.summary) == (["r1"], ["r0", "r1"], "summary \ufffd")
+    assert candidates == {"$legacy\ufffd", "$r0", "$\ufffd"}
+    assert seen == {"$legacy\ufffd", "$r0", "$\ufffd\ufffd\ufffd"}
+
+
+@pytest.mark.parametrize("field", ["agent_id", "user_id"])
+def test_an_archived_run_with_a_lone_surrogate_returns_with_a_replacement_character(tmp_path: Path, field: str) -> None:
+    """A text field worker code archived with an escaped lone surrogate, which SQLite cannot store, reads as U+FFFD."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    _set_archived(tmp_path, "run_data", json.dumps({**_run("r0").to_dict(), field: "x\ud800"}))
+
+    restored = _open(tmp_path).get_run("r0")
+
+    assert restored is not None
+    assert restored.to_dict()[field] == "x\ufffd"
+    assert _replay(tmp_path).stored == ["r0", "r1"]
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "value", "replay"),
+    [
+        ("code_sessions_compacted_runs", "session_id", "gone", (["r1"], ["r1"], "summary of r0")),
+        ("code_sessions_compacted_runs", "session_id", b"s1", (["r1"], ["r1"], "summary of r0")),
+        ("code_sessions_compacted_runs", "run_id", b"r0", (["r1"], ["r1"], "summary of r0")),
+        ("code_sessions_compactions", "session_id", "gone", (["r0", "r1"], ["r0", "r1"], None)),
+        ("code_sessions_compactions", "session_id", b"s1", (["r0", "r1"], ["r0", "r1"], None)),
+    ],
+    ids=["run-of-no-session", "run-of-a-blob-session", "blob-run-id", "generation-of-no-session", "blob-generation"],
+)
+def test_archive_rows_naming_no_stored_session_or_a_run_by_an_id_that_is_not_text_stay_out(
+    tmp_path: Path,
+    table: str,
+    column: str,
+    value: object,
+    replay: tuple[list[str], list[str], str | None],
+) -> None:
+    """Worker code can write the archive; a row no stored session or text run id names stays out, and the rest converts."""
+    _main_database(tmp_path, live=[_run("r1")], generations=[_Generation("summary of r0", [_run("r0")])])
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute(f"UPDATE {table} SET {column} = ?", (value,))  # noqa: S608
+
+    converted = _replay(tmp_path)
+
+    assert (converted.loaded, converted.stored, converted.summary) == replay
+
+
+def test_a_member_row_whose_id_is_not_text_below_an_archived_run_does_not_stop_the_conversion(tmp_path: Path) -> None:
+    """Worker code can write a stale copy's member row with an id that is not text; the copy goes, the row stays out."""
+    member = RunRecord(run_id="member", agent_id="code", session_id="s1", parent_run_id="r0")
+    _main_database(
+        tmp_path,
+        live=[_run("r0"), member, _run("r1")],
+        generations=[_Generation("summary of r0", [_run("r0")])],
+    )
+    with closing(sqlite3.connect(_db(tmp_path))) as connection, connection:
+        connection.execute("UPDATE code_sessions_runs SET run_id = ? WHERE run_id = 'member'", (b"\x09",))
+
+    converted = _replay(tmp_path)
+
+    assert (converted.loaded, converted.stored, converted.summary) == (["r1"], ["r0", "r1"], "summary of r0")

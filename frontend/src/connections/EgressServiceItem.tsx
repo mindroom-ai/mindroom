@@ -58,13 +58,13 @@ export interface ServicePaths {
 const REUSE_BODY = { acknowledge_approval_bypass: true };
 
 /**
- * Asked before Agent Keys may use an account; a second click while it closes
- * goes on only once. With `onAccessChange`, for a service that offers read
- * only, it also asks how much the account may do.
+ * Asked before Agent Keys may use an account, or at more access; a second
+ * click while it closes goes on only once. With `onAccessChange`, for a
+ * service that offers read only, it also asks how much the account may do.
  */
 function AccountReuseDialog({
   open,
-  provider,
+  title,
   description,
   confirmLabel,
   access,
@@ -73,7 +73,7 @@ function AccountReuseDialog({
   onCancel,
 }: {
   open: boolean;
-  provider: string;
+  title: string;
   description: string;
   confirmLabel: string;
   access: EgressAccess;
@@ -88,7 +88,7 @@ function AccountReuseDialog({
   return (
     <ConfirmDialog
       open={open}
-      title={`Use your ${provider} account for Agent Keys?`}
+      title={title}
       description={description}
       confirmLabel={confirmLabel}
       destructive={false}
@@ -103,7 +103,7 @@ function AccountReuseDialog({
         <ToggleGroup
           type="single"
           aria-label="Access"
-          className="self-start"
+          className="justify-self-start"
           value={access}
           // Pressing the chosen level again would clear it; one stays chosen.
           onValueChange={(value) =>
@@ -169,11 +169,14 @@ export function EgressServiceItem({
     (service.can_manage || oauth.can_connect);
   const reuseEnabled = oauth?.reuse_enabled === true;
   // The level the reuse question allows the account at; a service that
-  // offers read only asks, starting from it, and any other sends no level.
+  // offers read only asks, starting from it, a change of an allowed
+  // account's level sends it, and anything else sends no level.
   const readOnlyOffered = service.read_only_supported;
   const [access, setAccess] = useState<EgressAccess>("read");
   const reuseBody = (level: EgressAccess) =>
-    readOnlyOffered ? { ...REUSE_BODY, access: level } : REUSE_BODY;
+    readOnlyOffered || reuseEnabled
+      ? { ...REUSE_BODY, access: level }
+      : REUSE_BODY;
   const askReuse = (level: EgressAccess) => {
     setAccess(level);
     setConfirm("reuse");
@@ -378,7 +381,12 @@ export function EgressServiceItem({
         ]
       : []),
     // Only a connected account: connecting one already allowed keeps its level.
-    ...(oauth?.connected && reuseEnabled && canChangeReuse && readOnlyOffered
+    // One allowed only to read, where the service no longer offers read only,
+    // is refused everything until it changes to read and write.
+    ...(oauth?.connected &&
+    reuseEnabled &&
+    canChangeReuse &&
+    (readOnlyOffered || oauth.reuse_access === "read")
       ? [
           oauth.reuse_access === "read"
             ? {
@@ -649,7 +657,12 @@ export function EgressServiceItem({
         {oauth && (
           <AccountReuseDialog
             open={confirm === "reuse"}
-            provider={oauth.display_name}
+            // An allowed account asks again only to change to read and write.
+            title={
+              reuseEnabled
+                ? `Change ${oauth.display_name} to read and write?`
+                : `Use your ${oauth.display_name} account for Agent Keys?`
+            }
             description={accountReuseDescription({
               provider: oauth.display_name,
               account: oauth.connected
@@ -661,9 +674,15 @@ export function EgressServiceItem({
               unscoped: agent.scope === "unscoped",
               readOnly: readOnlyOffered && access === "read",
             })}
-            confirmLabel={oauth.connected ? "Use account" : "Continue"}
+            confirmLabel={
+              reuseEnabled
+                ? "Change"
+                : oauth.connected
+                  ? "Use account"
+                  : "Continue"
+            }
             access={access}
-            onAccessChange={readOnlyOffered ? setAccess : null}
+            onAccessChange={readOnlyOffered && !reuseEnabled ? setAccess : null}
             onCancel={() => setConfirm(null)}
             onContinue={() =>
               oauth.connected

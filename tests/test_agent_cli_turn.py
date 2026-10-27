@@ -53,7 +53,7 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test, stored_session_state
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
 from tests.test_tool_hooks import _plugin
@@ -1045,7 +1045,7 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         msg = "database unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr(ConversationStore, "save_runs", fail)
+    monkeypatch.setattr(ConversationStore, "save_run", fail)
     async with response_cli_lifetime():
         await capture_bash_batch(owner, ("bash-1", {"command": "touch"}))
         with pytest.raises(OSError, match="database unavailable"):
@@ -1927,8 +1927,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
         assert paused.cli_call["parent_bash_call_id"] == "outer"
         assert paused.tool_trace[0].parent_bash_call_id == "outer"
         assert paused.tool_trace[0].toolkit_name == "actions"
-        saved = catalog.store.read_session_fields("session")
-        assert saved.session_state["before_pause"] is True
+        assert stored_session_state(catalog.store, "session")["before_pause"] is True
         waiting.set()
         await decide.wait()
         requirement = paused.requirements[0]

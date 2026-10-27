@@ -45,6 +45,12 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             "No openai key is set for this shared agent. Only an administrator can add one, at manage_url.",
         ),
         (
+            "credential_not_configured",
+            {"service": "team_calendar", "own_account": True},
+            "No team_calendar account is connected for this agent. "
+            "Ask the user to connect the service's own account at manage_url, then retry.",
+        ),
+        (
             "oauth_connection_required",
             {"service": "github", "provider": "github"},
             "The github account for github must be connected again. "
@@ -61,6 +67,17 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             {"host": "api.github.com", "path": "/repos/o/b", "service": "github-limited"},
             "api.github.com/repos/o/b is outside the paths github-limited allows for this agent. "
             "Ask the user to add it at manage_url if the agent needs it.",
+        ),
+        (
+            "service_not_matched",
+            {"host": "www.googleapis.com", "path": "/calendar/v3?page=2", "service": "team_calendar"},
+            "The X-Agent-Keys-Service header names team_calendar, but no service of your own by that name has a rule "
+            "for www.googleapis.com/calendar/v3. Name one of your own services that covers it, or leave the header out.",
+        ),
+        (
+            "bad_request",
+            {"service_header": True},
+            "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own services.",
         ),
         (
             "bad_request",

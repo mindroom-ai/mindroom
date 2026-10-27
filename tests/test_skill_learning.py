@@ -1456,19 +1456,18 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
     runner = _runner(paths)
     assert await _count(runner, config) is None
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    storage.delete_run_subtrees(_stored("session"), ["r1"])
+    storage.delete_runs(["r1"], session_id="session")
     later = _tool_turn("r2", result="deployed to canary")
     later.session_id = "session"
     seed_session(storage, _stored("session", later))
     # The summary of the deleted reply sorts before every remaining run, as a compaction of it would.
     assert summary_rows.append_summary(
         storage,
-        session=ConversationSession(session_id="session", kind="agent", owner_id="mind"),
+        session_id="session",
         scope_key="agent:mind",
         based_on=None,
         covered=[],
         summary="The user wants release notes in the #deploys channel.",
-        summary_model="summary-model",
     )
     model = _model()
     install_model_providers(monkeypatch, {"default": model})

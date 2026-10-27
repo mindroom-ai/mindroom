@@ -226,7 +226,7 @@ A capture script, deleted with Agno's runtime, wrote `storage/`, `runs/`, `histo
 Every scenario ran MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
 Only the provider was replaced, by the synthetic provider answering from a script.
 The `storage/`, `runs/`, and `history/` files hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
-`tests/session_storage/test_store_goldens.py` proves the owned store reads and writes every `storage/` file as Agno did.
+`tests/session_storage/test_store_goldens.py` proves that every `storage/` file converts to storage v2 and then reads and writes with nothing lost or changed.
 
 ### Scenarios
 
@@ -272,9 +272,9 @@ Every run with a provider request also has its usage row in `<table>_usage`.
 
 Agno's own readers are not lossless.
 Re-serializing a stored run adds `"events": []` to it and to every member response, drops an empty `tools` list, and drops `Audio.format`, so a row written back after Agno read it carries those changes.
-The resumed runs are such rows, since Agno's continuation reads the paused run from storage before saving it, and so is any loaded run MindRoom edits and saves with `save_runs`.
+The resumed runs are such rows, since Agno's continuation reads the paused run from storage before saving it, and so is any loaded run the capturing release edited and saved back whole.
 `tests/session_storage/test_store_goldens.py` pins exactly these differences.
-The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds with `save_runs` after delivering a reply.
+The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds to a run's metadata after delivering a reply.
 
 The `run-error` record holds the previous turn's answer followed by `(turn failed before completion)`, because the Agno-era interrupted-turn text fell back to replayed history when the failed request produced no assistant message; the golden keeps that stored legacy data, while the owned loop keeps only the failed reply's own text (`tests/test_agent_turn_runtime.py::test_an_error_record_never_repeats_an_earlier_answer`).
 

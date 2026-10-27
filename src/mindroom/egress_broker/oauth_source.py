@@ -65,6 +65,7 @@ __all__ = [
     "oauth_connection_for_display",
     "oauth_status",
     "resolve_oauth_token",
+    "separate_account_provider",
     "shared_worker_oauth",
     "shared_worker_unavailable_status",
 ]
@@ -113,6 +114,7 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     worker_target: ResolvedWorkerTarget,
     request: SecretRequest,
     read_only: EgressReadOnly | None,
+    separate_account: bool,
 ) -> SecretResult:
     """Return a fresh access token from the scope's connection to `provider_id`, refreshing it when near expiry.
 
@@ -123,10 +125,12 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     Only a rejected grant or an unreadable credential asks the user to act (`SecretNeedsReconnect`); any other refresh
     failure is `SecretUnavailable`, as the tools treat it, and the scope then answers that without another grant
     for `_TRANSIENT_FAILURE_BACKOFF_SECONDS`. `service` names the egress service in the one warning logged for a
-    provider id the registry does not know. Blocks on the OAuth transaction owner, and on another lookup refreshing
-    the same scope, so callers on an event loop run it in a thread.
+    provider id the registry does not know. A `separate_account` service reads only its own account
+    (`separate_account_provider`), and gets no connect link, which would connect the tools' one. Blocks on the OAuth
+    transaction owner, and on another lookup refreshing the same connection, so callers on an event loop run it in a
+    thread.
     """
-    provider = _registered_provider(service, provider_id, config, runtime_paths)
+    provider = _registered_provider(service, provider_id, config, runtime_paths, separate_account=separate_account)
     if provider is None:
         return SecretMissing()
     access = shared_worker_oauth(
@@ -142,7 +146,7 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     if provider.requester_scoped_credentials and context.worker_target is None:
         # No requester to bind the connection to, so there is no stored token to use or allow.
         return SecretMissing()
-    level = oauth_reuse_access(context, service, provider.id)
+    level = oauth_reuse_access(context, service, provider.id, separate_account=separate_account)
     if level is None:
         return SecretMissing(
             provider=provider.id,
@@ -151,12 +155,12 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
         )
     if level == "read" and not read_only_allows(read_only, request):
         return SecretReadOnly(provider=provider.id, requester_owned=provider.requester_scoped_credentials)
-    credentials = _refreshed_credentials(service, context)
+    credentials = _refreshed_credentials(service, context, linked=not separate_account)
     if isinstance(credentials, SecretNeedsReconnect | SecretUnavailable):
         return credentials
     token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
     if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
-        return _missing(context)
+        return SecretMissing(own_account=True) if separate_account else _missing(context)
     return Secret(token)
 
 
@@ -165,6 +169,7 @@ def oauth_status(
     worker_target: ResolvedWorkerTarget | None,
     *,
     service: str,
+    separate_account: bool,
     config: Config,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
@@ -174,9 +179,10 @@ def oauth_status(
     A stored connection whose access token expired still counts as connected while it can be refreshed.
     `reuse_enabled` says whether Agent Keys may use it for `service`, and `reuse_access` at which level; without that
     the connection is not read, so it reports nothing connected. A None `worker_target` is the global store that agents without a worker scope read.
-    Binding the keyword arguments gives `secrets.service_status` its `oauth_status` reader.
+    A `separate_account` service reports its own account. Binding the keyword arguments gives `secrets.service_status`
+    its `oauth_status` reader.
     """
-    provider = _registered_provider(service, provider_id, config, runtime_paths)
+    provider = _registered_provider(service, provider_id, config, runtime_paths, separate_account=separate_account)
     if provider is None:
         return None
     access = shared_worker_oauth(
@@ -188,7 +194,7 @@ def oauth_status(
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
     context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
-    reuse_access = oauth_reuse_access(context, service, provider.id)
+    reuse_access = oauth_reuse_access(context, service, provider.id, separate_account=separate_account)
     credentials = None
     reset_required = False
     if reuse_access is not None:
@@ -224,6 +230,16 @@ def oauth_connection_for_display(context: OAuthCredentialContext) -> tuple[bool,
             credentials = load_oauth_credentials_snapshot_sync(context).credentials
     connected = oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
     return connected, oauth_account_label(credentials) if connected and credentials else None
+
+
+def separate_account_provider(provider: OAuthProvider, service: str) -> OAuthProvider:
+    """Return the provider whose connection is a user service's own account (`oauth_separate_account`).
+
+    Only the stored name changes, to `<base>__<service>_oauth` beside the tools' `<base>_oauth`, so connect, refresh,
+    and the opt-in work on it unchanged in the same scope store, and the name stays an OAuth token service's.
+    """
+    base = provider.credential_service.removesuffix("_oauth")
+    return replace(provider, credential_service=f"{base}__{service}_oauth")
 
 
 def shared_worker_oauth(
@@ -278,6 +294,8 @@ def _registered_provider(
     provider_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    separate_account: bool,
 ) -> OAuthProvider | None:
     provider = load_oauth_providers(config, runtime_paths).get(provider_id)
     if provider is None:
@@ -286,14 +304,20 @@ def _registered_provider(
             _warned_unknown_providers.add((service, provider_id))
         if first:
             logger.warning("egress_broker_oauth_provider_unknown", service=service, provider_id=provider_id)
-    return provider
+        return None
+    return separate_account_provider(provider, service) if separate_account else provider
 
 
 def _refreshed_credentials(
     service: str,
     context: OAuthCredentialContext,
+    *,
+    linked: bool,
 ) -> dict[str, Any] | SecretNeedsReconnect | SecretUnavailable | None:
-    """Refresh the scope's credentials through its gate; a failed refresh becomes the result to return."""
+    """Refresh the scope's credentials through its gate; a failed refresh becomes the result to return.
+
+    A reconnect carries a connect link only when `linked`.
+    """
     gate = _refresh_gate(context)
     with gate.lock:
         # Lookups queued behind a failed refresh answer here instead of each repeating the grant.
@@ -316,7 +340,7 @@ def _refreshed_credentials(
         return SecretNeedsReconnect(provider=context.provider.id, reset_required=True)
     return SecretNeedsReconnect(
         provider=context.provider.id,
-        connect_url=_connect_url(context, OAUTH_REFRESH_REJECTED_REASON),
+        connect_url=_connect_url(context, OAUTH_REFRESH_REJECTED_REASON) if linked else None,
     )
 
 
@@ -330,11 +354,11 @@ def _log_token_unavailable(service: str, provider: OAuthProvider, exc: OAuthProv
 
 
 def _refresh_gate(context: OAuthCredentialContext) -> _RefreshGate:
-    """Return the gate of the context's credential store: one per provider, worker scope, and worker key."""
+    """Return the gate of the context's credential store: one per stored connection, worker scope, and worker key."""
     target = context.worker_target
     key = (
         context.runtime_paths.storage_root,
-        context.provider.id,
+        context.provider.credential_service,
         None if target is None else (target.worker_scope, target.worker_key),
     )
     with _refresh_gates_lock:

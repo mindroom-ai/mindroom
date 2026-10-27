@@ -8,6 +8,40 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to conversation storage v2
+
+The first start after this upgrade converts the conversation database of every agent and team, private instances included, and the internal usage database under `system/`, to a new layout before any agent comes online.
+Each converted database logs one `conversation_converted` record (see [Events](operational-log-events.md#conversation_converted)).
+The process stays live but becomes ready only after the conversion and the rest of startup finish; [Health & Readiness](operational-log-events.md#health-readiness) says what each endpoint answers meanwhile.
+The conversion is one-way, and downgrading afterwards is not supported.
+
+### Before upgrading
+
+Check that every startup probe asks `/api/health`, as the bundled Helm charts do and [Health & Readiness](operational-log-events.md#health-readiness) requires.
+A deploy that rolls back when readiness times out, such as `helm upgrade --atomic` with its default 5-minute timeout, can roll back mid-conversion and start the older release on converted databases (see [Downgrading](#downgrading)), so raise the timeout or drop `--atomic` for this upgrade.
+Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about two and a half times the total size of their `.db` files.
+A database that no release since v2026.10.341 has opened can still hold Agno 2 run blobs or the compaction archive, which the conversion copies first, so it needs up to about three and a half times its size.
+A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+
+### What carries over
+
+Conversation history, compaction summaries, pending tool approvals, and usage records carry over.
+Before converting a database, MindRoom copies it byte for byte to `<name>.db.pre-storage-v2` beside it and never deletes that copy.
+A stored run whose data cannot be read is left out of the converted database, logged as `conversation_run_left_out` with its run ID, and kept in the backup.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+Right after converting a database, MindRoom compacts it to return the space its old tables used, when its directory has free space of about twice the converted data.
+Without that space the file keeps it until later writes reuse it; with MindRoom stopped, `sqlite3 <name>.db VACUUM` returns it.
+
+### Downgrading
+
+The only way back is to stop MindRoom, replace each `<name>.db` with its `<name>.db.pre-storage-v2` backup, delete any `<name>.db-journal` beside it, and start the older release.
+Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
+The older release drops messages redacted since the upgrade from the restored history before it next replies in that conversation, but edits made since the upgrade are not applied again, so the earlier reply to an edited message can return to the agent's history.
+An older release started on converted databases without restoring the backups archives each agent's or team's `sessions/` directory, backups included, as [Incompatible session databases](storage.md#incompatible-session-databases) describes; move the backups back out of that archive and restore them as above.
+Upgrading again converts each restored database again and writes a new backup.
+
+Once you are sure you will not downgrade, delete the `.pre-storage-v2` backups.
+
 ## Upgrading to OpenAI SDK 3
 
 OpenAI-compatible and Claude model requests, and the other OpenAI SDK requests [Model Configuration](../configuration/models.md#configuration-examples) lists, now verify certificates against the operating system's trust store instead of certifi's bundle.

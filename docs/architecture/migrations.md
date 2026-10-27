@@ -25,7 +25,11 @@ Paths below are relative to `src/mindroom/` unless they start with `scripts/` or
 
 - An incompatible format is not a locked database, permission failure, missing key, full disk, or corrupt current schema; migration owners reject those failures instead of converting them into deletion, and reset is an explicit owner policy, never a generic exception fallback.
 - Sparse readers may ignore unknown fields or drop malformed records that can be rebuilt, but conversation databases are not rebuildable caches, because they hold the conversation history the models see, so an incompatible one is archived.
-- A conversation database from an earlier release converts once, when it opens and before any response loads it, in the transaction that creates the summary-row tables: Agno 2 run blobs and rows without a position become positioned run rows, and destructive-compaction state and the compaction archive become summary rows, because the loader reads only that shape.
+- Conversation databases convert one way from the Agno layout to storage v2, with a byte-for-byte backup beside each that MindRoom never deletes and no supported downgrade, because keeping both layouts readable needed triggers and a reconversion that could not tell which conversations an older release wrote (see `docs/dev/2026-10-25-conversation-storage-rows.md`).
+  A startup sweep converts every agent's, team's, and private instance's database and the system usage database before any bot or the API starts, so no reply waits on a large conversion and ready means converted, and every store open runs the same entry, which converts a database the sweep skipped and a restored backup, at the cost of one read on a converted one.
+  The sweep logs and skips a database it cannot read, lock, or convert, because worker code can write session directories and one database must not stop startup; that database's own open then fails with the error.
+  The earlier one-time steps (usage-ledger seeding, summary-row adoption, and Agno 2 run blobs and positions) run only inside the conversion, behind its format marker, because they recognize an old database by a missing table, and a converted one lacks the Agno tables too.
+- A historical shape the conversion can rewrite, such as combined tool results, stored tool schemas, history copies, and legacy tool-call shapes, is normalized once by it instead of being read at every load; a shape it cannot rewrite stays a runtime reader, such as a summary inside a paused run's saved system message, which a resume reuses byte for byte.
 - Upgrades run while no reply is in flight, so reply records adopt no stream, queued delivery, or resume an earlier release left.
   Pending approvals cannot be ruled out, so the upgrade cancels them; no continuation therefore rebuilds historical context, origin, or tool-call visibility.
 - The Nio ownership cutoff drops unfinished journal work from before it, including interactive tables, the old response outbox and delivery tables, and approval transport, instead of an additive conversion chain that archives, translates, or tombstones it.
@@ -40,5 +44,6 @@ Paths below are relative to `src/mindroom/` unless they start with `scripts/` or
 ## Limitations
 
 - An old invited-room ledger that fails validation is not moved below `tracking/`, so that entity leaves the rooms it kept on its first room pass after the upgrade.
+- Downgrading below conversation storage v2 means restoring each database's backup, which loses every write made since the upgrade.
 
 See [Upgrade and reset limits](../deployment/upgrades.md#upgrade-and-reset-limits) for the operator view.

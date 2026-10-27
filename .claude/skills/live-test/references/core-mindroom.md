@@ -370,7 +370,7 @@ git worktree add --detach "$upgrade_root/old" origin/main
 setsid nohup "$upgrade_root/old/.venv/bin/mindroom" run --storage-path "$MINDROOM_STORAGE_PATH" --api-port 9877 --log-level INFO >> old.log 2>&1 < /dev/null & disown
 ```
 3. Build history, stop it (`kill "$(lsof -ti :9877)"`), copy the session database aside for comparison, then start this branch's `.venv/bin/mindroom` on the same `MINDROOM_STORAGE_PATH`, namespace, and config.
-4. Verify with the database, not the chat: `sqlite3 <root>/agents/<agent>/sessions/<agent>.db` and inspect `<agent>_sessions` (`runs`, `summary`, `metadata`), `<agent>_sessions_runs`, and `PRAGMA journal_mode`.
+4. Verify with the database, not the chat: check that `<root>/agents/<agent>/sessions/<agent>.db.pre-storage-v2` exists and matches the copy from step 3 (`cmp`), then `sqlite3 <root>/agents/<agent>/sessions/<agent>.db` and inspect `<agent>_sessions` (`session_data`, `metadata`), the `<agent>_sessions_log_*` tables (`_log_runs`, `_log_messages`, `_log_tools`, `_log_summaries`, `_log_removed`, `_log_meta`), and `PRAGMA journal_mode`.
 
 Compaction knobs that make it fire within a few turns:
 

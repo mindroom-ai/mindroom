@@ -181,7 +181,8 @@ def _config_service_provider(
     service = config.egress_broker.services.get(name) if config is not None else None
     if service is None:
         raise HTTPException(404, "Service is not configured")
-    return target, worker_target, oauth_provider_of_service(request, service, worker_target, connecting=connecting)
+    provider = oauth_provider_of_service(request, name, service, worker_target, connecting=connecting)
+    return target, worker_target, provider
 
 
 def _oauth_reuse_target(

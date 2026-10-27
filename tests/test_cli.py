@@ -15,11 +15,11 @@ import pytest
 from typer.testing import CliRunner
 
 from mindroom import constants as constants_mod
+from mindroom.api import startup_probes
+from mindroom.api.startup_probes import serve_startup_probes
 from mindroom.cli import main as main_module
-from mindroom.cli import pairing_probes
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
-from mindroom.cli.pairing_probes import serve_pairing_probes
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
@@ -619,11 +619,14 @@ def _require_ipv6_loopback() -> None:
         pytest.skip("IPv6 loopback is unavailable")
 
 
+_PAIRING = "Waiting for local pairing approval"
+
+
 def _probe_status(host: str, port: int) -> int:
     return httpx.get(f"http://{host}:{port}/api/health", trust_env=False).status_code
 
 
-def test_pairing_probes_answer_on_every_localhost_address() -> None:
+def test_startup_probes_answer_on_every_localhost_address() -> None:
     """Like the real API server, `localhost` probes answer on both loopbacks, and a taken IPv4 loopback fails early."""
     _require_ipv6_loopback()
     families = {info[0] for info in socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)}
@@ -631,7 +634,7 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         pytest.skip("localhost does not resolve to both loopbacks")
     port = _unused_local_port()
 
-    with serve_pairing_probes("localhost", port):
+    with serve_startup_probes("localhost", port, detail=_PAIRING):
         assert _probe_status("127.0.0.1", port) == 200
         assert _probe_status("[::1]", port) == 200
 
@@ -650,7 +653,7 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         occupied.listen()
         with (
             pytest.raises(OSError, match=re.escape(f"localhost:{port} (Address already in use)")),
-            serve_pairing_probes("localhost", port),
+            serve_startup_probes("localhost", port, detail=_PAIRING),
         ):
             pass
     # The first listener is released again after the failure.
@@ -660,7 +663,7 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         released.listen()
 
 
-def test_pairing_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_startup_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     """Like the real API server, a `::1` that IPv6-disabled hosts cannot bind is skipped while IPv4 still answers."""
     port = _unused_local_port()
     resolved = {
@@ -676,31 +679,31 @@ def test_pairing_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.M
         "getaddrinfo",
         lambda host, *args, **kwargs: resolved.get(host) or real_getaddrinfo(host, *args, **kwargs),
     )
-    real_server_bind = pairing_probes._ProbeServer.server_bind
+    real_server_bind = startup_probes._ProbeServer.server_bind
 
-    def server_bind(server: pairing_probes._ProbeServer) -> None:
+    def server_bind(server: startup_probes._ProbeServer) -> None:
         if server.address_family == socket.AF_INET6:
             raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
         real_server_bind(server)
 
-    monkeypatch.setattr(pairing_probes._ProbeServer, "server_bind", server_bind)
+    monkeypatch.setattr(startup_probes._ProbeServer, "server_bind", server_bind)
 
-    with serve_pairing_probes("dual-stack.test", port):
+    with serve_startup_probes("dual-stack.test", port, detail=_PAIRING):
         assert _probe_status("127.0.0.1", port) == 200
 
     with (
         pytest.raises(OSError, match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)")),
-        serve_pairing_probes("ipv6-only.test", port),
+        serve_startup_probes("ipv6-only.test", port, detail=_PAIRING),
     ):
         pass
 
 
-def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
+def test_startup_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
     """Like the real API server, `::` binds IPv6 only, so an IPv4 listener on the same port does not block pairing."""
     _require_ipv6_loopback()
     port = _unused_local_port()
 
-    with serve_pairing_probes("::", port):
+    with serve_startup_probes("::", port, detail=_PAIRING):
         assert _probe_status("[::1]", port) == 200
         with pytest.raises(httpx.ConnectError):
             _probe_status("127.0.0.1", port)
@@ -709,7 +712,7 @@ def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
         ipv4_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         ipv4_listener.bind(("0.0.0.0", port))  # noqa: S104
         ipv4_listener.listen()
-        with serve_pairing_probes("::", port):
+        with serve_startup_probes("::", port, detail=_PAIRING):
             assert _probe_status("[::1]", port) == 200
 
 

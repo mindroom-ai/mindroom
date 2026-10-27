@@ -26,6 +26,10 @@ _MESSAGES = {
         "Retry in a minute; if it keeps failing, ask the user to reconnect at manage_url."
     ),
     "path_not_allowed": _PATH_OUTSIDE + "Ask the user to add it at manage_url if the agent needs it.",
+    "service_not_matched": (
+        "The X-Agent-Keys-Service header names {service}, but no service of your own by that name has a rule for "
+        "{host}{path}. Name one of your own services that covers it, or leave the header out."
+    ),
     "bad_request": (
         "The request path is ambiguous (dot segments, //, backslashes, or encoded forms of them) and was refused. "
         "Use a plain path."
@@ -44,6 +48,11 @@ _MESSAGES = {
     "broker_error": "The credential broker hit an internal error. Retry; if it keeps failing, tell an administrator.",
     "proxy_authentication_required": "The sandbox's proxy credentials are missing or expired. Start a new tool call.",
 }
+# A service's own account, which only the service's row on the egress page connects, so there is no connect link.
+_OWN_ACCOUNT_MISSING = (
+    "No {service} account is connected for this agent. "
+    "Ask the user to connect the service's own account at manage_url, then retry."
+)
 _CONNECTABLE = (
     "No {service} credential is set for this agent. "
     "Ask the user to connect it at connect_url or add a key at manage_url, then retry."
@@ -86,6 +95,9 @@ _PATH_SHARED = _PATH_OUTSIDE + "Only its credential managers ({managers}) can ch
 _PATH_ADMINISTRATOR = _PATH_OUTSIDE + "Only an administrator can change this, at manage_url."
 # The spec words `bad_request` for the ambiguous-path refusal; a request the broker cannot read at all has no path.
 _MALFORMED = "The request is malformed and was refused."
+_BAD_SERVICE_HEADER = (
+    "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own services."
+)
 # A personal scope's keys, accounts, and services are set only on the personal page. Where it is not served, its
 # refusals take their texts from `_WITHOUT_PAGE`, which names no page, or `_WITHOUT_PAGE_LINKED` when the body carries
 # a connect link, and `refusal_body` drops `manage_url`, the dashboard. The `egress_credentials` tool ends its note
@@ -137,7 +149,7 @@ class ScopeInfo:
     personal_page: bool
 
 
-def _template(  # noqa: PLR0911 - one text per case, checked in order
+def _template(  # noqa: C901, PLR0911 - one text per case, checked in order
     code: str,
     *,
     path: str | None,
@@ -148,12 +160,16 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
     by_operator: bool,
     reuse_off: bool,
     requester_owned: bool,
+    own_account: bool,
+    service_header: bool,
 ) -> str:
     without_page = not (shared or personal_page)
     if code == "credential_not_configured" and reuse_off:
         return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "read_only":
         return _read_only_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
+    if code == "credential_not_configured" and own_account and not without_page:
+        return _OWN_ACCOUNT_MISSING
     if code == "credential_not_configured" and connectable and not without_page:
         return _CONNECTABLE
     if code == "credential_not_configured" and shared:
@@ -162,6 +178,8 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
         return _PATH_ADMINISTRATOR
     if code == "path_not_allowed" and shared:
         return _PATH_SHARED
+    if code == "bad_request" and service_header:
+        return _BAD_SERVICE_HEADER
     if code == "bad_request" and path is None:
         return _MALFORMED
     texts = _MESSAGES
@@ -207,6 +225,8 @@ def refusal_body(
     by_operator: bool = False,
     reuse_off: bool = False,
     requester_owned: bool = False,
+    service_header: bool = False,
+    own_account: bool = False,
     **extra: object,
 ) -> dict[str, object]:
     """Return the JSON body for a refusal: its `error` code, `message`, `service` and `provider` when given, and `extra`.
@@ -220,11 +240,13 @@ def refusal_body(
     edits it. A `credential_not_configured` with `reuse_off` (nobody allowed Agent Keys to use the `provider` account)
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
-    writes the same way.
+    writes the same way. `own_account` (the service's own account is not connected) asks the user to connect it at
+    `manage_url`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.
-    A `bad_request` with a `path` is the ambiguous-path refusal; without one, the request itself was malformed.
+    A `bad_request` with a `path` is the ambiguous-path refusal, with `service_header` an `X-Agent-Keys-Service` header
+    that names no service once; without either, the request itself was malformed.
     Raises ValueError for a code without a text and KeyError when the text needs a value that was not given.
     """
     template = _template(
@@ -237,6 +259,8 @@ def refusal_body(
         by_operator=by_operator,
         reuse_off=reuse_off,
         requester_owned=requester_owned,
+        own_account=own_account,
+        service_header=service_header,
     )
     if "manage_url" not in template:
         # A body carries the manage link only where its text names it.

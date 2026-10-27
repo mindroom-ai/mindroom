@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
 import threading
 import time
 from dataclasses import dataclass, field
@@ -153,40 +152,38 @@ def _seed(
     *,
     at: int = T0,
     paused: frozenset[str] = frozenset(),
+    cancelled: frozenset[str] = frozenset(),
     updated_at: int | None = None,
     agent: str = "mind",
     spacing: int = 1,
     matrix: bool = True,
+    edit: Callable[[list[RunRecord]], None] | None = None,
 ) -> None:
-    """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run."""
+    """Store a conversation whose runs start at ``at``, ``spacing`` seconds apart, last updated after its last run.
+
+    ``edit`` changes the runs before they are stored; a run already stored and finished stays as it was.
+    """
     storage = create_session_storage(agent, config, paths, execution_identity=None)
+    statuses = {**dict.fromkeys(cancelled, RunStatus.cancelled), **dict.fromkeys(paused, RunStatus.paused)}
     runs = [
         _run(
             run_id,
             session_id,
             at + index * spacing,
-            RunStatus.paused if run_id in paused else RunStatus.completed,
+            statuses.get(run_id, RunStatus.completed),
             agent,
             matrix=matrix,
         )
         for index, run_id in enumerate(run_ids)
     ]
+    if edit is not None:
+        edit(runs)
     seed_session(storage, ConversationSession(session_id=session_id, kind="agent", owner_id=agent, runs=runs))
     with storage.transaction(write=True) as connection:
         connection.execute(
             f"UPDATE {quote_identifier(storage.names.sessions)} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
             (updated_at if updated_at is not None else at + (len(run_ids) - 1) * spacing + 1, session_id),
         )
-
-
-def _edit_runs(config: Config, paths: RuntimePaths, session_id: str, edit: Callable[[list[RunRecord]], None]) -> None:
-    """Change a seeded conversation's stored runs in place."""
-    storage = create_session_storage("mind", config, paths, execution_identity=None)
-    session = storage.load_session(session_id, "agent")
-    assert session is not None
-    runs = copy.deepcopy(session.runs)
-    edit(runs)
-    storage.save_runs(session, runs)
 
 
 async def _no_redactions(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
@@ -491,12 +488,10 @@ async def test_a_later_pass_names_a_person_as_their_earlier_turns_did(tmp_path: 
             body = f"question {run.run_id}"
             run.messages[0].content = render_msg_tag(sender="@alice:x", display_name=display_name, body=body)
 
-    _seed(config, paths, "!room:x:$t1", ["r1"])
-    _edit_runs(config, paths, "!room:x:$t1", tagged)
+    _seed(config, paths, "!room:x:$t1", ["r1"], edit=tagged)
     worker = _worker(config, paths, store)
     await _pass(worker, config, now=T0 + 10)
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"])
-    _edit_runs(config, paths, "!room:x:$t1", tagged)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], edit=tagged)
     await _pass(worker, config, now=T0 + 20)
 
     conversations = [episode for _, episode, _ in store.episodes if episode.kind == "conversation"]
@@ -512,13 +507,12 @@ async def test_a_long_backlog_spreads_over_passes(tmp_path: Path) -> None:
     """One conversation adds a bounded number of episodes per pass and stays due until it is done."""
     config, paths, store = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path), _FakeStore()
     run_ids = [f"r{index:02d}" for index in range(30)]
-    _seed(config, paths, "!room:x:$t1", run_ids)
 
     def long_answers(runs: list[RunRecord]) -> None:
         for run in runs:
             run.messages[1].content = "a" * 600
 
-    _edit_runs(config, paths, "!room:x:$t1", long_answers)
+    _seed(config, paths, "!room:x:$t1", run_ids, edit=long_answers)
     worker = _worker(config, paths, store)
 
     await _pass(worker, config, now=T0 + 100)
@@ -575,7 +569,6 @@ async def test_a_conversation_held_back_by_an_approval_is_ingested_once_it_expir
 async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: Path) -> None:
     """Dropped pieces stay done, so earlier pieces are not extracted again and the run completes."""
     config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
-    _seed(config, paths, "!room:x:$t1", ["r1"])
 
     def eight_results(runs: list[RunRecord]) -> None:
         runs[0].tools = [
@@ -583,7 +576,7 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
             for index in range(8)
         ]
 
-    _edit_runs(config, paths, "!room:x:$t1", eight_results)
+    _seed(config, paths, "!room:x:$t1", ["r1"], edit=eight_results)
     store = _FakeStore()
     first_pieces: list[str] = []
     real_add = store.add_episode
@@ -611,12 +604,11 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
 async def test_a_turn_waiting_on_a_recent_approval_still_holds_back(tmp_path: Path) -> None:
     """An approval asked for days into a turn expires counting from when it was asked, not from the turn's start."""
     config, paths, store = _config(backfill_days=30), _paths(tmp_path), _FakeStore()
-    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}))
 
     def asked_on_day_six(runs: list[RunRecord]) -> None:
         runs[0].messages[-1].created_at = T0 + 6 * DAY
 
-    _edit_runs(config, paths, "!room:x:$t1", asked_on_day_six)
+    _seed(config, paths, "!room:x:$t1", ["r1", "r2"], paused=frozenset({"r1"}), edit=asked_on_day_six)
 
     await _pass(_worker(config, paths, store), config, now=T0 + 8 * DAY)
 
@@ -1406,7 +1398,10 @@ async def test_a_failing_conversation_left_without_matrix_turns_stops_keeping_he
     await _pass(worker, config, now=T0 + 10)
     assert knowledge_graph_failure() is not None
 
-    _seed(config, paths, "!room:x:$t1", ["r1"], updated_at=T0 + 4000, matrix=False)
+    # The failing turn is deleted, and the conversation goes on with a turn that is not a Matrix turn.
+    storage = create_session_storage("mind", config, paths, execution_identity=None)
+    assert storage.delete_runs(["r1"], session_id="!room:x:$t1") == {"r1"}
+    _seed(config, paths, "!room:x:$t1", ["r2"], updated_at=T0 + 4000, matrix=False)
     await _pass(worker, config, now=T0 + 5000)
 
     assert store.episodes == []
@@ -1419,8 +1414,10 @@ async def test_a_conversation_first_recorded_empty_still_starts_after_the_backfi
     config, paths, store = _config(backfill_days=0), _paths(tmp_path), _FakeStore()
     worker = _worker(config, paths, store)
     await _pass(worker, config, now=T0 + 10)
-    # A turn that has not finished, such as one still running when the graph started, is not a Matrix turn yet.
-    _seed(config, paths, "!room:x:$t1", ["old"], at=T0 + 5, updated_at=T0 + 20, matrix=False)
+    # A turn that has not finished, such as one still running when the graph started, is not a Matrix turn yet: its
+    # row is the checkpoint a crash would leave, which the finished turn replaces.
+    unfinished = frozenset({"old"})
+    _seed(config, paths, "!room:x:$t1", ["old"], at=T0 + 5, updated_at=T0 + 20, cancelled=unfinished, matrix=False)
     await _pass(worker, config, now=T0 + 30)
 
     _seed(config, paths, "!room:x:$t1", ["old", "new"], at=T0 + 5, spacing=35)

@@ -165,4 +165,4 @@ Changing `matrix_sync` through config reload restarts running agents.
 If a large initial sync exceeds the response limit, raise `max_response_bytes` enough to fit it.
 If processing received events exceeds the pending limit, raise `max_pending_bytes`; stored events can take more space than the HTTP response, so raising the response limit may also require raising the pending limit.
 Each bot has its own sync session, so allow enough memory and disk space when raising these limits.
-Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance, and the runtime Helm chart's `probes.startup` values set the Kubernetes startup probe allowance.
+Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance.

@@ -189,6 +189,12 @@ server {
     return 204;
   }
 {{- end }}
+
+  # iOS reads app links from the origin root regardless of basePath.
+  location = /.well-known/apple-app-site-association {
+    alias /usr/share/nginx/html/.well-known/apple-app-site-association;
+    default_type application/json;
+  }
 {{- if or .Values.matrixRTC.enabled .Values.bugReports.admins }}
 {{- if .Values.matrixRTC.enabled }}
 
@@ -254,6 +260,14 @@ server {
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
   }
 
+  # Operator notices come from the image's notices directory, which an operator
+  # can replace with a mount; nginx reads the file on every request.
+  location = {{ $prefix }}/notices.json {
+    alias /opt/mindroom/notices/notices.json;
+    default_type application/json;
+    add_header Cache-Control "no-store, max-age=0" always;
+  }
+
   # The client service worker, scoped to basePath.
   location = {{ $prefix }}/sw.js {
     alias /usr/share/nginx/html/sw.js;
@@ -283,6 +297,15 @@ server {
     alias /usr/share/nginx/html/pdf.worker.min.js;
   }
 {{- end }}
+
+  # The device pairing page approves a sign-in, so no origin may frame it.
+  location ~ ^{{ regexQuoteMeta $prefix }}/connect/?$ {
+    root /usr/share/nginx/html;
+    add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    add_header X-Frame-Options "DENY" always;
+    try_files /index.html =404;
+  }
 
   # The bundled Element Call ships its own assets/ directory, so strip only the
   # route prefix before public/element-call/. Its hashed assets never change.

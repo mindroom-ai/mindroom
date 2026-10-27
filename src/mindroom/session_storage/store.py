@@ -1,8 +1,14 @@
-"""The conversation store: one SQLite database of sessions, their run log, summary rows, and usage ledger.
+"""The conversation store: one SQLite database of sessions, their runs and message rows, summary rows, and usage.
 
 Every operation runs in one transaction on its own short-lived connection and leaves the journal mode alone, so
 databases keep SQLite's default rollback journal. A write takes the write lock before it reads anything its rules
-depend on, and a load reads the session row, its runs, and its summary from one snapshot.
+depend on, and a load reads from one snapshot. Opening a database (``create_state_storage``) converts it and creates
+every table it lacks, so no operation runs DDL.
+
+A run is a ``*_log_runs`` row plus a ``*_log_messages`` row per stored message and a ``*_log_tools`` row per tool
+execution, so a save rewrites only the rows that changed, and every reader gets its replay view: the message rows no
+mid-turn fold took, in order. ``seq`` places a run in the log; the meta row's counter hands it out and never goes
+back, so a deleted run's number is never reused.
 """
 
 from __future__ import annotations
@@ -10,56 +16,92 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+from collections import defaultdict
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, fields, replace
 from datetime import UTC, datetime
 from time import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
-from mindroom.history.summary_rows_schema import (
-    NON_VISIBLE_RUN_STATUS_VALUES,
-    latest_row_index_sql,
-    loads_sql,
-    owner_scope_key,
+from mindroom.constants import (
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
+    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
 from mindroom.history.types import ScopeSummary
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
-from mindroom.session_storage.codec import run_from_row, run_type
+from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.legacy_agno2_runs import decode_session_json
-from mindroom.session_storage.schema import TableNames, schema_sql, table_names
-from mindroom.session_storage.types import ConversationSession, SessionFields, session_state_snapshot
+from mindroom.session_storage.schema import (
+    NON_VISIBLE_RUN_STATUS_SQL,
+    NON_VISIBLE_RUN_STATUS_VALUES,
+    TableNames,
+    owner_scope_key,
+)
+from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.usage.storage import project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.types import Refusal, SessionKind
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord, RunRecord
+    from mindroom.session_storage.types import SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
-# How long an operation waits for another connection's write lock on the database, its migrations included.
+# How long an operation waits for another connection's write lock on the database, its conversion included.
 BUSY_TIMEOUT_SECONDS = 30.0
-_NON_VISIBLE_STATUS_SQL = ", ".join(f"'{status}'" for status in NON_VISIBLE_RUN_STATUS_VALUES)
+_NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
+# The run-row columns a run's stored dict fills: ``RunColumns``' fields, in their order.
+_RECORD_COLUMNS = tuple(field.name for field in fields(RunColumns))
+
+# What a full save did: wrote the run, wrote nothing because a cut removed it, or wrote nothing because it is final.
+type SaveOutcome = Literal["written", "removed", "final"]
 
 
 def connect_conversation_database(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
-    """Open a connection to the conversation database at ``path``, for the store and the migrations that open it.
+    """Open a connection to the conversation database at ``path``, for the store and the conversion that opens it.
 
     ``timeout`` is how long a statement waits for another connection's lock; a caller that would rather skip a
     locked database than wait passes less.
     """
     # No implicit transactions: every operation begins its own, so its reads cannot straddle a commit.
     connection = sqlite3.connect(path, timeout=timeout, isolation_level=None)
-    # Deleting a session row cascades to its runs, summary rows, and usage.
+    # Deleting a session row cascades to its runs, summary rows, and usage, and deleting a run to its message and tool
+    # rows.
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 
+def connect_by_name(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    """Connect to the file ``path`` names itself, never to a link's target, which ``sqlite3.connect`` would open or create.
+
+    Opening a store, or converting its database at startup, connects this way. A link at the database or its sessions
+    directory is refused before connecting. The name SQLite resolves for the file, every link followed, must then be
+    ``path`` with only the directories above the sessions directory resolved, so a link swapped in at either place
+    before SQLite resolves the path is refused before anything is written, though SQLite's open can have created an
+    empty file at the link's target. Links above the sessions directory are followed, as the store follows them.
+    """
+    if path.parent.is_symlink() or path.is_symlink():
+        msg = f"Refusing to open {path}: the conversation database or its directory is a link"
+        raise ValueError(msg)
+    expected = str(path.parent.parent.resolve() / path.parent.name / path.name)
+    connection = connect_conversation_database(path, timeout=timeout)
+    (opened,) = connection.execute("SELECT file FROM pragma_database_list WHERE name = 'main'").fetchone()
+    if opened != expected:
+        connection.close()
+        msg = f"Refusing to open {path}: SQLite opened {opened} instead"
+        raise ValueError(msg)
+    return connection
+
+
 @contextmanager
-def _begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
+def begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
     """Run the block as one transaction on ``connection``, committing when it exits normally.
 
     A write takes the write lock first. A block that fails or is interrupted rolls back at once rather than
@@ -74,33 +116,11 @@ def _begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
     connection.commit()
 
 
-def migrate_database(
-    path: Path,
-    *,
-    needed: Callable[[sqlite3.Connection], bool],
-    apply: Callable[[sqlite3.Connection], None],
-    timeout: float = BUSY_TIMEOUT_SECONDS,
-) -> None:
-    """Run a one-time migration of the database at ``path`` in one write transaction, when ``needed`` says it is due.
-
-    ``needed`` reads the schema, so a migrated database costs one read. It is asked again once the write lock is
-    held, because another opener may have migrated the database while this one waited. A migration that fails or
-    is interrupted changes nothing, so the next opener runs it again.
-    """
-    with closing(connect_conversation_database(path, timeout=timeout)) as connection:
-        if needed(connection):
-            with _begun(connection, write=True):
-                if needed(connection):
-                    apply(connection)
-
-
 @dataclass(frozen=True, slots=True)
 class ConversationStore:
     """One conversation database; it holds no connection, so there is nothing to close.
 
-    Stored runs leave out their system messages unless they are paused.
-    Tables are created by the first write. Migrations that recognize an older database by a missing summary-row
-    or usage table must run before that write.
+    Stored runs never hold a message replayed from history, and leave out their system messages unless they are paused.
     """
 
     path: Path
@@ -114,22 +134,20 @@ class ConversationStore:
     def transaction(self, *, write: bool) -> Iterator[sqlite3.Connection]:
         """Run one transaction on its own connection, committing when the block exits normally.
 
-        A write takes the write lock first, so rules that read the log before writing see what they change,
-        and creates any missing table. A read is one snapshot.
+        A write takes the write lock first, so rules that read the log before writing see what they change. A read
+        is one snapshot.
         """
-        with closing(connect_conversation_database(self.path)) as connection, _begun(connection, write=write):
-            if write:
-                for statement in schema_sql(self.names):
-                    connection.execute(statement)
+        with closing(connect_conversation_database(self.path)) as connection, begun(connection, write=write):
             yield connection
 
-    def read_session_fields(self, session_id: str) -> SessionFields | None:
-        """Read one session row's metadata and ``session_state`` without its runs, or None when the row is missing."""
+    def read_session_metadata(self, session_id: str) -> dict[str, Any] | None:
+        """Read one session row's metadata without its state or runs, or None when the row is missing or holds none."""
         with self.transaction(write=False) as connection:
-            row = self._session_row(connection, session_id)
-        if row is None:
-            return None
-        return SessionFields(metadata=decoded_mapping(row[4]), session_state=_session_state(row[3]))
+            row = connection.execute(
+                f"SELECT metadata FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+                (session_id,),
+            ).fetchone()
+        return None if row is None else decoded_mapping(row[0])
 
     def has_session(self, session_id: str, kind: SessionKind) -> bool:
         """Return whether a ``kind`` session ``session_id`` is stored, the condition under which a load finds it."""
@@ -139,8 +157,8 @@ class ConversationStore:
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
 
-        The runs are those after the owner scope's latest summary row, every paused, cancelled, or errored run,
-        and their member runs, in log order; a run folded mid-turn loads without the messages its segments hold.
+        The runs are every top-level run its scope's latest summary row does not cover, every paused, cancelled, or
+        errored one wherever it sits, and the member runs of those, in ``seq`` order, each in its replay view.
         """
         with self.transaction(write=False) as connection:
             loaded = self._read_load(connection, session_id, kind)
@@ -155,25 +173,26 @@ class ConversationStore:
             metadata=decoded_mapping(metadata),
             session_state=state,
             stored_session_state=copy.deepcopy(state),
-            runs=loaded.runs(),
+            runs=loaded.runs,
             summary=loaded.summary,
             created_at=created_at,
         )
 
     def _read_load(self, connection: sqlite3.Connection, session_id: str, kind: SessionKind) -> _Load | None:
-        """Read what a load of session ``session_id`` returns in the caller's transaction, its runs still encoded."""
-        names = self.names
-        tables = table_names(connection)
+        """Read what a load of session ``session_id`` returns, in the caller's transaction."""
         row = self._session_row(connection, session_id, kind)
         if row is None:
             return None
         stored_kind, agent_id, team_id = row[:3]
-        summaries = quote_identifier(names.summaries) if names.summaries in tables else None
-        run_rows = _loaded_run_rows(connection, names, summaries, session_id) if names.runs in tables else []
+        names = self.names
+        runs, summaries = quote_identifier(names.log_runs), quote_identifier(names.log_summaries)
+        loaded = (
+            f"run.session_id = ? AND ({_loads_sql('run', summaries)} OR run.parent_run_id IN "  # noqa: S608
+            f"(SELECT top.run_id FROM {runs} AS top WHERE top.session_id = ? AND {_loads_sql('top', summaries)}))"
+        )
         return _Load(
             row=row,
-            run_rows=run_rows,
-            folded=_folded_message_ids(connection, summaries, session_id, [run_id for run_id, _, _ in run_rows]),
+            runs=_read_runs(connection, names, loaded, (session_id, session_id)),
             summary=_replay_summary(connection, summaries, session_id, owner_scope_key(stored_kind, agent_id, team_id)),
         )
 
@@ -205,88 +224,166 @@ class ConversationStore:
         self,
         connection: sqlite3.Connection,
         session_id: str,
-        kind: SessionKind | None = None,
+        kind: SessionKind,
     ) -> tuple[Any, ...] | None:
-        """Read session ``session_id``'s row, or None when it is missing or, given ``kind``, of another kind."""
-        if self.names.sessions not in table_names(connection):
-            return None
+        """Read session ``session_id``'s row, or None when it is missing or of another kind."""
         row = connection.execute(
             "SELECT session_type, agent_id, team_id, session_data, metadata, created_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-        return None if row is None or (kind is not None and row[0] != kind) else row
+        return None if row is None or row[0] != kind else row
 
-    def ensure_session_row(self, session: ConversationSession) -> None:
-        """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile."""
-        with self.transaction(write=True) as connection:
-            created = _ensure_session_row(connection, self.names, session)
-        _record_stored_state(session, created)
-
-    def save_runs(
+    def save_run(
         self,
         session: ConversationSession,
-        runs: Iterable[AnyRunRecord],
+        run: AnyRunRecord,
+        *,
+        record_usage: bool,
+        state: dict[str, Any] | None = None,
+    ) -> SaveOutcome:
+        """Save ``run`` of ``session`` whole, creating the session row if needed, unless it is removed or final.
+
+        A run a cut removed, or a member of one, writes nothing (``"removed"``). A run whose stored status is visible,
+        or a member whose team run's is, writes nothing (``"final"``), so a stale copy never makes a finished run
+        pending again. Otherwise the run's row and replay view become the record's (``"written"``): a new run, or a
+        top-level run saved visible over its paused, cancelled, or errored row, takes the next ``seq``, so it replays
+        after the turns it waited for, and the first requester a written run names goes on a row that has none.
+
+        ``record_usage`` replaces the run's usage snapshot in the ledger, which outlives removed runs, and moves the
+        session totals by the difference; a final run's usage changes neither. ``state``, a
+        ``session_state_snapshot`` of the state the run ran with, commits with the run when the row does not hold it.
+        ``session.runs`` then holds the run as the store does (``_mirror``).
+        """
+        return self._save(session, run.to_dict(), run_kind(run), record_usage=record_usage, state=state)
+
+    def save_interrupted_record(
+        self,
+        session: ConversationSession,
+        record: AnyRunRecord,
         *,
         state: dict[str, Any] | None = None,
-    ) -> None:
-        """Save ``runs`` of ``session`` in one transaction under the conversation log's insertion rules.
+    ) -> Literal["written", "removed"]:
+        """Save an interrupted turn's record as ``save_run`` does, over a final run too, without its usage.
 
-        The session row is created if needed. A run a cut removed, or a member of one, writes no row. A visible run
-        behind its scope's latest summary row, or a member of one, stays as stored. A run new to the session, or
-        saved visible over a stored paused, cancelled, or errored row, takes the next position after every run and
-        summary row. The first requester a written run names is stored on a session row that has none; no other
-        write of the store names a requester. The usage ledger and session totals are left alone: a run's terminal
-        record reaches them through ``persist_to``.
-
-        With ``state``, a ``session_state_snapshot`` of the state the runs ran with, the runs and the state commit in
-        one transaction, so a failure leaves neither. The state is written only when the row does not already hold it.
-
-        Once the transaction commits, ``session.runs`` holds each written run as the store does (see ``_reconcile``),
-        so a removed run leaves the session and a frozen one keeps the session's copy. Callers therefore edit a copy
-        and hand the copy here: a refused save must leave the session's copy as stored. A call with neither runs nor
-        ``state`` writes nothing.
+        It is what the user saw or heard of a turn whose failure followed its terminal save, so it replaces the stored
+        answer; a visible run keeps its ``seq``, so replay order does not change.
         """
-        runs = list(runs)
-        if not runs and state is None:
-            return
-        loaded = {id(existing) for existing in session.runs}
-        if any(id(run) in loaded for run in runs):
-            msg = "save_runs received a run object loaded from the session; edit a copy instead"
-            raise ValueError(msg)
-        self._save_encoded(session, [_encoded(run) for run in runs], record_usage=False, state=state)
+        kind = run_kind(record)
+        outcome = self._save(session, record.to_dict(), kind, record_usage=False, state=state, interrupted=True)
+        return cast("Literal['written', 'removed']", outcome)
 
-    def _save_encoded(
+    def _save(
         self,
         session: ConversationSession,
-        runs: list[tuple[dict[str, Any], SessionKind]],
+        data: dict[str, Any],
+        kind: SessionKind,
         *,
         record_usage: bool,
         state: dict[str, Any] | None,
-    ) -> list[_SavedRun]:
-        """Save ``runs``, each a stored dict and its row type, and ``state`` in one transaction, then reconcile."""
+        interrupted: bool = False,
+    ) -> SaveOutcome:
+        """Save one run from its stored dict and ``state`` in one transaction, then mirror it in ``session``."""
         with self.transaction(write=True) as connection:
-            created = _ensure_session_row(connection, self.names, session)
-            saved = [
-                self._save_run(connection, session.session_id, data, row_type=row_type, record_usage=record_usage)
-                for data, row_type in runs
-            ]
+            created = ensure_session_row(connection, self.names, session)
+            saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted=interrupted)
+            if record_usage and saved.outcome != "final":
+                snapshot = project_usage({**data, "created_at": saved.created_at, "updated_at": saved.updated_at})
+                _record_run_usage(connection, self.names, session.session_id, data["run_id"], snapshot)
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
-        _reconcile(session, saved)
-        return saved
+        _mirror(session, saved)
+        return saved.outcome
 
-    def save_session_state(self, session: ConversationSession, state: dict[str, Any]) -> None:
-        """Write ``state`` as the session's ``session_state``, creating the row if needed, and leave the rest alone.
+    def patch_run_metadata(
+        self,
+        session_id: str,
+        run_id: str,
+        changes: Mapping[str, Any],
+        *,
+        session: ConversationSession | None = None,
+    ) -> bool:
+        """Set ``changes``' top-level keys in stored run ``run_id``'s metadata and keep the rest, a final run's too.
 
-        ``state`` is a ``session_state_snapshot`` of the run's state, which a caller outside the database's lane takes
-        before awaiting it, as the run's tools change the live state in place meanwhile. It is recorded as
-        ``session.stored_session_state``, so the caller must not change it.
+        A visible top-level run's event ids also join the event sets of the summary row that covers it, so redacting a
+        reply linked after that summary still cuts it. Returns whether the run is stored. ``session``, when given, then
+        holds a changed copy of the run in a new list; loaded runs are shared, so none changes in place.
+        """
+        runs = quote_identifier(self.names.log_runs)
+        with self.transaction(write=True) as connection:
+            row = connection.execute(
+                f"SELECT parent_run_id, scope_key, status, seq, metadata FROM {runs} "  # noqa: S608
+                "WHERE session_id = ? AND run_id = ?",
+                (session_id, run_id),
+            ).fetchone()
+            if row is None:
+                return False
+            parent_run_id, scope_key, status, seq, stored = row
+            metadata = {**(decoded_mapping(stored) or {}), **changes}
+            connection.execute(f"UPDATE {runs} SET metadata = ? WHERE run_id = ?", (json.dumps(metadata), run_id))  # noqa: S608
+            if parent_run_id is None and status not in _NON_VISIBLE:
+                _join_covering_row(connection, self.names, session_id, scope_key, seq, metadata)
+        if session is not None:
+            session.runs = [
+                replace(run, metadata=copy.deepcopy(metadata)) if run.run_id == run_id else run for run in session.runs
+            ]
+        return True
+
+    def rewrite_run_messages(
+        self,
+        session_id: str,
+        kind: SessionKind,
+        edit: Callable[[list[AnyRunRecord]], list[AnyRunRecord]],
+        *,
+        session: ConversationSession | None = None,
+    ) -> None:
+        """Apply ``edit`` to fresh copies of the runs a load returns, under the write lock, and store their messages.
+
+        ``edit`` returns the runs it changed and changes no other. Only messages store, under the save's message rules,
+        and only for runs the load returned, so no other writer's status, metadata, or messages are lost and no covered
+        run changes. Once it commits, ``session``, when given, holds what a load returns: the load ``edit`` was handed
+        when it stored nothing, which spares a second read.
         """
         with self.transaction(write=True) as connection:
-            _ensure_session_row(connection, self.names, session)
-            _write_session_state(connection, self.names, session.session_id, state)
-        _record_stored_state(session, state)
+            loaded = self._read_load(connection, session_id, kind)
+            runs = loaded.runs if loaded is not None else []
+            statuses = {run.run_id: run.status.value for run in runs}
+            stored = [(run, status) for run in edit(runs) if (status := statuses.get(run.run_id)) is not None]
+            for run, status in stored:
+                messages = [message.to_dict() for message in run.messages]
+                set_visible_messages(connection, self.names, run.run_id, messages, status)
+            if stored and session is not None:
+                loaded = self._read_load(connection, session_id, kind)
+        if session is not None:
+            _adopt_log(session, loaded)
+
+    def delete_runs(
+        self,
+        run_ids: Collection[str],
+        *,
+        session_id: str,
+        session: ConversationSession | None = None,
+    ) -> set[str]:
+        """Delete session ``session_id``'s runs ``run_ids`` with their member runs and messages; return the deleted ids.
+
+        It records no removed run and keeps every summary row, so it suits discarding a run, not cutting history.
+        Once it commits, ``session``, when given, holds none of the runs nor their members.
+        """
+        with self.transaction(write=True) as connection:
+            deleted = delete_runs_in_transaction(connection, self.names, run_ids, session_id=session_id)
+        if session is not None:
+            session.runs = runs_without(session.runs, run_ids)
+        return deleted
+
+    def get_run(self, run_id: str) -> AnyRunRecord | None:
+        """Return one stored run, in whatever session, in its replay view; a paused team run comes with its members."""
+        with self.transaction(write=False) as connection:
+            return next(iter(_read_runs(connection, self.names, "run.run_id = ?", (run_id,))), None)
+
+    def list_runs(self, session_id: str) -> list[AnyRunRecord]:
+        """Return every stored run of the session, member runs included, in ``seq`` order, each in its replay view."""
+        with self.transaction(write=False) as connection:
+            return _read_runs(connection, self.names, "run.session_id = ?", (session_id,))
 
     def _write_state(
         self,
@@ -330,7 +427,7 @@ class ConversationStore:
             current = decoded_mapping(stored[0]) if stored is not None else session.metadata
             updated = update(copy.deepcopy(current))
             if updated != current:
-                created = _ensure_session_row(connection, self.names, session)
+                created = ensure_session_row(connection, self.names, session)
                 connection.execute(
                     f"UPDATE {sessions} SET metadata = ?, updated_at = ? WHERE session_id = ?",  # noqa: S608
                     (json.dumps(updated), int(time()), session.session_id),
@@ -338,44 +435,13 @@ class ConversationStore:
         _record_stored_state(session, created)
         session.metadata = updated
 
-    def delete_run_subtrees(self, session: ConversationSession, run_ids: Collection[str]) -> set[str]:
-        """Delete ``session``'s runs ``run_ids`` with every member run below them.
-
-        Returns the deleted ids. Once the delete commits, ``session`` holds none of them, nor any run below them.
-        """
-        with self.transaction(write=True) as connection:
-            deleted = delete_run_subtrees_in_transaction(connection, self.names, run_ids, session_id=session.session_id)
-        session.runs = runs_without(session.runs, deleted)
-        return deleted
-
-    def get_run(self, run_id: str) -> AnyRunRecord | None:
-        """Return one stored run, in whatever session, as stored."""
-        return next(iter(self._stored_runs("run_id = ?", run_id)), None)
-
-    def list_runs(self, session_id: str) -> list[AnyRunRecord]:
-        """Return the session's whole run log as stored, member runs included, in log order."""
-        return self._stored_runs("session_id = ? ORDER BY run_index, created_at, run_id", session_id)
-
-    def _stored_runs(self, condition: str, value: str) -> list[AnyRunRecord]:
-        """Decode the stored runs whose rows match ``condition`` on ``value``, skipping rows of other run types."""
-        with self.transaction(write=False) as connection:
-            if self.names.runs not in table_names(connection):
-                return []
-            rows = connection.execute(
-                f"SELECT run_type, CAST(run_data AS TEXT) FROM {quote_identifier(self.names.runs)} WHERE {condition}",  # noqa: S608
-                (value,),
-            ).fetchall()
-        return [run for run in (run_from_row(*row) for row in rows) if run is not None]
-
     def list_updated_sessions(self, agent_id: str, *, since: int) -> list[tuple[str, int]]:
         """Return ``(session_id, updated_at)`` of agent ``agent_id``'s sessions updated after ``since``, oldest first.
 
-        A session's update time moves when its row is written: a state save, a metadata change, or a run's terminal
-        save through ``persist_to``, which records its usage.
+        A session's update time moves when its row is written: a changed state a run save carries, a metadata change,
+        or a run save that records its usage, as a run's terminal save through ``persist_to`` does.
         """
         with self.transaction(write=False) as connection:
-            if self.names.sessions not in table_names(connection):
-                return []
             return connection.execute(
                 "SELECT session_id, COALESCE(updated_at, created_at) AS updated "  # noqa: S608
                 f"FROM {quote_identifier(self.names.sessions)} WHERE session_type = 'agent' AND agent_id = ? "
@@ -411,148 +477,92 @@ class ConversationStore:
         snapshot["kind"] = kind
         with self.transaction(write=True) as connection:
             if initial_session is not None:
-                _ensure_session_row(connection, self.names, initial_session)
+                ensure_session_row(connection, self.names, initial_session)
             connection.execute(usage_upsert_sql(self.names.sessions), (session_id, usage_id, json.dumps(snapshot)))
-
-    def _save_run(
-        self,
-        connection: sqlite3.Connection,
-        session_id: str,
-        data: dict[str, Any],
-        *,
-        row_type: SessionKind,
-        record_usage: bool,
-    ) -> _SavedRun:
-        """Save one run from its stored dict (``record.to_dict()``), under the insertion rules."""
-        if data["status"] != RunStatus.paused.value:
-            # Prompts are rebuilt from config on every request; a paused run keeps them until it continues.
-            data["messages"] = [message for message in data["messages"] if message["role"] != "system"]
-        row = _write_run_row(connection, self.names, data, row_type=row_type, session_id=session_id)
-        saved = _SavedRun(data["run_id"], row_type, row)
-        if isinstance(row, _WrittenRow):
-            _adopt_requester(connection, self.names, session_id, data.get("user_id"))
-        if not record_usage or row == "frozen":
-            return saved
-        now = int(time())
-        created_at, updated_at = (
-            (row.created_at, row.updated_at) if isinstance(row, _WrittenRow) else (data.get("created_at") or now, now)
-        )
-        snapshot = project_usage({**data, "created_at": created_at, "updated_at": updated_at})
-        _record_run_usage(connection, self.names, session_id, data["run_id"], snapshot)
-        return saved
 
 
 @dataclass(frozen=True, slots=True)
 class _Load:
-    """What one load of a session read: its row, its runs as stored, the messages its folds hold, and its summary."""
+    """What one load of a session read: its row, its runs, and its summary."""
 
     row: tuple[Any, ...]
-    run_rows: list[tuple[str, str, str]]
-    folded: dict[str, set[str]]
+    runs: list[AnyRunRecord]
     summary: ScopeSummary | None
-
-    def runs(self) -> list[AnyRunRecord]:
-        """Decode the runs, each folded run without the messages its segments hold."""
-        runs: list[AnyRunRecord] = []
-        for run_id, stored_type, run_data in self.run_rows:
-            run = run_from_row(stored_type, run_data)
-            if run is None:
-                continue
-            if run_id in self.folded:
-                run.messages = [message for message in run.messages if message.id not in self.folded[run_id]]
-            runs.append(run)
-        return runs
-
-
-def _encoded(run: AnyRunRecord) -> tuple[dict[str, Any], SessionKind]:
-    """Return ``run``'s stored dict and the ``run_type`` of its row."""
-    return run.to_dict(), run_type(run)
 
 
 def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
     """Make ``session``'s runs and summary those of ``loaded``, or none when the session is no longer stored."""
-    session.runs = loaded.runs() if loaded is not None else []
+    session.runs = loaded.runs if loaded is not None else []
     session.summary = loaded.summary if loaded is not None else None
 
 
 @dataclass(frozen=True, slots=True)
-class _WrittenRow:
-    """One run row as an upsert left it: its timestamps, its ``run_data`` text, and whether it now ends the log."""
-
-    created_at: int
-    updated_at: int
-    run_data: str
-    ends_log: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _SavedRun:
-    """One run save: the run, its row type, and the row it wrote or why it wrote none."""
+class _Saved:
+    """One full save: its outcome, the timestamps its usage takes, and a written run's move and read-back copy."""
 
     run_id: str
-    row_type: SessionKind
-    row: _WrittenRow | Refusal
+    outcome: SaveOutcome
+    created_at: int = 0
+    updated_at: int = 0
+    moved: bool = False
+    stored: AnyRunRecord | None = None
 
 
-def _reconcile(session: ConversationSession, saved: Iterable[_SavedRun]) -> None:
-    """Make ``session``'s copies of the saved runs what the store holds.
+class _StoredRow(NamedTuple):
+    """What a save reads of a run's stored row, or of its team run's."""
 
-    A written run's copy is its row decoded afresh, never the record the caller handed over: it replaces the
-    session's copy in place, or goes last when the row took the log's next position (a new run, or one saved visible
-    over its paused, cancelled, or errored row). A written run the session holds no copy of also goes last, even
-    when its row kept an earlier place, so only then can the session's order differ from a load's. Member runs keep
-    their own copies. A removed run leaves the session with every run below it. A frozen run's row did not change,
-    so neither does the session's copy, nor its absence when the session holds none.
+    parent_run_id: str | None
+    status: str
+    seq: int
+    created_at: int
+
+
+def _mirror(session: ConversationSession, saved: _Saved) -> None:
+    """Make ``session``'s copy of a saved run what the store holds, in a new list.
+
+    A removed run leaves with its member runs. A written run's copy is its row read back, never the record handed
+    over: it replaces the session's copy, or goes last when the run took the next ``seq`` or the session held no copy.
+    A final run's copy, or its absence, stays.
     """
     runs = list(session.runs)
-    for save in saved:
-        if save.row == "removed":
-            runs = runs_without(runs, [save.run_id])
-        elif isinstance(save.row, _WrittenRow):
-            # Unlike a load, this keeps any message a mid-turn fold's segment holds: a fold rewrites its run's live
-            # messages when the segment row commits, so a record handed over after the fold holds none of them.
-            stored = run_from_row(save.row_type, save.row.run_data)
-            assert stored is not None
-            place = next((index for index, run in enumerate(runs) if run.run_id == save.run_id), None)
-            if place is None or save.row.ends_log:
-                runs = [*(run for run in runs if run.run_id != save.run_id), stored]
-            else:
-                runs[place] = stored
+    if saved.outcome == "removed":
+        runs = runs_without(runs, [saved.run_id])
+    elif saved.stored is not None:
+        place = next((index for index, run in enumerate(runs) if run.run_id == saved.run_id), None)
+        if place is None or saved.moved:
+            runs = [*(run for run in runs if run.run_id != saved.run_id), saved.stored]
+        else:
+            runs[place] = saved.stored
     # A new list, so a reader of the old one is unaffected. Only the store assigns a session's runs and summary, and
     # async callers run its writes in the database's lane one at a time, so no write's assignment overtakes another's.
     session.runs = runs
 
 
 def runs_without(runs: Iterable[AnyRunRecord], run_ids: Iterable[str]) -> list[AnyRunRecord]:
-    """Return ``runs`` minus ``run_ids`` and every run descending from them through ``parent_run_id``."""
-    run_list = list(runs)
-    removed = {run_id for run_id in run_ids if run_id}
-    while below := {run.run_id for run in run_list if run.parent_run_id and run.parent_run_id in removed} - removed:
-        removed |= below
-    return [run for run in run_list if run.run_id not in removed and run.parent_run_id not in removed]
+    """Return ``runs`` minus ``run_ids`` and their member runs; team members are agents, so none has members."""
+    removed = set(run_ids)
+    return [run for run in runs if run.run_id not in removed and run.parent_run_id not in removed]
 
 
 def persist_to(store: ConversationStore, session: ConversationSession) -> Callable[[AnyRunRecord], Awaitable[None]]:
     """Return the callback a run hands its terminal record to: save it to ``store`` with its usage, in the database's lane.
 
-    The record saves under ``save_runs``' rules. Its usage replaces its earlier snapshot in the usage ledger, which
-    outlives removed runs, and the session totals change by the difference, in the same transaction; a frozen run's
-    usage is final and changes neither.
+    The record saves as ``ConversationStore.save_run`` saves it with ``record_usage``.
     The record and ``session.session_state``, which the run's tools change in place, are copied on the caller's task
     before the lane is awaited, so what lands is what was handed over. The state is written back, in the record's
     own transaction, when it differs from ``session.stored_session_state``, which every write of the field records,
     so a turn whose runs or checkpoints change the state and restore it stores it restored.
-    The save reconciles ``session.runs`` with what it stored (see ``_reconcile``) in the lane, where the session's
-    saves run one at a time; it completes even when the caller is cancelled, as the lane's operations do.
+    The save mirrors itself in ``session.runs`` in the lane, where the session's saves run one at a time; it completes
+    even when the caller is cancelled, as the lane's operations do.
     """
 
     async def persist(record: AnyRunRecord) -> None:
-        encoded = _encoded(record)
-        await write_with_session_state(
-            store,
-            session,
-            lambda opened, state: opened._save_encoded(session, [encoded], record_usage=True, state=state),
-        )
+        data, kind = record.to_dict(), run_kind(record)
+
+        def save(opened: ConversationStore, state: dict[str, Any]) -> SaveOutcome:
+            return opened._save(session, data, kind, record_usage=True, state=state)
+
+        await write_with_session_state(store, session, save)
 
     return persist
 
@@ -574,11 +584,15 @@ async def write_with_session_state[Result](
 def decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Return a stored JSON object column, ``null`` for SQL or JSON null, or None when unreadable or not an object.
 
-    An odd row therefore never fails a load.
+    An odd row therefore never fails a load or a conversion; JSON nested too deep to decode is unreadable too.
     """
+    if raw_value is None:
+        return null
+    if not isinstance(raw_value, (str, bytes, bytearray)):
+        return None
     try:
-        value = decode_session_json(raw_value)
-    except (TypeError, ValueError):
+        value = decode_json(raw_value)
+    except (RecursionError, ValueError):
         return None
     if value is None:
         return null
@@ -591,12 +605,12 @@ def _session_state(raw_session_data: object) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def _ensure_session_row(
+def ensure_session_row(
     connection: sqlite3.Connection,
     names: TableNames,
     session: ConversationSession,
 ) -> dict[str, Any] | None:
-    """Create ``session``'s row unless one exists, keeping a row another writer created meanwhile.
+    """Create ``session``'s row in the caller's write transaction unless one exists, keeping one another writer made.
 
     Returns the copy of ``session.session_state`` a created row holds, for the caller to record as
     ``session.stored_session_state`` once its transaction commits, or None when the row existed.
@@ -665,81 +679,388 @@ def _write_session_state(
     )
 
 
-def _write_run_row(
+def _next_seq(connection: sqlite3.Connection, names: TableNames) -> int:
+    """Hand out the database's next run ``seq`` in the caller's write transaction; the counter never goes back."""
+    (seq,) = connection.execute(
+        f"UPDATE {quote_identifier(names.log_meta)} SET next_seq = next_seq + 1 WHERE id = 1 RETURNING next_seq - 1",  # noqa: S608
+    ).fetchone()
+    return seq
+
+
+def is_removed(
     connection: sqlite3.Connection,
     names: TableNames,
-    data: dict[str, Any],
-    *,
-    row_type: str,
     session_id: str,
-) -> _WrittenRow | Refusal:
-    """Upsert one run row under the conversation log's rules; return the row as written, or why none was."""
-    run_id, parent_run_id = data["run_id"], data.get("parent_run_id")
-    runs, summaries, removed = (quote_identifier(name) for name in (names.runs, names.summaries, names.removed_runs))
-    if connection.execute(f"SELECT 1 FROM {removed} WHERE run_id IN (?, ?)", (run_id, parent_run_id)).fetchone():  # noqa: S608
-        return "removed"
-    if _is_folded(connection, runs, summaries, run_id, parent_run_id):
-        return "frozen"
-    (next_index,) = connection.execute(
-        f"SELECT MAX(COALESCE((SELECT MAX(run_index) FROM {runs} WHERE session_id = ?), -1), "  # noqa: S608
-        f"COALESCE((SELECT MAX(after_run_index) FROM {summaries} WHERE session_id = ?), -1)) + 1",
-        (session_id, session_id),
-    ).fetchone()
-    now = int(time())
-    run_data = json.dumps(data)
-    # A run saved visible over its stored paused, cancelled, or errored row was finished after the turns it waited
-    # for, so it moves after them; any other update keeps the run's place.
-    created_at, updated_at, run_index = connection.execute(
-        f"INSERT INTO {runs} AS run (run_id, session_id, run_type, agent_id, team_id, user_id, parent_run_id, "  # noqa: S608
-        "status, run_index, run_data, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(run_id) DO UPDATE SET status = excluded.status, run_data = excluded.run_data, "
-        "user_id = excluded.user_id, parent_run_id = excluded.parent_run_id, updated_at = excluded.updated_at, "
-        f"run_index = CASE WHEN run.parent_run_id IS NULL AND run.status IN ({_NON_VISIBLE_STATUS_SQL}) "
-        f"AND excluded.parent_run_id IS NULL AND excluded.status NOT IN ({_NON_VISIBLE_STATUS_SQL}) "
-        "THEN excluded.run_index ELSE COALESCE(run.run_index, excluded.run_index) END "
-        "RETURNING created_at, updated_at, run_index",
-        (
-            run_id,
-            session_id,
-            row_type,
-            data.get("agent_id"),
-            data.get("team_id"),
-            data.get("user_id"),
-            parent_run_id,
-            data["status"],
-            next_index,
-            run_data,
-            data.get("created_at") or now,
-            now,
-        ),
-    ).fetchone()
-    return _WrittenRow(created_at, updated_at, run_data, ends_log=run_index == next_index)
-
-
-def _is_folded(
-    connection: sqlite3.Connection,
-    runs: str,
-    summaries: str,
     run_id: str,
     parent_run_id: str | None,
 ) -> bool:
-    """Return whether a run, or the top-level run it belongs to, is visible and behind its scope's latest summary row.
+    """Return whether a cut removed run ``run_id``, or its team run ``parent_run_id``, from session ``session_id``."""
+    removed = f"SELECT 1 FROM {quote_identifier(names.log_removed)} WHERE session_id = ? AND run_id IN (?, ?)"  # noqa: S608
+    return connection.execute(removed, (session_id, run_id, parent_run_id)).fetchone() is not None
 
-    The chain starts at the stored run and at the parent the save names, so a member row seen for the first
-    time is as final as the folded team run it belongs to.
+
+def _write_run(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    data: dict[str, Any],
+    kind: SessionKind,
+    *,
+    interrupted: bool,
+) -> _Saved:
+    """Write one run from its stored dict by ``ConversationStore.save_run``'s rules; an interrupted one is not final."""
+    run_id, parent_run_id, now = data["run_id"], data.get("parent_run_id"), int(time())
+    if is_removed(connection, names, session_id, run_id, parent_run_id):
+        return _Saved(run_id, "removed", data.get("created_at") or now, now)
+    rows = {
+        row[0]: _StoredRow(*row[1:])
+        for row in connection.execute(
+            f"SELECT run_id, parent_run_id, status, seq, created_at FROM {quote_identifier(names.log_runs)} "  # noqa: S608
+            "WHERE session_id = ? AND run_id IN (?, ?)",
+            (session_id, run_id, parent_run_id),
+        )
+    }
+    stored, team_run = rows.get(run_id), rows.get(parent_run_id)
+    if team_run is not None and team_run.parent_run_id is not None:
+        msg = f"Run {run_id!r} names member run {parent_run_id!r} as its team run; team members have no members"
+        raise ValueError(msg)
+    # A top-level run, or a member's team run, whose stored status is visible is final; a member's own is not.
+    judged = team_run if parent_run_id is not None else stored
+    if not interrupted and judged is not None and judged.status not in _NON_VISIBLE:
+        return _Saved(run_id, "final")
+    if stored is None:
+        moved, created_at, seq = True, data.get("created_at") or now, _next_seq(connection, names)
+    else:
+        # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
+        moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
+        created_at, seq = stored.created_at, _next_seq(connection, names) if moved else stored.seq
+    upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
+    set_visible_messages(connection, names, run_id, data["messages"], data["status"])
+    _adopt_requester(connection, names, session_id, data.get("user_id"))
+    [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
+    return _Saved(run_id, "written", created_at, now, moved, written)
+
+
+def upsert_run(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    data: Mapping[str, Any],
+    kind: SessionKind,
+    *,
+    seq: int,
+    created_at: int,
+    updated_at: int,
+) -> None:
+    """Upsert the row and the tool rows of the run whose stored dict is ``data``.
+
+    A stored row keeps its ``session_id`` and ``created_at``. An update rather than a replace, which would cascade the
+    run's message rows away. Tool rows are keyed by their place in the list, so a save that appends a tool execution
+    writes that one row; changed rows are rewritten and rows past the list's end deleted.
+    """
+    written = ("parent_run_id", *_RECORD_COLUMNS, "seq", "updated_at")
+    run_id, parent_run_id, columns = data["run_id"], data.get("parent_run_id"), run_columns(data, kind)
+    connection.execute(
+        f"INSERT INTO {quote_identifier(names.log_runs)} (run_id, session_id, created_at, {', '.join(written)}) "  # noqa: S608
+        f"VALUES ({', '.join('?' * (len(written) + 3))}) "
+        f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(f'{column} = excluded.{column}' for column in written)}",
+        (run_id, session_id, created_at, parent_run_id, *astuple(columns), seq, updated_at),
+    )
+    tools, table = data.get("tools") or [], quote_identifier(names.log_tools)
+    connection.executemany(
+        f"INSERT INTO {table} (run_id, ord, data) VALUES (?, ?, ?) ON CONFLICT(run_id, ord) "  # noqa: S608
+        "DO UPDATE SET data = excluded.data WHERE data IS NOT excluded.data",
+        [(run_id, position, json.dumps(tool)) for position, tool in enumerate(tools)],
+    )
+    connection.execute(f"DELETE FROM {table} WHERE run_id = ? AND ord >= ?", (run_id, len(tools)))  # noqa: S608
+
+
+def _join_covering_row(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    scope_key: str,
+    seq: int,
+    metadata: Mapping[str, Any],
+) -> None:
+    """Add a visible run's event ids to the summary row that covers it, so redacting a reply linked later still cuts it.
+
+    The covering row is the scope's first row by ``id`` whose ``through`` reaches the run's ``seq``. A run at or behind
+    the latest barrier's ``through`` is retired and joins none; for any other run, since ``through`` never decreases in
+    ``id`` order, that row comes after the latest barrier and has text.
+    """
+    summaries = quote_identifier(names.log_summaries)
+    covering = connection.execute(
+        f"SELECT id, event_ids, seen_event_ids FROM {summaries} WHERE session_id = ?1 AND scope_key = ?2 "  # noqa: S608
+        f"AND through >= ?3 AND ?3 > COALESCE((SELECT through FROM {summaries} WHERE session_id = ?1 "
+        "AND scope_key = ?2 AND summary IS NULL ORDER BY id DESC LIMIT 1), 0) ORDER BY id LIMIT 1",
+        (session_id, scope_key, seq),
+    ).fetchone()
+    if covering is not None:
+        summary_id, stored_event_ids, stored_seen = covering
+        event_ids, seen = summary_event_sets([metadata])
+        connection.execute(
+            f"UPDATE {summaries} SET event_ids = ?, seen_event_ids = ? WHERE id = ?",  # noqa: S608
+            (
+                json.dumps(sorted({*json.loads(stored_event_ids), *event_ids})),
+                json.dumps(sorted({*json.loads(stored_seen), *seen})),
+                summary_id,
+            ),
+        )
+
+
+def set_visible_messages(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    run_id: str,
+    messages: Sequence[Mapping[str, Any]],
+    status: str,
+) -> None:
+    """Make the replay view of run ``run_id``, saved with ``status``, its message dicts, rewriting changed rows only.
+
+    History copies are never stored, and system messages only while the run is paused, for its continuation. A row a
+    fold took stays as it is, so it never replays again, and an unfolded row the list no longer holds is deleted. A
+    list holding one message id twice raises rather than keeping one copy.
+    """
+    paused = status == RunStatus.paused.value
+    kept = [
+        message for message in messages if not message.get("from_history") and (paused or message["role"] != "system")
+    ]
+    ids = [message["id"] for message in kept]
+    if len(set(ids)) < len(ids):
+        msg = f"Run {run_id!r} holds a message id twice"
+        raise ValueError(msg)
+    table = quote_identifier(names.log_messages)
+    connection.executemany(
+        f"INSERT INTO {table} (run_id, message_id, ord, data) VALUES (?, ?, ?, ?) ON CONFLICT(run_id, message_id) "  # noqa: S608
+        "DO UPDATE SET ord = excluded.ord, data = excluded.data "
+        "WHERE folded_by IS NULL AND (ord, data) IS NOT (excluded.ord, excluded.data)",
+        [(run_id, message["id"], position, json.dumps(message)) for position, message in enumerate(kept)],
+    )
+    connection.execute(
+        f"DELETE FROM {table} WHERE run_id = ? AND folded_by IS NULL "  # noqa: S608
+        "AND message_id NOT IN (SELECT value FROM json_each(?))",
+        (run_id, json.dumps(ids)),
+    )
+
+
+def _read_runs(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    condition: str,
+    parameters: tuple[object, ...],
+) -> list[AnyRunRecord]:
+    """Decode the runs whose rows meet ``condition``, in ``seq`` order, each in its replay view.
+
+    A paused team run's ``member_responses``, which its resume reads, are the member runs its requirements name, in
+    first-mention order, each decoded apart from the member's own record so the two share nothing.
+    """
+    records = _decoded_runs(connection, names, f"{condition} ORDER BY run.seq", parameters)
+    for record in records:
+        if isinstance(record, TeamRunRecord) and record.status is RunStatus.paused:
+            named = list(dict.fromkeys(item.member_run_id for item in record.requirements or () if item.member_run_id))
+            members = _decoded_runs(connection, names, "run.parent_run_id = ?", (record.run_id,))
+            by_id = {member.run_id: cast("RunRecord", member) for member in members}
+            record.member_responses = [by_id[member_id] for member_id in named if member_id in by_id]
+    return records
+
+
+def _decoded_runs(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    condition: str,
+    parameters: tuple[object, ...],
+) -> list[AnyRunRecord]:
+    """Decode the runs whose rows meet ``condition``, each with its unfolded message and tool rows in ``ord`` order.
+
+    Each call parses its own copy of the JSON.
+    """
+    rows = connection.execute(
+        f"SELECT run_id, session_id, parent_run_id, {', '.join(_RECORD_COLUMNS)} "  # noqa: S608
+        f"FROM {quote_identifier(names.log_runs)} AS run WHERE {condition}",
+        parameters,
+    ).fetchall()
+    run_ids = [run_id for run_id, *_ in rows]
+    messages = _rows_by_run(connection, names.log_messages, run_ids, "folded_by IS NULL")
+    tools = _rows_by_run(connection, names.log_tools, run_ids)
+    return [
+        run_record(run_id, session_id, parent_run_id, RunColumns(*columns), messages[run_id], tools[run_id])
+        for run_id, session_id, parent_run_id, *columns in rows
+    ]
+
+
+def _rows_by_run(
+    connection: sqlite3.Connection,
+    table: str,
+    run_ids: list[str],
+    condition: str = "TRUE",
+) -> dict[str, list[dict[str, Any]]]:
+    """Decode the ``data`` of ``table``'s rows of the runs ``run_ids`` that meet ``condition``, by run, in ``ord`` order."""
+    decoded: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    for run_id, data in connection.execute(
+        f"SELECT run_id, data FROM {quote_identifier(table)} WHERE {condition} "  # noqa: S608
+        "AND run_id IN (SELECT value FROM json_each(?)) ORDER BY run_id, ord",
+        (json.dumps(run_ids),),
+    ):
+        decoded[run_id].append(json.loads(data))
+    return decoded
+
+
+def _loads_sql(alias: str, summaries: str) -> str:
+    """Return the SQL condition under which run ``alias`` loads as a top-level run.
+
+    A paused, cancelled, or errored run loads wherever it sits; any other loads unless its scope's latest summary
+    row, a barrier included, covers it. Every run of a scope without summary rows loads.
     """
     return (
-        connection.execute(
-            "WITH RECURSIVE chain(run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id) "  # noqa: S608
-            f"AS (SELECT run_id, parent_run_id, run_index, status, run_type, agent_id, team_id, session_id FROM {runs} "
-            "WHERE run_id IN (?, ?) UNION SELECT run.run_id, run.parent_run_id, run.run_index, run.status, run.run_type, "
-            f"run.agent_id, run.team_id, run.session_id FROM {runs} AS run JOIN chain ON run.run_id = chain.parent_run_id) "
-            "SELECT 1 FROM chain AS top WHERE top.parent_run_id IS NULL "
-            f"AND NOT {loads_sql('top', latest_row_index_sql(summaries, 'top'))}",
-            (run_id, parent_run_id),
-        ).fetchone()
-        is not None
+        f"({alias}.parent_run_id IS NULL AND ({alias}.status IN ({NON_VISIBLE_RUN_STATUS_SQL}) OR {alias}.seq > COALESCE("  # noqa: S608
+        f"(SELECT row.through FROM {summaries} AS row WHERE row.session_id = {alias}.session_id "
+        f"AND row.scope_key = {alias}.scope_key ORDER BY row.id DESC LIMIT 1), 0)))"
     )
+
+
+def _replay_summary(
+    connection: sqlite3.Connection,
+    summaries: str,
+    session_id: str,
+    owner_scope: str | None,
+) -> ScopeSummary | None:
+    """Return the text of the owner scope's latest summary row, which the session replays; a barrier has none."""
+    if owner_scope is None:
+        return None
+    latest = connection.execute(
+        f"SELECT summary, created_at FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
+        "ORDER BY id DESC LIMIT 1",
+        (session_id, owner_scope),
+    ).fetchone()
+    if latest is None or latest[0] is None:
+        return None
+    return ScopeSummary(text=latest[0], updated_at=datetime.fromtimestamp(latest[1], UTC))
+
+
+def source_event_ids(metadata: object) -> set[str]:
+    """Return the Matrix event ids a run answered, from its metadata."""
+    if not isinstance(metadata, dict):
+        return set()
+    metadata = cast("dict[str, Any]", metadata)
+    event_ids: set[str] = set()
+    event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
+    if isinstance(event_id, str) and event_id:
+        event_ids.add(event_id)
+    for key in (MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY):
+        raw_ids = metadata.get(key)
+        if isinstance(raw_ids, list):
+            event_ids.update(candidate for candidate in raw_ids if isinstance(candidate, str) and candidate)
+    return event_ids
+
+
+def seen_event_ids(metadata: object) -> set[str]:
+    """Return the Matrix event ids a run already represents, from its metadata."""
+    if not isinstance(metadata, dict):
+        return set()
+    metadata = cast("dict[str, Any]", metadata)
+    event_ids: set[str] = set()
+    raw_seen_ids = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
+    if isinstance(raw_seen_ids, list):
+        event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
+    raw_revisions = metadata.get(MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
+    if isinstance(raw_revisions, dict):
+        event_ids.update(
+            revision[1]
+            for revision in raw_revisions.values()
+            if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
+        )
+    response_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
+    if isinstance(response_event_id, str) and response_event_id:
+        event_ids.add(response_event_id)
+    return event_ids
+
+
+def summary_event_sets(run_metadata: Sequence[object]) -> tuple[set[str], set[str]]:
+    """Return the ``event_ids`` and ``seen_event_ids`` a summary row keeps of the runs whose metadata it is given.
+
+    ``event_ids``, which redactions match, hold what the runs answered and represent; ``seen_event_ids`` only what they
+    represent.
+    """
+    seen = set().union(*map(seen_event_ids, run_metadata))
+    return seen.union(*map(source_event_ids, run_metadata)), seen
+
+
+def store_fold(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run: AnyRunRecord,
+    messages: Sequence[Message],
+    member_run_ids: Collection[str],
+    summary_id: int,
+) -> None:
+    """Store what fold summary ``summary_id`` took out of ``run``, the live running record, in the caller's transaction.
+
+    The run takes the next ``seq``, so it sorts after the summary; one without a row gets a cancelled one with its live
+    scalars and metadata, which a crash leaves as a run that does not replay. The folded ``messages``, and the run's
+    member runs that ``member_run_ids`` names, are flagged with the summary, a stored message keeping its data, so none
+    replays again. The caller creates the session row (``ensure_session_row``) before it inserts the summary row.
+    """
+    runs, now, seq = quote_identifier(names.log_runs), int(time()), _next_seq(connection, names)
+    move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
+    if not connection.execute(move, (seq, session_id, run.run_id)).rowcount:
+        data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
+        created_at, kind = run.created_at or now, run_kind(run)
+        upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
+    folded = [message.to_dict() for message in messages]
+    flag_folded(connection, names, session_id, run.run_id, folded, member_run_ids, summary_id)
+
+
+def flag_folded(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    run_id: str,
+    messages: Sequence[Mapping[str, Any]],
+    member_run_ids: Collection[str],
+    summary_id: int,
+) -> None:
+    """Flag the message dicts ``messages`` of stored run ``run_id`` and its member runs ``member_run_ids`` as folded.
+
+    Summary ``summary_id`` took them, in the caller's transaction. A message the run does not hold yet is stored
+    folded; one it holds keeps its data and gains the flag. Either way it takes its place in ``messages`` as its
+    ``ord``, so each fold's messages read in the fold's order. A message or member run keeps the flag and place of the
+    first fold that took it, and none replays again.
+    """
+    connection.executemany(
+        f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, folded_by, data) "  # noqa: S608
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = excluded.folded_by, "
+        "ord = excluded.ord WHERE folded_by IS NULL",
+        [
+            (run_id, message["id"], position, summary_id, json.dumps(message))
+            for position, message in enumerate(messages)
+        ],
+    )
+    connection.execute(
+        f"UPDATE {quote_identifier(names.log_runs)} SET folded_by = ? WHERE session_id = ? AND parent_run_id = ? "  # noqa: S608
+        "AND folded_by IS NULL AND run_id IN (SELECT value FROM json_each(?))",
+        (summary_id, session_id, run_id, json.dumps(sorted(member_run_ids))),
+    )
+
+
+def delete_runs_in_transaction(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    run_ids: Collection[str],
+    *,
+    session_id: str,
+) -> set[str]:
+    """Delete session ``session_id``'s runs ``run_ids`` with their members and messages; return the deleted ids."""
+    selected = json.dumps(sorted(run_ids))
+    return {
+        run_id
+        for (run_id,) in connection.execute(
+            f"DELETE FROM {quote_identifier(names.log_runs)} WHERE session_id = ?1 AND (run_id IN "  # noqa: S608
+            "(SELECT value FROM json_each(?2)) OR parent_run_id IN (SELECT value FROM json_each(?2))) RETURNING run_id",
+            (session_id, selected),
+        ).fetchall()
+    }
 
 
 # TODO(simplify): the session totals in `session_data` repeat what the usage ledger's run snapshots record.
@@ -813,110 +1134,25 @@ def _counted_value(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def delete_run_subtrees_in_transaction(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    run_ids: Collection[str],
-    *,
-    session_id: str,
-) -> set[str]:
-    """Delete session ``session_id``'s runs ``run_ids`` and every run below them in the caller's write transaction.
-
-    Returns the deleted ids. Team member runs are rows whose ``parent_run_id`` is the team run, so a deleted run
-    takes its whole subtree.
-    """
-    runs = quote_identifier(names.runs)
-    found = {run_id for run_id in run_ids if run_id}
-    frontier = found
-    while frontier:
-        frontier = {
-            run_id
-            for (run_id,) in connection.execute(
-                f"SELECT run_id FROM {runs} WHERE session_id = ? AND parent_run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
-                (session_id, json.dumps(sorted(frontier))),
-            )
-        } - found
-        found |= frontier
-    connection.execute(
-        f"DELETE FROM {runs} WHERE session_id = ? AND run_id IN (SELECT value FROM json_each(?))",  # noqa: S608
-        (session_id, json.dumps(sorted(found))),
-    )
-    return found
-
-
-def _loaded_run_rows(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    summaries: str | None,
-    session_id: str,
-) -> list[tuple[str, str, str]]:
-    """Return ``(run_id, run_type, run_data)`` of the runs a load returns, in log order."""
-    runs = quote_identifier(names.runs)
-    # A database that has not written a run since it gained a sessions table has no summary rows yet.
-    after_latest = f"AND {loads_sql('run', latest_row_index_sql(summaries, 'run'))} " if summaries is not None else ""
-    # The descendant step searches a materialized child set, which SQLite indexes automatically, instead of
-    # scanning the session once per loaded run.
-    return connection.execute(
-        "WITH RECURSIVE children(run_id, parent_run_id) AS MATERIALIZED ("  # noqa: S608
-        f"SELECT run_id, parent_run_id FROM {runs} WHERE session_id = ? AND parent_run_id IS NOT NULL), "
-        f"loaded(run_id) AS (SELECT run.run_id FROM {runs} AS run "
-        f"WHERE run.session_id = ? AND run.parent_run_id IS NULL {after_latest}"
-        "UNION SELECT children.run_id FROM loaded JOIN children ON children.parent_run_id = loaded.run_id) "
-        f"SELECT run.run_id, run.run_type, CAST(run.run_data AS TEXT) FROM {runs} AS run "
-        "WHERE run.session_id = ? AND run.run_id IN (SELECT run_id FROM loaded) "
-        "ORDER BY run.run_index, run.created_at, run.run_id",
-        (session_id, session_id, session_id),
-    ).fetchall()
-
-
-def _folded_message_ids(
-    connection: sqlite3.Connection,
-    summaries: str | None,
-    session_id: str,
-    run_ids: list[str],
-) -> dict[str, set[str]]:
-    """Return, for each of ``run_ids`` that folded mid-turn, the ids of the messages its segments hold."""
-    folded: dict[str, set[str]] = {}
-    if summaries is None:
-        return folded
-    for run_id, message_id in connection.execute(
-        f"SELECT row.segment_run_id, json_extract(message.value, '$.id') FROM {summaries} AS row, "  # noqa: S608
-        "json_each(row.segment, '$.messages') AS message WHERE row.session_id = ? "
-        "AND row.segment_run_id IN (SELECT value FROM json_each(?))",
-        (session_id, json.dumps(run_ids)),
-    ):
-        if isinstance(message_id, str):
-            folded.setdefault(run_id, set()).add(message_id)
-    return folded
-
-
-def _replay_summary(
-    connection: sqlite3.Connection,
-    summaries: str | None,
-    session_id: str,
-    owner_scope: str | None,
-) -> ScopeSummary | None:
-    """Return the text of the owner scope's latest summary row, which the session replays."""
-    if summaries is None or owner_scope is None:
-        return None
-    latest = connection.execute(
-        f"SELECT summary, created_at FROM {summaries} WHERE session_id = ? AND scope_key = ? "  # noqa: S608
-        "ORDER BY id DESC LIMIT 1",
-        (session_id, owner_scope),
-    ).fetchone()
-    if latest is None or latest[0] is None:
-        return None
-    return ScopeSummary(text=latest[0], updated_at=datetime.fromtimestamp(latest[1], UTC))
-
-
 __all__ = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
+    "SaveOutcome",
+    "begun",
+    "connect_by_name",
     "connect_conversation_database",
     "decoded_mapping",
-    "delete_run_subtrees_in_transaction",
-    "migrate_database",
+    "delete_runs_in_transaction",
+    "ensure_session_row",
+    "flag_folded",
+    "is_removed",
     "persist_to",
     "runs_without",
+    "seen_event_ids",
+    "set_visible_messages",
+    "source_event_ids",
+    "store_fold",
+    "summary_event_sets",
+    "upsert_run",
     "write_with_session_state",
 ]

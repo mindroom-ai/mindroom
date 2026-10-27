@@ -9,6 +9,7 @@ import ssl
 import stat
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -27,7 +28,7 @@ from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
-from mindroom.egress_broker.secrets import delete_secret, save_egress_document, save_secret
+from mindroom.egress_broker.secrets import Secret, SecretRequest, delete_secret, save_egress_document, save_secret
 from mindroom.egress_broker.service import (
     active_audit_log,
     active_ca_pem,
@@ -35,7 +36,7 @@ from mindroom.egress_broker.service import (
     manage_url,
     serve_egress_broker,
 )
-from mindroom.egress_broker.tokens import TokenSigner
+from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.egress_broker.user_services import (
     USER_SERVICES_CREDENTIAL_SERVICE,
     delete_user_service,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.egress_broker.secrets import SecretResult
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, OAuthCredentialsSnapshot
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
@@ -1670,3 +1672,80 @@ async def test_config_placeholders_win_over_user_placeholders(
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
     assert env["GH_TOKEN"] == _PLACEHOLDER
     assert env["MINE_TOKEN"] == "mine-placeholder"  # noqa: S105 - a placeholder value, not a secret
+
+
+_DRIVE_PLACEHOLDER = "DRIVE_TOKEN"
+
+
+def _own_drive_service(manager: CredentialsManager, runtime_paths: RuntimePaths, tools_token: str) -> OAuthProvider:
+    """Save Alice's service `mine` with its own Drive account, connect the tools' Drive account, and allow `mine`.
+
+    The opt-in is written for the service's own account, as its row writes it, and that account is returned unconnected.
+    """
+    drive = google_drive_oauth_provider()
+    own = oauth_source.separate_account_provider(drive, "mine")
+    manager.save_credentials("google_drive_oauth_client", {"client_id": "google_drive-client-id", "client_secret": "s"})
+    save_user_service(
+        manager,
+        _routable_target(),
+        "mine",
+        EgressService.model_validate(
+            {
+                "preset": "google_drive",
+                "oauth_separate_account": True,
+                "placeholder_env": {_DRIVE_PLACEHOLDER: _PLACEHOLDER},
+            },
+        ),
+        config_services={},
+        oauth_providers={drive.id},
+    )
+    connect_account(manager, _routable_target(), tools_token, provider=drive)
+    allow_oauth_reuse(manager, runtime_paths, _routable_target(), "mine", provider=own)
+    return own
+
+
+@pytest.mark.asyncio
+async def test_the_broker_resolves_a_routed_service_with_its_own_account(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """The secret lookup reads the routed definition's own account, never the tools' connection."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    connect_account(manager, _routable_target(), "own-access", provider=own)
+    claims = WorkerClaims.from_worker_target(_routable_target())
+    assert claims is not None
+    routed = user_services.effective_config(config.egress_broker, manager, claims.to_worker_target()).services["mine"]
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = await service._resolve_secret(
+            claims,
+            "mine",
+            routed,
+            SecretRequest(method="GET", path="/drive/v3/files"),
+            config=service._LastGoodConfig(lambda: config, manager, personal_page=True),
+            runtime_paths=runtime_paths,
+            credentials_manager=manager,
+            oauth_executor=executor,
+        )
+
+    assert result == Secret("own-access")
+
+
+@pytest.mark.asyncio
+async def test_placeholder_env_follows_a_services_own_account(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """A service with its own account sets its placeholders once that account is connected, not for the tools' one."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        before = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        connect_account(manager, _routable_target(), "own-access", provider=own)
+        after = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+
+    assert _DRIVE_PLACEHOLDER not in before
+    assert after[_DRIVE_PLACEHOLDER] == _PLACEHOLDER

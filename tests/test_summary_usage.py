@@ -29,7 +29,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
-from tests.conftest import install_model_providers, prepare_history_for_run_for_test
+from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session_state
 from tests.fakes.scripted_model import Await
 from tests.fakes.summary_model import Reply, ScriptedSummaryModel, summary_model, summary_steps, summary_turn
 from tests.history_helpers import (
@@ -175,7 +175,7 @@ async def test_summary_cost_survives_success_or_rejected_output(  # noqa: PLR091
     assert "question" not in json.dumps(summary)
     assert summary["requests"][0]["metrics"]["input_tokens"] == 100
     # Repeated exports and session writes cannot add the same summary twice.
-    storage.save_session_state(session, session_state_snapshot(session.session_state))
+    seed_session_state(storage, session, session_state_snapshot(session.session_state))
     assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 

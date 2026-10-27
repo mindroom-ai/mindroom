@@ -72,7 +72,7 @@ from tests.history_helpers import (
     compact_runs,
     completed_outcome,
     folded_run_ids,
-    latest_summary_model,
+    summary_rows_of,
 )
 from tests.providers.openai_family_support import responses_adapter
 
@@ -174,7 +174,6 @@ async def test_prepare_history_for_run_forced_compaction_rewrites_session(
     assert persisted.runs == []
 
     state = read_scope_state(persisted, scope)
-    assert latest_summary_model(storage, scope) == "summary-model"
     assert len(folded_run_ids(storage)) == 4
     assert state.force_compact_before_next_run is False
 
@@ -1258,7 +1257,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         if second_chunk == "fails":
             msg = "summary failed"
             raise RuntimeError(msg)
-        storage.delete_run_subtrees(_session("session-1"), ["run-3"])
+        storage.delete_runs(["run-3"], session_id="session-1")
         return "stale second summary"
 
     summary_mock = AsyncMock(side_effect=summarize)
@@ -1500,7 +1499,6 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "primary summary"
-    assert latest_summary_model(storage, scope) == "summary-model-id"
 
 
 @pytest.mark.asyncio
@@ -1760,7 +1758,7 @@ async def test_prepare_history_for_run_compaction_failure_clears_force_flag(
 
     state = read_scope_state(persisted, scope)
     assert state.force_compact_before_next_run is False
-    assert latest_summary_model(storage, scope) is None
+    assert summary_rows_of(storage, scope.key) == []
 
     assert prepared.compaction_reply_outcome == "failed"
     assert prepared.replays_persisted_history is True
@@ -1788,12 +1786,12 @@ async def test_a_manual_compaction_the_conversation_outran_says_so_and_stays_req
 
     def basis_after_a_redaction_cuts_a_run(*args: object, **kwargs: object) -> object:
         if race == "before_summary":
-            storage.delete_run_subtrees(_session("session-1"), ["run-1"])
+            storage.delete_runs(["run-1"], session_id="session-1")
         return read_chunk_basis(*args, **kwargs)
 
     async def summary_while_a_redaction_cuts_a_run(**_kwargs: object) -> str:
         if race == "during_summary":
-            storage.delete_run_subtrees(_session("session-1"), ["run-1"])
+            storage.delete_runs(["run-1"], session_id="session-1")
         return "stale summary"
 
     install_model_providers(monkeypatch, {"default": summary_model()})
@@ -1946,7 +1944,7 @@ async def _prepare_with_reported_usage(
     session = seed_session(storage, _session("session-1", runs=runs))
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if folded_run_ids:
-        with patch("mindroom.history.summary_rows.time.time", return_value=_SUMMARY_WRITTEN_AT):
+        with patch("mindroom.history.summary_rows.time", return_value=_SUMMARY_WRITTEN_AT):
             compact_runs(storage, session, scope, list(folded_run_ids), "Earlier summary")
     estimate = estimate_prompt_visible_history_tokens(
         session=session,
