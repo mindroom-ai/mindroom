@@ -48,6 +48,14 @@ def test_api_key_error_with_provider() -> None:
     assert "Authentication failed" in message
 
 
+def test_an_untyped_http_client_error_names_no_provider() -> None:
+    """An authentication reply from an untyped httpx error names no provider, since httpx is the HTTP client."""
+    error = httpx.HTTPStatusError("401 Unauthorized", request=_MOCK_RESPONSE.request, response=_MOCK_RESPONSE)
+    message = get_user_friendly_error_message(error, "assistant")
+    assert "Authentication failed:" in message
+    assert "httpx" not in message
+
+
 def test_provider_auth_error_redacts_secret_from_user_message() -> None:
     """Provider exception text should be redacted before Matrix-visible user output."""
     error = OpenAIAuthError(

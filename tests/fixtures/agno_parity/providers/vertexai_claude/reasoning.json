@@ -17,8 +17,7 @@
         "project_id": "parity-project",
         "region": "us-east5",
         "thinking": {
-          "budget_tokens": 2048,
-          "type": "enabled"
+          "type": "adaptive"
         }
       },
       "id": "claude-sonnet-5-5",
@@ -98,14 +97,17 @@
         }
       ],
       "thinking": {
-        "budget_tokens": 2048,
-        "type": "enabled"
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
       },
       "stream": true,
       "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "content-type": "application/json"
     },
     "method": "POST",
