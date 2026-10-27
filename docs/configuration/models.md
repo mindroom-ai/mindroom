@@ -498,7 +498,7 @@ When a response reaches the model's output limit (`max_tokens` or the route's eq
 
 Some models reject sampling controls:
 
-- Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
+- Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5, and Sonnet 5 reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
 - MindRoom also omits those controls for direct Gemini 3.8 Flash and Gemini 3.5 Flash-Lite requests.
 - [GPT-6 Astra does not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Sol and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 

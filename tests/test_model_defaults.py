@@ -216,6 +216,8 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "claude-sonnet-5-5",
         "claude-sonnet-5.5",
         "claude-sonnet-5",
+        "claude-haiku-5-5",
+        "claude-haiku-5.5",
     )
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
         "openrouter",
@@ -345,7 +347,10 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
         ("anthropic/claude-fable-5.1", True),
         ("Claude-Opus-5-5", True),
         ("claude-sonnet-4-5", False),
-        ("anthropic/claude-haiku-5.5", False),
+        ("claude-haiku-5-5", True),
+        ("anthropic.claude-haiku-5-5", True),
+        ("anthropic/claude-haiku-5.5", True),
+        ("claude-haiku-4-5", False),
     ],
 )
 def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:

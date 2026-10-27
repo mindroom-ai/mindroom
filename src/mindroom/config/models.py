@@ -543,8 +543,8 @@ class DefaultsConfig(BaseModel):
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
             "MindRoom always uses provider temperature defaults for OpenAI GPT-5 and GPT-6 models, Vertex Claude, "
-            "Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and "
-            "Gemini 3.5 Flash-Lite thread summaries."
+            "Claude Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash "
+            "and Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(

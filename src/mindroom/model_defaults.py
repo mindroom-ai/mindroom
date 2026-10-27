@@ -173,6 +173,8 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     _ANTHROPIC_SONNET,
     "claude-sonnet-5.5",
     "claude-sonnet-5",
+    _ANTHROPIC_HAIKU,
+    "claude-haiku-5.5",
 )
 
 # The Claude models whose API checks each replayed thinking block against the system prompt, tools, and messages sent

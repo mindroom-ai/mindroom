@@ -2539,6 +2539,7 @@ class TestGenerateSummary:
                     "anthropic/claude-fable-5",
                     "anthropic/claude-opus-5.5",
                     "anthropic/claude-sonnet-5.5",
+                    "anthropic/claude-haiku-5.5",
                 )
             ),
             *(
@@ -2557,6 +2558,7 @@ class TestGenerateSummary:
                     "claude-sonnet-5-5",
                     "claude-opus-5",
                     "claude-sonnet-5",
+                    "claude-haiku-5-5",
                 )
             ),
             pytest.param({"provider": "anthropic", "id": "claude-haiku-4-5"}, True, id="anthropic-claude-haiku-4-5"),
@@ -2566,12 +2568,12 @@ class TestGenerateSummary:
                     "anthropic.claude-fable-5-1",
                     "anthropic.claude-opus-5-5",
                     "anthropic.claude-sonnet-5-5",
+                    "anthropic.claude-haiku-5-5",
                 )
             ),
-            pytest.param(
-                {"provider": "vertexai_claude", "id": "claude-haiku-4-5"},
-                False,
-                id="vertex-claude-haiku-4-5",
+            *(
+                pytest.param({"provider": "vertexai_claude", "id": model_id}, False, id=f"vertex-{model_id}")
+                for model_id in ("claude-haiku-4-5", "claude-haiku-5-5")
             ),
             *(
                 pytest.param({"provider": "google", "id": model_id}, False, id=f"google-{model_id}")
