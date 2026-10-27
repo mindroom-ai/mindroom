@@ -1083,9 +1083,11 @@ class TestMemoryConfig:
         adapter.embed("remember", "add")
         adapter.embed("changed", "update")
         adapter.embed_batch(["one", "two"])
+        # Mem0 embeds the entities it finds in a search query in one batch.
+        adapter.embed_batch(["Alice", "Bob"], "search")
 
         inputs = [call.kwargs["input"] for call in client.embeddings.create.call_args_list]
-        assert inputs == ["q: find me", "d: remember", "d: changed", ["d: one", "d: two"]]
+        assert inputs == ["q: find me", "d: remember", "d: changed", ["d: one", "d: two"], ["q: Alice", "q: Bob"]]
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""

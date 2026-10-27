@@ -61,23 +61,17 @@ class _Mem0StrictOpenAIEmbedder:
         text: str,
         memory_action: Literal["add", "search", "update"] | None = None,
     ) -> list[float]:
-        text = text.replace("\n", " ")
-        try:
-            # Stored memories are documents; anything else is a search query.
-            purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
-            return self.embedder.embed([text], purpose=purpose)[0]
-        except Exception as exc:
-            self._remember_operation_failure(exc)
-            raise
+        return self.embed_batch([text], memory_action)[0]
 
     def embed_batch(
         self,
         texts: list[str],
-        memory_action: Literal["add", "search", "update"] = "add",
+        memory_action: Literal["add", "search", "update"] | None = "add",
     ) -> list[list[float]]:
-        del memory_action
+        # Stored memories are documents; anything else, including the entities of a search query, is a query.
+        purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
         try:
-            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose="document")
+            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose=purpose)
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
