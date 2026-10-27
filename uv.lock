@@ -4669,7 +4669,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.2.0" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.2.1" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4807,7 +4807,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "1.2.0"
+version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4820,9 +4820,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9c/25/fdb94ef423bfcae80d36c6d6c191e60069c17c2f188c425eda0d9ea0d058/mindroom_nio-1.2.0.tar.gz", hash = "sha256:be8043a7cfeb7004dca1ba2c7d9f2bceba180cb937bb0decfbbe19f34f2bf0a5", size = 219171, upload-time = "2026-10-25T20:08:35.273Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/e1/30ba3c245f7a2229809545c25a3a9e8d115db5f60677ae8692dfd3fcaaf9/mindroom_nio-1.2.1.tar.gz", hash = "sha256:6765ba6ed3e2bb918ba4412042042965e2ca161524d8f6ee01ec535953425e94", size = 219308, upload-time = "2026-10-27T01:31:58.897Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ba/8b/0e4ab5a8de66414c89a3ed9486aad150f228f319b2f35326f627f411e6d8/mindroom_nio-1.2.0-py3-none-any.whl", hash = "sha256:16ef5e3af167a2e6e9ff8ac3cb809d2e84aedbf106b96cb159e1f16b3c7beebc", size = 255252, upload-time = "2026-10-25T20:08:33.677Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/e5/87c8c6a078d725399feab5b40a8905597ff6f9f89af5f2992266a0e19241/mindroom_nio-1.2.1-py3-none-any.whl", hash = "sha256:ce58900db4fbbbb09c033e8993f7396abcb635eec0ff69505e2cc088212d5d57", size = 255430, upload-time = "2026-10-27T01:31:56.853Z" },
 ]
 
 [package.optional-dependencies]
