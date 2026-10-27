@@ -27,8 +27,8 @@ _VERTEX_AI_RANK_URL = (
     "https://discoveryengine.googleapis.com/v1/projects/{project}/locations/global"
     "/rankingConfigs/default_ranking_config:rank"
 )
-#: Most records one Vertex AI ranking request accepts.
-_VERTEX_AI_MAX_RECORDS = 200
+#: Records per Vertex AI ranking request: Google bills each 100 as one query, and smaller requests answer sooner.
+_VERTEX_AI_RECORDS_PER_REQUEST = 100
 
 
 class Reranker(Protocol):
@@ -82,12 +82,12 @@ class _VertexAIReranker:
                         json={
                             "model": self.model,
                             "query": query,
-                            "records": records[start : start + _VERTEX_AI_MAX_RECORDS],
+                            "records": records[start : start + _VERTEX_AI_RECORDS_PER_REQUEST],
                             "ignoreRecordDetailsInResponse": True,
                         },
                     ),
                 )
-                for start in range(0, len(records), _VERTEX_AI_MAX_RECORDS)
+                for start in range(0, len(records), _VERTEX_AI_RECORDS_PER_REQUEST)
             ]
         scores = [float("-inf")] * len(documents)
         for request in requests:

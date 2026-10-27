@@ -161,7 +161,7 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Vertex AI ranks at most 200 records per request, so larger candidate sets span requests scored together."""
+    """Candidates go out in concurrent requests of 100 records, the unit Vertex AI bills, and are scored together."""
     bodies: list[dict[str, object]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -193,8 +193,8 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
 
     documents = [f"doc {index}" for index in range(250)]
     assert await reranker.ascore("query", documents) == [index / 1000 for index in range(250)]
-    assert [len(body["records"]) for body in bodies] == [200, 50]
-    assert bodies[1]["records"][0] == {"id": "200", "content": "doc 200"}
+    assert sorted(len(body["records"]) for body in bodies) == [50, 100, 100]
+    assert {"id": "200", "content": "doc 200"} in [body["records"][0] for body in bodies]
     assert {body["model"] for body in bodies} == {"semantic-ranker-default@latest"}
     assert {body["query"] for body in bodies} == {"query"}
 

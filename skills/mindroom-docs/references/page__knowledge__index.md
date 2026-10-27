@@ -264,7 +264,7 @@ knowledge_reranker:
 
 `vertex_ai` signs in with Google Application Default Credentials and ranks in the project they name, such as the cluster's project on GKE or `GOOGLE_CLOUD_PROJECT`.
 That project needs the `discoveryengine.googleapis.com` API, and the identity needs `roles/discoveryengine.viewer`, the smallest predefined role that may rank.
-The ranking API reads the first 1024 tokens of each chunk and at most 200 chunks per request, so MindRoom splits larger candidate sets across requests.
+The ranking API reads the first 1024 tokens of each chunk; MindRoom sends candidates in concurrent requests of 100, the unit Google bills as one query.
 
 The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
 It applies to `search_knowledge_base` only; automatic memory search keeps the merged ranking, so it adds no latency to replies.
