@@ -375,7 +375,7 @@ Whoever may connect the account may allow it (see **Who may connect and set keys
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
 An allowance covers that provider's account for that scope until someone stops it: disconnecting keeps it, so an account of the same provider connected later, also one connected for the tools on the Connections portal, is used at once.
-It does not apply while the service's `oauth_provider` names another provider.
+It does not apply while the service's `oauth_provider` names another provider, or while the service uses [its own account](#a-services-own-account) instead of the one it was allowed for, or the reverse.
 A script can allow an account with `PUT /api/connections/egress/agents/<agent>/<service>/oauth-reuse`, or `PUT /api/egress-broker/services/<name>/oauth-reuse?agent_name=<agent>` on the dashboard, and the body `{"acknowledge_approval_bypass": true}`, and stop it with `DELETE` on the same URL.
 The body's `access` is `read_write` (the default) or `read`, which is a 409 for a service without `read_only`; sending it again for an allowed account changes the level.
 

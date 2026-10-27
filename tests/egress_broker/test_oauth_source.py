@@ -1039,10 +1039,10 @@ def test_entry_without_access_reads_read_write(
     )
     context = _alice_reuse_context(config, runtime_paths, manager)
 
-    assert oauth_reuse_access(context, "github", "github") == "read_write"
-    assert oauth_reuse_access(context, "gists", "github") == "read"
-    assert oauth_reuse_access(context, "github", "other") is None
-    assert oauth_reuse_access(context, "pages", "github") is None
+    assert oauth_reuse_access(context, "github", "github", separate_account=False) == "read_write"
+    assert oauth_reuse_access(context, "gists", "github", separate_account=False) == "read"
+    assert oauth_reuse_access(context, "github", "other", separate_account=False) is None
+    assert oauth_reuse_access(context, "pages", "github", separate_account=False) is None
 
 
 def test_set_oauth_reuse_stores_access(
@@ -1054,17 +1054,17 @@ def test_set_oauth_reuse_stores_access(
     context = _alice_reuse_context(config, runtime_paths, manager)
 
     set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
-    read = oauth_reuse_access(context, "github", "github")
+    read = oauth_reuse_access(context, "github", "github", separate_account=False)
     stored = load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE)
     set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org")
-    default = oauth_reuse_access(context, "github", "github")
+    default = oauth_reuse_access(context, "github", "github", separate_account=False)
     set_oauth_reuse(context, "github", "github", enabled=False, by="@alice:example.org")
 
     assert read == "read"
     assert stored is not None
     assert stored["services"]["github"]["access"] == "read"
     assert default == "read_write"
-    assert oauth_reuse_access(context, "github", "github") is None
+    assert oauth_reuse_access(context, "github", "github", separate_account=False) is None
 
 
 def test_changing_access_keeps_other_entries(
@@ -1098,8 +1098,8 @@ def test_changing_access_keeps_other_entries(
     assert stored is not None
     assert {name: entry for name, entry in stored["services"].items() if name != "github"} == others
     assert stored["services"]["github"]["access"] == "read"
-    assert oauth_reuse_access(context, "gists", "github") == "read_write"
-    assert oauth_reuse_access(context, "github-work", "github") == "read"
+    assert oauth_reuse_access(context, "gists", "github", separate_account=False) == "read_write"
+    assert oauth_reuse_access(context, "github-work", "github", separate_account=False) == "read"
 
 
 _POST = SecretRequest(method="POST", path="/repos/o/r/issues")
@@ -1172,13 +1172,40 @@ def test_a_separate_account_is_stored_under_its_services_own_credential_service(
     assert separate == replace(provider, credential_service="google_calendar__team_calendar_oauth")
 
 
-def _connect_own_account(manager: CredentialsManager, token: str, **fields: object) -> None:
-    """Store Alice's GitHub account of her own service `mine`, beside the connection her GitHub tools use."""
-    own = separate_account_provider(github_oauth_provider(), "mine")
-    connect_account(manager, account_store("@alice:example.org"), token, provider=own, **fields)
+# Alice's demo service `mine` with an account of its own, beside the demo connection her tools on agent `code` use.
+_OWN_DEMO = separate_account_provider(_DEMO, "mine")
 
 
-@pytest.mark.usefixtures("enable_reuse")
+def _connect_demo(manager: CredentialsManager, token: str, provider: OAuthProvider = _DEMO, **fields: object) -> None:
+    """Store Alice's demo connection on agent `code`: the tools' one, or with `_OWN_DEMO` the one of her service `mine`."""
+    connect_account(manager, _tool_target("@alice:example.org"), token, provider=provider, **fields)
+
+
+def _allow_mine(manager: CredentialsManager, runtime_paths: RuntimePaths, provider: OAuthProvider) -> None:
+    """Let Agent Keys use `provider`'s connection for Alice's service `mine`, as the egress page writes it."""
+    allow_oauth_reuse(manager, runtime_paths, _broker_target("@alice:example.org"), "mine", provider=provider)
+
+
+def _resolve_mine(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    *,
+    separate_account: bool = True,
+) -> SecretResult:
+    """Resolve Alice's demo service `mine`, by default as a service with its own account."""
+    return _resolve(
+        config,
+        runtime_paths,
+        manager,
+        _broker_target("@alice:example.org"),
+        provider_id="demo",
+        service="mine",
+        separate_account=separate_account,
+    )
+
+
+@pytest.mark.usefixtures("demo_registry")
 def test_a_separate_account_yields_only_its_own_connection(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1188,21 +1215,62 @@ def test_a_separate_account_yields_only_its_own_connection(
 
     Without its own account there is no connect link either: the provider's link would connect the tools' account.
     """
-    alice = _broker_target("@alice:example.org")
-    connect_account(manager, account_store("@alice:example.org"), "tools-access")
-    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), "mine")
+    _connect_demo(manager, "tools-access")
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
 
-    before = _resolve(config, runtime_paths, manager, alice, service="mine", separate_account=True)
-    _connect_own_account(manager, "own-access")
-    own = _resolve(config, runtime_paths, manager, alice, service="mine", separate_account=True)
-    tools = _resolve(config, runtime_paths, manager, alice, service="mine")
+    before = _resolve_mine(config, runtime_paths, manager)
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    own = _resolve_mine(config, runtime_paths, manager)
 
     assert before == SecretMissing()
     assert own == Secret("own-access")
-    assert tools == Secret("tools-access")
 
 
-@pytest.mark.usefixtures("enable_reuse")
+@pytest.mark.parametrize("own_first", [True, False], ids=["own-consent", "tools-consent"])
+@pytest.mark.usefixtures("demo_registry")
+def test_an_opt_in_unlocks_only_the_connection_it_was_given_for(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    own_first: bool,
+) -> None:
+    """A service switched between its own and the tools' account finds the opt-in off before anyone stops it.
+
+    So a request routed by the new definition while the old opt-in is still stored never uses the other account.
+    """
+    _connect_demo(manager, "tools-access")
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO if own_first else _DEMO)
+
+    allowed = _resolve_mine(config, runtime_paths, manager, separate_account=own_first)
+    switched = _resolve_mine(config, runtime_paths, manager, separate_account=not own_first)
+
+    assert allowed == Secret("own-access" if own_first else "tools-access")
+    assert switched == SecretMissing(provider="demo", reuse_off=True)
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_an_opt_in_without_a_credential_service_counts_for_the_tools_connection_only(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """An entry stored before opt-ins named their connection was given for the provider's own one."""
+    _connect_demo(manager, "tools-access")
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    entry = {"provider": "demo", "enabled_by": "@alice:example.org", "enabled_at": "2026-10-01T00:00:00Z"}
+    save_egress_document(
+        manager,
+        _broker_target("@alice:example.org"),
+        OAUTH_REUSE_CREDENTIAL_SERVICE,
+        {"services": {"mine": entry}},
+    )
+
+    assert _resolve_mine(config, runtime_paths, manager, separate_account=False) == Secret("tools-access")
+    assert _resolve_mine(config, runtime_paths, manager) == SecretMissing(provider="demo", reuse_off=True)
+
+
+@pytest.mark.usefixtures("demo_registry")
 def test_status_of_a_separate_account_reads_its_own_connection(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1211,18 +1279,15 @@ def test_status_of_a_separate_account_reads_its_own_connection(
     """The status, which placeholders and the agent tool read, shows the service's own account, not the tools'."""
     alice = _broker_target("@alice:example.org")
     claims = {"_oauth_claims_verified": True}
-    connect_account(
-        manager,
-        account_store("@alice:example.org"),
-        "tools-access",
-        _oauth_claims={"login": "tools"},
-        **claims,
-    )
-    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), "mine")
+    _connect_demo(manager, "tools-access", _oauth_claims={"login": "tools"}, **claims)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
 
-    before = _status(config, runtime_paths, manager, alice, service="mine", separate_account=True)
-    _connect_own_account(manager, "own-access", _oauth_claims={"login": "own"}, **claims)
-    after = _status(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+    def status() -> OAuthStatus | None:
+        return _status(config, runtime_paths, manager, alice, provider_id="demo", service="mine", separate_account=True)
+
+    before = status()
+    _connect_demo(manager, "own-access", _OWN_DEMO, _oauth_claims={"login": "own"}, **claims)
+    after = status()
 
     assert before is not None
     assert after is not None
@@ -1230,7 +1295,7 @@ def test_status_of_a_separate_account_reads_its_own_connection(
     assert (after.connected, after.account_label, after.reuse_enabled) == (True, "own", True)
 
 
-@pytest.mark.usefixtures("enable_reuse")
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
 def test_a_refresh_outage_of_one_connection_never_holds_back_another(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1238,14 +1303,13 @@ def test_a_refresh_outage_of_one_connection_never_holds_back_another(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The refresh backoff follows the stored connection, so the tools' outage leaves a service's own account working."""
-    alice = _broker_target("@alice:example.org")
-    connect_account(manager, account_store("@alice:example.org"), "stale-access", expires_at=1.0)
-    _connect_own_account(manager, "own-access")
-    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), "mine")
+    _connect_demo(manager, "stale-access", expires_at=1.0)
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
     serve_token_endpoint(monkeypatch, [httpx.Response(503, json={"error": "temporarily_unavailable"})])
 
-    tools = _resolve(config, runtime_paths, manager, alice)
-    own = _resolve(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+    tools = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"), provider_id="demo")
+    own = _resolve_mine(config, runtime_paths, manager)
 
-    assert tools == SecretUnavailable(provider="github")
+    assert tools == SecretUnavailable(provider="demo")
     assert own == Secret("own-access")

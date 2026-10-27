@@ -402,7 +402,13 @@ async def egress_oauth_status(
             return shared_worker_unavailable_status(provider, runtime_paths)
         result = await connection_status(provider)
         context = broker_credential_context(provider, config, runtime_paths, manager, reuse_target(provider))
-        reuse_access = await asyncio.to_thread(oauth_reuse_access, context, name, provider.id)
+        reuse_access = await asyncio.to_thread(
+            oauth_reuse_access,
+            context,
+            name,
+            provider.id,
+            separate_account=service.oauth_separate_account,
+        )
         if result.has_service_account_config:
             # Shown whether or not Agent Keys may use it, so the user can allow or disconnect it.
             connected, account_label = await asyncio.to_thread(oauth_connection_for_display, context)

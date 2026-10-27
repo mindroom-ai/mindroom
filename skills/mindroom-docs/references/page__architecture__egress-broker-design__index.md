@@ -76,6 +76,7 @@ The egress pages still show whether an account is connected, through the Connect
 The opt-in lives in the store of the connection it unlocks, and the broker and both APIs resolve that store through one function, so an opt-in cannot unlock another requester's or scope's account; a round-trip test per scope kind guards this.
 Requester-scoped providers get one opt-in per requester and service name, covering all of that requester's agents, because the account itself is the requester's.
 It names the provider, not the account: it covers whatever account of that provider the scope connects, a later connection made for the tools included, until someone stops it, and it does not apply while the service's `oauth_provider` names another provider.
+It does name the connection, the tools' or the service's own, so switching a service between the two never carries it across, even for a request routed while the switch is saved.
 Rejected: keeping connections already in use working after the upgrade, because that would silently keep the bypass this removes.
 
 **An opt-in carries an access level, read or read and write, and only a service that declares how its API reads offers read.**

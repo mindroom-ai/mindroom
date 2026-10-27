@@ -20,7 +20,8 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
   The provider with that one field replaced (`dataclasses.replace`) is the connection everywhere: the connect flow, the callback, refresh and the credential lifecycle already work per credential service.
   The agent's tools keep using the provider's own connection and never see a separate one.
 - **The existing service row manages it.** The Agent Keys connect, disconnect and opt-in routes for that service, and its status, resolve the separate connection instead of the provider's own; there are no new routes or dashboard sections.
-  The opt-in entry stays keyed by the service name, with the same fields (`provider`, `access`, `enabled_by`, `enabled_at`).
+  The opt-in entry stays keyed by the service name, with the same fields (`provider`, `access`, `enabled_by`, `enabled_at`) plus `credential_service`, the connection it unlocks.
+  An entry counts as off while it names another connection than the one the service uses now, and an entry without `credential_service` names the provider's own, so ticking or unticking the box never carries an opt-in to the other account, not even for a request routed while the save lands.
   Deleting the service removes its connection and its opt-in.
 - **A request picks such a service with a header.** Routing is unchanged without it, so a user service that ties with an operator's service on host and path is never chosen by accident.
   A request may add `X-Agent-Keys-Service: <name>`; routing then matches only that service's rules, after the same restriction checks as today, and a request no rule of that service matches is refused with 403 `service_not_matched`.

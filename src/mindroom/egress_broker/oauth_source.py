@@ -146,7 +146,7 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     if provider.requester_scoped_credentials and context.worker_target is None:
         # No requester to bind the connection to, so there is no stored token to use or allow.
         return SecretMissing()
-    level = oauth_reuse_access(context, service, provider.id)
+    level = oauth_reuse_access(context, service, provider.id, separate_account=separate_account)
     if level is None:
         return SecretMissing(
             provider=provider.id,
@@ -194,7 +194,7 @@ def oauth_status(
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
     context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
-    reuse_access = oauth_reuse_access(context, service, provider.id)
+    reuse_access = oauth_reuse_access(context, service, provider.id, separate_account=separate_account)
     credentials = None
     reset_required = False
     if reuse_access is not None:
