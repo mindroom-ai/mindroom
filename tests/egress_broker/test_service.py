@@ -28,7 +28,14 @@ from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
-from mindroom.egress_broker.secrets import Secret, SecretRequest, delete_secret, save_egress_document, save_secret
+from mindroom.egress_broker.secrets import (
+    Secret,
+    SecretMissing,
+    SecretRequest,
+    delete_secret,
+    save_egress_document,
+    save_secret,
+)
 from mindroom.egress_broker.service import (
     active_audit_log,
     active_ca_pem,
@@ -1704,22 +1711,13 @@ def _own_drive_service(manager: CredentialsManager, runtime_paths: RuntimePaths,
     return own
 
 
-@pytest.mark.asyncio
-async def test_the_broker_resolves_a_routed_service_with_its_own_account(
-    tmp_runtime_paths: Callable[..., RuntimePaths],
-    manager: CredentialsManager,
-) -> None:
-    """The secret lookup reads the routed definition's own account, never the tools' connection."""
-    runtime_paths = _oauth_runtime(tmp_runtime_paths)
-    config = _config()
-    own = _own_drive_service(manager, runtime_paths, "tools-access")
-    connect_account(manager, _routable_target(), "own-access", provider=own)
+async def _resolve_mine(config: Config, runtime_paths: RuntimePaths, manager: CredentialsManager) -> SecretResult:
+    """Resolve Alice's service `mine` as the broker does for a request its definition routed."""
     claims = WorkerClaims.from_worker_target(_routable_target())
     assert claims is not None
     routed = user_services.effective_config(config.egress_broker, manager, claims.to_worker_target()).services["mine"]
-
     with ThreadPoolExecutor(max_workers=1) as executor:
-        result = await service._resolve_secret(
+        return await service._resolve_secret(
             claims,
             "mine",
             routed,
@@ -1730,7 +1728,39 @@ async def test_the_broker_resolves_a_routed_service_with_its_own_account(
             oauth_executor=executor,
         )
 
-    assert result == Secret("own-access")
+
+@pytest.mark.asyncio
+async def test_the_broker_resolves_a_routed_service_with_its_own_account(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """The secret lookup reads the routed definition's own account, never the tools' connection."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    connect_account(manager, _routable_target(), "own-access", provider=own)
+
+    assert await _resolve_mine(config, runtime_paths, manager) == Secret("own-access")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connected", [True, False], ids=["connected", "unconnected"])
+async def test_a_service_with_its_own_account_never_uses_a_stored_key(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    connected: bool,
+) -> None:
+    """A key stored under such a service's name neither wins over its own account nor stands in until it is connected."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    save_secret(manager, _routable_target(), "mine", "stored-key")
+    if connected:
+        connect_account(manager, _routable_target(), "own-access", provider=own)
+
+    result = await _resolve_mine(config, runtime_paths, manager)
+
+    assert result == (Secret("own-access") if connected else SecretMissing(own_account=True))
 
 
 @pytest.mark.asyncio
@@ -1738,10 +1768,14 @@ async def test_placeholder_env_follows_a_services_own_account(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
 ) -> None:
-    """A service with its own account sets its placeholders once that account is connected, not for the tools' one."""
+    """A service with its own account sets its placeholders once that account is connected, not for the tools' one.
+
+    Nor for a key stored under its name, which it never uses.
+    """
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config()
     own = _own_drive_service(manager, runtime_paths, "tools-access")
+    save_secret(manager, _routable_target(), "mine", "stored-key")
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         before = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         connect_account(manager, _routable_target(), "own-access", provider=own)

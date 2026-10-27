@@ -258,12 +258,13 @@ def _routed_key(
 ) -> Secret | SecretServiceChanged | None:
     """Return the scope's key for `name` if, once it is read, the effective config still defines `name` as `routed`.
 
-    None without a key. Under `consistent_read` no user-service write lands during the read and the check. A config
-    change does not take that lock, so the check reads the current config after the key: a key saved after the config
-    moved `name` to other hosts is only read once the new config is current, and the check then refuses it.
+    None without a key, and for a service with its own account (`oauth_separate_account`), which uses only that
+    account. Under `consistent_read` no user-service write lands during the read and the check. A config change does
+    not take that lock, so the check reads the current config after the key: a key saved after the config moved `name`
+    to other hosts is only read once the new config is current, and the check then refuses it.
     """
     with consistent_read():
-        key = load_secret(credentials_manager, target, name)
+        key = None if routed.oauth_separate_account else load_secret(credentials_manager, target, name)
         current = config.current()
         effective = None if current is None else effective_config(current.egress_broker, credentials_manager, target)
         if effective is None or effective.services.get(name) != routed:
@@ -283,6 +284,8 @@ async def _resolve_secret(
     oauth_executor: ThreadPoolExecutor,
 ) -> SecretResult:
     """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token.
+
+    A service with its own account gets only that account's token, never a key stored under its name.
 
     `routed` is the definition of `name` whose rule routed the request. The requester's effective config (the
     config's services plus the scope's own) must still define `name` as `routed`, or the result is

@@ -335,9 +335,14 @@ def service_status(
     """Return both secret sources of an egress service for a worker target or the global store.
 
     `oauth_status(provider_id, target)` reports the service's OAuth provider for the same target; it is not
-    called for services without one. Never returns a secret or token.
+    called for services without one. A service with its own account (`oauth_separate_account`) has no key, as the
+    broker never uses one for it. Never returns a secret or token.
     """
-    key = load_egress_document(manager, target, egress_credential_service(name))
+    key = (
+        None
+        if service.oauth_separate_account
+        else load_egress_document(manager, target, egress_credential_service(name))
+    )
     oauth = oauth_status(service.oauth_provider, target) if service.oauth_provider is not None else None
     active_source: Literal["key", "oauth"] | None = None
     if key is not None:

@@ -358,6 +358,7 @@ class EgressSourceStatus(BaseModel):
 
     `configured` is true when either source is available. `active_source` says which source the broker uses: an
     explicit key wins over an OAuth connection, which counts only once Agent Keys may use it (`oauth.reuse_enabled`).
+    A service with its own account (`oauth_separate_account`) never has a key.
     """
 
     configured: bool
