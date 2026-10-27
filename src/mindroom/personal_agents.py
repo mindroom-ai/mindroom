@@ -53,7 +53,7 @@ type _RosterEntry = PersonalAgentRosterEntry | CreatedAgentEntry
 _EDIT_FIELDS = tuple(GeneratedAgentEdits.model_fields)
 
 
-class GeneratedAgentError(ValueError):
+class _GeneratedAgentError(ValueError):
     """Why a change to a generated agent was refused; the message is shown to the requester as is."""
 
 
@@ -89,7 +89,7 @@ def _refuse_bracketed_owner(user_id: str) -> None:
     if "[" in user_id or "]" in user_id:
         # access.users entries are globs, so brackets would keep the owner out of their own agent.
         msg = f"{user_id} cannot own an agent: brackets in a Matrix ID are not supported"
-        raise GeneratedAgentError(msg)
+        raise _GeneratedAgentError(msg)
 
 
 def _personal_agent_user_id(
@@ -297,13 +297,13 @@ def _refuse_owners(owners: list[str], runtime_paths: RuntimePaths) -> None:
         _refuse_bracketed_owner(owner)
         if is_mindroom_account_id(owner, runtime_paths):
             msg = f"{owner} is a MindRoom account and cannot own an agent"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
 
 
 def _refuse_tools(tools: list[str] | None, allowed: tuple[str, ...]) -> None:
     if outside := [name for name in tools or () if name not in allowed]:
         msg = f"Not among the tools this agent may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"
-        raise GeneratedAgentError(msg)
+        raise _GeneratedAgentError(msg)
 
 
 def _owned_entry(
@@ -317,12 +317,12 @@ def _owned_entry(
     entry = next((other for other in [*roster.entries, *roster.created] if other.agent_name == agent_name), None)
     if entry is None or config.generated_agent(agent_name) is None:
         msg = f"{agent_name} is not a generated agent"
-        raise GeneratedAgentError(msg)
+        raise _GeneratedAgentError(msg)
     owners = [entry.owner, *entry.co_owners] if isinstance(entry, CreatedAgentEntry) else [entry.user_id]
     requester = resolve_human_requester_alias(requester_id, config, runtime_paths)
     if requester not in owners:
         msg = f"Only {' or '.join(owners)} may change {agent_name}"
-        raise GeneratedAgentError(msg)
+        raise _GeneratedAgentError(msg)
     return entry, requester
 
 
@@ -357,10 +357,10 @@ def update_generated_agent(
         editable = [*_EDIT_FIELDS, "co_owners"] if isinstance(entry, CreatedAgentEntry) else list(_EDIT_FIELDS)
         if unknown := [field for field in changes if field not in editable]:
             msg = f"{', '.join(unknown)} cannot be changed; allowed: {', '.join(editable)}"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
         if isinstance(entry, CreatedAgentEntry) and "co_owners" in changes and requester != entry.owner:
             msg = f"Only {entry.owner} may change co_owners of {agent_name}"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
         data = entry.model_dump()
         data["edits"] = (data["edits"] or {}) | {field: changes[field] for field in _EDIT_FIELDS if field in changes}
         if "co_owners" in changes:
@@ -382,10 +382,10 @@ def delete_created_agent(config: Config, runtime_paths: RuntimePaths, *, agent_n
         entry, requester = _owned_entry(config, runtime_paths, agent_name, requester_id)
         if not isinstance(entry, CreatedAgentEntry):
             msg = f"{agent_name} is a personal agent and cannot be deleted"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
         if requester != entry.owner:
             msg = f"Only {entry.owner} may delete {agent_name}"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
         _replace_roster_entry(runtime_paths, entry, None)
 
 
@@ -399,11 +399,11 @@ def _reserve_created_agent(config: Config, runtime_paths: RuntimePaths, entry: C
         count = sum((other.creator, other.owner) == (entry.creator, entry.owner) for other in roster.created)
         if count >= cap:
             msg = f"{entry.owner} already has {count} agents from {entry.creator}, which may create {cap} per owner"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
         name = entry.agent_name
         if name in _taken_agent_names(config, runtime_paths, roster) or _localpart_taken(name, None, runtime_paths):
             msg = f"{name} is taken; choose another name"
-            raise GeneratedAgentError(msg)
+            raise _GeneratedAgentError(msg)
         _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"created": [*roster.created, entry]}))
 
 
@@ -423,7 +423,7 @@ async def provision_created_agent(
     slug = re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")[:30]
     if not slug:
         msg = f"{name!r} has no letters or digits to name the agent by; choose another name"
-        raise GeneratedAgentError(msg)
+        raise _GeneratedAgentError(msg)
     _refuse_tools(tools, config.tool_ceiling(creator))
     owner = resolve_human_requester_alias(requester_id, config, runtime_paths)
     edits = GeneratedAgentEdits(display_name=display_name, role=role, instructions=instructions, tools=tools)
@@ -438,7 +438,7 @@ async def provision_created_agent(
         await run_blocking_until_complete(remove)
         if isinstance(exc, Exception):
             msg = f"Registering {entry.agent_name} failed: {exc}"
-            raise GeneratedAgentError(msg) from exc
+            raise _GeneratedAgentError(msg) from exc
         raise
     active = entry.model_copy(update={"pending": False})
     await run_blocking_until_complete(_settle_roster_entry, runtime_paths, entry, active)

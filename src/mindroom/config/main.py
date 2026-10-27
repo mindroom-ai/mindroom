@@ -135,7 +135,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
-    {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
+    {
+        "agent_manager",
+        "delegate",
+        "dynamic_tools",
+        "external_trigger_manager",
+        "invite_router",
+        "self_config",
+        "skill_manage",
+    },
 )
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",

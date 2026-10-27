@@ -33,7 +33,7 @@ def tool_ceiling(config: Config, agent_name: str) -> tuple[str, ...]:
     return tuple(entry.name for entry in config._get_agent_authored_tool_configs(agent_name))
 
 
-def generated_agent_data(
+def _generated_agent_data(
     base: Config,
     base_agent: str,
     edits: GeneratedAgentEdits | None,
@@ -124,7 +124,7 @@ def expand_generated_agents(
         builds.append((name, creator, created.edits, created))
 
     for name, base_agent, edits, created in builds:
-        agents[name], dropped = generated_agent_data(base, base_agent, edits, created=created)
+        agents[name], dropped = _generated_agent_data(base, base_agent, edits, created=created)
         if dropped:
             logger.warning("generated_agent_tool_dropped", agent_name=name, base=base_agent, tools=dropped)
     return ({**data, "agents": agents} if builds else None), infos

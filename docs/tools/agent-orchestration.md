@@ -13,6 +13,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 - [`report_publishing`](#report_publishing) - Publish workflow reports or workspace static sites through revocable public links.
 - [`config_manager`](#config_manager) - Inspect and patch the full configuration, and create, update, or validate agents and teams.
 - [`self_config`](#self_config) - Let an agent read and update only its own configuration.
+- [`agent_manager`](#agent_manager) - Create agents for the people asking, and let owners change or delete the agents generated for them.
 - [`claude_agent`](#claude_agent) - Run persistent Claude Agent SDK coding sessions.
 
 Related tools documented elsewhere:
@@ -612,6 +613,12 @@ update_own_config(
     context_files=["SOUL.md", "USER.md"],
 )
 ```
+
+## [`agent_manager`]
+
+`agent_manager` is added automatically, never listed under `tools`.
+An agent with `created_agents_per_owner` above 0 gets `create_agent`, and a generated agent gets `agent_settings`, `update_agent`, and `delete_agent` for its own owners.
+`create_agent`, `update_agent`, and `delete_agent` show an approval card.
 
 ## [`claude_agent`]
 
