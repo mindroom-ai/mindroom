@@ -44,9 +44,16 @@ _VECTORS = {
     # Not unit length: squared L2 distance 16 from the query.
     "Opposite of everything": [-3.0, 0.0, 0.0, 0.0],
 }
-_UNRELATED_AGENT_MEMORIES = ["Recipe one", "Recipe two", "Recipe three", "Recipe four", "Recipe five"]
-for _axis, _text in enumerate(_UNRELATED_AGENT_MEMORIES):
-    _VECTORS[_text] = _unit(0.0, axis=1 + _axis % 3)
+# The agent's own memories: three loosely related ones, enough to fill a three-memory recall, and two unrelated ones.
+_AGENT_MEMORY_COSINES = {
+    "Recipe one": 0.6,
+    "Recipe two": 0.5,
+    "Recipe three": 0.4,
+    "Recipe four": 0.0,
+    "Recipe five": 0.0,
+}
+for _axis, (_text, _cosine) in enumerate(_AGENT_MEMORY_COSINES.items()):
+    _VECTORS[_text] = _unit(_cosine, axis=1 + _axis % 3)
 _TEAM_MEMORY = "Team PR review checklist"
 _VECTORS[_TEAM_MEMORY] = _unit(1.0)
 _OTHER_TEXT_VECTOR = _unit(0.0, axis=2)
@@ -147,9 +154,16 @@ async def _remember(
     await add_agent_memory("Remember my notes.", "general", runtime_paths.storage_root, config, runtime_paths)
 
 
-async def _search(config: Config) -> list[tuple[str, float]]:
+async def _search(config: Config, *, limit: int = 5) -> list[tuple[str, float]]:
     runtime_paths = runtime_paths_for(config)
-    outcome = await search_agent_memories(_QUERY, "general", runtime_paths.storage_root, config, runtime_paths, limit=5)
+    outcome = await search_agent_memories(
+        _QUERY,
+        "general",
+        runtime_paths.storage_root,
+        config,
+        runtime_paths,
+        limit=limit,
+    )
     assert outcome.degraded_reason is None
     return [(result["memory"], result["score"]) for result in outcome.results]
 
@@ -170,12 +184,12 @@ async def test_memory_search_ranks_the_closest_memory_first_and_drops_cosine_bel
 
 
 @pytest.mark.asyncio
-async def test_unrelated_agent_memories_do_not_crowd_out_an_exact_team_memory(
+async def test_an_exact_team_memory_outranks_the_agents_loosely_related_memories(
     config: Config,
     claude_reply: list[AnthropicMessage],
 ) -> None:
-    """Agent memories fill the result limit before team memories, so unrelated ones must not reach it."""
-    await _remember(config, claude_reply, _UNRELATED_AGENT_MEMORIES)
+    """Agent and team hits are ranked together, so the agent's own memories cannot push out a better team match."""
+    await _remember(config, claude_reply, list(_AGENT_MEMORY_COSINES))
     claude_reply[0] = _claude_reply(facts=[_TEAM_MEMORY], thinking_first=False)
     runtime_paths = runtime_paths_for(config)
     await store_conversation_memory(
@@ -187,9 +201,14 @@ async def test_unrelated_agent_memories_do_not_crowd_out_an_exact_team_memory(
         runtime_paths,
     )
 
-    results = await _search(config)
+    # Automatic recall searches with a limit of three, which the agent's own memories could fill.
+    recall = await _search(config, limit=3)
+    # A larger limit leaves room, so the unrelated agent memories must stay out by the cutoff alone.
+    search = await _search(config, limit=5)
 
-    assert [memory for memory, _ in results] == [_TEAM_MEMORY]
+    assert [memory for memory, _ in recall] == [_TEAM_MEMORY, "Recipe one", "Recipe two"]
+    assert [score for _, score in recall] == pytest.approx([1.0, 1 / 1.8, 1 / 2.0])
+    assert [memory for memory, _ in search] == [_TEAM_MEMORY, "Recipe one", "Recipe two", "Recipe three"]
 
 
 @pytest.mark.asyncio

@@ -514,6 +514,8 @@ class Mem0MemoryBackend:
         logger.debug("Total memories found", count=len(results), agent=agent_name)
         if degraded_reason is None:
             health_recorder.record(None)
+        # Both scopes share one Mem0 collection and score scale, so the limit keeps the best hits of either scope.
+        results.sort(key=lambda result: result.get("score", 0.0), reverse=True)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(
