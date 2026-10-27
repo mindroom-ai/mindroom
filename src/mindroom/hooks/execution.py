@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_since
+from mindroom.tool_system.tool_environment import ToolEnvironment
 
 from .context import (
     AgentLifecycleContext,
@@ -31,9 +32,16 @@ from .context import (
     SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
     message_envelope_for_hook_context,
 )
-from .types import EVENT_MESSAGE_RECEIVED, EnrichmentItem, RegisteredHook, default_timeout_ms_for_event
+from .types import (
+    EVENT_MESSAGE_RECEIVED,
+    EVENT_TOOL_ENVIRONMENT,
+    EnrichmentItem,
+    RegisteredHook,
+    default_timeout_ms_for_event,
+)
 
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
@@ -46,7 +54,7 @@ _COLLECT_CONCURRENCY_LIMIT = 10
 _MAX_EMIT_DEPTH = 3
 _EMIT_DEPTH: ContextVar[int] = ContextVar("mindroom_hook_emit_depth", default=0)
 
-type _HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext
+type _HookExecutionContext = HookContext | ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext
 type _TransformContext = BeforeResponseContext | FinalResponseTransformContext
 type _TransformDraft = ResponseDraft | FinalResponseDraft
 
@@ -59,7 +67,7 @@ class _HookInvocationResult:
 
 def _scope_agent_name(context: _HookExecutionContext) -> str | None:
     agent_name: str | None = None
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
+    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
         agent_name = context.agent_name
     else:
         envelope = message_envelope_for_hook_context(context)
@@ -78,7 +86,7 @@ def _scope_agent_name(context: _HookExecutionContext) -> str | None:
 
 
 def _scope_room_ids(context: _HookExecutionContext) -> tuple[str, ...]:  # noqa: PLR0911
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
+    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
         return (context.room_id,) if context.room_id else ()
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
@@ -166,7 +174,7 @@ def _bind_hook_context(
         "logger": _context_logger(hook),
         "_hook_registry_snapshot": registry,
     }
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext):
+    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
@@ -341,34 +349,47 @@ def _normalize_collector_result(
     return items
 
 
-async def emit_collect(
+async def _collect[C: _HookExecutionContext](
     registry: HookRegistry,
     event_name: str,
-    context: MessageEnrichContext | SystemEnrichContext,
-) -> list[EnrichmentItem]:
-    """Run collector hooks concurrently and return merged enrichment items."""
+    context: C,
+) -> list[tuple[C, object | None]]:
+    """Run collector hooks concurrently; return each finished hook's own context and return value, in hook order."""
     hooks = _eligible_hooks(registry, event_name, context)
     if not hooks:
         return []
 
     semaphore = asyncio.Semaphore(_COLLECT_CONCURRENCY_LIMIT)
 
-    async def run_hook(hook: RegisteredHook) -> list[EnrichmentItem]:
+    async def run_hook(hook: RegisteredHook) -> tuple[C, object | None] | None:
         async with semaphore:
-            hook_context = cast(
-                "MessageEnrichContext | SystemEnrichContext",
-                _bind_hook_context(registry, hook, context),
-            )
+            hook_context = cast("C", _bind_hook_context(registry, hook, context))
             invocation = await _invoke_hook(hook, hook_context)
-            if not invocation.succeeded:
-                return []
-            return _normalize_collector_result(invocation.value, hook_context)
+            return (hook_context, invocation.value) if invocation.succeeded else None
 
     results = await asyncio.gather(*(run_hook(hook) for hook in hooks))
-    merged: list[EnrichmentItem] = []
-    for hook_items in results:
-        merged.extend(hook_items)
-    return merged
+    return [result for result in results if result is not None]
+
+
+async def emit_collect(
+    registry: HookRegistry,
+    event_name: str,
+    context: MessageEnrichContext | SystemEnrichContext,
+) -> list[EnrichmentItem]:
+    """Run collector hooks concurrently and return merged enrichment items."""
+    return [
+        item
+        for hook_context, result in await _collect(registry, event_name, context)
+        for item in _normalize_collector_result(result, hook_context)
+    ]
+
+
+async def emit_collect_environment(registry: HookRegistry, context: ToolEnvironmentContext) -> ToolEnvironment:
+    """Run tool:environment hooks concurrently and return their changes, a later hook's over an earlier one's."""
+    environment = ToolEnvironment()
+    for hook_context, _result in await _collect(registry, EVENT_TOOL_ENVIRONMENT, context):
+        environment = environment.then(hook_context._environment)
+    return environment
 
 
 async def emit_transform(

@@ -497,8 +497,7 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
-    "mindroom.tool_system.sandbox_proxy",
-    "mindroom.tools.shell",
+    "mindroom.tool_system.tool_environment",
 ]
 
 [[interfaces]]
@@ -2196,6 +2195,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
     "mindroom.api.sandbox_execute_stream",
@@ -2940,6 +2940,7 @@ depends_on = [
     "mindroom.hooks.context",
     "mindroom.hooks.types",
     "mindroom.logging_config",
+    "mindroom.tool_system.tool_environment",
 ]
 
 [[modules]]
@@ -5196,6 +5197,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
     "mindroom.tool_system.plugin_identity",
+    "mindroom.tool_system.tool_environment",
 ]
 
 [[modules]]
@@ -5487,6 +5489,10 @@ path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
+path = "mindroom.tool_system.tool_environment"
+depends_on = ["mindroom.agent_cli.shell_contract", "mindroom.constants"]
+
+[[modules]]
 path = "mindroom.tool_system.progress"
 depends_on = []
 visibility = [
@@ -5518,6 +5524,7 @@ depends_on = [
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
+    "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
 ]
@@ -5573,7 +5580,6 @@ depends_on = ["mindroom.agent_loop.prompt", "mindroom.agent_loop.structured", "m
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
-    "mindroom.agent_cli.shell_contract",
     "mindroom.config.worker_projection",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
@@ -5582,6 +5588,7 @@ depends_on = [
     "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.worker_proxy_client",
@@ -7163,6 +7170,7 @@ expose = [
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
+    "EVENT_TOOL_ENVIRONMENT",
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
@@ -7201,6 +7209,7 @@ expose = [
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "ToolEnvironmentContext",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "TurnIntent",
     "TurnOrigin",
@@ -7212,6 +7221,7 @@ expose = [
     "default_timeout_ms_for_event",
     "emit",
     "emit_collect",
+    "emit_collect_environment",
     "emit_final_response_transform",
     "emit_gate",
     "emit_transform",

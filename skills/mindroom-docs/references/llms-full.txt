@@ -15738,6 +15738,7 @@ Do not report or "fix" these; they are deliberate.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
+- A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, and other code in the same worker can read them, as with the CLI grant.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - Unless `knowledge_graph_edits` is off, any requester of a shared agent, or a tool result that steers it, can have it delete facts and entities from the shared graph, merge its entities, or rewrite their summaries, as with any write tool; the edits reach only that agent's own graph.
 - Redacting a message does not remove facts the knowledge graph already extracted from it; ingestion skips turns derived from messages redacted before it reached them, so raising `knowledge_graph.generation` rebuilds the graphs without them; replies and voice calls already running finish on the old graphs, which stay stored until `knowledge_graph/` is deleted with MindRoom stopped; an `exploration` prompt can still list a redacted turn's tool calls until the agent next replies in that conversation.
@@ -16804,7 +16805,7 @@ To write memory files, use `mindroom.memory.write_scope_markdown_file`, and to m
 # Hooks
 
 Hooks are async functions in a [plugin](https://docs.mindroom.chat/plugins/) that run when MindRoom events happen.
-Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
+Use them to add context to prompts, rewrite or suppress replies, allow or decline tool calls, set the environment of the shell commands a tool call runs, and react to messages, reactions, schedules, room membership, sessions, compaction, startup, shutdown, and config reloads.
 Each hook has a timeout, and a failing hook is logged without crashing the bot.
 The [Plugins](https://docs.mindroom.chat/plugins/) page covers manifests, `plugins:` entries, installation, and hot reload.
 
@@ -16928,10 +16929,11 @@ async def track_response(ctx):
 
 ### Collector
 
-Used by `message:enrich` and `system:enrich`.
+Used by `message:enrich`, `system:enrich`, and `tool:environment`.
 Hooks run concurrently, at most 10 at a time, so total latency is roughly that of the slowest hook rather than the sum.
-Each hook contributes `EnrichmentItem` entries, and a failing or timed-out hook loses only its own items.
-Items are merged in hook order.
+Each hook contributes `EnrichmentItem` entries or environment changes, and a failing or timed-out hook loses only its own contributions.
+Contributions are merged in hook order, so when two `tool:environment` hooks change the same variable, the later hook wins.
+A variable any `tool:environment` hook sets or removes wins over every hook's pass-through, whatever their order.
 
 ### Transformer
 
@@ -17000,6 +17002,7 @@ async def block_secret_reads(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
+| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
 Custom events default to 1000 ms.
@@ -17107,6 +17110,34 @@ async def required_instruction(ctx):
     )
 ```
 
+## Shell command environment (`tool:environment`)
+
+`tool:environment` sets environment variables for the shell commands of one tool call, whether the `shell` tool runs them in MindRoom's process or in a worker.
+Use it to give a command a credential or proxy setting only when it needs one, or to keep a variable away from commands, instead of changing MindRoom's process environment, which every call shares.
+
+```python
+from mindroom.plugin_api import ToolEnvironmentContext, hook
+
+
+@hook("tool:environment")
+async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
+    if ctx.function_name != "run_shell_command":
+        return
+    ctx.unset_env("GITHUB_TOKEN")
+    if "api.github.com" in str(ctx.arguments.get("args", "")):
+        ctx.set_env("HTTPS_PROXY", ctx.settings["proxy_url"])
+        ctx.pass_through("GH_CONFIG_DIR")
+```
+
+- `ctx.set_env(name, value)` gives the command `name` with `value`, even where the workspace's [`.mindroom/worker-env.sh`](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) exports `name` for a worker.
+- `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough` or the workspace's `.mindroom/worker-env.sh`.
+  `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
+- `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
+- The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
+- Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
+- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
+- A failing or timed-out hook loses its changes and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+
 ## Custom events
 
 Plugins can define their own namespaced events and emit them from tool code:
@@ -17167,7 +17198,7 @@ async def pin_message(ctx):
 
 ### Base fields
 
-All contexts except the two tool contexts include these fields:
+All contexts except the three tool contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -17182,6 +17213,7 @@ All contexts except the two tool contexts include these fields:
 | `state_root` | `Path` | Plugin state directory |
 
 `ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
+`ToolEnvironmentContext` has only `event_name`, `plugin_name`, `settings`, `config`, `runtime_paths`, `logger`, and `correlation_id`, and its `config` and `runtime_paths` can be `None`.
 
 ### Event-specific fields
 
@@ -17202,6 +17234,7 @@ All contexts except the two tool contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
+| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
@@ -19153,6 +19186,7 @@ To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` 
 Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Use `shell_path_prepend` to add directories, such as wrapper directories, ahead of the existing `PATH`.
 Both options are documented with the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
+A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) can also set, remove, or pass through variables for one call's commands.
 
 ### Workspace home contract
 
@@ -19180,6 +19214,7 @@ How it behaves:
 - Only exported variables apply: write `export FOO=bar`, because plain `FOO=bar`, aliases, functions, and `cd` do not carry over.
 - The script starts from the prepared request environment, not the runner's full environment.
 - Exported values pass through, including tokens you export on purpose, except MindRoom's control variables (the same ones dropped from [shell passthrough](#shell-environment-and-path)), bash bookkeeping variables such as `PWD` and `SHLVL`, the [workspace home](#workspace-home-contract) variables, and values larger than 32 KiB.
+- A variable a plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) sets or removes for a `shell` call wins over the script's export.
 
 Limits and errors:
 
