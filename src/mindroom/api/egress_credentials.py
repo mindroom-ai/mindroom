@@ -683,13 +683,20 @@ async def connect_egress_account(
     _body: _EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
-    _agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=True)
+    _agent, egress_service, provider = await _account_provider(
+        request,
+        requester_id,
+        agent_name,
+        service,
+        connecting=True,
+    )
     return await masked_oauth_call(
         oauth.connect_account(
             provider.id,
             request,
             agent_name=agent_name,
-            credential_service=provider.credential_service,
+            # A service's own account is stored under its own name; the tools' flow stays as it was.
+            credential_service=provider.credential_service if egress_service.oauth_separate_account else None,
         ),
         "Could not start account connection",
     )
@@ -704,13 +711,20 @@ async def disconnect_egress_account(
     _body: _EmptyMutation,
 ) -> dict[str, str]:
     """Reset the OAuth connection of a service's provider for one agent's credential scope; its opt-in stays."""
-    _agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
+    _agent, egress_service, provider = await _account_provider(
+        request,
+        requester_id,
+        agent_name,
+        service,
+        connecting=False,
+    )
     return await masked_oauth_call(
         oauth.disconnect_account(
             provider.id,
             request,
             agent_name=agent_name,
-            credential_service=provider.credential_service,
+            # A service's own account is stored under its own name; the tools' flow stays as it was.
+            credential_service=provider.credential_service if egress_service.oauth_separate_account else None,
         ),
         "Could not disconnect account",
     )

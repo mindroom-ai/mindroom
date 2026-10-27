@@ -2210,6 +2210,24 @@ def test_a_per_user_account_cannot_be_a_services_own_account(
     assert "mine" not in _listed_names(portal, "alice", "personal")
 
 
+@pytest.mark.parametrize("action", ["connect", "disconnect"])
+def test_only_a_service_with_its_own_account_names_another_credential_service(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """The flows of the tools' connection stay as they were; only a service's own account is stored elsewhere."""
+    portal = oauth_egress_portal
+    _put_own_account_service(portal)
+    flow = AsyncMock(side_effect=HTTPException(503, "stop"))
+    monkeypatch.setattr(oauth, f"{action}_account", flow)
+
+    _account_action(portal, "alice", "personal", "drive", action)
+    _account_action(portal, "alice", "personal", "mine", action)
+
+    assert [call.kwargs["credential_service"] for call in flow.call_args_list] == [None, "google_drive__mine_oauth"]
+
+
 def test_disconnecting_a_service_with_its_own_account_leaves_the_tools_connection(
     oauth_egress_portal: dict[str, Any],
 ) -> None:
