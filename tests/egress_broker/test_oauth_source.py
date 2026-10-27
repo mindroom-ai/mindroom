@@ -1314,3 +1314,18 @@ def test_a_refresh_outage_of_one_connection_never_holds_back_another(
 
     assert tools == SecretUnavailable(provider="demo")
     assert own == Secret("own-access")
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_a_separate_account_whose_grant_was_revoked_gets_no_connect_link(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect never offers the provider's link, which would connect the tools' account instead."""
+    _connect_demo(manager, "stale-access", _OWN_DEMO, expires_at=1.0)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
+    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+
+    assert _resolve_mine(config, runtime_paths, manager) == SecretNeedsReconnect(provider="demo", connect_url=None)
