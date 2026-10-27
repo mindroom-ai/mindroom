@@ -654,7 +654,7 @@ def _write_session_state(
     )
 
 
-def next_seq(connection: sqlite3.Connection, names: TableNames) -> int:
+def _next_seq(connection: sqlite3.Connection, names: TableNames) -> int:
     """Hand out the database's next run ``seq`` in the caller's write transaction; the counter never goes back."""
     (seq,) = connection.execute(
         f"UPDATE {quote_identifier(names.log_meta)} SET next_seq = next_seq + 1 WHERE id = 1 RETURNING next_seq - 1",  # noqa: S608
@@ -704,11 +704,11 @@ def _write_run(
     if not interrupted and judged is not None and judged.status not in _NON_VISIBLE:
         return _Saved(run_id, "final")
     if stored is None:
-        moved, created_at, seq = True, data.get("created_at") or now, next_seq(connection, names)
+        moved, created_at, seq = True, data.get("created_at") or now, _next_seq(connection, names)
     else:
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
         moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
-        created_at, seq = stored.created_at, next_seq(connection, names) if moved else stored.seq
+        created_at, seq = stored.created_at, _next_seq(connection, names) if moved else stored.seq
     upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
     set_visible_messages(connection, names, run_id, data["messages"], data["status"])
     _adopt_requester(connection, names, session_id, data.get("user_id"))
@@ -977,7 +977,7 @@ def store_fold(
     member runs that ``member_run_ids`` names, are flagged with the summary, a stored message keeping its data, so none
     replays again. The caller creates the session row (``ensure_session_row``) before it inserts the summary row.
     """
-    runs, now, seq = quote_identifier(names.log_runs), int(time()), next_seq(connection, names)
+    runs, now, seq = quote_identifier(names.log_runs), int(time()), _next_seq(connection, names)
     move = f"UPDATE {runs} SET seq = ? WHERE session_id = ? AND run_id = ?"  # noqa: S608
     if not connection.execute(move, (seq, session_id, run.run_id)).rowcount:
         data = {**run.to_dict(), "status": RunStatus.cancelled.value, "tools": None, "requirements": None}
@@ -1117,7 +1117,6 @@ __all__ = [
     "ensure_session_row",
     "flag_folded",
     "is_removed",
-    "next_seq",
     "persist_to",
     "runs_without",
     "seen_event_ids",

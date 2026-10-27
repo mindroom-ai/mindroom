@@ -1168,7 +1168,6 @@ expose = [
     "ensure_session_row",
     "flag_folded",
     "is_removed",
-    "next_seq",
     "persist_to",
     "runs_without",
     "seen_event_ids",
