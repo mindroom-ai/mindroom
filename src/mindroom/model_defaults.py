@@ -161,17 +161,25 @@ GOOGLE_VEO = "veo-3.1-generate-001"
 # Direct Gemini API models whose requests keep the provider's sampling defaults. Literal ids, like the Claude lists
 # below, because a model keeps its sampling rule after the preferred defaults move on from it.
 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
-# The Claude models that reject non-default temperature, top_p, and top_k on every request
-# (https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters), in their direct and dotted
-# gateway spellings; newer generations join them. Literal ids, because a model keeps the rule after the preferred
-# defaults move on from it.
+# The Claude models that reject non-default temperature, top_p, and top_k on every request, Claude 4.7 and later plus
+# Mythos Preview (https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters), in their direct
+# and dotted gateway spellings; newer generations join them. Literal ids, because a model keeps the rule after the
+# preferred defaults move on from it.
 CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
     "claude-fable-5-1",
     "claude-fable-5.1",
     "claude-fable-5",
+    "claude-mythos-5-1",
+    "claude-mythos-5.1",
+    "claude-mythos-5",
+    "claude-mythos-preview",
     "claude-opus-5-5",
     "claude-opus-5.5",
     "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4.8",
+    "claude-opus-4-7",
+    "claude-opus-4.7",
     "claude-sonnet-5-5",
     "claude-sonnet-5.5",
     "claude-sonnet-5",
