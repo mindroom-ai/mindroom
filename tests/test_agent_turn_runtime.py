@@ -49,7 +49,7 @@ from mindroom.hooks import (
 )
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
     NativeCompactionReplay,
@@ -916,7 +916,7 @@ async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_and_n
     assert probe.calls == ["a"]
     first, second, retried = reply.model.requests
     assert (first.messages[-1].role, first.messages[-1].content) == ("user", RECEIPT_TEXT)
-    assert RECEIPT_TEXT not in str(first.messages[0].content)
+    assert RECEIPT_TEXT not in system_text(first.messages)
     assert second.messages[: len(first.messages)] == first.messages
     assert all(RECEIPT_TEXT not in str(message.content) for message in retried.messages)
     session = reply.storage.load_session(SESSION_ID, "agent")
@@ -951,6 +951,51 @@ async def test_a_later_attempt_of_a_turn_on_a_new_scope_replays_the_run_an_earli
     assert probe.calls == ["a"]
     *_, last = reply.model.requests
     assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call_1", "call_2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_tool_calls_per_turn", "runs"),
+    [(1, 1), (None, 2)],
+    ids=["refused_by_the_call_limit", "ran_and_failed"],
+)
+async def test_only_a_model_switch_that_ran_continues_the_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    max_tool_calls_per_turn: int | None,
+    runs: int,
+) -> None:
+    """A switch the call limit refused never ran, so the model's next answer ends the turn without a second attempt.
+
+    A switch that ran and failed stops the run unanswered, so the turn continues with a second attempt.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when="next-turn")),
+            answer("Done."),
+            answer("Started over."),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+    )
+
+    chunks = await _stream(reply)
+
+    assert probe.calls == ["a"]
+    assert len(reply.model.requests) == 3
+    assert "".join(streamed_text(chunks)).endswith("Done.")
+    session = reply.storage.load_session(SESSION_ID, "agent")
+    assert session is not None
+    assert len(session.runs) == runs
+    # The refused switch is recorded as a failed call; the one that ran answered with the tool's own error payload.
+    assert [(tool.tool_name, tool.is_error) for tool in session.runs[0].tools or ()] == [
+        ("touch", False),
+        ("switch_thread_model", max_tool_calls_per_turn is not None),
+    ]
 
 
 @pytest.mark.asyncio

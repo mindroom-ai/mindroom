@@ -42,7 +42,6 @@ from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
-from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -170,15 +169,15 @@ def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bo
     system text, or history a replay limit or compaction dropped, replays the history instead. Only a stored response
     records its digest, so an unstored one never continues.
     Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain across a
-    changed system text, but ``instructions`` cannot hold the explicit prompt-cache breakpoint of the shared system
-    prefix.
+    changed system text, but ``instructions`` cannot hold the explicit prompt-cache breakpoint of the stable system
+    message.
     """
     # LEGACY_COMPAT: Stored Responses replies without the digest of their conversation.
     # Legacy format: a stored Responses reply, an assistant message whose ``provider_data`` records a ``response_id``
     # but no ``mindroom_conversation_sha256`` and whose ``mindroom_response_stored`` is not false: replies through
     # v2026.10.525 recorded no digest, and replies from v2026.10.526 recorded only ``mindroom_system_sha256``, the
     # digest of their system text. An unstored reply records no digest by design and is not legacy.
-    # Last legacy release: v2026.10.580, which recorded only the system-text digest; replacement: the first release
+    # Last legacy release: v2026.10.609, which recorded only the system-text digest; replacement: the first release
     # after it, which records the conversation digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once and continues the response it stores from then on; ``mindroom_system_sha256`` is ignored.
@@ -281,25 +280,19 @@ def _input_items(replay: ResponsesReplay) -> list[Any]:
     return items
 
 
-def _with_shared_system_prefix(formatted_input: list[Any], *, explicit_breakpoint: bool) -> list[Any]:
-    """Split MindRoom's initial system text so the shared agent instructions stay a cacheable prefix."""
+def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
+    """Put an explicit cache breakpoint after the first system message, the stable prompt (``agent_loop.prompt``).
+
+    The turn's context follows in its own system message, so it can change without invalidating the prefix.
+    """
     first_message = formatted_input[0] if formatted_input else None
     if not isinstance(first_message, dict) or first_message.get("role") not in {"system", "developer"}:
         return formatted_input
     content = first_message.get("content")
-    if not isinstance(content, str):
+    if not isinstance(content, str) or not content.strip():
         return formatted_input
-    shared_text, boundary, session_text = content.partition(SESSION_CONTEXT_BOUNDARY)
-    if not boundary or not shared_text.strip():
-        return formatted_input
-    shared_block: dict[str, Any] = {"type": "input_text", "text": shared_text}
-    if explicit_breakpoint:
-        shared_block["prompt_cache_breakpoint"] = {"mode": "explicit"}
-    return [
-        {**first_message, "content": [shared_block]},
-        {**first_message, "content": boundary + session_text},
-        *formatted_input[1:],
-    ]
+    prefix_block = {"type": "input_text", "text": content, "prompt_cache_breakpoint": {"mode": "explicit"}}
+    return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
 
 
 def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
@@ -315,8 +308,8 @@ def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, expli
         native_route=replay.native_route,
         replay_reasoning=replay.replay_reasoning,
     )
-    if cache_system_prompt:
-        formatted = _with_shared_system_prefix(formatted, explicit_breakpoint=explicit_breakpoint)
+    if cache_system_prompt and explicit_breakpoint:
+        formatted = _with_system_prefix_breakpoint(formatted)
     return formatted
 
 
@@ -324,16 +317,8 @@ def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, expli
 
 
 def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return tools sorted by name with function definitions flattened as Responses expects."""
-    functions: list[dict[str, Any]] = []
-    for tool in tools:
-        definition: dict[str, Any] = {**function_definition(tool), "type": "function"}
-        # TODO(simplify): A top-level parameter's list `type` keeps only its first entry, so ["string", "null"] loses
-        # null, while nested schemas and Chat routes send the list. Send the schema unchanged. Models.
-        for property_schema in definition.get("parameters", {}).get("properties", {}).values():
-            if isinstance(property_schema, dict) and isinstance(property_schema.get("type"), list):
-                property_schema["type"] = property_schema["type"][0]
-        functions.append(definition)
+    """Return tools sorted by name with function definitions flattened as Responses expects, schemas as authored."""
+    functions = [{**function_definition(tool), "type": "function"} for tool in tools]
     return sorted(functions, key=lambda tool: tool["name"])
 
 
@@ -441,7 +426,10 @@ def responses_request_kwargs(
     # ``store`` in request_params already became the route's storage setting.
     params.update({key: value for key, value in (settings.request_params or {}).items() if key != "store"})
     _add_replay_policy(params, request)
-    params = disable_tool_selection(request_params_with_deferred_tool_search(params, request.deferred_tools.names))
+    params = disable_tool_selection(
+        request_params_with_deferred_tool_search(params, request.deferred_tools.names),
+        request.tool_choice,
+    )
     if wire.route == "codex":
         _codex_params(params, settings, wire)
     formatted_input = responses_input(

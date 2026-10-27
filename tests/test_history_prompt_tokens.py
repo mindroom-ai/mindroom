@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.replay import (
@@ -19,8 +20,13 @@ from mindroom.history.types import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ToolSpec
+from mindroom.session_storage.schema import TableNames
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from tests.history_helpers import _completed_run, _session, replay_settings
+from tests.session_storage.agno_layout import SESSION_ID, converted_store
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SYSTEM_MESSAGE = Message(role="system", content="You are a careful engineer.\n\nStay concise.")
 _SEARCH_PARAMETERS = {
@@ -39,23 +45,17 @@ _SEARCH_DOCS = ToolSpec(
     description="Search the engineering docs for a matching answer.",
     parameters=_SEARCH_PARAMETERS,
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 _EXPORT_NOTES = ToolSpec(
     name="export_notes",
     description="Export the current working notes as markdown.",
     parameters=_EXPORT_PARAMETERS,
     strict=True,
-    requires_confirmation=True,
-    external_execution=None,
-    approval_type=None,
 )
 
 
 def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
-    estimator = build_static_token_estimator(_SYSTEM_MESSAGE, (), frozenset())
+    estimator = build_static_token_estimator((_SYSTEM_MESSAGE,), (), frozenset())
 
     assert estimator.non_prompt_tokens() == estimate_text_tokens(str(_SYSTEM_MESSAGE.content))
     assert estimator.estimate("Current prompt") == estimate_text_tokens("Current prompt") + estimate_text_tokens(
@@ -65,7 +65,7 @@ def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
 
 def test_static_estimate_counts_each_offered_tool_definition_as_the_request_sends_it() -> None:
     """Tool definitions count with every field the tool set; fields it left unset are not sent, so they do not count."""
-    estimator = build_static_token_estimator(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES), frozenset())
+    estimator = build_static_token_estimator((_SYSTEM_MESSAGE,), (_SEARCH_DOCS, _EXPORT_NOTES), frozenset())
 
     sent_definitions = [
         {
@@ -78,7 +78,6 @@ def test_static_estimate_counts_each_offered_tool_definition_as_the_request_send
             "description": "Export the current working notes as markdown.",
             "parameters": _EXPORT_PARAMETERS,
             "strict": True,
-            "requires_confirmation": True,
         },
     ]
     assert estimator.non_prompt_tokens() == (
@@ -89,13 +88,13 @@ def test_static_estimate_counts_each_offered_tool_definition_as_the_request_send
 def test_static_estimate_leaves_deferred_tools_out() -> None:
     """A tool that tool search keeps off the request until it is found costs nothing up front."""
     tools = (_SEARCH_DOCS, _EXPORT_NOTES)
-    nothing_deferred = build_static_token_estimator(_SYSTEM_MESSAGE, tools, frozenset())
-    export_deferred = build_static_token_estimator(_SYSTEM_MESSAGE, tools, frozenset({"export_notes"}))
-    all_deferred = build_static_token_estimator(_SYSTEM_MESSAGE, tools, frozenset({"search_docs", "export_notes"}))
+    nothing_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset())
+    export_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset({"export_notes"}))
+    all_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset({"search_docs", "export_notes"}))
 
     assert export_deferred.non_prompt_tokens() < nothing_deferred.non_prompt_tokens()
     assert export_deferred.estimate("Current prompt") == build_static_token_estimator(
-        _SYSTEM_MESSAGE,
+        (_SYSTEM_MESSAGE,),
         (_SEARCH_DOCS,),
         frozenset(),
     ).estimate("Current prompt")
@@ -145,27 +144,23 @@ def test_estimate_prompt_visible_history_tokens_never_mutates_session_messages()
     assert [message.to_dict() for run in session.runs for message in run.messages] == original_snapshots
 
 
-def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles() -> None:
+def test_estimate_prompt_visible_history_tokens_excludes_legacy_persisted_prompt_roles(tmp_path: Path) -> None:
+    """A run an earlier release stored with its system prompt converts without it, so no estimate counts it."""
     conversation_messages = [
         Message(role="user", content="user request"),
         Message(role="assistant", content="assistant answer"),
         Message(role="tool", content="tool result"),
     ]
     history_settings = replay_settings()
-    contaminated_session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="system", content="legacy system prompt " * 20),
-                    *conversation_messages,
-                ],
-            ),
-        ],
-    )
+    stored = _completed_run(
+        "run-1",
+        messages=[Message(role="system", content="legacy system prompt " * 20), *conversation_messages],
+    ).to_dict()
+    store = converted_store(TableNames("test_agent").database_path(tmp_path), stored, owner_id="test_agent")
+    contaminated_session = store.load_session(SESSION_ID, "agent")
+    assert contaminated_session is not None
     clean_session = _session(
-        "session-1",
+        SESSION_ID,
         runs=[_completed_run("run-1", messages=conversation_messages)],
     )
 

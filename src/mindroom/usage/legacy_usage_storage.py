@@ -3,27 +3,17 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import TYPE_CHECKING, cast
 
-from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import resolve_session_state_root
-from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agno2_runs import decode_session_json, has_blob_column
-from mindroom.session_storage.schema import TableNames, table_names
-from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, migrate_database
+from mindroom.session_storage.schema import table_names
 from mindroom.usage.storage import project_usage, quote_identifier, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
+    import sqlite3
     from collections.abc import Mapping
-    from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
-
-logger = get_logger(__name__)
-
-# Startup skips a locked store at once; the store's owner retries it with the full timeout.
-_STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
+    from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 
 
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
@@ -42,27 +32,21 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Legacy format: Agno 3 run_data rows and retained Agno 2 single/double-encoded runs blobs.
 # Last legacy release: v2026.9.190, the last verified native writer without an independent usage table.
 # Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
-# Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
+# Handling: Detect by schema in a database's conversion to storage v2; seed in its transaction, prefer current rows,
+# retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
-def migrate_usage_database(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
-    """Seed the existing database at ``path`` once; publication and all imported records commit together."""
-    if not path.is_file():
-        return
-    names = TableNames.of_database(path)
-    migrate_database(
-        path,
-        needed=lambda connection: _needs_migration(connection, names),
-        apply=lambda connection: _seed_usage(connection, names),
-        timeout=timeout,
-    )
+def seed_usage_ledger(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    """Seed the usage ledger of a database that has none in the caller's write transaction."""
+    if _needs_migration(connection, names):
+        _seed_usage(connection, names)
 
 
-def _needs_migration(connection: sqlite3.Connection, names: TableNames) -> bool:
+def _needs_migration(connection: sqlite3.Connection, names: AgnoTableNames) -> bool:
     tables = table_names(connection)
     return names.sessions in tables and names.usage not in tables
 
 
-def _seed_usage(connection: sqlite3.Connection, names: TableNames) -> None:
+def _seed_usage(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     connection.execute(usage_table_sql(names.sessions))
     legacy_column = "runs" if has_blob_column(connection, names) else "NULL"
     has_runs = names.runs in table_names(connection)
@@ -102,42 +86,10 @@ def _decode(raw: object) -> object:
 
 def _insert_usage(
     connection: sqlite3.Connection,
-    names: TableNames,
+    names: AgnoTableNames,
     session_id: str,
     run_id: str | None,
     run: object,
 ) -> None:
     payload = json.dumps(project_usage(cast("dict[str, object]", run))) if isinstance(run, dict) else None
     connection.execute(usage_upsert_sql(names.sessions), (session_id, run_id, payload))
-
-
-async def migrate_usage_storage(runtime_paths: RuntimePaths) -> None:
-    """Finish the startup import before runtime or read-only reporting is admitted."""
-    await run_blocking_until_complete(_migrate_stores, runtime_paths)
-
-
-def _migrate_stores(runtime_paths: RuntimePaths) -> None:
-    root = resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
-    directories = [*_directories(root / "agents"), *_directories(root / "teams")]
-    for scope in _directories(root / "private_instances"):
-        directories.extend(_directories(scope))
-    for directory in directories:
-        path = TableNames(directory.name).database_path(directory)
-        try:
-            if not path.parent.is_symlink() and not path.is_symlink():
-                migrate_usage_database(path, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
-        except (sqlite3.Error, OSError) as error:
-            # Worker code can write session databases, so one unreadable or locked store must not stop startup.
-            # Its owner retries the import with the full lock timeout when it next opens the store.
-            logger.warning("usage_migration_skipped_unreadable_store", path=str(path), error=str(error))
-
-
-def _directories(root: Path) -> list[Path]:
-    if root.is_symlink() or not root.is_dir():
-        return []
-    try:
-        return [child for child in sorted(root.iterdir()) if not child.is_symlink() and child.is_dir()]
-    except OSError as error:
-        # Worker code can make a state directory unlistable; skip the stores beneath it instead of stopping startup.
-        logger.warning("usage_migration_skipped_unreadable_store", path=str(root), error=str(error))
-        return []

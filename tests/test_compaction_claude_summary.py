@@ -103,8 +103,13 @@ async def test_summary_rejects_output_capped_at_effective_request_limit(
 
 @pytest.mark.parametrize("route", sorted(_ROUTES))
 @pytest.mark.parametrize("raw_body", [False, True])
-async def test_summary_disables_thinking_and_the_prompt_cache(route: str, tmp_path: Path, *, raw_body: bool) -> None:
-    """Thinking authored anywhere is off, other authored fields stay, and the system prompt carries no cache marker."""
+async def test_summary_leaves_out_authored_thinking_and_the_prompt_cache(
+    route: str,
+    tmp_path: Path,
+    *,
+    raw_body: bool,
+) -> None:
+    """Thinking authored anywhere is left out, other authored fields stay, and the system prompt has no cache marker."""
     authored = {"thinking": {"type": "adaptive"}, "max_tokens": 1024, "metadata": {"user_id": "summary-user"}}
     params = {"extra_body": authored} if raw_body else authored
     requests: list[dict[str, Any]] = []
@@ -118,7 +123,7 @@ async def test_summary_disables_thinking_and_the_prompt_cache(route: str, tmp_pa
         tmp_path,
         respond,
         request_params=params,
-        thinking={"type": "enabled", "budget_tokens": 2048},
+        thinking={"type": "adaptive", "display": "summarized"},
         cache_system_prompt=True,
     )
 

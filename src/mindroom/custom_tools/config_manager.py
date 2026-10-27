@@ -779,7 +779,7 @@ class ConfigManagerTools(Toolkit):
             rooms: List of room IDs or names to auto-join
             knowledge_bases: List of knowledge base IDs to assign to this agent
             include_default_tools: Whether this agent should include defaults.tools
-            markdown: Whether to use markdown formatting
+            markdown: Whether the agent's system prompt says its replies are shown as Markdown
 
         Returns:
             Success message or error details
@@ -847,7 +847,7 @@ class ConfigManagerTools(Toolkit):
         display_name: str,
         role: str,
         agents: list[str],
-        mode: str = "coordinate",
+        mode: Literal["coordinate", "collaborate"] = "coordinate",
     ) -> str:
         """Create or manage team configurations.
 
@@ -1377,14 +1377,11 @@ class ConfigManagerTools(Toolkit):
         display_name: str,
         role: str,
         agents: list[str],
-        mode: str = "coordinate",
+        mode: Literal["coordinate", "collaborate"] = "coordinate",
         *,
         config: Config,
     ) -> str:
         """Create a new team configuration."""
-        if mode not in ["coordinate", "collaborate"]:
-            return "Error: Team mode must be 'coordinate' or 'collaborate'"
-
         try:
             if team_name in config.teams:
                 return f"Error: Team '{team_name}' already exists."

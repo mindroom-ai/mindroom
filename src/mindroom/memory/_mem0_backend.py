@@ -54,6 +54,12 @@ _T = TypeVar("_T")
 
 logger = get_logger(__name__)
 
+# Mem0 scores a Chroma hit 1 / (1 + d), where d is the squared L2 distance its collections use, and drops hits below
+# the threshold. A search keeps the memories with d <= 1.8, which for unit-length embeddings (d = 2 - 2 * cosine) are
+# those with cosine similarity of at least 0.1; Mem0's default threshold of 0.1 would keep every unit-length hit.
+_MIN_COSINE_SIMILARITY = 0.1
+_MEM0_SEARCH_THRESHOLD = 1 / (1 + 2 * (1 - _MIN_COSINE_SIMILARITY))
+
 
 @runtime_checkable
 class _OperationTrackedEmbedder(Protocol):
@@ -146,6 +152,22 @@ async def _create_mem0_memory_instance(
     return await create_memory(resolved_storage_path, config)
 
 
+async def _search_mem0_scope(
+    memory: ScopedMemoryCrud,
+    query: str,
+    scope_user_id: str,
+    limit: int,
+) -> list[MemoryResult]:
+    return _mem0_results(
+        await memory.search(
+            query,
+            filters=_scope_filter(scope_user_id),
+            top_k=limit,
+            threshold=_MEM0_SEARCH_THRESHOLD,
+        ),
+    )
+
+
 @timed("system_prompt_assembly.memory_search.mem0.agent_search")
 async def _search_mem0_agent_scope(
     memory: ScopedMemoryCrud,
@@ -153,13 +175,7 @@ async def _search_mem0_agent_scope(
     agent_name: str,
     limit: int,
 ) -> list[MemoryResult]:
-    return _mem0_results(
-        await memory.search(
-            query,
-            filters=_scope_filter(agent_scope_user_id(agent_name)),
-            top_k=limit,
-        ),
-    )
+    return await _search_mem0_scope(memory, query, agent_scope_user_id(agent_name), limit)
 
 
 @timed("system_prompt_assembly.memory_search.mem0.team_search")
@@ -169,7 +185,7 @@ async def _search_mem0_team_scope(
     team_id: str,
     limit: int,
 ) -> list[MemoryResult]:
-    return _mem0_results(await memory.search(query, filters=_scope_filter(team_id), top_k=limit))
+    return await _search_mem0_scope(memory, query, team_id, limit)
 
 
 async def _get_scoped_memory_by_id(
@@ -446,7 +462,7 @@ class Mem0MemoryBackend:
         Mem0 builds its own internal embedder, so passive health recording in
         MindRoom's embedder never sees this traffic: the backend records the
         outcome itself. Mem0's search embeds the query without swallowing
-        (verified against mem0ai 2.0.1), so a completed search proves the
+        (verified against mem0ai 2.2.1), so a completed search proves the
         embedder round-tripped and a propagated provider error classifies
         into a degraded outcome instead of raising.
         """
@@ -472,7 +488,6 @@ class Mem0MemoryBackend:
             logger.warning("Mem0 memory search degraded by embedder failure", agent=agent_name, error=degraded_reason)
             return MemorySearchOutcome(results=[], degraded_reason=degraded_reason)
 
-        existing_memories = {result.get("memory", "") for result in results}
         degraded_reason: str | None = None
         for team_id in get_team_ids_for_agent(agent_name, config):
             try:
@@ -489,16 +504,18 @@ class Mem0MemoryBackend:
                     error=scope_failure,
                 )
                 continue
-            for memory_result in team_memories:
-                if memory_result.get("memory", "") not in existing_memories:
-                    results.append(memory_result)
-                    existing_memories.add(memory_result.get("memory", ""))
+            results.extend(team_memories)
             logger.debug("Team memories found", team_id=team_id, count=len(team_memories))
 
         logger.debug("Total memories found", count=len(results), agent=agent_name)
         if degraded_reason is None:
             health_recorder.record(None)
-        return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
+        # Both scopes share one Mem0 collection and score scale, so the limit keeps the best hits of either scope, and
+        # a memory both scopes return keeps its better-scored copy.
+        best_by_text: dict[str, MemoryResult] = {}
+        for result in sorted(results, key=lambda result: result.get("score", 0.0), reverse=True):
+            best_by_text.setdefault(result.get("memory", ""), result)
+        return MemorySearchOutcome(results=list(best_by_text.values())[:limit], degraded_reason=degraded_reason)
 
     async def list_all(
         self,

@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -20,6 +20,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex, agent_reply_membership_policy_changed
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.api.startup_probes import serve_startup_probes
 from mindroom.approval.manager import initialize_approval_store
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import shutdown_approval_runtime
@@ -110,6 +111,7 @@ from mindroom.runtime_state import (
     set_runtime_starting,
 )
 from mindroom.scheduling.executor import set_scheduling_hook_registry
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
@@ -122,7 +124,6 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
-from mindroom.usage.legacy_usage_storage import migrate_usage_storage
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
@@ -3205,7 +3206,6 @@ async def _run_runtime(  # noqa: PLR0915
     """Run the multi-agent bot system until it stops."""
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
-    await migrate_usage_storage(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
     storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
@@ -3232,6 +3232,12 @@ async def _run_runtime(  # noqa: PLR0915
         # ordered unit off-loop while retaining exception propagation to startup.
         await run_blocking_until_complete(_sync_credentials_and_prepare_storage, runtime_paths, storage_path)
         await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
+        # After the retirement, so no old worker mounting whole state roots can swap a sessions directory as it converts.
+        # The first start after an upgrade converts every conversation database before the API binds, which can take
+        # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.
+        probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
+        with probes or nullcontext():
+            await migrate_conversation_storage(runtime_paths)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

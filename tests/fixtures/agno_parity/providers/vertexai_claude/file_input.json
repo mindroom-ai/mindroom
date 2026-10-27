@@ -84,9 +84,6 @@
                 "media_type": "application/pdf",
                 "data": "JVBERi0xLjQKJSVFT0YK"
               },
-              "citations": {
-                "enabled": true
-              },
               "cache_control": {
                 "type": "ephemeral",
                 "ttl": "1h"
@@ -105,11 +102,18 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "stream": true,
       "anthropic_version": "vertex-2023-10-16"
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "content-type": "application/json"
     },
     "method": "POST",

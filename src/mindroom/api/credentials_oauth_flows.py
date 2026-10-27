@@ -34,6 +34,7 @@ class _PendingOAuthState:
     payload: dict[str, str] | None
     code_verifier: str | None
     token_url: str | None
+    credential_service: str | None = None
 
 
 def issue_pending_oauth_state(
@@ -46,11 +47,13 @@ def issue_pending_oauth_state(
     token_url: str | None = None,
     browser_user_required: bool = True,
     opener_origin: str | None = None,
+    credential_service: str | None = None,
 ) -> str:
     """Create opaque OAuth state bound to a browser user or conversation capability.
 
     `opener_origin` is the already validated origin of the page that started the flow, which the popup's last page
-    tells how the flow ended.
+    tells how the flow ended. `credential_service` is the name the callback stores the connection under instead of the
+    provider's own, for an Agent Keys service's own account.
     """
     user_id = require_auth_user_id(request) if browser_user_required else ""
     auth_user = request.scope.get("auth_user")
@@ -78,6 +81,7 @@ def issue_pending_oauth_state(
             "code_verifier": code_verifier or "",
             "token_url": token_url or "",
             "opener_origin": opener_origin or "",
+            "credential_service": credential_service or "",
         },
     )
 
@@ -139,6 +143,7 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
     )
     code_verifier = data.get("code_verifier")
     token_url = data.get("token_url")
+    credential_service = data.get("credential_service")
     return _PendingOAuthState(
         browser_user_required=browser_user_required,
         agent_name=agent_name if isinstance(agent_name, str) and agent_name else None,
@@ -147,4 +152,5 @@ def consume_pending_oauth_request(request: Request, service: str, state: str) ->
         payload=payload,
         code_verifier=code_verifier if isinstance(code_verifier, str) and code_verifier else None,
         token_url=token_url if isinstance(token_url, str) and token_url else None,
+        credential_service=credential_service if isinstance(credential_service, str) and credential_service else None,
     )

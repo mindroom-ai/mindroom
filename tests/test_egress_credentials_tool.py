@@ -112,6 +112,7 @@ def _unconfigured(name: str, display_name: str | None = None, **changes: object)
         "configured": False,
         "active_source": None,
         "oauth_reuse": None,
+        "oauth_access": None,
         "can_connect_account": False,
         "provider": None,
         **changes,
@@ -127,6 +128,7 @@ def _keyed(name: str, display_name: str | None = None, source: str = "config") -
         "configured": True,
         "active_source": "key",
         "oauth_reuse": None,
+        "oauth_access": None,
     }
 
 
@@ -489,8 +491,33 @@ def test_connected_account_is_the_active_source_without_a_key(tmp_path: Path) ->
         "configured": True,
         "active_source": "oauth",
         "oauth_reuse": True,
+        "oauth_access": "read_write",
     }
     assert _entry(bob, "github")["configured"] is False
+
+
+def test_list_reports_oauth_access(tmp_path: Path) -> None:
+    """An allowed account says whether the agent may only read with it, so the agent knows why a write is refused."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    _configure_github_client(manager)
+    _connect_github(manager)
+    allow_oauth_reuse(manager, runtime_paths, account_store(_ALICE), access="read")
+    context = _context(runtime_paths, _PRESET_SERVICES)
+
+    payload = _list(_tool(runtime_paths), context)
+
+    assert _entry(payload, "github") == {
+        "name": "github",
+        "display_name": "GitHub",
+        "source": "config",
+        "configured": True,
+        "active_source": "oauth",
+        "oauth_reuse": True,
+        "oauth_access": "read",
+    }
+    assert _entry(payload, "openai")["oauth_access"] is None
+    assert '`oauth_access: "read"`' in str(payload["note"])
 
 
 def test_a_connected_account_agent_keys_may_not_use_is_named_until_it_is_allowed(tmp_path: Path) -> None:
@@ -516,6 +543,7 @@ def test_a_connected_account_agent_keys_may_not_use_is_named_until_it_is_allowed
         "github",
         "GitHub",
         oauth_reuse=True,
+        oauth_access="read_write",
         can_connect_account=True,
         provider="github",
     )
@@ -604,6 +632,7 @@ def test_unconfigured_service_says_whether_an_account_can_be_connected(tmp_path:
         "github",
         "GitHub",
         oauth_reuse=True,
+        oauth_access="read_write",
         can_connect_account=True,
         provider="github",
     )
@@ -636,7 +665,12 @@ def test_shared_service_account_is_not_injected_so_it_is_not_connected(tmp_path:
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _DRIVE_SERVICES))
 
-    assert _entry(payload, "drive") == _unconfigured("drive", "Google Drive", oauth_reuse=True)
+    assert _entry(payload, "drive") == _unconfigured(
+        "drive",
+        "Google Drive",
+        oauth_reuse=True,
+        oauth_access="read_write",
+    )
 
 
 def test_google_account_follows_the_agent_scope_not_the_requester(tmp_path: Path) -> None:
@@ -786,3 +820,24 @@ def test_note_on_a_shared_agent_says_who_can_allow_an_account(tmp_path: Path, wo
         "On this shared agent only its credential managers or an administrator can allow its accounts, "
         "except a per-user account such as GitHub, which each user allows for themselves."
     ) in str(payload["note"])
+
+
+def test_a_service_with_its_own_account_is_marked_and_the_note_names_the_header(tmp_path: Path) -> None:
+    """The agent learns which service logs in with an account of its own and how a request picks a service."""
+    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+    manager = get_runtime_credentials_manager(runtime_paths)
+    context = _context(runtime_paths, _PRESET_SERVICES)
+    save_user_service(
+        manager,
+        worker_target(),
+        "mine",
+        EgressService.model_validate({"preset": "google_drive", "oauth_separate_account": True}),
+        config_services=context.config.egress_broker.services,
+        oauth_providers={"google_drive"},
+    )
+
+    payload = _list(_tool(runtime_paths), context)
+
+    assert _entry(payload, "mine")["separate_account"] is True
+    assert "separate_account" not in _entry(payload, "github")
+    assert "`X-Agent-Keys-Service: <name>`" in str(payload["note"])

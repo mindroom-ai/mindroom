@@ -180,7 +180,7 @@ class ChatUITools(Toolkit):
         # their users' clients refuse to show.
         if enable_show_canvas:
             tools.extend([self.show_canvas, self.read_canvas_state])
-        super().__init__(name="chat_ui", add_instructions=True, tools=tools)
+        super().__init__(name="chat_ui", tools=tools)
 
     @property
     def instructions(self) -> str:

@@ -266,6 +266,7 @@ def test_model_params_record_the_route_settings_without_credentials_or_clients(r
         "strict_output": True,
         "cache_system_prompt": True,
         "extended_cache_time": True,
+        "use_thinking": True,
     }
     params["metadata"]["team"] = "b"
     assert provider.model_params["metadata"] == {"team": "a"}
@@ -290,6 +291,30 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
             "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
         ),
     ]
+
+
+@pytest.mark.parametrize("name", ["gpt-6.1", "my model", "team/sol", ""])
+def test_config_load_rejects_an_empty_model_name_or_one_its_dashboard_key_cannot_carry(name: str) -> None:
+    """A model's name names its dashboard key, so config load rejects an empty name or a character it cannot carry."""
+    synthetic = {"provider": "synthetic", "id": "lorem-ipsum"}
+
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate({"models": {"default": synthetic, name: synthetic}})
+
+    assert iter_config_validation_messages(info.value) == [
+        (
+            "models",
+            "Value error, Model names can only include letters, numbers, colon, underscore, and hyphen; "
+            f"rename models.{name} and update every reference",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("name", ["gpt-6-1", "Sol_2", "openrouter:sol"])
+def test_every_model_name_config_load_accepts_builds(name: str, runtime_paths: RuntimePaths) -> None:
+    config = Config.model_validate({"models": {name: {"provider": "synthetic", "id": "lorem-ipsum"}}})
+
+    assert build_model_provider(config, runtime_paths, name).identity.id == "lorem-ipsum"
 
 
 def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
@@ -764,7 +789,7 @@ async def test_requests_are_logged_under_the_storage_root_with_the_model_setting
     assert set(request_record) == {
         "timestamp",
         "request_log_id",
-        "agent_id",
+        "model_name",
         "model_id",
         "system_prompt",
         "messages",
@@ -774,10 +799,10 @@ async def test_requests_are_logged_under_the_storage_root_with_the_model_setting
         "deferred_tool_names",
         "model_params",
     }
-    assert (request_record["agent_id"], request_record["model_id"]) == ("default", "gpt-6-astra")
+    assert (request_record["model_name"], request_record["model_id"]) == ("default", "gpt-6-astra")
     assert request_record["model_params"]["temperature"] == 0.3
     assert "api_key" not in request_record["model_params"]
-    assert (response_record["record"], response_record["agent_id"]) == ("response", "default")
+    assert (response_record["record"], response_record["model_name"]) == ("response", "default")
 
 
 # --- The refusal and malformed tool-call policies, on real routes -------------------------------------------
@@ -865,9 +890,6 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
             description="Weather.",
             parameters=_SCHEMA,
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
 

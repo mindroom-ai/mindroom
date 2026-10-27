@@ -200,6 +200,24 @@ describe("services of the agent that already send a key to a website", () => {
     ).toEqual([]);
   });
 
+  it("says a request picks the service with the header once it has its own account", () => {
+    const calendar = presets.find((preset) => preset.id === "google_calendar");
+    expect(
+      overlapWarnings(
+        formFromService("team_calendar", {
+          preset: "google_calendar",
+          oauth_separate_account: true,
+        }),
+        calendar,
+        [listed("calendar", "Google Calendar", [rule("www.googleapis.com")])],
+        undefined,
+        true,
+      ),
+    ).toEqual([
+      "Google Calendar already sends a key to www.googleapis.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically. A request uses this service instead when it sends the header X-Agent-Keys-Service: team_calendar.",
+    ]);
+  });
+
   it("skips a service that only limits paths, one that sends no key, the one being edited, and an empty host", () => {
     const others = [
       listed("limit", "Limit", [rule("api.example.com")], true),

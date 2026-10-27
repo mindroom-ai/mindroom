@@ -26,10 +26,8 @@ def minimal_bash_toolkit(
     intentionally no raw-worker or ordinary-proxy fallback here.
     """
 
-    # TODO(simplify): `command` is optional in the schema, yet every call without one fails. Make it a required
-    # string. Models would see the changed tool schema.
     async def bash(
-        command: str | None = None,
+        command: str,
         timeout: int | None = None,  # noqa: ASYNC109
         tail: int = 100,
     ) -> str | ToolValue:
@@ -45,7 +43,7 @@ def minimal_bash_toolkit(
             tail: The number of output lines to return.
 
         """
-        if not isinstance(command, str) or not command.strip():
+        if not command.strip():
             msg = "Bash requires a command"
             raise ValueError(msg)
         arguments: dict[str, object] = {"args": command, "tail": tail}

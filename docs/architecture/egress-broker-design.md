@@ -80,7 +80,22 @@ The egress pages still show whether an account is connected, through the Connect
 The opt-in lives in the store of the connection it unlocks, and the broker and both APIs resolve that store through one function, so an opt-in cannot unlock another requester's or scope's account; a round-trip test per scope kind guards this.
 Requester-scoped providers get one opt-in per requester and service name, covering all of that requester's agents, because the account itself is the requester's.
 It names the provider, not the account: it covers whatever account of that provider the scope connects, a later connection made for the tools included, until someone stops it, and it does not apply while the service's `oauth_provider` names another provider.
+It does name the connection, the tools' or the service's own, so switching a service between the two never carries it across, even for a request routed while the switch is saved.
 Rejected: keeping connections already in use working after the upgrade, because that would silently keep the bypass this removes.
+
+**An opt-in carries an access level, read or read and write, and only a service that declares how its API reads offers read.**
+An opt-in otherwise hands the agent's commands the connection's full access, so a routine that only reads had to be granted writes or nothing.
+HTTP methods map onto reads and writes only for APIs that follow REST conventions, so a service offers read-only access only through its `read_only` declaration, whose `post_paths` name the endpoints that read with `POST`; `github` declares none, because git clone and fetch read with `POST` to `git-upload-pack`, which a path prefix cannot name.
+The broker checks the level right after the opt-in and before reading the connection, and refuses a WebSocket upgrade and any method-override header under read, since either can write whatever the method says; an entry stored as read on a service that later drops `read_only` gets no token at all, so it never fails open.
+An entry without a level reads as read and write, so existing opt-ins keep working unmigrated, and a stored API key is never limited, since a key is scoped where it is issued.
+The record is [Read-Only Access for Agent Keys Account Opt-Ins](../dev/2026-10-27-agent-keys-read-only-access-design.md).
+
+**A service of a user's own can have its own account, and a request picks such a service by naming it.**
+Agent Keys hands commands the scope's one connection per provider, the one the tools use, so a second account of a provider, such as a shared mailbox, had no place.
+The service's connection is the provider with only its stored name changed, so connecting, refreshing, allowing, and removing it reuse the per-service paths and the tools never see it; the broker offers no connect link for it, since the provider's link connects the tools' account.
+Such a service usually ties with an operator's service on host and path, and the operator's wins a tie, so a request picks it with `X-Agent-Keys-Service` rather than by a changed tie-break, which would move other requests onto a user's service unasked.
+Rejected: labelled accounts beside each provider connection, which made each account a second kind of thing to list, connect, allow, and remove.
+The record is [Separate Accounts for Agent Keys Services](../dev/2026-10-27-agent-keys-separate-accounts-design.md).
 
 **Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.

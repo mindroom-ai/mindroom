@@ -31,12 +31,15 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
+from mindroom.cli.doctor import _validate_vertexai_claude_connection
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
     _load_active_config_or_exit,
     _threads_export,
     app,
 )
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
@@ -55,6 +58,7 @@ from mindroom.model_defaults import (
     OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
+from mindroom.providers import credentials as provider_credentials
 from mindroom.providers.credentials import missing_model_api_key_provider
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
@@ -67,8 +71,6 @@ from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from mindroom.config.main import Config
 
 runner = CliRunner()
 
@@ -1911,6 +1913,35 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
+    def test_validate_prints_room_names_as_written(self, tmp_path: Path) -> None:
+        """The summary prints configured room names verbatim, even ones that look like Rich markup."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n    host: http://gpu.example:11434\n"
+            'agents:\n  assistant:\n    display_name: Assistant\n    model: default\n    rooms: ["[/fast]", "[bold]lobby"]\n'
+            "router:\n  model: default\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Rooms: 2 ([/fast], [bold]lobby)" in output
+
+    def test_validate_prints_a_rejected_key_that_looks_like_markup_as_written(self, tmp_path: Path) -> None:
+        """A validation error quotes the config key it rejects verbatim, even one that looks like Rich markup."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
+            '  "[/fast]":\n    provider: ollama\n    id: gemma4\n'
+            "router:\n  model: default\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 1, result.output
+        assert "rename models.[/fast] and update every reference" in normalize_console_output(result.output)
+
     def test_validate_fails_on_an_automation_no_plugin_provides(self, tmp_path: Path) -> None:
         """A plugin automation name that no loaded plugin registers fails validation with its location."""
         cfg = tmp_path / "config.yaml"
@@ -2059,7 +2090,7 @@ class TestConfigValidate:
         result = _invoke_with_runtime(["config", "validate", "--path", str(cfg)], cfg, storage_path=storage)
         output = normalize_console_output(result.output)
 
-        assert "azure: Set AZURE_OPENAI_ENDPOINT" in output
+        assert "azure: Set AZURE_OPENAI_ENDPOINT (models: azure)" in output
         assert "Set AZURE_OPENAI_API_KEY" not in output
         assert "Set OPENAI_API_KEY" not in output
 
@@ -2087,6 +2118,241 @@ class TestConfigValidate:
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
 
+    @pytest.mark.parametrize(
+        ("models", "missing"),
+        [
+            (
+                {"default": ModelConfig(provider="VertexAI-Claude", id="claude-sonnet-5-5")},
+                [
+                    ("vertexai_claude", "ANTHROPIC_VERTEX_PROJECT_ID", ("default",)),
+                    ("vertexai_claude", "CLOUD_ML_REGION", ("default",)),
+                ],
+            ),
+            (
+                {"default": ModelConfig(provider="Azure", id="deployment")},
+                [("azure", "AZURE_OPENAI_API_KEY", ("default",)), ("azure", "AZURE_OPENAI_ENDPOINT", ("default",))],
+            ),
+            (
+                {
+                    "default": ModelConfig(provider="azure", id="deployment", api_key="sk-own"),
+                    "shared": ModelConfig(provider=" AZURE ", id="deployment"),
+                },
+                [
+                    ("azure", "AZURE_OPENAI_API_KEY", ("shared",)),
+                    ("azure", "AZURE_OPENAI_ENDPOINT", ("default", "shared")),
+                ],
+            ),
+            (
+                {"default": ModelConfig(provider="Bedrock-Claude", id="claude")},
+                [("bedrock_claude", "AWS_REGION", ("default",))],
+            ),
+            (
+                {"default": ModelConfig(provider="Gemini", id="gemini-3.8-flash")},
+                [("google", "GOOGLE_API_KEY", ("default",))],
+            ),
+        ],
+    )
+    def test_validate_names_a_route_s_missing_variables_in_any_provider_spelling(
+        self,
+        tmp_path: Path,
+        models: dict[str, ModelConfig],
+        missing: list[tuple[str, str, tuple[str, ...]]],
+    ) -> None:
+        """Each spelling config load accepts gets its route's variable checks, under the route's name and its models."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        config = Config(models=models, router=RouterConfig(model="default"))
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == missing
+
+    @pytest.mark.parametrize(
+        ("models", "missing"),
+        [
+            # One model's own region or profile does not supply another model's.
+            (
+                {
+                    "default": ModelConfig(provider="bedrock_claude", id="claude"),
+                    "regional": ModelConfig(provider="Bedrock-Claude", id="claude", extra_kwargs={"aws_region": "eu"}),
+                },
+                [("bedrock_claude", "AWS_REGION", ("default",))],
+            ),
+            (
+                {
+                    "default": ModelConfig(provider="bedrock_claude", id="claude"),
+                    "profiled": ModelConfig(provider="BEDROCK_CLAUDE", id="claude", extra_kwargs={"aws_profile": "p"}),
+                },
+                [("bedrock_claude", "AWS_REGION", ("default",))],
+            ),
+            # A model's own endpoint or project and region need no variable, at either level of its settings.
+            (
+                {
+                    "default": ModelConfig(
+                        provider="Azure",
+                        id="deployment",
+                        api_key="sk-own",
+                        extra_kwargs={"azure_endpoint": "https://own.openai.azure.com"},
+                    ),
+                },
+                [],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="VertexAI-Claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"project_id": "own-project", "region": "us-east5"},
+                    ),
+                },
+                [],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="AZURE",
+                        id="deployment",
+                        api_key="sk-own",
+                        extra_kwargs={"client_params": {"base_url": "https://gateway.example/openai"}},
+                    ),
+                },
+                [],
+            ),
+            # OLLAMA_HOST is a server, not a key, so a model's own key does not supply it.
+            (
+                {"default": ModelConfig(provider="Ollama", id="gemma4", api_key="sk-own")},
+                [("ollama", "OLLAMA_HOST", ("default",))],
+            ),
+            # The model's own server, as ``host`` or ``client_params.host``, needs no OLLAMA_HOST.
+            ({"default": ModelConfig(provider="Ollama", id="gemma4", host="http://gpu.example:11434")}, []),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="OLLAMA",
+                        id="gemma4",
+                        extra_kwargs={"client_params": {"host": "http://gpu.example:11434"}},
+                    ),
+                },
+                [],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="Azure",
+                        id="deployment",
+                        api_key="sk-own",
+                        extra_kwargs={"azure_endpoint": "https://own.openai.azure.com"},
+                    ),
+                    "endpointless": ModelConfig(provider="azure", id="deployment", api_key="sk-own"),
+                },
+                [("azure", "AZURE_OPENAI_ENDPOINT", ("endpointless",))],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="VertexAI-Claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"project_id": "own-project", "region": "us-east5"},
+                    ),
+                    "client": ModelConfig(
+                        provider="vertexai-claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"client_params": {"project_id": "own-project", "region": "us-east5"}},
+                    ),
+                    "regional": ModelConfig(
+                        provider="vertexai_claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"region": "us-east5"},
+                    ),
+                },
+                [("vertexai_claude", "ANTHROPIC_VERTEX_PROJECT_ID", ("regional",))],
+            ),
+        ],
+        ids=[
+            "bedrock-region",
+            "bedrock-profile",
+            "azure-endpoint",
+            "vertex-project-and-region",
+            "azure-base-url",
+            "ollama-own-key",
+            "ollama-host",
+            "ollama-client-host",
+            "mixed-azure-endpoints",
+            "mixed-vertex-settings",
+        ],
+    )
+    def test_validate_checks_each_model_s_own_settings_before_asking_for_a_variable(
+        self,
+        tmp_path: Path,
+        models: dict[str, ModelConfig],
+        missing: list[tuple[str, str, tuple[str, ...]]],
+    ) -> None:
+        """A variable is missing for each model that sets no value of its own, whatever another model of its route sets."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        config = Config(models=models, router=RouterConfig(model="default"))
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == missing
+
+    def test_validate_asks_for_the_shared_key_of_a_model_whose_dashboard_key_cannot_be_read(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A model whose credential lookup fails needs its shared key; a model with a key in config still does not."""
+        model_uses_own_credential = provider_credentials.model_uses_own_credential
+
+        def unreadable_store(name: str, model: ModelConfig, runtime_paths: constants_module.RuntimePaths) -> bool:
+            if name == "dashboard":
+                raise OSError
+            return model_uses_own_credential(name, model, runtime_paths)
+
+        monkeypatch.setattr(provider_credentials, "model_uses_own_credential", unreadable_store)
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        endpoint = {"azure_endpoint": "https://own.openai.azure.com"}
+        config = Config(
+            models={
+                "default": ModelConfig(provider="Azure", id="deployment", api_key="sk-own", extra_kwargs=endpoint),
+                "dashboard": ModelConfig(provider="azure", id="deployment", extra_kwargs=endpoint),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == [
+            ("azure", "AZURE_OPENAI_API_KEY", ("dashboard",)),
+        ]
+
+    @pytest.mark.parametrize("service", ["openai", "OPENAI_API_KEY"])
+    def test_validate_takes_a_shared_key_saved_in_the_dashboard(self, tmp_path: Path, service: str) -> None:
+        """A shared key the dashboard saved, under the provider's name or its variable's, supplies that route only."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            service,
+            {"api_key": "sk-dashboard", "_source": "ui"},
+        )
+        endpoint = {"azure_endpoint": "https://own.openai.azure.com"}
+        config = Config(
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+                "azure": ModelConfig(provider="azure", id="deployment", extra_kwargs=endpoint),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == [
+            ("azure", "AZURE_OPENAI_API_KEY", ("azure",)),
+        ]
+        assert missing_model_api_key_provider(config, runtime_paths, "default") is None
+
     @pytest.mark.parametrize("provider", ["gemini", "Gemini"])
     def test_validate_names_the_google_key_for_a_gemini_model(
         self,
@@ -2094,7 +2360,7 @@ class TestConfigValidate:
         monkeypatch: pytest.MonkeyPatch,
         provider: str,
     ) -> None:
-        """Config validate asks for GOOGLE_API_KEY for a model whose provider is ``gemini``, in any letter case."""
+        """Config validate asks for GOOGLE_API_KEY, under the route's name, for a ``gemini`` model in any letter case."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             f"models:\n  default:\n    provider: {provider}\n    id: gemini-3.8-flash\n"
@@ -2107,7 +2373,7 @@ class TestConfigValidate:
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
         assert result.exit_code == 0
-        assert f"{provider}: Set GOOGLE_API_KEY" in normalize_console_output(result.output)
+        assert "google: Set GOOGLE_API_KEY (models: default)" in normalize_console_output(result.output)
 
     def test_validate_warns_for_missing_bedrock_claude_region(
         self,
@@ -2306,7 +2572,7 @@ class TestRunFirstRunSetup:
 
         with (
             patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
-            patch("mindroom.cli.pairing_probes.serve_pairing_probes", return_value=nullcontext()),
+            patch("mindroom.api.startup_probes.serve_startup_probes", return_value=nullcontext()),
             patch("mindroom.cli.main._run", side_effect=fake_run),
         ):
             result = _invoke_with_runtime(["run", *args], config_path, input=answers, env=env)
@@ -4020,6 +4286,35 @@ class TestDoctor:
             1,
             [{"role": "user", "content": [{"type": "text", "text": "Reply with OK."}]}],
         )
+
+    @pytest.mark.parametrize(
+        "extra_kwargs",
+        [
+            {"client_params": {"project_id": "own-project", "region": "us-east5"}},
+            {"project_id": "own-project", "client_params": {"region": "us-east5"}},
+        ],
+        ids=["client-params", "mixed-levels"],
+    )
+    def test_vertexai_claude_connection_check_uses_the_model_s_own_project_and_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        extra_kwargs: dict[str, object],
+    ) -> None:
+        """A model that sets its project and region, at either level of its settings, is checked where it sends."""
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5", extra_kwargs=extra_kwargs)
+
+        assert _validate_vertexai_claude_connection(model, runtime_paths) == (True, "")
+        assert [request.url.path for request in requests] == [
+            "/v1/projects/own-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5:streamRawPredict",
+        ]
 
     def test_vertexai_claude_connection_uses_runtime_adc_credentials(
         self,

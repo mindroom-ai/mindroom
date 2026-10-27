@@ -13,7 +13,7 @@ from mindroom import constants
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, standard_cli_eligible, wrap_native_shell_window
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
-from mindroom.agent_loop.prompt import PromptSpec, model_note_for
+from mindroom.agent_loop.prompt import PromptSpec, join_sections
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
 from mindroom.approval.tool_approval import (
@@ -41,7 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.prompt_templates import build_agent_identity_context, render_prompt_template
+from mindroom.prompt_templates import build_agent_identity_context, openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
@@ -53,7 +53,7 @@ from mindroom.shared_directories.paths import (
     describe_agent_shared_directories,
     primary_tools_reach_shared_directories,
 )
-from mindroom.system_prompt import render_date_context, render_session_context
+from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
@@ -70,7 +70,12 @@ from mindroom.tool_system.catalog import (
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.construction import (
+    ToolConstruction,
+    bind_toolkit_construction,
+    get_toolkit_construction,
+    tool_config_signature,
+)
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -1196,27 +1201,27 @@ def _render_agent_identity_context(
 ) -> str:
     openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
     if include_openai_compat_guidance:
-        openai_context = render_prompt_template(
-            config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-            agent_name=agent_name,
-            display_name=display_name,
-            model_provider=model_provider,
-            model_id=model_id,
-            openai_compat_history_guidance=openai_compat_history_guidance,
+        return openai_compat_identity(
+            config.prompts,
+            openai_identity=render_prompt_template(
+                config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+                agent_name=agent_name,
+                display_name=display_name,
+                model_provider=model_provider,
+                model_id=model_id,
+                openai_compat_history_guidance=openai_compat_history_guidance,
+            ),
+            matrix_identity=render_prompt_template(
+                config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+                display_name=display_name,
+                matrix_id="not available in OpenAI-compatible API",
+                model_provider=model_provider,
+                model_id=model_id,
+                openai_compat_history_guidance=openai_compat_history_guidance,
+            ),
+            openai_prompt_name="OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
+            matrix_prompt_name="AGENT_IDENTITY_CONTEXT_TEMPLATE",
         )
-        has_custom_matrix_identity = "AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts
-        has_custom_openai_identity = "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts
-        if not has_custom_matrix_identity or has_custom_openai_identity:
-            return openai_context
-        overridden_identity_context = render_prompt_template(
-            config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-            display_name=display_name,
-            matrix_id="not available in OpenAI-compatible API",
-            model_provider=model_provider,
-            model_id=model_id,
-            openai_compat_history_guidance=openai_compat_history_guidance,
-        )
-        return overridden_identity_context + openai_context
 
     matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id
     return build_agent_identity_context(
@@ -1410,8 +1415,13 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             approvals_as_jobs=approvals_as_jobs
             and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
-        # A toolkit whose instructions describe its functions describes only the ones left.
-        adapted = with_offered_instructions(toolkit, adapted)
+        # Instructions describe only the functions left; Agno's defaults that name a missing one are dropped.
+        construction = get_toolkit_construction(toolkit)
+        adapted = with_offered_instructions(
+            toolkit,
+            adapted,
+            authored_instructions=construction is not None and construction.authored_instructions,
+        )
         entry = offered_entry(toolkit, adapted, tool_entry, authored_name) if adapted.functions else None
         if persona_tools is not None:
             persona_built[tool_name] = filtered
@@ -1527,9 +1537,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             partial(_generated_function_visible, config, tool_function_filter),
         ),
     ]
+    offered = _offered_entries(built, agent_name=agent_name)
     assembly = _AgentToolAssembly(
-        entries=_offered_entries(built, agent_name=agent_name),
-        instructions=toolkit_instructions(entry.adapted for entry in built),
+        entries=offered,
+        instructions=toolkit_instructions(entry.adapted for entry in offered),
         cli_deferred=tuple(cli_deferred),
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
@@ -1568,32 +1579,37 @@ def _build_agent_role_context(
     worker_routed_tool_names: tuple[str, ...],
     include_identity: bool,
 ) -> _AgentRoleContext:
-    """Render the runtime facts, the identity, and preload context into the role.
+    """Render the identity, the runtime facts, the preloaded files, and the authored role into the role, as sections.
 
     Without ``include_identity``, as for an authored subagent whose prompt replaces it, the role holds only the
     runtime facts.
     """
-    runtime_facts = _get_mind_runtime_context(agent_name, runtime_paths)
-    if not disable_runtime_capabilities:
-        runtime_facts += "\n\n" + _render_tool_execution_environment(
-            runtime_paths=runtime_paths,
-            local_tool_names=local_tool_names,
-            worker_routed_tool_names=worker_routed_tool_names,
-            worker_scope=agent_runtime.execution.execution_scope,
-            file_access=config.resolve_entity(agent_name).file_access,
-            has_workspace=agent_runtime.tool_base_dir is not None,
-            unconfined_tool_names=_unconfined_tool_names(
-                (*local_tool_names, *worker_routed_tool_names),
-                requires_primary_runtime=False,
+    runtime_facts = join_sections(
+        (
+            _get_mind_runtime_context(agent_name, runtime_paths),
+            None
+            if disable_runtime_capabilities
+            else _render_tool_execution_environment(
+                runtime_paths=runtime_paths,
+                local_tool_names=local_tool_names,
+                worker_routed_tool_names=worker_routed_tool_names,
+                worker_scope=agent_runtime.execution.execution_scope,
+                file_access=config.resolve_entity(agent_name).file_access,
+                has_workspace=agent_runtime.tool_base_dir is not None,
+                unconfined_tool_names=_unconfined_tool_names(
+                    (*local_tool_names, *worker_routed_tool_names),
+                    requires_primary_runtime=False,
+                ),
+                primary_only_unconfined_tool_names=_unconfined_tool_names(
+                    (*local_tool_names, *worker_routed_tool_names),
+                    requires_primary_runtime=True,
+                ),
+                shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
             ),
-            primary_only_unconfined_tool_names=_unconfined_tool_names(
-                (*local_tool_names, *worker_routed_tool_names),
-                requires_primary_runtime=True,
-            ),
-            shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
-        )
+        ),
+    )
     if not include_identity:
-        return _AgentRoleContext(role=runtime_facts.lstrip(), context_documents=())
+        return _AgentRoleContext(role=runtime_facts, context_documents=())
 
     model_config = config.models.get(model_name)
     model_provider = model_config.provider.title() if model_config is not None else "AI"
@@ -1609,14 +1625,11 @@ def _build_agent_role_context(
             include_openai_compat_guidance=include_openai_compat_guidance,
         )
 
-    full_context = identity_context + runtime_facts
     context_documents: list[_PreloadChunk] = []
+    preloaded_files = None
     if not disable_runtime_capabilities:
         workspace = agent_runtime.workspace
-        # TODO(simplify): The tool-environment section ends without a newline, so the "## Personality Context"
-        # heading lands on its last line. End the section with a newline so the heading starts its own line.
-        # Models would notice: it changes system prompt bytes (#3075).
-        full_context += _render_preloaded_files(
+        preloaded_files = _render_preloaded_files(
             agent_name,
             agent_config,
             config.defaults.max_preload_chars,
@@ -1630,7 +1643,10 @@ def _build_agent_role_context(
             runtime_paths=runtime_paths,
         )
 
-    return _AgentRoleContext(role=full_context + agent_config.role, context_documents=tuple(context_documents))
+    return _AgentRoleContext(
+        role=join_sections((identity_context, runtime_facts, preloaded_files, agent_config.role)),
+        context_documents=tuple(context_documents),
+    )
 
 
 def _skill_usage_instructions(
@@ -2046,7 +2062,7 @@ def create_agent(
         id=agent_name,
         name=agent_config.display_name,
         model=provider,
-        system_message=None,
+        system_messages=(),
         toolkits=toolkits if windowed_toolkits is None else windowed_toolkits,
         max_tool_calls_per_turn=entity_view.max_tool_calls_per_turn,
     )
@@ -2056,15 +2072,9 @@ def create_agent(
         instructions=tuple(instructions),
         markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
         tool_instructions=tool_assembly.instructions,
-        turn_context=render_session_context(
-            render_date_context(
-                config.get_entity_timezone(agent_name),
-                datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE"),
-            ),
-        ),
+        turn_context=render_session_context(config, config.get_entity_timezone(agent_name)),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
         knowledge_block=None if enabled_knowledge is None else enabled_knowledge.prompt_block(),
-        model_note=model_note_for(provider.capabilities, offers_tools=bool(spec.functions)),
     )
 
     surface = AgentSurface(

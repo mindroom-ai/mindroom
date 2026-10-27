@@ -100,6 +100,6 @@ if TYPE_CHECKING:
 )
 def mem0_tools() -> type[Mem0Tools]:
     """Return Mem0 memory tools for persistent memory management."""
-    from agno.tools.mem0 import Mem0Tools
+    from mindroom.tools.agno_compat_mem0 import UserFilterMem0Tools
 
-    return Mem0Tools
+    return UserFilterMem0Tools

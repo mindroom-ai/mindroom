@@ -14,7 +14,9 @@ __all__ = (
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
-    "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
+    "CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES",
+    "CLAUDE_PREFIX_CHECKED_THINKING_MODELS",
+    "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS",
     "CODEX_GPT_ALIAS",
     "CODEX_GPT_ENDPOINT",
     "CONFIG_INIT_ADDITIONAL_MODELS",
@@ -52,7 +54,6 @@ __all__ = (
     "OPENAI_IMAGE",
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
-    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
@@ -68,6 +69,7 @@ __all__ = (
     "ModelPreset",
     "claude_rejects_sampling_controls",
     "llama_cpp_server_command",
+    "openai_rejects_sampling_controls",
 )
 
 
@@ -109,6 +111,9 @@ CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-mythos-5",
     "claude-mythos-preview",
 )
+# Claude models that reject forced tool use on every request
+# (https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility).
+CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES = (_ANTHROPIC_OPUS, _ANTHROPIC_SONNET, _ANTHROPIC_FABLE, "claude-mythos-5-1")
 # Claude models that predate tool_search_tool_regex_20251119 (Opus 4.1 and
 # earlier — a closed set, so new releases take the native tool-search path
 # without a list update). Prefixes cover the aliases plus the dated
@@ -140,8 +145,9 @@ OPENAI_GPT_LUNA = "gpt-6-luna"
 # The Decisions API serves only this model, so it does not follow the Luna default.
 OPENAI_DECISIONS_MODEL = "gpt-6-luna"
 # OpenAI model families whose models mostly reject sampling values other than their defaults, as gpt-5-mini, gpt-5.5,
-# and gpt-6-luna reject temperature 0.1; each user decides how it matches IDs and which parameters it drops.
-OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
+# and gpt-6-luna reject temperature 0.1; ``openai_rejects_sampling_controls`` matches their ids, and each caller
+# decides which parameters it drops.
+_OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
 OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")
@@ -157,30 +163,49 @@ _GOOGLE_GEMINI_FLASH = "gemini-3.8-flash"
 _GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
 GOOGLE_IMAGE = "gemini-3.1-flash-image"
 GOOGLE_VEO = "veo-3.1-generate-001"
-GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
-    _GOOGLE_GEMINI_FLASH,
-    "gemini-3.6-flash",
-    _GOOGLE_GEMINI_LITE,
-)
-CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
-    _ANTHROPIC_FABLE,
-    "claude-fable-5.1",
+# Direct Gemini API models whose requests keep the provider's sampling defaults. Literal ids, like the Claude lists
+# below, because a model keeps its sampling rule after the preferred defaults move on from it.
+GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+# The Claude models that reject non-default temperature, top_p, and top_k on every request, Claude 4.7 and later plus
+# Mythos Preview (https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters), by the start of
+# their hyphenated and dotted ids; newer generations join them. Literal ids, because a model keeps the rule after the
+# preferred defaults move on from it.
+CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS = (
     "claude-fable-5",
-    _ANTHROPIC_OPUS,
-    "claude-opus-5.5",
+    "claude-mythos-5",
+    "claude-mythos-preview",
     "claude-opus-5",
-    _ANTHROPIC_SONNET,
-    "claude-sonnet-5.5",
+    "claude-opus-4-8",
+    "claude-opus-4.8",
+    "claude-opus-4-7",
+    "claude-opus-4.7",
     "claude-sonnet-5",
+    "claude-haiku-5-5",
+    "claude-haiku-5.5",
 )
+
+# The Claude models whose API checks each replayed thinking block against the system prompt, tools, and messages sent
+# before it (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join them.
+# Literal ids, because a model keeps the check after the preferred defaults move on from it.
+CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:
     """Return whether a Claude model id rejects non-default ``temperature``, ``top_p``, and ``top_k``.
 
-    The direct, Bedrock, Vertex, and gateway spellings of one generation all end with its suffix.
+    Every spelling of a listed model's id contains its name: direct, dated, Vertex ``@`` snapshot, Bedrock region and
+    version, and gateway path or prefix.
     """
-    return model_id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+    folded = model_id.casefold()
+    return any(name in folded for name in CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS)
+
+
+def openai_rejects_sampling_controls(model_id: str) -> bool:
+    """Return whether an OpenAI model id names a GPT-5 or GPT-6 model, which mostly reject non-default sampling values.
+
+    The id may carry a gateway prefix such as OpenRouter's ``openai/``, in any letter case.
+    """
+    return model_id.casefold().rsplit("/", 1)[-1].startswith(_OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
 
 
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"

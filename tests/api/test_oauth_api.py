@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from httpx import HTTPError, HTTPStatusError, Request, Response
 from starlette.requests import Request as StarletteRequest
@@ -3577,6 +3578,7 @@ async def test_callback_maps_locked_connection_generation_race_to_conflict(
         payload={"connection_generation": "generation-1"},
         code_verifier=None,
         token_url=provider.token_url,
+        credential_service=None,
     )
     conflict = OAuthCredentialConflictError("OAuth connection state is stale because this credential changed")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
@@ -3630,6 +3632,7 @@ async def test_callback_hides_provider_controlled_exchange_error(
         payload={"connection_generation": "generation-1"},
         code_verifier=None,
         token_url=provider.token_url,
+        credential_service=None,
     )
     provider_error = OAuthProviderError("provider-controlled-callback-secret")
     monkeypatch.setattr(oauth_api, "_require_oauth_api_user", AsyncMock())
@@ -4462,6 +4465,7 @@ async def test_callback_saves_exchanged_credentials_before_propagating_cancellat
         payload=await oauth_api._target_binding_payload(provider, target),
         code_verifier=None,
         token_url=provider.token_url,
+        credential_service=None,
     )
 
     async def allow_request(_request: StarletteRequest) -> None:
@@ -4543,6 +4547,7 @@ async def test_callback_finishes_target_verification_after_state_consumption_bef
         payload={"connection_generation": "generation-1"},
         code_verifier=None,
         token_url=provider.token_url,
+        credential_service=None,
     )
     verification_started = asyncio.Event()
     release_verification = asyncio.Event()
@@ -7086,3 +7091,11 @@ def test_required_scope_check_accepts_refresh_token_for_offline_access() -> None
         provider,
         {"scopes": ["scope.read"], "refresh_token": ""},
     )
+
+
+def test_oauth_routes_never_take_another_credential_service() -> None:
+    """Only Agent Keys stores a service's own account under another name; the tools' OAuth routes cannot ask for one."""
+    routes = {route.path: route for route in main.app.routes if isinstance(route, APIRoute)}
+    for action in ("connect", "disconnect", "status"):
+        route = routes[f"/api/oauth/{{provider_id}}/{action}"]
+        assert {param.name for param in route.dependant.query_params} == {"agent_name"}

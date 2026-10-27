@@ -979,7 +979,6 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
         intent=None,
         requested_members=[],
         member_statuses=[],
-        eligible_members=[],
         outcome=TeamOutcome.REJECT,
         reason="No team members are available.",
     )

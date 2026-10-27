@@ -25,9 +25,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Plan a multi-stop trip.",
-        "external_execution": false,
         "name": "plan_trip",
         "parameters": {
           "properties": {
@@ -131,13 +129,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Create a calendar event and invite attendees.",
-        "external_execution": false,
         "name": "calendar_create_event",
         "parameters": {
           "$defs": {
@@ -269,7 +264,6 @@
           "title": "create_eventArguments",
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -371,68 +365,17 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "tools": [
         {
           "name": "calendar_create_event",
           "description": "Create a calendar event and invite attendees.",
           "input_schema": {
-            "type": "object",
-            "properties": {
-              "attendees": {
-                "description": "People to invite.",
-                "items": {
-                  "$ref": "#/$defs/Attendee"
-                },
-                "maxItems": 50,
-                "title": "Attendees",
-                "type": "array"
-              },
-              "labels": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "Free-form labels.",
-                "title": "Labels",
-                "type": "object"
-              },
-              "location": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Location"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": ""
-              },
-              "reminder_minutes": {
-                "default": 10,
-                "maximum": 1440,
-                "minimum": 0,
-                "title": "Reminder Minutes",
-                "type": "integer",
-                "description": ""
-              },
-              "starts_at": {
-                "format": "date-time",
-                "title": "Starts At",
-                "type": "string",
-                "description": ""
-              },
-              "title": {
-                "description": "Event title.",
-                "title": "Title",
-                "type": "string"
-              }
-            },
-            "required": [
-              "title",
-              "starts_at",
-              "attendees"
-            ],
-            "additionalProperties": false,
             "$defs": {
               "Attendee": {
                 "properties": {
@@ -506,14 +449,67 @@
                 "title": "Location",
                 "type": "object"
               }
-            }
+            },
+            "properties": {
+              "attendees": {
+                "description": "People to invite.",
+                "items": {
+                  "$ref": "#/$defs/Attendee"
+                },
+                "maxItems": 50,
+                "title": "Attendees",
+                "type": "array"
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Free-form labels.",
+                "title": "Labels",
+                "type": "object"
+              },
+              "location": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Location"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "reminder_minutes": {
+                "default": 10,
+                "maximum": 1440,
+                "minimum": 0,
+                "title": "Reminder Minutes",
+                "type": "integer"
+              },
+              "starts_at": {
+                "format": "date-time",
+                "title": "Starts At",
+                "type": "string"
+              },
+              "title": {
+                "description": "Event title.",
+                "title": "Title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "title",
+              "starts_at",
+              "attendees"
+            ],
+            "title": "create_eventArguments",
+            "type": "object"
           }
         },
         {
           "name": "plan_trip",
           "description": "Plan a multi-stop trip.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "budget": {
                 "anyOf": [
@@ -538,8 +534,7 @@
                       "amount"
                     ],
                     "title": "TripBudget",
-                    "type": "object",
-                    "additionalProperties": false
+                    "type": "object"
                   },
                   {
                     "type": "null"
@@ -585,8 +580,7 @@
                     "city"
                   ],
                   "title": "TripStop",
-                  "type": "object",
-                  "additionalProperties": false
+                  "type": "object"
                 },
                 "type": "array"
               },
@@ -615,7 +609,7 @@
               "destination",
               "stops"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "cache_control": {
             "type": "ephemeral",
@@ -628,6 +622,7 @@
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "content-type": "application/json"
     },
     "method": "POST",

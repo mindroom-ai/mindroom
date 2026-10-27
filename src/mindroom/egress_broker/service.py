@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.egress_broker.secrets import SecretRequest
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
@@ -274,6 +275,7 @@ async def _resolve_secret(
     claims: WorkerClaims,
     name: str,
     routed: EgressService,
+    request: SecretRequest,
     *,
     config: _LastGoodConfig,
     runtime_paths: RuntimePaths,
@@ -286,7 +288,8 @@ async def _resolve_secret(
     config's services plus the scope's own) must still define `name` as `routed`, or the result is
     `SecretServiceChanged`: a service saved since routing may be meant for other hosts. The key read and that check
     run in one call on the loop's default executor (`_routed_key`); the OAuth lookup, which may refresh, then
-    runs on `oauth_executor` with the provider of the checked definition.
+    runs on `oauth_executor` with the provider and `read_only` of the checked definition and the `request` facts, which
+    an account allowed only to read is checked against. A stored key is never limited by that.
     """
     target = claims.to_worker_target()
     stored = await asyncio.to_thread(_routed_key, config, credentials_manager, target, name, routed)
@@ -306,6 +309,9 @@ async def _resolve_secret(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=target,
+        request=request,
+        read_only=routed.read_only,
+        separate_account=routed.oauth_separate_account,
     )
     return await asyncio.get_running_loop().run_in_executor(oauth_executor, lookup)
 
@@ -527,6 +533,7 @@ def execution_env_for_worker(
         read_oauth_status = functools.partial(
             oauth_status,
             service=name,
+            separate_account=egress_service.oauth_separate_account,
             config=config,
             runtime_paths=runtime_paths,
             credentials_manager=runtime.credentials_manager,

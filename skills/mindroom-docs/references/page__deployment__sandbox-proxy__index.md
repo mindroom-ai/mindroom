@@ -221,8 +221,12 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 ### Keeping worker versions matched
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
-MindRoom refuses dedicated Docker worker images whose protocol does not match the primary runtime; it pulls the configured image once and recreates the worker before failing.
+MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running under a mutable tag such as `:latest` from a release with another worker protocol is replaced on its next use.
+A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
+A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary does not run yet; upgrade the primary to that release, or pin one release tag for both.
+Restarting the primary picks up that release only when the primary runs the same mutable tag and pulls it on every start, as the runtime chart's default `latest` tag with pull policy `Always` does.
+A restarted `uvx mindroom run` keeps its cached release, while `uvx mindroom@latest run` fetches the newest one.
 Plain `uvx mindroom run` runs the published PyPI release, so when testing unreleased code, run MindRoom from the checkout you build the image from (`uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`).
 When upgrading from older releases, see [Workspace-only worker mounts](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts), [Config-free runners and workers](https://docs.mindroom.chat/deployment/upgrades/#config-free-runners-and-workers), and [Requester-scoped worker keys](https://docs.mindroom.chat/deployment/upgrades/#requester-scoped-worker-keys).
 
@@ -353,6 +357,7 @@ To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` 
 Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Use `shell_path_prepend` to add directories, such as wrapper directories, ahead of the existing `PATH`.
 Both options are documented with the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
+A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) can also set, remove, or pass through variables for one call's commands.
 
 ### Workspace home contract
 
@@ -380,6 +385,7 @@ How it behaves:
 - Only exported variables apply: write `export FOO=bar`, because plain `FOO=bar`, aliases, functions, and `cd` do not carry over.
 - The script starts from the prepared request environment, not the runner's full environment.
 - Exported values pass through, including tokens you export on purpose, except MindRoom's control variables (the same ones dropped from [shell passthrough](#shell-environment-and-path)), bash bookkeeping variables such as `PWD` and `SHLVL`, the [workspace home](#workspace-home-contract) variables, and values larger than 32 KiB.
+- A variable a plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) sets or removes for a `shell` call wins over the script's export.
 
 Limits and errors:
 

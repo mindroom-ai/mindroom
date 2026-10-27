@@ -184,7 +184,7 @@ async def _resume(
     )
     session = new_scope_session(session_id="session-1", scope_id="general", is_team=False)
     for run in (*history, paused):
-        store.save_runs(session, [run])
+        store.save_run(session, run, record_usage=False)
     runner = ResumeRunner(
         build=build,
         config=config,

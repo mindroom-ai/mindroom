@@ -13,6 +13,10 @@ import {
   Trash2,
 } from "lucide-react";
 import { API_ENDPOINTS, fetchJSON } from "@/lib/api";
+import {
+  SERVICE_NAME_CHARACTERS,
+  SERVICE_NAME_PATTERN,
+} from "@/lib/serviceNames";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,7 +54,6 @@ interface ServiceStatus {
 }
 
 const EMPTY_JSON = "{}";
-const SERVICE_NAME_PATTERN = /^[a-zA-Z0-9:_-]+$/;
 const PARTIAL_STATUS_ERROR =
   "Some service statuses could not be loaded. You can still edit credentials.";
 
@@ -74,7 +77,7 @@ function validateServiceName(service: string): string | null {
     return "Service name is required";
   }
   if (!SERVICE_NAME_PATTERN.test(service)) {
-    return "Service name can only include letters, numbers, colon, underscore, and hyphen";
+    return `Service name can only include ${SERVICE_NAME_CHARACTERS}`;
   }
   return null;
 }

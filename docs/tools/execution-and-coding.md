@@ -356,6 +356,7 @@ is_prime(97)
 `think()` records an intermediate thought and an optional next action.
 `analyze()` records the result of a step and a `next_action` of `continue`, `validate`, or `final_answer`.
 Steps are kept for the current run, so later steps see earlier ones.
+The agent's prompt includes the default reasoning instructions, which tell the model to call `think()` before every tool call or reply, only while both `think()` and `analyze()` are enabled; instructions you set with `instructions` are always included.
 
 ### Configuration
 
@@ -363,8 +364,7 @@ Steps are kept for the current run, so later steps see earlier ones.
 | --- | --- | --- | --- | --- |
 | `enable_think` | `boolean` | `no` | `true` | Enable `think()`. |
 | `enable_analyze` | `boolean` | `no` | `true` | Enable `analyze()`. |
-| `add_instructions` | `boolean` | `no` | `false` | Add the toolkit's reasoning instructions to the prompt. |
-| `add_few_shot` | `boolean` | `no` | `false` | Also add few-shot examples when instructions are added. |
+| `add_few_shot` | `boolean` | `no` | `false` | Add few-shot examples to the default reasoning instructions. |
 | `instructions` | `text` | `no` | `null` | Replace the default reasoning instructions entirely. |
 | `few_shot_examples` | `text` | `no` | `null` | Replace the built-in few-shot examples; used only when few-shot examples are added. |
 | `all` | `boolean` | `no` | `false` | Enable all reasoning functions. |
@@ -376,7 +376,6 @@ agents:
   researcher:
     tools:
       - reasoning:
-          add_instructions: true
           add_few_shot: true
 ```
 

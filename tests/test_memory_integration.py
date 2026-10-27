@@ -108,7 +108,7 @@ class TestMemoryIntegration:
 
         # The recalled memory follows the prompt as transient context the run never stores.
         [request] = model.requests
-        _system, prompt, transient = request.messages
+        _stable, _turn, prompt, transient = request.messages
         assert prompt.role == "user"
         assert prompt.content == "What is 2+2?"
         assert prompt.add_to_agent_memory is True
@@ -212,7 +212,12 @@ class TestMemoryIntegration:
             )
 
             # Memory search should have been called
-            mock_memory.search.assert_called_with("What is A?", filters={"user_id": "agent_general"}, top_k=3)
+            mock_memory.search.assert_called_with(
+                "What is A?",
+                filters={"user_id": "agent_general"},
+                top_k=3,
+                threshold=pytest.approx(1 / 2.8),
+            )
 
 
 @pytest.mark.parametrize(

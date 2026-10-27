@@ -161,7 +161,7 @@
             }
           ],
           "default": null,
-          "description": "Whether to use markdown formatting",
+          "description": "Whether the system prompt tells the agent its replies are shown as Markdown",
           "title": "Markdown"
         },
         "knowledge_graph": {
@@ -1326,7 +1326,7 @@
         },
         "markdown": {
           "default": true,
-          "description": "Default markdown setting",
+          "description": "Default for whether system prompts tell agents and team leaders their replies are shown as Markdown",
           "title": "Markdown",
           "type": "boolean"
         },
@@ -1614,7 +1614,7 @@
             }
           ],
           "default": 0.2,
-          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for OpenAI GPT-5 and GPT-6 models, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
+          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for OpenAI GPT-5 and GPT-6 models, Vertex Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, Claude 5 and 5.x models, and direct Google Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite thread summaries.",
           "title": "Thread Summary Temperature"
         },
         "thread_summary_first_threshold": {
@@ -1778,6 +1778,23 @@
       "title": "EgressBrokerConfig",
       "type": "object"
     },
+    "EgressReadOnly": {
+      "additionalProperties": false,
+      "description": "How a service's API reads: with `GET` and `HEAD`, and with `POST` only to `post_paths`.",
+      "properties": {
+        "post_paths": {
+          "default": [],
+          "description": "Path prefixes, matched by segment like a rule's path_prefix, of the endpoints that read with POST; a connected account allowed read-only may POST only to these",
+          "items": {
+            "type": "string"
+          },
+          "title": "Post Paths",
+          "type": "array"
+        }
+      },
+      "title": "EgressReadOnly",
+      "type": "object"
+    },
     "EgressRule": {
       "additionalProperties": false,
       "description": "One egress routing rule.",
@@ -1841,7 +1858,7 @@
             }
           ],
           "default": null,
-          "description": "Built-in service preset that supplies display_name, description, rules, placeholder_env, and oauth_provider; fields set explicitly here replace the preset's values",
+          "description": "Built-in service preset that supplies display_name, description, rules, placeholder_env, oauth_provider, and read_only; fields set explicitly here replace the preset's values",
           "title": "Preset"
         },
         "display_name": {
@@ -1894,6 +1911,24 @@
           "default": null,
           "description": "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored, once someone allows Agent Keys to use it for this service; checked against the provider registry at runtime",
           "title": "Oauth Provider"
+        },
+        "oauth_separate_account": {
+          "default": false,
+          "description": "Give a service a user adds its own oauth_provider login, separate from the connection the agent's tools use; a request chooses the service with the X-Agent-Keys-Service header. Config services and services of shared or unscoped agents cannot set it. Presets never set this",
+          "title": "Oauth Separate Account",
+          "type": "boolean"
+        },
+        "read_only": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressReadOnly"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Offer read-only access for the service's connected account: allowed read-only, it gets the token only for GET and HEAD, and for POST to read_only.post_paths. Set it only for an API whose writes never use GET or HEAD; without it, an account can only be allowed read and write"
         },
         "oauth_on_shared_workers": {
           "default": false,
@@ -4656,6 +4691,7 @@
       "type": "object"
     },
     "TeamConfig": {
+      "additionalProperties": false,
       "description": "Configuration for a team of agents.",
       "properties": {
         "display_name": {
@@ -4742,6 +4778,10 @@
         "mode": {
           "default": "coordinate",
           "description": "Team collaboration mode: coordinate or collaborate",
+          "enum": [
+            "coordinate",
+            "collaborate"
+          ],
           "title": "Mode",
           "type": "string"
         },

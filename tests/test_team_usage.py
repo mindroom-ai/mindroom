@@ -23,7 +23,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
-from tests.conftest import persist_runs
+from tests.conftest import persist_runs, seed_session_row
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -87,28 +87,27 @@ def _stored_team(
     *,
     requester_id: str = _ALIAS,
 ) -> Iterator[ConversationStore]:
-    grandchild = RunRecord(
-        run_id="grandchild",
-        parent_run_id="member",
-        agent_id="code",
-        user_id=requester_id,
-        model_provider="test-provider",
-        model="member-model",
-        created_at=_MIDNIGHT + 20,
-        metrics=_metrics(30, "member-model"),
-        messages=[_request(30, _MIDNIGHT + 20)],
-    )
-    member = TeamRunRecord(
+    member = RunRecord(
         run_id="member",
         parent_run_id="leader",
-        team_id="nested-team",
+        agent_id="code",
         metadata={"requester_id": requester_id},
         model_provider="test-provider",
         model="member-model",
         created_at=_MIDNIGHT + 10,
         metrics=_metrics(20, "member-model"),
         messages=[_request(20, _MIDNIGHT + 10)],
-        member_responses=[grandchild],
+    )
+    other_member = RunRecord(
+        run_id="other-member",
+        parent_run_id="leader",
+        agent_id="research",
+        user_id=requester_id,
+        model_provider="test-provider",
+        model="member-model",
+        created_at=_MIDNIGHT + 20,
+        metrics=_metrics(30, "member-model"),
+        messages=[_request(30, _MIDNIGHT + 20)],
     )
     leader = TeamRunRecord(
         run_id="leader",
@@ -119,7 +118,7 @@ def _stored_team(
         created_at=_MIDNIGHT - 10,
         metrics=_metrics(10, "leader-model"),
         messages=[_request(10, _MIDNIGHT - 10)],
-        member_responses=[member],
+        member_responses=[member, other_member],
     )
     session = ConversationSession(session_id="session", kind="team", owner_id=team_id)
     storage = create_scope_session_storage(
@@ -128,9 +127,10 @@ def _stored_team(
         runtime_paths=paths,
         execution_identity=None,
     )
-    storage.ensure_session_row(session)
-    # The member is saved twice, as a run saved again at a checkpoint is; its calls count once.
-    persist_runs(storage, session, leader, member, grandchild, member)
+    seed_session_row(storage, session)
+    # Members save before their team run, as a team turn saves them. The member is saved twice, as a run saved
+    # again at a checkpoint is; its calls count once.
+    persist_runs(storage, session, member, other_member, member, leader)
     yield storage
 
 
@@ -141,7 +141,7 @@ def test_team_export_counts_each_saved_call_once(
     team_id: str,
     retained_conversation: bool,
 ) -> None:
-    """Configured and ad hoc team details include descendants and survive conversation cleanup."""
+    """Configured and ad hoc team details include team members and survive conversation cleanup."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(
         agents={"code": AgentConfig(display_name="Code"), "research": AgentConfig(display_name="Research")},
@@ -150,10 +150,7 @@ def test_team_export_counts_each_saved_call_once(
     )
     with _stored_team(paths, config, team_id) as storage:
         if not retained_conversation:
-            storage.delete_run_subtrees(
-                ConversationSession(session_id="session", kind="team", owner_id=team_id),
-                ["leader"],
-            )
+            storage.delete_runs(["leader"], session_id="session")
         report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
     assert report.totals.input_tokens == 60
@@ -196,10 +193,10 @@ def test_invalid_team_child_counter_preserves_valid_usage(tmp_path: Path, invali
         with sqlite3.connect(storage.path) as connection:
             table = quote_identifier(storage.names.usage)
             query = f"SELECT usage_data FROM {table} WHERE run_id = ?"  # noqa: S608
-            payload = json.loads(connection.execute(query, ("grandchild",)).fetchone()[0])
+            payload = json.loads(connection.execute(query, ("other-member",)).fetchone()[0])
             payload["metrics"]["total_tokens"] = invalid_total
             query = f"UPDATE {table} SET usage_data = ? WHERE run_id = ?"  # noqa: S608
-            connection.execute(query, (json.dumps(payload), "grandchild"))
+            connection.execute(query, (json.dumps(payload), "other-member"))
         report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
     assert report.totals.total_tokens == 63  # Authoritative session counters remain valid.
@@ -226,10 +223,10 @@ def test_team_child_without_requester_does_not_inherit_session_creator(tmp_path:
         with sqlite3.connect(storage.path) as connection:
             table = quote_identifier(storage.names.usage)
             query = f"SELECT usage_data FROM {table} WHERE run_id = ?"  # noqa: S608
-            payload = json.loads(connection.execute(query, ("grandchild",)).fetchone()[0])
+            payload = json.loads(connection.execute(query, ("other-member",)).fetchone()[0])
             payload.pop("user_id")
             query = f"UPDATE {table} SET usage_data = ? WHERE run_id = ?"  # noqa: S608
-            connection.execute(query, (json.dumps(payload), "grandchild"))
+            connection.execute(query, (json.dumps(payload), "other-member"))
         report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
 
     assert {(row.user_id, row.totals.input_tokens) for row in report.user_breakdown} == {(_ALICE, 30), (None, 30)}

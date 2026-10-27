@@ -103,7 +103,12 @@ export interface EgressOAuthStatus {
    * it, a connected account serves only its tools.
    */
   reuse_enabled: boolean;
+  /** What Agent Keys may do with the account: only read, or read and write; `null` while it is not allowed. */
+  reuse_access: EgressAccess | null;
 }
+
+/** How much an allowed account may do through Agent Keys. */
+export type EgressAccess = "read" | "read_write";
 
 /** Who defined a service: the administrator in config.yaml or the caller's own scope. */
 export type EgressServiceSource = "config" | "user";
@@ -140,6 +145,10 @@ export interface EgressCredentialService {
    * pick a credential, and it has no key or account.
    */
   restrict_only: boolean;
+  /** The service's account can be allowed read-only as well as read and write. */
+  read_only_supported: boolean;
+  /** The account is the service's own, not the one the agent's tools use. Sent in the personal listing only. */
+  separate_account?: boolean;
   /**
    * The names of the variables the service sets in the sandbox, a preset's
    * included, so a service of one's own that sets the same one can be warned
@@ -223,6 +232,8 @@ export interface AuthoredEgressService {
   rules?: EgressRule[];
   placeholder_env?: Record<string, string>;
   oauth_provider?: string | null;
+  /** A user's own service logs in with an account of its own, not the one the agent's tools use. */
+  oauth_separate_account?: boolean;
   /** Operator-only; the personal API rejects it. */
   oauth_on_shared_workers?: boolean;
   restrict_to_rules?: boolean;
@@ -245,6 +256,8 @@ export interface EgressPreset {
 export interface EgressOAuthProviderOption {
   id: string;
   display_name: string;
+  /** Its accounts belong to each user (GitHub, Atlassian), so a service cannot have one of its own. */
+  requester_scoped: boolean;
 }
 
 /** The rules for the variables a service may set in the sandbox, as the server enforces them. */

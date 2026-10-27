@@ -17,16 +17,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopEndHook, LoopState
     from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 @dataclass(frozen=True)
 class CapturedRequest:
-    """One run's last model request, its messages continued with the model's final answer."""
+    """One run's last model request, its messages continued with the model's final answer.
+
+    ``functions`` are the run's offered functions, whose policy says which of the request's tools wait for a decision.
+    """
 
     model: ModelProvider
     model_name: str
     run_id: str
     request: ModelRequest
+    functions: tuple[ToolFunction, ...]
 
 
 @dataclass
@@ -58,6 +63,7 @@ def capture_final_request(
             model_name=model_name,
             run_id=state.run.run_id,
             request=replace(request, messages=messages, tools=state.offered.specs()),
+            functions=tuple(state.offered.functions.values()),
         )
 
     return record

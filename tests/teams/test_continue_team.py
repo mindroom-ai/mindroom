@@ -194,9 +194,8 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert checker_request.messages[-1].content == "Alice declined."
 
 
-async def test_a_resumed_leader_reads_a_new_delegation_by_the_streamed_result_rules() -> None:
-    # The result rules still depend on the stream mode (``member_result_text``), and a resume uses the streamed ones,
-    # so a member whose text is blank and that ran no tools hands over the no-response notice rather than nothing.
+async def test_a_resumed_leader_reads_a_new_delegation_by_the_one_result_rule() -> None:
+    # A member whose text is blank and that ran no tools hands over the no-response notice (``member_result_text``).
     paused = _paused_team_approved()
     leader = scripted(
         "leader-model",
@@ -249,7 +248,7 @@ async def test_a_collaborate_resume_keeps_the_text_of_the_member_that_finished_b
         start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
     )
     assert paused.tools is not None
-    assert paused.tools[0].result == "Six times seven is 42." + CHECKER_PAUSED_PIECE
+    assert paused.tools[0].result == ("Agent Writer: Six times seven is 42.\n\n" + CHECKER_PAUSED_PIECE)
 
     store = Store()
     _, record = await collect(
@@ -265,7 +264,7 @@ async def test_a_collaborate_resume_keeps_the_text_of_the_member_that_finished_b
 
     assert (record.status, record.content) == (RunStatus.completed, "The panel says 42.")
     # The writer's text stays in the tool entry and in what the leader reads, beside the resumed checker's.
-    resolved = "Six times seven is 42.Agent Checker: 42"
+    resolved = "Agent Writer: Six times seven is 42.\n\nAgent Checker: 42"
     assert record.tools is not None
     assert record.tools[0].result == resolved
     assert leader.requests[-1].messages[-1].content == resolved
@@ -672,7 +671,7 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
     assert writer.requests[-1].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
     assert checker.requests[-1].messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
     assert record.tools is not None
-    assert record.tools[0].result == "Agent Writer: Writer: 42Agent Checker: Checker: 42"
+    assert record.tools[0].result == "Agent Writer: Writer: 42\n\nAgent Checker: Checker: 42"
     assert leader.requests[-1].messages[-1].content == record.tools[0].result
     assert record.requirements == []
 
@@ -976,7 +975,7 @@ async def test_a_member_renamed_while_its_approval_waits_still_answers_the_call_
     )
 
     assert record.status is RunStatus.completed
-    answered = "42" if mode is TeamMode.COORDINATE else "Six times seven is 42.Agent Checker: 42"
+    answered = "42" if mode is TeamMode.COORDINATE else "Agent Writer: Six times seven is 42.\n\nAgent Checker: 42"
     assert leader.requests[-1].messages[-1].content == answered
 
 
@@ -1082,7 +1081,9 @@ async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_ans
     )
 
     expected = (
-        [writer_text, "Checker: 42"] if mode is TeamMode.COORDINATE else [f"{writer_text}Agent Checker: Checker: 42"]
+        [writer_text, "Checker: 42"]
+        if mode is TeamMode.COORDINATE
+        else [f"Agent Writer: {writer_text}\n\nAgent Checker: Checker: 42"]
     )
     assert record.status is RunStatus.completed
     assert [message.content for message in leader.requests[-1].messages if message.role == "tool"] == expected

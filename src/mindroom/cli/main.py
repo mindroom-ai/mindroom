@@ -245,10 +245,13 @@ def run(
     try:
         if local_pairing_required(runtime_paths):
             import mindroom.cli.connect as cli_connect  # noqa: PLC0415
-            from mindroom.cli.pairing_probes import serve_pairing_probes  # noqa: PLC0415
+            from mindroom.api.startup_probes import serve_startup_probes  # noqa: PLC0415
 
             # Container health probes must see a live process while the run waits for a human to approve it.
-            with serve_pairing_probes(api_host, api_port) if api else nullcontext():
+            probes = (
+                serve_startup_probes(api_host, api_port, detail="Waiting for local pairing approval") if api else None
+            )
+            with probes or nullcontext():
                 cli_connect.pair_local_install(
                     runtime_paths,
                     console=console,

@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Gemini wire format: request contents, function declarations, schema conversion, and stream parsing.
+"""Gemini wire format: request contents, function declarations, and stream parsing.
 
 Request values are plain dicts in google-genai's field names.
 The SDK validates them into its own types before it serializes the request.
@@ -12,7 +12,7 @@ import base64
 import json
 import mimetypes
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,7 +28,7 @@ from google.genai.types import (
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, InvalidRequest, ProviderError
 from mindroom.llm.media import IMAGE_HEADER_BYTES, canonical_mime_type, image_mime_type
-from mindroom.llm.messages import tool_result_view
+from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
         GenerateContentResponseUsageMetadata,
         Part,
     )
-    from pydantic import BaseModel
 
     from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message, ToolResultView
@@ -54,6 +53,8 @@ logger = get_logger(__name__)
 _ROLE_MAP = {"assistant": "model", "tool": "user"}
 # Gemini rejects requests above 20 MB, so larger local media goes through the Files API, which Vertex AI lacks.
 _INLINE_MEDIA_LIMIT_BYTES = 20 * 1024 * 1024
+# ``Message.provider_data`` key of a Gemini reply's parts in arrival order (``reply_provider_data``).
+_GEMINI_PARTS_KEY = "gemini_parts"
 _FORMAT_TO_MIME = {
     "png": "image/png",
     "jpeg": "image/jpeg",
@@ -124,18 +125,31 @@ class MediaRoute:
 async def format_contents(
     messages: Sequence[Message],
     route: MediaRoute,
-) -> tuple[list[dict[str, Any]], str | list[Any] | None]:
-    """Return the request contents and the system instruction for ``messages``.
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return the request contents and the system instruction for ``messages``, their system prompt as one text.
 
     Local media is read off the event loop and remote media downloaded; media that cannot be sent raises
     ``InvalidRequest``, so the media fallback replaces it with its note instead of the model never seeing it.
     """
     contents: list[dict[str, Any]] = []
-    system_instruction: str | list[Any] | None = None
+    # LEGACY_COMPAT: Tool results stored without their tool's name.
+    # Legacy format: a stored ``tool`` message whose ``tool_name`` is null, as rows the Agno-backed runtime or another
+    # writer stored can be; current writers record the name with every result.
+    # Last legacy release: no single cutoff: v2026.10.498 was the last release whose Agno-backed writer stored tool
+    # results, the owned writers from v2026.10.499 always store the name, and foreign rows may still lack it.
+    # Handling: such a result takes the name of the call with its id earlier in the request, so it goes to Gemini as a
+    # function response instead of user text; one whose call the request does not hold still goes as text.
+    # Coverage: tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_names_a_tool_result_stored_without_its_name_after_its_call
+    call_names = {
+        call.get("id"): (call.get("function") or {}).get("name")
+        for message in messages
+        for call in message.tool_calls or ()
+    }
     for message in messages:
         if message.role == "system":
-            system_instruction = message.content
             continue
+        if message.role == "tool" and message.tool_name is None and message.tool_call_id in call_names:
+            message = replace(message, tool_name=call_names[message.tool_call_id])  # noqa: PLW2901
         role = _ROLE_MAP.get(message.role, message.role)
         parts = _message_parts(message, role)
         if role == "user" and message.tool_calls is None and not _is_tool_result(message):
@@ -149,7 +163,7 @@ async def format_contents(
         # Gemini 4 rejects a last user turn that ends with anything but its function responses, as a request ending
         # with a model turn, so the text and media that follow tool results go before them.
         content["parts"].sort(key=lambda part: "function_response" in part)
-    return contents, system_instruction
+    return contents, system_text(messages) or None
 
 
 def _is_tool_result(message: Message) -> bool:
@@ -157,8 +171,15 @@ def _is_tool_result(message: Message) -> bool:
 
 
 def _message_parts(message: Message, role: str) -> list[dict[str, Any]]:
-    """Return the text, function call, and function response parts of one message."""
+    """Return the text, function call, and function response parts of one message.
+
+    A model message that stored its parts (``reply_provider_data``) replays them in their order, each text part with
+    its own signature.
+    """
     content = message.content
+    stored = (message.provider_data or {}).get(_GEMINI_PARTS_KEY) if role == "model" else None
+    if isinstance(stored, list):
+        return _stored_parts(stored, message.tool_calls or [])
     if role == "model" and message.tool_calls:
         parts = [] if content is None else [_text_part(str(content), message.provider_data)]
         parts.extend(_function_call_part(call) for call in message.tool_calls)
@@ -190,6 +211,24 @@ def _provider_id(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Return a stored reply's parts in order; a call the parts do not name follows them."""
+    calls = {call.get("id"): call for call in tool_calls}
+    parts: list[dict[str, Any]] = []
+    for entry in stored:
+        if isinstance(entry, dict) and isinstance(entry.get("text"), str):
+            parts.append(_text_part(entry["text"], entry))
+        elif isinstance(entry, dict) and (call := calls.pop(entry.get("function_call_id"), None)) is not None:
+            parts.append(_function_call_part(call))
+    return [*parts, *(_function_call_part(call) for call in calls.values())]
+
+
+# LEGACY_COMPAT: Gemini replies stored with one message-level thought signature.
+# Legacy format: a stored Gemini assistant message whose ``provider_data`` holds ``thought_signature`` and no
+# ``gemini_parts``: the reply's text parts joined into ``content`` and the last signed text part's signature.
+# Last legacy release: v2026.10.600 wrote this shape; the release after it stores ``gemini_parts``.
+# Handling: such a message replays as one text part carrying that signature, then its calls, as it did.
+# Coverage: tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_replays_a_reply_in_the_order_its_parts_arrived
 def _text_part(text: str, provider_data: Mapping[str, Any] | None) -> dict[str, Any]:
     part: dict[str, Any] = {"text": text}
     if provider_data and "thought_signature" in provider_data:
@@ -233,22 +272,16 @@ async def _local_part(
     kind: str,
     route: MediaRoute,
     mime_type: Callable[[bytes], str],
-    *,
-    always_upload: bool = False,
 ) -> dict[str, Any] | None:
     """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
 
     ``mime_type`` gets the file's bytes, or only its header when the file is uploaded.
     """
     file_path = Path(path)
-    # TODO(simplify): local audio and video always go through the Files API where there is one, even when small
-    # enough to inline. Inline them up to the limit like other media and drop ``always_upload``. Operators would
-    # see fewer Files API uploads; models get the same media.
-    inline_limit = 0 if always_upload and route.upload is not None else _INLINE_MEDIA_LIMIT_BYTES
-    size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, inline_limit)
+    size, data = await asyncio.to_thread(_read_local_media, file_path, kind, route.provider, _INLINE_MEDIA_LIMIT_BYTES)
     if not size:
         return None
-    if size <= inline_limit:
+    if size <= _INLINE_MEDIA_LIMIT_BYTES:
         return _inline(data, mime_type(data))
     if route.upload is None:
         msg = f"The {kind} attachment is too large to send inline to Vertex AI"
@@ -289,7 +322,7 @@ async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
         data, _ = await _downloaded(audio.url, "audio", route)
         return _inline(data, mime_type)
     if audio.filepath is not None:
-        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type, always_upload=True)
+        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type)
     return _inline(audio.content, mime_type) if audio.content else None
 
 
@@ -298,7 +331,7 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     if video.url is not None:
         return _file_uri(video.url, mime_type)
     if video.filepath is not None:
-        return await _local_part(video.filepath, "video", route, lambda _: mime_type, always_upload=True)
+        return await _local_part(video.filepath, "video", route, lambda _: mime_type)
     return _inline(video.content, mime_type) if video.content else None
 
 
@@ -356,11 +389,13 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  #
 
 
 def function_declarations(tools: Sequence[ToolSpec]) -> dict[str, Any] | None:
-    """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes."""
-    # TODO(simplify): a tool without a description sends an empty one. Leave it out, as Chat, Responses, and Ollama do
-    # (#3113). Models would notice: Gemini tool declarations change for tools without a description.
+    """Return the Gemini tool that declares ``tools``, sorted by name for stable request prefixes.
+
+    Each schema goes as authored, as JSON Schema (``parameters_json_schema``), which the Gemini API and Vertex AI both
+    take; a tool without a description sends none.
+    """
     declarations = [
-        _without_none(name=tool.name, description=tool.description or "", parameters=convert_schema(tool.parameters))
+        _without_none(name=tool.name, description=tool.description, parameters_json_schema=dict(tool.parameters))
         for tool in sorted(tools, key=lambda tool: tool.name)
     ]
     return {"function_declarations": declarations} if declarations else None
@@ -413,177 +448,6 @@ def tool_config(tool_choice: ToolChoice | None) -> dict[str, Any] | None:
     return None if tool_choice is None else {"function_calling_config": {"mode": "NONE"}}
 
 
-def response_schema(output_schema: type[BaseModel]) -> type[BaseModel] | dict[str, Any]:
-    """Return the response schema for a pydantic output model, converted where Gemini needs it."""
-    schema = output_schema.model_json_schema()
-    if not _needs_conversion(schema):
-        return output_schema
-    return convert_schema(schema) or output_schema
-
-
-def _needs_conversion(schema: Mapping[str, Any]) -> bool:
-    """Return whether a schema has dict fields or self references, which Gemini cannot take as a class."""
-    if _has_additional_properties(schema):
-        return True
-    definitions: Mapping[str, Any] = schema.get("$defs", {})
-    return any(
-        isinstance(definition, dict) and _has_self_reference(definition, f"#/$defs/{name}")
-        for name, definition in definitions.items()
-    )
-
-
-def _has_additional_properties(schema: Mapping[str, Any]) -> bool:
-    if "additionalProperties" in schema:
-        return True
-    properties: Mapping[str, Any] = schema.get("properties", {})
-    children = [*properties.values(), schema.get("items")]
-    return any(isinstance(child, dict) and _has_additional_properties(child) for child in children)
-
-
-def _has_self_reference(schema: Mapping[str, Any], target: str) -> bool:
-    if schema.get("$ref") == target:
-        return True
-    properties: Mapping[str, Any] = schema.get("properties", {})
-    alternatives = [sub for key in ("anyOf", "oneOf", "allOf") for sub in schema.get(key, ())]
-    children = [*properties.values(), schema.get("items"), *alternatives]
-    return any(isinstance(child, dict) and _has_self_reference(child, target) for child in children)
-
-
-def convert_schema(  # noqa: C901, PLR0911, PLR0912
-    schema: Mapping[str, Any],
-    root: Mapping[str, Any] | None = None,
-    visited: frozenset[str] = frozenset(),
-) -> dict[str, Any] | None:
-    """Convert a JSON schema to Gemini's schema dialect, resolving ``$ref`` and breaking cycles.
-
-    The input is never modified.
-    """
-    # TODO(simplify): tool and output schemas are rewritten into Gemini's OpenAPI subset, which drops some
-    # descriptions and invents an ``example_key`` property for dicts. Send them as authored, in the SDK's
-    # recommended ``parameters_json_schema`` and ``response_json_schema``, and delete this. Models would notice.
-    root = schema if root is None else root
-    if "$ref" in schema:
-        ref = schema["$ref"]
-        if ref in visited:
-            return {"type": "OBJECT", "description": f"Circular reference to {ref}"}
-        definitions = root.get("$defs", {})
-        name = ref.split("/")[-1]
-        if ref.startswith("#/$defs/") and name in definitions:
-            return convert_schema(definitions[name], root, visited | {ref})
-        return None
-
-    schema_type = schema.get("type", "")
-    if schema_type is None or schema_type == "null":
-        return None
-    description = schema.get("description")
-    title = schema.get("title")
-    default = schema.get("default")
-
-    if "enum" in schema:
-        return _without_none(type="STRING", enum=schema["enum"], description=description, default=default, title=title)
-
-    if schema_type == "object":
-        if "properties" in schema:
-            properties = {key: _property_schema(value, root, visited) for key, value in schema["properties"].items()}
-            if properties:
-                return _without_none(
-                    type="OBJECT",
-                    properties=properties,
-                    required=schema.get("required", []),
-                    description=description,
-                    default=default,
-                    title=title,
-                )
-        elif isinstance(additional := schema.get("additionalProperties"), dict) and "type" in additional:
-            return _dictionary_schema(additional, description=description, default=default)
-        return _without_none(type="OBJECT", description=description, default=default, title=title)
-
-    if schema_type == "array" and "items" in schema:
-        items = (convert_schema(schema["items"], root, visited) if schema["items"] else None) or {"type": "STRING"}
-        return _without_none(
-            type="ARRAY",
-            description=description,
-            items=items,
-            min_items=schema.get("minItems"),
-            max_items=schema.get("maxItems"),
-            title=title,
-        )
-
-    if schema_type == "string":
-        return _without_none(
-            type="STRING",
-            description=description,
-            default=default,
-            title=title,
-            format=schema.get("format"),
-        )
-
-    if schema_type in ("integer", "number"):
-        return _without_none(
-            type=schema_type.upper(),
-            description=description,
-            default=default,
-            title=title,
-            maximum=schema.get("maximum"),
-            minimum=schema.get("minimum"),
-        )
-
-    if schema_type == "" and "anyOf" in schema:
-        converted = [convert_schema(sub, root, visited) for sub in schema["anyOf"]]
-        alternatives = [sub for sub in converted if sub is not None]
-        if len(alternatives) == 1:
-            # TODO(simplify): a nullable ``anyOf`` keeps only its alternative's fields, so a parameter such as
-            # ``background_after`` loses its description. Keep the outer description. Models would notice (#3075).
-            alternatives[0]["nullable"] = any(sub is None for sub in converted)
-            return alternatives[0]
-        return _without_none(any_of=alternatives, description=description, default=default, title=title)
-
-    if isinstance(schema_type, list):
-        schema_type = next((name for name in schema_type if name != "null"), "")
-    if schema_type:
-        return _without_none(type=schema_type.upper(), description=description, default=default, title=title)
-    return None
-
-
-def _property_schema(value: Mapping[str, Any], root: Mapping[str, Any], visited: frozenset[str]) -> dict[str, Any]:
-    value_type = value.get("type", "")
-    # A ["<type>", "null"] list type is sent as its first entry, marked nullable.
-    nullable = isinstance(value_type, list) and "null" in value_type
-    converted = convert_schema({**value, "type": value_type[0]} if nullable else value, root, visited)
-    if converted is None:
-        return _without_none(title=value.get("title"), description=value.get("description"))
-    if nullable:
-        converted["nullable"] = True
-    return converted
-
-
-def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None, default: object) -> dict[str, Any]:
-    """Represent a ``dict[str, T]`` as an object with one example property, since Gemini needs properties."""
-    type_value = additional.get("type", "string")
-    if isinstance(type_value, list):
-        value_type = type_value[0].upper() if type_value else "STRING"
-        suffix = f" (supports union types: {', '.join(type_value)})"
-    else:
-        value_type = type_value.upper()
-        suffix = ""
-    example: dict[str, Any] = {
-        "type": value_type,
-        "description": (
-            f"Example key-value pair. This object can contain any number of keys with {value_type.lower()} values"
-            f"{suffix}."
-        ),
-    }
-    if value_type == "ARRAY":
-        example["items"] = {}
-    return _without_none(
-        type="OBJECT",
-        properties={"example_key": example},
-        description=description
-        or f"Dictionary with {value_type.lower()} values{suffix}. Can contain any number of key-value pairs.",
-        default=default,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Streamed replies
 # ---------------------------------------------------------------------------
@@ -591,12 +455,18 @@ def _dictionary_schema(additional: Mapping[str, Any], *, description: str | None
 
 @dataclass(slots=True)
 class GeminiReply:
-    """What one streamed Gemini reply produced so far."""
+    """What one streamed Gemini reply produced so far.
+
+    ``parts`` holds the reply's text and function calls in the order they arrived: a text part as ``{"text"}`` with
+    the ``thought_signature`` Gemini signed it with, a function call as ``{"function_call_id"}``. Unsigned streamed
+    text joins the open unsigned text part; a signed part, even one with empty text, stays its own part, because
+    Google requires each signature back in the part it came in, never merged with another part.
+    """
 
     content: str = ""
     reasoning: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    thought_signature: str | None = None
+    parts: list[dict[str, str]] = field(default_factory=list)
     usage: MessageMetrics | None = None
     finish_reason: str | None = None
     prompt_blocked: bool = False
@@ -662,11 +532,11 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
             reply.reasoning += part.text
             if part.text:
                 events.append(ReasoningDelta(part.text))
-        elif part.text:
-            reply.content += part.text
-            events.append(TextDelta(part.text))
-        if signature is not None:
-            reply.thought_signature = signature
+        elif part.text or signature is not None:
+            if part.text:
+                reply.content += part.text
+                events.append(TextDelta(part.text))
+            _add_text(reply, part.text, signature)
     if part.function_call is not None:
         call: dict[str, Any] = {
             "id": part.function_call.id or str(uuid4()),
@@ -679,15 +549,36 @@ def _read_part(reply: GeminiReply, part: Part) -> list[StreamEvent]:
         if signature is not None:
             call["thought_signature"] = signature
         reply.tool_calls.append(call)
+        reply.parts.append({"function_call_id": call["id"]})
         events.append(ToolCallReady(call))
     return events
+
+
+def _add_text(reply: GeminiReply, text: str, signature: str | None) -> None:
+    """Join unsigned ``text`` to the open unsigned text part; a signed part, or text after a call, starts a part."""
+    last = reply.parts[-1] if reply.parts else None
+    if signature is None and last is not None and "text" in last and "thought_signature" not in last:
+        last["text"] += text
+        return
+    reply.parts.append({"text": text} if signature is None else {"text": text, "thought_signature": signature})
+
+
+def reply_provider_data(reply: GeminiReply) -> dict[str, Any]:
+    """Return the replay state a finished reply stores: its parts, when their order or signatures matter.
+
+    A reply that is only unsigned text replays the same from its content, so it stores none.
+    """
+    if reply.tool_calls or any("thought_signature" in part for part in reply.parts):
+        return {_GEMINI_PARTS_KEY: reply.parts}
+    return {}
 
 
 def _usage_metrics(usage: GenerateContentResponseUsageMetadata) -> MessageMetrics:
     """Return the usage of one reply; thinking counts as output, as Google bills it."""
     reasoning_tokens = usage.thoughts_token_count or 0
     counts = TokenCounts(
-        input_tokens=usage.prompt_token_count or 0,
+        # The prompt a hosted tool adds, such as fetched URL context or search results, counts as input too.
+        input_tokens=(usage.prompt_token_count or 0) + (usage.tool_use_prompt_token_count or 0),
         output_tokens=(usage.candidates_token_count or 0) + reasoning_tokens,
         reasoning_tokens=reasoning_tokens,
         cache_read_tokens=usage.cached_content_token_count or 0,
@@ -714,12 +605,11 @@ def stop_reason(reply: GeminiReply) -> StopReason | None:
 __all__ = [
     "GeminiReply",
     "MediaRoute",
-    "convert_schema",
     "format_contents",
     "function_declarations",
     "malformed_tool_call_error",
     "read_chunk",
-    "response_schema",
+    "reply_provider_data",
     "stop_reason",
     "tool_config",
     "without_tool_selection",

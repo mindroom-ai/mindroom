@@ -12,6 +12,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from typing import NoReturn
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ from mindroom.knowledge.vector_store import (
     KnowledgeCollection,
     StoredRow,
     _CollectionNotFoundError,
+    _KnowledgeIndexTooLargeError,
     list_collection_names,
 )
 
@@ -85,8 +87,8 @@ def test_delete_source_paths_and_paths_with_vectors(collection: KnowledgeCollect
 
 def test_copy_rows_keeps_selected_rows_verbatim(collection: KnowledgeCollection, tmp_path: Path) -> None:
     """Copying keeps the selected rows' text, metadata, and vectors."""
-    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0], source_size=5)])
-    collection.write_source_rows("b.md", [_row("b1", "b.md", "beta", [0.0, 1.0], source_size=4)])
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0], page=5)])
+    collection.write_source_rows("b.md", [_row("b1", "b.md", "beta", [0.0, 1.0], page=4)])
     candidate = KnowledgeCollection(path=tmp_path, name="mindroom_knowledge_docs_candidate_x")
     candidate.reset()
 
@@ -94,16 +96,26 @@ def test_copy_rows_keeps_selected_rows_verbatim(collection: KnowledgeCollection,
 
     [hit] = candidate.search([1.0, 0.0], limit=5)
     assert hit.content == "alpha"
-    assert hit.meta_data["source_size"] == 5
+    assert hit.meta_data["page"] == 5
     assert candidate.paths_with_vectors(["a.md", "b.md"]) == {"a.md"}
 
 
-def test_search_ranks_by_cosine_distance_and_shapes_hits(collection: KnowledgeCollection) -> None:
-    """Search ranks by cosine distance and shapes hits the way knowledge search always has."""
+def test_search_ranks_by_cosine_distance_and_shows_each_hit_s_source_reader_keys_and_distance(
+    collection: KnowledgeCollection,
+) -> None:
+    """A hit shows its source, its reader keys, and one distance, without the row keys that serve indexing."""
+    indexing = {
+        "source_mtime_ns": 1,
+        "source_size": 2,
+        "source_digest": "digest",
+        "content_id": "cid",
+        "content_hash": "hash",
+        "linked_to": "",
+    }
     collection.write_source_rows(
         "a.md",
         [
-            _row("a1", "a.md", "east", [2.0, 0.0], content_id="cid", chunk=1),
+            _row("a1", "a.md", "east", [2.0, 0.0], chunk=1, **indexing),
             _row("a2", "a.md", "north", [0.0, 3.0], chunk=2),
             _row("a3", "a.md", "northeast", [1.0, 1.0], chunk=3),
         ],
@@ -114,12 +126,8 @@ def test_search_ranks_by_cosine_distance_and_shapes_hits(collection: KnowledgeCo
     assert [hit.content for hit in hits] == ["east", "northeast"]
     east = hits[0]
     assert east.name == "a.md"
-    assert "name" not in east.meta_data
-    assert "content_id" not in east.meta_data
-    assert east.meta_data["chunk"] == 1
     expected = 1 - 1.0 / math.hypot(1.0, 0.1)
-    assert east.meta_data["distances"] == pytest.approx(expected, abs=1e-6)
-    assert east.meta_data["similarity_score"] == east.meta_data["distances"]
+    assert east.meta_data == {"source_path": "a.md", "chunk": 1, "distance": pytest.approx(expected, abs=1e-6)}
 
 
 def test_search_drops_repeated_chunks_of_one_document(collection: KnowledgeCollection) -> None:
@@ -212,7 +220,7 @@ def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_misses(coll
 
     assert dense[-1].content.startswith("Set MINDROOM_STORAGE_PATH")
     assert hybrid[0].content.startswith("Set MINDROOM_STORAGE_PATH")
-    assert hybrid[0].meta_data["distances"] == pytest.approx(1.0, abs=1e-6)
+    assert hybrid[0].meta_data["distance"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_hybrid_search_stems_words_and_ignores_punctuation(collection: KnowledgeCollection) -> None:
@@ -267,10 +275,10 @@ def test_concurrent_cold_searches_load_the_matrix_once(
     loads: list[int] = []
     real_load = vector_store_module._load_vector_index
 
-    def slow_load(connection: sqlite3.Connection) -> object:
+    def slow_load(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> object:
         loads.append(1)
         time.sleep(0.2)
-        return real_load(connection)
+        return real_load(connection, max_matrix_bytes)
 
     monkeypatch.setattr(vector_store_module, "_load_vector_index", slow_load)
     with ThreadPoolExecutor(8) as pool:
@@ -278,6 +286,32 @@ def test_concurrent_cold_searches_load_the_matrix_once(
 
     assert loads == [1]
     assert all(result[0].content == "alpha" for result in results)
+
+
+def _refuse_allocation(*_args: object, **_kwargs: object) -> NoReturn:
+    message = "a matrix past the search's limit was allocated"
+    raise AssertionError(message)
+
+
+def test_a_search_refuses_vectors_past_its_limit_before_loading_them(
+    collection: KnowledgeCollection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection whose matrix exceeds the search's byte limit raises before allocating, reading ahead, or caching it."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    reads: list[Path] = []
+    monkeypatch.setattr(vector_store_module, "_read_ahead", reads.append)
+    collection.write_source_rows("a.md", [_row(f"a{index}", "a.md", "alpha", [1.0, 0.0]) for index in range(3)])
+    matrix_bytes = 3 * 2 * 4
+
+    with monkeypatch.context() as allocation:
+        allocation.setattr(np, "empty", _refuse_allocation)
+        with pytest.raises(_KnowledgeIndexTooLargeError):
+            collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes - 1)
+    assert not vector_store_module._index_cache
+
+    assert collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes)[0].content == "alpha"
+    assert not reads, "a limited search read its file ahead"
 
 
 def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollection) -> None:
@@ -289,7 +323,7 @@ def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollec
     with closing(sqlite3.connect(collection.file)) as connection:
         tracemalloc.start()
         try:
-            index = vector_store_module._load_vector_index(connection)
+            index = vector_store_module._load_vector_index(connection, None)
             _current, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -367,7 +401,7 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection: loads.append("load") or real_load(connection),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _round in range(3):
@@ -401,7 +435,7 @@ def test_the_published_matrix_stays_cached_beside_the_collection_it_retired(
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection: loads.append("load") or real_load(connection),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(3):
@@ -429,7 +463,7 @@ def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatc
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection: loads.append("load") or real_load(connection),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(3):
@@ -469,3 +503,29 @@ def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
 
     assert [hit.content for hit in collection.search([1.0, 0.0], limit=2)] == expected
     assert len(vector_store_module._index_cache) == 1, "the outdated matrix stayed cached beside the new one"
+
+
+def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first search reads the collection file front to back before loading its matrix; cached searches do not."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    collection = KnowledgeCollection(path=tmp_path, name="docs")
+    collection.reset()
+    collection.write_source_rows("a.md", [_row("a", "a.md", "alpha", [1.0, 0.0])])
+    calls: list[str] = []
+    real_read_ahead = vector_store_module._read_ahead
+    real_load = vector_store_module._load_vector_index
+    monkeypatch.setattr(
+        vector_store_module,
+        "_read_ahead",
+        lambda file: calls.append(f"read {file.name}") or real_read_ahead(file),
+    )
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection, max_matrix_bytes: calls.append("load") or real_load(connection, max_matrix_bytes),
+    )
+
+    for _search in range(2):
+        assert collection.search([1.0, 0.0], limit=1)[0].content == "alpha"
+
+    assert calls == ["read docs.sqlite3", "load"]

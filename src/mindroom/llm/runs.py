@@ -1,8 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Run records, tool executions, and pause requirements, with the dict shapes stored in run rows.
+"""Run records, tool executions, and pause requirements, with their stored dict shapes.
 
-Keys and ``RunStatus`` strings are those existing run rows, summary-row segments, and delegation state hold, so they
-decode without migration; keys the records do not model are ignored on read.
+The conversation store splits a record's dict across its run, message, and tool rows (``session_storage/codec.py``).
+Keys and ``RunStatus`` strings are also those delegation state holds and those of the Agno-layout run rows, which only
+the storage v2 conversion still reads; keys the records do not model are ignored on read.
 """
 
 from __future__ import annotations
@@ -268,6 +269,9 @@ class _RunRecordCommon:
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
     tools: list[ToolExecution] | None = None
+    # How many of ``tools`` are refused calls that do not count toward the run's tool-call limit: a call naming no
+    # offered function, one whose arguments do not decode, and one of a cut-off response. A resume counts the rest.
+    uncounted_tool_calls: int = 0
     requirements: list[RunRequirement] | None = None
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
@@ -335,23 +339,15 @@ class _RunRecordCommon:
         return result
 
     def _tools_dict(self) -> dict[str, Any]:
-        return {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
+        tools = {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
+        # Written only when some call does not count, so a run whose every call counts stores no key.
+        return tools | ({"uncounted_tool_calls": self.uncounted_tool_calls} if self.uncounted_tool_calls else {})
 
     def _requirements_dict(self) -> dict[str, Any]:
         return {} if self.requirements is None else {"requirements": [item.to_dict() for item in self.requirements]}
 
 
 def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
-    # LEGACY_COMPAT: Agno 3 run dicts carry keys the owned run records dropped.
-    # Legacy format: ``run_data`` rows and summary-row ``member_responses`` written by the Agno-backed runtime
-    # may hold ``input``, ``content_type``, ``session_state``, ``events``, ``images``/``videos``/``audio``/
-    # ``files``, ``response_audio``, ``citations``, ``references``, ``reasoning_*``, ``followups``,
-    # ``model_provider_data``, fork and queue lineage fields, and per-tool ``requires_user_input``,
-    # ``user_input_schema``, ``user_feedback_schema``, ``answered``, ``approval_id``.
-    # Last legacy release: v2026.10.498; replacement: v2026.10.499.
-    # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
-    # Coverage: tests/llm/test_codecs.py::test_run_record_round_trips_agno_dict_minus_dropped_keys,
-    #   tests/llm/test_codecs.py::test_stored_fixture_dicts_round_trip_minus_dropped_keys
     tools = data.get("tools")
     requirements = data.get("requirements")
     metrics = data.get("metrics")
@@ -366,6 +362,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "model_provider": data.get("model_provider"),
         "messages": [Message.from_dict(message) for message in data.get("messages") or []],
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
+        "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),
         "requirements": None if requirements is None else [RunRequirement.from_dict(item) for item in requirements],
         "metrics": None if metrics is None else RunMetrics.from_dict(metrics),
         "metadata": data.get("metadata"),
@@ -383,7 +380,7 @@ class RunRecord(_RunRecordCommon):
     agent_display_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored ``run_data`` dict, keys in stored order."""
+        """Return the stored dict, keys in stored order, which the store splits across its run, message, and tool rows."""
         return {
             **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_display_name}),
             "status": self.status.value,
@@ -395,7 +392,7 @@ class RunRecord(_RunRecordCommon):
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RunRecord:
-        """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
+        """Rebuild from a stored dict, or an Agno-layout ``run_data`` the conversion reads, ignoring unmodeled keys."""
         return cls(agent_id=data.get("agent_id"), agent_display_name=data.get("agent_name"), **_common_from_dict(data))
 
 
@@ -404,7 +401,7 @@ class TeamRunRecord(_RunRecordCommon):
     """A persisted team run; paused member runs ride along in ``member_responses``.
 
     ``ended_member_runs`` holds the terminal record of every member run that ended while the run ran, in the order
-    they first ended: a member run stopped with its team run comes last. A mid-turn fold stores them in its segment,
+    they first ended: a member run stopped with its team run comes last. A mid-turn fold flags their rows as folded,
     and the turn's reply and usage read them. It is never stored, so a loaded record starts without it, while a resume
     of the live record carries it on.
     """
@@ -414,7 +411,7 @@ class TeamRunRecord(_RunRecordCommon):
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored ``run_data`` dict, keys in stored order; ``member_responses`` is always present."""
+        """Return the stored dict, keys in stored order, split as a run's is; ``member_responses`` is always present."""
         return {
             **self._scalars_dict({"team_id": self.team_id}),
             **self._metrics_dict(),
@@ -427,7 +424,7 @@ class TeamRunRecord(_RunRecordCommon):
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TeamRunRecord:
-        """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
+        """Rebuild from a stored dict, or an Agno-layout ``run_data`` the conversion reads, ignoring unmodeled keys."""
         # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
         # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
         # joined by ``-``; no MindRoom code read it.

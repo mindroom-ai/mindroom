@@ -301,7 +301,7 @@ async def _team_memory_saves(
         else:
             await bot._response_runner.generate_team_response_helper(
                 request,
-                team_agents=[ids["a1"], ids["a2"]],
+                member_names=["a1", "a2"],
                 team_mode="coordinate",
             )
 

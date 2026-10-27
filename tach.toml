@@ -497,8 +497,7 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.tool_system.agent_tool_calls",
-    "mindroom.tool_system.sandbox_proxy",
-    "mindroom.tools.shell",
+    "mindroom.tool_system.tool_environment",
 ]
 
 [[interfaces]]
@@ -971,10 +970,9 @@ depends_on = ["mindroom.logging_config", "mindroom.tool_system.agno_toolkits"]
 [[modules]]
 path = "mindroom.session_storage.agent_storage"
 depends_on = [
-    "mindroom.history.legacy_compaction_state",
     "mindroom.llm",
-    "mindroom.usage.legacy_usage_storage",
     "mindroom.runtime_resolution",
+    "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.session_storage.preflight",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
@@ -1080,34 +1078,103 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.session_storage.schema"
-depends_on = ["mindroom.history.summary_rows_schema", "mindroom.usage.storage"]
+depends_on = ["mindroom.history.run_visibility", "mindroom.usage.storage"]
 
 [[modules]]
 path = "mindroom.session_storage.codec"
-depends_on = ["mindroom.llm", "mindroom.session_storage.legacy_tool_results"]
+depends_on = ["mindroom.llm"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_agno2_runs"
-depends_on = ["mindroom.usage.storage"]
+depends_on = ["mindroom.session_storage.codec", "mindroom.usage.storage"]
 visibility = [
-    "mindroom.session_storage.store",
     "mindroom.history.legacy_compaction_state",
+    "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.stats_storage",
 ]
 
 [[modules]]
-path = "mindroom.session_storage.store"
+path = "mindroom.session_storage.legacy_agno3_backup"
+depends_on = ["mindroom.path_confinement"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
+
+[[modules]]
+path = "mindroom.session_storage.legacy_agno3_conversion"
 depends_on = [
-    "mindroom.history.summary_rows_schema",
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.history.legacy_compaction_state",
+    "mindroom.history.legacy_stored_tool_calls",
+    "mindroom.history.storage",
+    "mindroom.history.types",
     "mindroom.llm",
+    "mindroom.logging_config",
     "mindroom.session_storage.codec",
     "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.legacy_agno3_backup",
+    "mindroom.session_storage.legacy_agno3_schema",
+    "mindroom.session_storage.schema",
+    "mindroom.session_storage.store",
+    "mindroom.usage.legacy_usage_storage",
+    "mindroom.usage.storage",
+]
+visibility = [
+    "mindroom.session_storage.agent_storage",
+    "mindroom.orchestrator",
+    "mindroom.api.main",
+]
+
+[[modules]]
+path = "mindroom.session_storage.legacy_agno3_schema"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.session_storage.codec",
+    "mindroom.session_storage.legacy_tool_results",
+    "mindroom.session_storage.schema",
+    "mindroom.usage.storage",
+]
+visibility = [
+    "mindroom.history.legacy_compaction_state",
+    "mindroom.session_storage.legacy_agno3_conversion",
+]
+
+[[modules]]
+path = "mindroom.session_storage.store"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.history.types",
+    "mindroom.llm",
+    "mindroom.session_storage.codec",
+    "mindroom.session_storage.lanes",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.types",
     "mindroom.usage.storage",
-    "mindroom.session_storage.lanes",
-    "mindroom.history.types",
+]
+
+[[interfaces]]
+from = ["mindroom.session_storage.store"]
+expose = [
+    "BUSY_TIMEOUT_SECONDS",
+    "ConversationStore",
+    "SaveOutcome",
+    "begun",
+    "connect_by_name",
+    "connect_conversation_database",
+    "decoded_mapping",
+    "delete_runs_in_transaction",
+    "ensure_session_row",
+    "flag_folded",
+    "is_removed",
+    "persist_to",
+    "runs_without",
+    "seen_event_ids",
+    "set_visible_messages",
+    "source_event_ids",
+    "store_fold",
+    "summary_event_sets",
+    "upsert_run",
+    "write_with_session_state",
 ]
 
 [[modules]]
@@ -1152,13 +1219,12 @@ visibility = [
 path = "mindroom.history.run_visibility"
 depends_on = ["mindroom.llm"]
 visibility = [
-    "mindroom.history.summary_rows_schema",
+    "mindroom.session_storage.schema",
     "mindroom.ai_runtime",
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
@@ -1505,6 +1571,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.connections",
+    "mindroom.api.egress_credentials",
     "mindroom.api.oauth",
     "mindroom.api.tools",
     "mindroom.custom_tools.atlassian",
@@ -1573,7 +1640,9 @@ depends_on = ["mindroom.config.agent"]
 path = "mindroom.custom_tools.memory"
 depends_on = [
     "mindroom.embeddings.errors",
+    "mindroom.failure_text",
     "mindroom.memory",
+    "mindroom.redaction",
 ]
 
 [[modules]]
@@ -1911,6 +1980,7 @@ depends_on = [
     "mindroom.config.egress_broker",
     "mindroom.credentials.manager",
     "mindroom.egress_broker",
+    "mindroom.oauth.credential_lifecycle",
     "mindroom.requester_identity",
 ]
 
@@ -1959,7 +2029,7 @@ depends_on = [
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.legacy_state_root_records",
     "mindroom.credentials.legacy_tool_credentials",
-    "mindroom.usage.legacy_usage_storage",
+    "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
@@ -2196,6 +2266,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
     "mindroom.api.sandbox_execute_stream",
@@ -2277,6 +2348,11 @@ depends_on = [
     "mindroom.matrix.users",
     "mindroom.scheduling.tasks",
 ]
+
+[[modules]]
+path = "mindroom.api.startup_probes"
+depends_on = []
+visibility = ["mindroom.cli.main", "mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.api.skills"
@@ -2633,7 +2709,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.request_messages"
 depends_on = [
-    "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.legacy_summary_system_prompt",
     "mindroom.history.message_content",
     "mindroom.history.summary_message",
@@ -2641,11 +2716,11 @@ depends_on = [
     "mindroom.history.run_visibility",
 ]
 
-# The stored tool-call shapes earlier releases wrote, read where stored runs become requests.
+# The stored tool-call shapes earlier releases wrote, which the conversion to storage v2 stores in the current shape.
 [[modules]]
 path = "mindroom.history.legacy_stored_tool_calls"
 depends_on = ["mindroom.history.message_content"]
-visibility = ["mindroom.history.request_messages"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 
 [[modules]]
 path = "mindroom.history.summary_message"
@@ -2665,7 +2740,6 @@ depends_on = [
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
     "mindroom.error_handling",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.replay",
     "mindroom.history.storage",
     "mindroom.history.summary_call",
@@ -2685,7 +2759,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.prompt_tokens"
-depends_on = ["mindroom.token_budget"]
+depends_on = ["mindroom.llm", "mindroom.token_budget"]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -2754,13 +2828,14 @@ path = "mindroom.providers.anthropic.wire"
 depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.model_defaults",
     "mindroom.providers.claude_wire_blocks",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
 path = "mindroom.providers.cache_ladder"
-depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks", "mindroom.system_prompt"]
+depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks"]
 visibility = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.providers.openai",
@@ -2810,11 +2885,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.summary_rows"
 depends_on = [
-    "mindroom.constants",
-    "mindroom.history.summary_rows_schema",
-    "mindroom.usage.storage",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
+    "mindroom.session_storage.types",
+    "mindroom.usage.storage",
 ]
 visibility = [
     "mindroom.history.storage",
@@ -2822,20 +2896,11 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.summary_rows_schema"
-depends_on = ["mindroom.history.run_visibility", "mindroom.usage.storage"]
-visibility = [
-    "mindroom.history.legacy_compaction_state",
-    "mindroom.history.summary_rows",
-    "mindroom.session_storage.schema",
-    "mindroom.session_storage.store",
-]
-
-[[modules]]
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
+    "mindroom.session_storage.store",
     "mindroom.history.summary_rows",
     "mindroom.background_tasks",
     "mindroom.constants",
@@ -2849,13 +2914,13 @@ depends_on = [
 path = "mindroom.history.legacy_compaction_state"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.summary_rows_schema",
     "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.legacy_agno3_schema",
     "mindroom.session_storage.schema",
     "mindroom.session_storage.store",
     "mindroom.usage.storage",
 ]
-visibility = ["mindroom.session_storage.agent_storage"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 
 [[modules]]
 path = "mindroom.history.types"
@@ -2939,6 +3004,7 @@ depends_on = [
     "mindroom.hooks.context",
     "mindroom.hooks.types",
     "mindroom.logging_config",
+    "mindroom.tool_system.tool_environment",
 ]
 
 [[modules]]
@@ -3123,6 +3189,7 @@ path = "mindroom.orchestrator"
 depends_on = [
     "mindroom.agent_cli.session",
     "mindroom.api.agent_cli",
+    "mindroom.api.startup_probes",
     "mindroom.approval.manager",
     "mindroom.approval.recovery",
     "mindroom.matrix.room_reconciliation",
@@ -3133,7 +3200,7 @@ depends_on = [
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.legacy_state_root_records",
     "mindroom.credentials.legacy_tool_credentials",
-    "mindroom.usage.legacy_usage_storage",
+    "mindroom.session_storage.legacy_agno3_conversion",
     "mindroom.orchestration.computer_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
@@ -3374,6 +3441,7 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
+    "mindroom.prompt_templates",
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
@@ -3457,6 +3525,7 @@ depends_on = [
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
+    "mindroom.credentials.manager",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
@@ -3624,17 +3693,11 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
-    "mindroom.memory._mem0_openai",
     "mindroom.memory._mem0_usage",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.memory._backend"]
-
-[[modules]]
-path = "mindroom.memory._mem0_openai"
-depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -3711,6 +3774,7 @@ visibility = [
     "mindroom.config.main",
     "mindroom.memory._prompting",
     "mindroom.memory.functions",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -4716,14 +4780,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
     "mindroom.constants",
-    "mindroom.entity_resolution",
     "mindroom.history.session_context",
     "mindroom.history.types",
-    "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
-    "mindroom.history.team_scope",
     "mindroom.session_storage.lanes",
 ]
 
@@ -4831,6 +4891,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials.sync",
     "mindroom.path_confinement",
+    "mindroom.providers.names",
     # Deferred import in the missing-env check.
     "mindroom.providers.credentials",
     "mindroom.tool_system.worker_routing",
@@ -4955,11 +5016,6 @@ depends_on = [
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
-path = "mindroom.cli.pairing_probes"
-depends_on = []
-visibility = ["mindroom.cli.main"]
-
-[[modules]]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
@@ -4999,6 +5055,7 @@ path = "mindroom.cli.main"
 depends_on = [
     "mindroom.origins",
     "mindroom.api.auth",
+    "mindroom.api.startup_probes",
     "mindroom.cli.api",
     "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
@@ -5016,7 +5073,6 @@ depends_on = [
     "mindroom.cli.interactive",
     "mindroom.cli.local_stack",
     "mindroom.cli.migrate",
-    "mindroom.cli.pairing_probes",
     "mindroom.cli.plugins",
     "mindroom.cli.service",
     "mindroom.cli.trigger",
@@ -5195,6 +5251,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.runtime_protocols",
     "mindroom.tool_system.plugin_identity",
+    "mindroom.tool_system.tool_environment",
 ]
 
 [[modules]]
@@ -5486,6 +5543,10 @@ path = "mindroom.tool_system.tool_calls"
 depends_on = ["mindroom.constants"]
 
 [[modules]]
+path = "mindroom.tool_system.tool_environment"
+depends_on = ["mindroom.agent_cli.shell_contract", "mindroom.constants"]
+
+[[modules]]
 path = "mindroom.tool_system.progress"
 depends_on = []
 visibility = [
@@ -5517,6 +5578,7 @@ depends_on = [
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_calls",
+    "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
 ]
@@ -5572,7 +5634,6 @@ depends_on = ["mindroom.agent_loop.prompt", "mindroom.agent_loop.structured", "m
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
-    "mindroom.agent_cli.shell_contract",
     "mindroom.config.worker_projection",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
@@ -5581,6 +5642,7 @@ depends_on = [
     "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_environment",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.worker_proxy_client",
@@ -6410,8 +6472,17 @@ from = ["mindroom.agents"]
 
 [[interfaces]]
 expose = [
+    "BACKUP_SUFFIX",
+    "ConversionSpaceError",
+    "write_conversion_backup",
+]
+from = ["mindroom.session_storage.legacy_agno3_backup"]
+
+[[interfaces]]
+expose = [
     "create_session_storage",
     "create_state_storage",
+    "prepare_conversation_database",
     "save_compaction_usage",
 ]
 from = ["mindroom.session_storage.agent_storage"]
@@ -6445,7 +6516,7 @@ expose = [
     "members.materialize_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
-    "presentation.format_team_response",
+    "presentation.finished_run_text",
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",
@@ -7162,6 +7233,7 @@ expose = [
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
+    "EVENT_TOOL_ENVIRONMENT",
     "ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
@@ -7200,6 +7272,7 @@ expose = [
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "ToolEnvironmentContext",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "TurnIntent",
     "TurnOrigin",
@@ -7211,6 +7284,7 @@ expose = [
     "default_timeout_ms_for_event",
     "emit",
     "emit_collect",
+    "emit_collect_environment",
     "emit_final_response_transform",
     "emit_gate",
     "emit_transform",
@@ -7264,6 +7338,7 @@ expose = [
     "refresh_oauth_credentials_sync",
     "refresh_oauth_credentials_with_result",
     "reset_oauth_credentials",
+    "reset_oauth_credentials_blocking",
     "resolve_oauth_credential_context",
 ]
 from = ["mindroom.oauth.credential_lifecycle"]
@@ -7887,11 +7962,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.claude_replay_compat"
-depends_on = ["mindroom.history.run_visibility"]
-visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
-
-[[modules]]
 path = "mindroom.history.message_content"
 depends_on = [
     "mindroom.token_budget",
@@ -7980,7 +8050,6 @@ visibility = [
 path = "mindroom.history.summary_input"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.message_content",
     "mindroom.timing",
     "mindroom.token_budget",
@@ -8459,6 +8528,19 @@ from = ["mindroom.tools.agno_compat_visualization"]
 expose = ["WorkspaceVisualizationTools"]
 
 [[modules]]
+path = "mindroom.tools.mem0"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_mem0"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_mem0"
+depends_on = ["mindroom.failure_text", "mindroom.redaction"]
+visibility = ["mindroom.tools.mem0"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_mem0"]
+expose = ["UserFilterMem0Tools"]
+
+[[modules]]
 path = "mindroom.tools.newspaper4k"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
 
@@ -8848,6 +8930,7 @@ visibility = [
 path = "mindroom.agent_cli.minimal_agent"
 depends_on = [
     "mindroom.agent_cli.bash",
+    "mindroom.agent_loop.prompt",
     "mindroom.agent_cli.context",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
@@ -9065,20 +9148,16 @@ expose = ["clear_stale_singleton_locks"]
 [[modules]]
 path = "mindroom.usage.storage"
 depends_on = ["mindroom.llm"]
-visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.summary_rows_schema", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
+visibility = ["mindroom.session_storage.legacy_agno2_runs", "mindroom.session_storage.legacy_agno3_conversion", "mindroom.session_storage.legacy_agno3_schema", "mindroom.session_storage.schema", "mindroom.session_storage.store", "mindroom.helper_usage", "mindroom.history.summary_rows", "mindroom.history.legacy_compaction_state", "mindroom.usage.legacy_usage_storage", "mindroom.usage.stats", "mindroom.usage.stats_storage", "mindroom.history.mid_turn_compaction", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = [
-    "mindroom.background_tasks",
-    "mindroom.constants",
     "mindroom.session_storage.legacy_agno2_runs",
     "mindroom.session_storage.schema",
-    "mindroom.session_storage.store",
-    "mindroom.logging_config",
     "mindroom.usage.storage",
 ]
-visibility = ["mindroom.session_storage.agent_storage", "mindroom.orchestrator", "mindroom.api.main", "mindroom.usage.stats"]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.usage.stats"]
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]
@@ -9612,4 +9691,4 @@ visibility = [
 [[modules]]
 path = "mindroom.session_storage.legacy_tool_results"
 depends_on = ["mindroom.llm"]
-visibility = ["mindroom.session_storage.codec"]
+visibility = ["mindroom.session_storage.legacy_agno3_schema"]

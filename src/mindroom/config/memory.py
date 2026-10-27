@@ -116,6 +116,12 @@ class _MemoryLLMConfig(BaseModel):
         json_schema_extra=dashboard_hint(secret=True),
     )
 
+    @field_validator("provider")
+    @classmethod
+    def _canonical_provider(cls, value: str) -> str:
+        """Spell the provider as Mem0 and every memory LLM consumer compare it, so `OpenRouter` selects openrouter."""
+        return normalized_provider_name(value)
+
     @field_validator("config")
     @classmethod
     def _normalize_api_key(cls, value: dict[str, Any]) -> dict[str, Any]:

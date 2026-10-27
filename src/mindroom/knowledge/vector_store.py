@@ -13,12 +13,19 @@ import sqlite3
 import struct
 import threading
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY, SearchHit
+from mindroom.knowledge.read_protocol import (
+    DISTANCE_KEY,
+    SOURCE_DIGEST_KEY,
+    SOURCE_MTIME_NS_KEY,
+    SOURCE_PATH_KEY,
+    SOURCE_SIZE_KEY,
+    SearchHit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -43,10 +50,17 @@ _WORD = re.compile(r"\w+")
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
+#: Bytes per read while reading a collection file ahead of its matrix load.
+_READ_AHEAD_CHUNK_BYTES = 8 * 1024 * 1024
 #: Rows normalized at a time while a matrix loads.
 _NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
+# Stored row keys that serve indexing and say nothing about the chunk; ``content_id``, ``content_hash``, and the empty
+# ``linked_to`` are the keys the rows Agno wrote carry.
+_INDEXING_KEYS = frozenset(
+    {SOURCE_MTIME_NS_KEY, SOURCE_SIZE_KEY, SOURCE_DIGEST_KEY, "content_id", "content_hash", "linked_to"},
+)
 _SCHEMA = f"""
 CREATE TABLE chunks (
     rowid INTEGER PRIMARY KEY,
@@ -81,6 +95,10 @@ END;
 
 class _CollectionNotFoundError(LookupError):
     """The collection's file does not exist."""
+
+
+class _KnowledgeIndexTooLargeError(ValueError):
+    """The collection's vectors exceed what its search may load into memory."""
 
 
 @dataclass(frozen=True)
@@ -206,17 +224,25 @@ class KnowledgeCollection:
         with closing(self._connect()) as connection:
             return connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is not None
 
-    def search(self, embedding: Sequence[float], *, limit: int, query: str | None = None) -> list[SearchHit]:
+    def search(
+        self,
+        embedding: Sequence[float],
+        *,
+        limit: int,
+        query: str | None = None,
+        max_matrix_bytes: int | None = None,
+    ) -> list[SearchHit]:
         """Return the ``limit`` best chunks, each document's repeats dropped.
 
         Chunks rank by cosine distance to ``embedding``; with ``query`` text, that ranking is fused with an FTS5 BM25
         ranking of the query's words by reciprocal rank fusion, so exact names and identifiers the embedding blurs
-        still surface. Every hit reports its cosine distance either way.
+        still surface. Every hit reports its cosine distance either way. A collection whose vectors take more than
+        ``max_matrix_bytes`` raises ``_KnowledgeIndexTooLargeError`` instead of loading.
         """
         import numpy as np  # noqa: PLC0415 - only searching needs numpy, which installs on first use.
 
         with closing(self._connect(read_only=True)) as connection:
-            index = _vector_index(connection, self.file)
+            index = _vector_index(connection, self.file, max_matrix_bytes)
             if not len(index.rowids):
                 return []
             query_vector = np.asarray(embedding, dtype=np.float32)
@@ -396,7 +422,11 @@ def _reciprocal_rank_fusion(*rankings: Sequence[int]) -> list[int]:
 
 
 def _hits(connection: sqlite3.Connection, ranked: Sequence[tuple[int, float]], *, limit: int) -> list[SearchHit]:
-    """Build hits for ranked ``(rowid, cosine distance)`` pairs, dropping a document's repeated chunks."""
+    """Build hits for ranked ``(rowid, cosine distance)`` pairs, dropping a document's repeated chunks.
+
+    A hit shows its source, its reader keys, and its distance; the row keys that serve indexing, the source signature
+    and the content hash and id, and Agno's empty ``linked_to`` stay out of it.
+    """
     rows = {
         rowid: (document, metadata)
         for rowid, document, metadata in connection.execute(
@@ -408,14 +438,10 @@ def _hits(connection: sqlite3.Connection, ranked: Sequence[tuple[int, float]], *
     seen: set[tuple[str | None, str]] = set()
     for rowid, distance in ranked:
         document, metadata_json = rows[rowid]
-        meta_data = json.loads(metadata_json)
-        name = meta_data.pop("name", None)
-        meta_data.pop("content_id", None)
-        # TODO(simplify): Hits show the model the stored source signature, Agno's empty `linked_to`, `content_hash`, and
-        # the cosine distance twice, once as a `similarity_score` that falls as matches improve. Show the source, the
-        # chunk, and one distance. Models would read shorter hits; the knowledge goldens pin these keys.
-        meta_data["distances"] = distance
-        meta_data["similarity_score"] = distance
+        stored = json.loads(metadata_json)
+        name = stored.pop("name", None)
+        meta_data = {key: value for key, value in stored.items() if key not in _INDEXING_KEYS}
+        meta_data[DISTANCE_KEY] = distance
         hit = SearchHit(content=document, name=None if name is None else str(name), meta_data=meta_data)
         if (hit.name, hit.content) in seen:
             continue
@@ -453,7 +479,7 @@ def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
     return (str(file), status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
 
 
-def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
+def _vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: int | None) -> _VectorIndex:
     """Return the file's vectors, loading them once per file version and keeping recent ones within the cache budget."""
     version = _file_version(file)
     if version is None:
@@ -481,7 +507,12 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
                 if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
             ]:
                 del _index_cache[stale]
-        index = _load_vector_index(connection)
+        # A file swept since the connection opened still loads through it, so reading ahead is only best effort. A
+        # limited base loads in time without it, and one past its limit is refused without reading its file.
+        if max_matrix_bytes is None:
+            with suppress(OSError):
+                _read_ahead(file)
+        index = _load_vector_index(connection, max_matrix_bytes)
         with _index_cache_lock:
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
@@ -496,7 +527,19 @@ def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
     return index
 
 
-def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
+def _read_ahead(file: Path) -> None:
+    """Read the collection file front to back, so the row-order matrix load that follows reads from the page cache.
+
+    On a cold network disk a sequential read is several times faster than that load's own reads, which for a
+    collection of a few GB can otherwise exceed a search's budget.
+    """
+    buffer = bytearray(_READ_AHEAD_CHUNK_BYTES)
+    with file.open("rb", buffering=0) as handle:
+        while handle.readinto(buffer):
+            pass
+
+
+def _load_vector_index(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> _VectorIndex:
     import numpy as np  # noqa: PLC0415
 
     # One read transaction, so the count and the rows come from the same snapshot.
@@ -505,6 +548,9 @@ def _load_vector_index(connection: sqlite3.Connection) -> _VectorIndex:
         count = connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         first = connection.execute("SELECT length(embedding) FROM chunks LIMIT 1").fetchone()
         dimension = 0 if first is None else first[0] // 4
+        if max_matrix_bytes is not None and count * dimension * 4 > max_matrix_bytes:
+            message = f"Knowledge collection holds {count} vectors, more than its {max_matrix_bytes}-byte search limit"
+            raise _KnowledgeIndexTooLargeError(message)
         rowids = np.empty(count, dtype=np.int64)
         matrix = np.empty((count, dimension), dtype=np.float32)
         rows = connection.execute("SELECT rowid, embedding FROM chunks ORDER BY rowid")

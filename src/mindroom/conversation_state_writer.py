@@ -2,24 +2,22 @@
 
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.team_scope import ad_hoc_team_scope_id
+from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 from mindroom.session_storage.lanes import run_session_storage_operation
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import structlog
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.identity import MatrixID
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -48,25 +46,17 @@ class ConversationStateWriter:
 
     def team_history_scope(
         self,
-        team_agents: list[MatrixID],
+        member_names: Sequence[str],
         *,
         requester_user_id: str | None,
     ) -> HistoryScope:
-        """Return the persisted team-history scope for one team response."""
-        config = self.deps.runtime.config
-        if self.deps.agent_name in config.teams:
-            return HistoryScope(kind="team", scope_id=self.deps.agent_name)
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-        member_names = [registry.entity_name_or_username(matrix_id) for matrix_id in team_agents]
-        scope_id = (
-            ad_hoc_team_scope_id(
-                member_names,
-                config.agents,
-                requester_user_id=requester_user_id,
-            )
-            or "team_"
+        """Return the persisted history scope of one team response: this bot's configured team's, else its members'."""
+        return resolve_bound_team_scope(
+            member_names=member_names,
+            config=self.deps.runtime.config,
+            team_name=self.deps.agent_name,
+            requester_user_id=requester_user_id,
         )
-        return HistoryScope(kind="team", scope_id=scope_id)
 
     def create_storage(
         self,
@@ -92,16 +82,8 @@ class ConversationStateWriter:
         response_event_id: str,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it, off-loop in the session target's FIFO lane."""
-
-        def persist(storage: ConversationStore) -> None:
-            session = storage.load_session(session_id, scope.kind)
-            if session is None:
-                return
-            run = next((run for run in session.runs if run.run_id == run_id), None)
-            if run is None or (run.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
-                return
-            linked_run = copy(run)
-            linked_run.metadata = {**(run.metadata or {}), MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
-            storage.save_runs(session, [linked_run])
-
-        await run_session_storage_operation(partial(self.create_storage, execution_identity, scope=scope), persist)
+        link = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
+        await run_session_storage_operation(
+            partial(self.create_storage, execution_identity, scope=scope),
+            lambda storage: storage.patch_run_metadata(session_id, run_id, link),
+        )

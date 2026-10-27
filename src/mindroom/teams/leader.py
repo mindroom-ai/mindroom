@@ -49,9 +49,8 @@ class LeaderRun:
         user_id: str | None,
         metadata: dict[str, Any] | None,
         records: TerminalRecord[TeamRunRecord] | None,
-        stream: bool,
     ) -> AsyncIterator[TeamRunEvent]:
-        """Start the leader's run over ``run_input``; ``stream`` selects what the leader reads for a member's run."""
+        """Start the leader's run over ``run_input``."""
         return run_team(
             self.built.spec,
             run_input,
@@ -66,7 +65,6 @@ class LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage),
             request_template=self.request_template,
-            stream=stream,
         )
 
     def resume(

@@ -474,8 +474,7 @@ def parse_request_row(payload: object) -> RequestRow | None:
     )
     session_id_raw = payload_dict.get("session_id")
     room_id_raw = payload_dict.get("room_id")
-    # The request logger writes "agent_id"; accept "agent_name" for older logs.
-    agent_name_raw = payload_dict.get("agent_id") or payload_dict.get("agent_name")
+    agent_name_raw = payload_dict.get("agent_id")
     tools_raw = payload_dict.get("tools")
     request_log_id_raw = payload_dict.get("request_log_id")
     model_params_dict = object_dict(model_params)
@@ -524,7 +523,7 @@ def build_provider_message_blobs_from_messages(
         chat_messages = format_claude_messages(
             prompt_messages,
             append_trailing_user_message=False,
-            citations=True,
+            earlier_thinking=True,
         ).messages
         if apply_cache_ladder:
             cache_control = ladder_cache_control(model_params)

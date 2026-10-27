@@ -109,8 +109,17 @@ def reject_legacy_defaults_fields(value: object) -> object:
 #   defaults.file_access settings.
 # Handling: Reject it on every tool with guidance to the agent or defaults file_access setting.
 # Coverage: tests/test_tools_metadata.py::test_restrict_to_base_dir_is_rejected_with_file_access_hint.
+# LEGACY_COMPAT: Retired per-tool add_instructions switch of Agno's toolkits.
+# Legacy format: reasoning, zep, and daytona tool entries accepted an authored boolean add_instructions that put the
+#   toolkit's instructions in the agent's prompt.
+# Last legacy release: v2026.10.600; replacement: unreleased; the next release always shows a toolkit's instructions
+#   whenever it offers a function and removes the field.
+# Handling: Reject it on every tool, naming the key and saying to remove it.
+# Coverage: tests/test_tools_metadata.py::test_add_instructions_is_rejected_because_instructions_always_show,
+#   tests/test_tools_metadata.py::test_config_load_rejects_a_retired_add_instructions_setting.
 _REJECTED_TOOL_OVERRIDES = {
     "restrict_to_base_dir": "use agents.<name>.file_access or defaults.file_access",
+    "add_instructions": "a toolkit's instructions always reach the prompt, so remove the setting",
 }
 
 

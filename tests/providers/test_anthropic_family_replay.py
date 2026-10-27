@@ -340,7 +340,10 @@ def _cited_history(citation: dict[str, Any]) -> list[Message]:
 @pytest.mark.parametrize("route", _CLAUDE_ROUTES)
 @pytest.mark.parametrize("citation", _STORED_CITATIONS.values(), ids=_STORED_CITATIONS.keys())
 async def test_cited_answers_replay_as_plain_text(tmp_path: Path, route: str, citation: dict[str, Any]) -> None:
-    """A stored cited answer replays as its text, because the cited document is not resent; history stays intact."""
+    """A stored cited answer replays as its text, because the cited document is not resent; history stays intact.
+
+    Bedrock sends no thinking binding, so the earlier turn replays there without its thinking.
+    """
     wire = Wire(sse_reply([{"type": "text", "text": "Blue."}]))
     messages = _cited_history(citation)
     stored = copy.deepcopy(messages[1].provider_data)
@@ -351,7 +354,7 @@ async def test_cited_answers_replay_as_plain_text(tmp_path: Path, route: str, ci
     assert [
         {key: value for key, value in block.items() if key != "cache_control"} for block in assistant["content"]
     ] == [
-        _THINKING_BLOCK,
+        *([] if route == "bedrock_claude" else [_THINKING_BLOCK]),
         {"type": "text", "text": _CITED_ANSWER},
         {"type": "text", "text": " It really is."},
     ]
@@ -495,9 +498,6 @@ async def test_vertex_strips_provider_level_strict_but_keeps_a_schema_property_n
         description="Update profile",
         parameters=parameters,
         strict=True,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
 

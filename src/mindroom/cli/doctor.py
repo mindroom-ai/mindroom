@@ -172,7 +172,8 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
-        console.print(f"[red]✗[/red] Config invalid: {issues}")
+        # A message can quote a config key, which may contain brackets Rich reads as markup.
+        console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
         return None, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)
@@ -233,7 +234,8 @@ def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons:
     """
     if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
         return False
-    listed = ", ".join(reasons)
+    # A setting path holds the model's settings' keys, which may contain brackets Rich reads as markup.
+    listed = escape(", ".join(reasons))
     effect = "may send it elsewhere or send another key in its place"
     console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} {effect}")
     return True
@@ -343,34 +345,34 @@ def _validate_vertexai_claude_connection(
 ) -> tuple[bool | None, str]:
     """Validate the configured Vertex AI Claude model with one tiny request through the runtime's Claude adapter.
 
-    An unreachable endpoint or token service leaves the check inconclusive rather than failed.
+    A model the adapter finds no project or region for is not checked, and an unreachable endpoint or token service
+    leaves the check inconclusive rather than failed.
     """
-    extra_kwargs = dict(model_config.extra_kwargs or {})
-    project_env = VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]
-    region_env = VERTEXAI_CLAUDE_ENV_BY_KEY["region"]
-    project_id = extra_kwargs.get("project_id") or get_secret_from_env(project_env, runtime_paths=runtime_paths)
-    region = extra_kwargs.get("region") or runtime_paths.env_value(region_env)
-    missing = []
-    if not project_id:
-        missing.append(project_env)
-    if not region:
-        missing.append(region_env)
-    if missing:
-        return None, f"missing {', '.join(missing)}"
-
     # Google auth, the anthropic SDK, and its HTTP client load only when a Vertex Claude model is checked.
     from google.auth.exceptions import DefaultCredentialsError  # noqa: PLC0415
 
-    from mindroom.providers.anthropic.messages import build_provider  # noqa: PLC0415
+    from mindroom.providers.anthropic.messages import build_provider, vertex_project_and_region  # noqa: PLC0415
     from mindroom.providers.model_http_client import closing_model_connections  # noqa: PLC0415
 
-    probe_config = model_config.model_copy(update={"extra_kwargs": {"timeout": 10, **extra_kwargs, "max_tokens": 1}})
+    probe_kwargs = {"timeout": 10, **(model_config.extra_kwargs or {}), "max_tokens": 1}
+    probe_config = model_config.model_copy(update={"extra_kwargs": probe_kwargs})
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
-        overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
+        overrides=RequestOverrides(prompt_cache=False, omit_thinking_setting=True),
     )
     try:
         provider = build_provider(probe_config, runtime_paths)
+        project_id, region = vertex_project_and_region(provider.settings)
+        missing = [
+            env_key
+            for env_key, value in (
+                (VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"], project_id),
+                (VERTEXAI_CLAUDE_ENV_BY_KEY["region"], region),
+            )
+            if not value
+        ]
+        if missing:
+            return None, f"missing {', '.join(missing)}"
         asyncio.run(closing_model_connections(complete(provider, request)))
     except PermanentStartupError as exc:
         return False, str(exc)

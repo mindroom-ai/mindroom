@@ -76,7 +76,15 @@
       "input": [
         {
           "role": "developer",
-          "content": "Route the message to the best agent."
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Route the message to the best agent.",
+              "prompt_cache_breakpoint": {
+                "mode": "explicit"
+              }
+            }
+          ]
         },
         {
           "role": "user",

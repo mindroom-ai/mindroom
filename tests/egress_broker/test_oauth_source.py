@@ -13,25 +13,39 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.egress_broker import EgressReadOnly
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker import oauth_source
-from mindroom.egress_broker.oauth_reuse import OAUTH_REUSE_CREDENTIAL_SERVICE, set_oauth_reuse
-from mindroom.egress_broker.oauth_source import broker_credential_context, oauth_status, resolve_oauth_token
+from mindroom.egress_broker.oauth_reuse import (
+    OAUTH_REUSE_CREDENTIAL_SERVICE,
+    oauth_reuse_access,
+    set_oauth_reuse,
+)
+from mindroom.egress_broker.oauth_source import (
+    broker_credential_context,
+    oauth_status,
+    resolve_oauth_token,
+    separate_account_provider,
+)
 from mindroom.egress_broker.secrets import (
     OAuthStatus,
     Secret,
     SecretMissing,
     SecretNeedsReconnect,
+    SecretReadOnly,
+    SecretRequest,
     SecretResult,
     SecretUnavailable,
     load_egress_document,
+    save_egress_document,
 )
 from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
+from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.egress_broker.conftest import (
@@ -167,8 +181,11 @@ def _resolve(
     *,
     provider_id: str = "github",
     service: str | None = None,
+    request: SecretRequest | None = None,
+    read_only: EgressReadOnly | None = None,
+    separate_account: bool = False,
 ) -> SecretResult:
-    """Resolve the token of the service named `service`, by default after its provider."""
+    """Resolve the token of the service named `service`, by default after its provider, for a GET unless `request`."""
     return resolve_oauth_token(
         service=service or provider_id,
         provider_id=provider_id,
@@ -176,6 +193,9 @@ def _resolve(
         runtime_paths=runtime_paths,
         credentials_manager=manager,
         worker_target=target,
+        request=request or SecretRequest(method="GET", path="/"),
+        read_only=read_only,
+        separate_account=separate_account,
     )
 
 
@@ -187,11 +207,13 @@ def _status(
     *,
     provider_id: str = "github",
     service: str | None = None,
+    separate_account: bool = False,
 ) -> OAuthStatus | None:
     return oauth_status(
         provider_id,
         target,
         service=service or provider_id,
+        separate_account=separate_account,
         config=config,
         runtime_paths=runtime_paths,
         credentials_manager=manager,
@@ -350,6 +372,7 @@ def test_status_without_a_worker_target_treats_it_as_unscoped(
         "github",
         None,
         service="github",
+        separate_account=False,
         config=config,
         runtime_paths=runtime_paths,
         credentials_manager=manager,
@@ -794,6 +817,7 @@ def test_status_reports_connection_without_refreshing(
         can_connect=True,
         reset_required=False,
         reuse_enabled=True,
+        reuse_access="read_write",
     )
     assert bob == OAuthStatus(
         provider="github",
@@ -803,6 +827,7 @@ def test_status_reports_connection_without_refreshing(
         can_connect=True,
         reset_required=False,
         reuse_enabled=True,
+        reuse_access="read_write",
     )
     assert presented == []
 
@@ -979,3 +1004,328 @@ def test_status_says_whether_agent_keys_may_use_the_connection_and_revoking_stop
     assert allowed[1] == Secret("alice-access")
     assert revoked == SecretMissing(provider="github", reuse_off=True, requester_owned=True)
     assert load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE) is None
+
+
+def _alice_reuse_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> OAuthCredentialContext:
+    """Return the context whose store holds the opt-ins for Alice's GitHub account."""
+    return broker_credential_context(
+        github_oauth_provider(),
+        config,
+        runtime_paths,
+        manager,
+        _broker_target("@alice:example.org"),
+    )
+
+
+def test_entry_without_access_reads_read_write(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """An opt-in stored before access levels existed keeps allowing writes; nothing needs migrating.
+
+    A level the broker does not know never allows writes.
+    """
+    entry = {"provider": "github", "enabled_by": "@alice:example.org", "enabled_at": "2026-10-01T00:00:00Z"}
+    save_egress_document(
+        manager,
+        account_store("@alice:example.org"),
+        OAUTH_REUSE_CREDENTIAL_SERVICE,
+        {"services": {"github": entry, "gists": {**entry, "access": "write"}}},
+    )
+    context = _alice_reuse_context(config, runtime_paths, manager)
+
+    assert oauth_reuse_access(context, "github", "github", separate_account=False) == "read_write"
+    assert oauth_reuse_access(context, "gists", "github", separate_account=False) == "read"
+    assert oauth_reuse_access(context, "github", "other", separate_account=False) is None
+    assert oauth_reuse_access(context, "pages", "github", separate_account=False) is None
+
+
+def test_set_oauth_reuse_stores_access(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Allowing an account records its level, which defaults to read and write; stopping it leaves no level."""
+    context = _alice_reuse_context(config, runtime_paths, manager)
+
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+    read = oauth_reuse_access(context, "github", "github", separate_account=False)
+    stored = load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org")
+    default = oauth_reuse_access(context, "github", "github", separate_account=False)
+    set_oauth_reuse(context, "github", "github", enabled=False, by="@alice:example.org")
+
+    assert read == "read"
+    assert stored is not None
+    assert stored["services"]["github"]["access"] == "read"
+    assert default == "read_write"
+    assert oauth_reuse_access(context, "github", "github", separate_account=False) is None
+
+
+def test_changing_access_keeps_other_entries(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Changing one service's level rewrites that entry only; every other entry stays exactly as stored."""
+    others = {
+        "gists": {"provider": "github", "enabled_by": "@bob:example.org", "enabled_at": "2026-10-01T00:00:00Z"},
+        "github-work": {
+            "provider": "github",
+            "enabled_by": None,
+            "enabled_at": "2026-10-02T00:00:00Z",
+            "access": "read",
+        },
+    }
+    store = account_store("@alice:example.org")
+    original = {"provider": "github", "enabled_by": "@alice:example.org", "enabled_at": "2026-10-03T00:00:00Z"}
+    save_egress_document(
+        manager,
+        store,
+        OAUTH_REUSE_CREDENTIAL_SERVICE,
+        {"services": {**others, "github": original}},
+    )
+    context = _alice_reuse_context(config, runtime_paths, manager)
+
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+
+    stored = load_egress_document(manager, store, OAUTH_REUSE_CREDENTIAL_SERVICE)
+    assert stored is not None
+    assert {name: entry for name, entry in stored["services"].items() if name != "github"} == others
+    assert stored["services"]["github"]["access"] == "read"
+    assert oauth_reuse_access(context, "gists", "github", separate_account=False) == "read_write"
+    assert oauth_reuse_access(context, "github-work", "github", separate_account=False) == "read"
+
+
+_POST = SecretRequest(method="POST", path="/repos/o/r/issues")
+_GET = SecretRequest(method="GET", path="/repos/o/r/issues")
+
+
+def test_read_only_refusal_never_reads_the_connection(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write under a read-only opt-in is refused before the connection is read or refreshed; a read gets the token.
+
+    Without a `read_only` declaration, as when the service's config dropped it after the account was allowed
+    read-only, even a GET is refused.
+    """
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    alice = _broker_target("@alice:example.org")
+    context = _alice_reuse_context(config, runtime_paths, manager)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+    reads = EgressReadOnly(post_paths=["/search"])
+
+    with monkeypatch.context() as patched:
+        patched.setattr(oauth_source, "refresh_oauth_credentials_blocking", _never)
+        patched.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", _never)
+        refused = _resolve(config, runtime_paths, manager, alice, request=_POST, read_only=reads)
+        undeclared = _resolve(config, runtime_paths, manager, alice, request=_GET)
+    read = _resolve(config, runtime_paths, manager, alice, request=_GET, read_only=reads)
+    listed_post = _resolve(
+        config,
+        runtime_paths,
+        manager,
+        alice,
+        request=_POST,
+        read_only=EgressReadOnly(post_paths=["/repos/o/r/issues"]),
+    )
+
+    assert refused == undeclared == SecretReadOnly(provider="github", requester_owned=True)
+    assert read == listed_post == Secret("alice-access")
+
+
+def test_read_write_entry_ignores_method(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """A read-and-write opt-in gets the token whatever the request does."""
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    alice = _broker_target("@alice:example.org")
+    context = _alice_reuse_context(config, runtime_paths, manager)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read_write")
+    override = SecretRequest(method="GET", path="/", method_override=True)
+    websocket = SecretRequest(method="GET", path="/", websocket=True)
+
+    results = [
+        _resolve(config, runtime_paths, manager, alice, request=request) for request in (_POST, override, websocket)
+    ]
+
+    assert results == [Secret("alice-access")] * 3
+
+
+def test_a_separate_account_is_stored_under_its_services_own_credential_service() -> None:
+    """A service's own account is the provider with only the stored name changed, still ending in `_oauth`."""
+    provider = google_calendar_oauth_provider()
+
+    separate = separate_account_provider(provider, "team_calendar")
+
+    assert separate.credential_service == "google_calendar__team_calendar_oauth"
+    assert separate == replace(provider, credential_service="google_calendar__team_calendar_oauth")
+
+
+# Alice's demo service `mine` with an account of its own, beside the demo connection her tools on agent `code` use.
+_OWN_DEMO = separate_account_provider(_DEMO, "mine")
+
+
+def _connect_demo(manager: CredentialsManager, token: str, provider: OAuthProvider = _DEMO, **fields: object) -> None:
+    """Store Alice's demo connection on agent `code`: the tools' one, or with `_OWN_DEMO` the one of her service `mine`."""
+    connect_account(manager, _tool_target("@alice:example.org"), token, provider=provider, **fields)
+
+
+def _allow_mine(manager: CredentialsManager, runtime_paths: RuntimePaths, provider: OAuthProvider) -> None:
+    """Let Agent Keys use `provider`'s connection for Alice's service `mine`, as the egress page writes it."""
+    allow_oauth_reuse(manager, runtime_paths, _broker_target("@alice:example.org"), "mine", provider=provider)
+
+
+def _resolve_mine(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    *,
+    separate_account: bool = True,
+) -> SecretResult:
+    """Resolve Alice's demo service `mine`, by default as a service with its own account."""
+    return _resolve(
+        config,
+        runtime_paths,
+        manager,
+        _broker_target("@alice:example.org"),
+        provider_id="demo",
+        service="mine",
+        separate_account=separate_account,
+    )
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_a_separate_account_yields_only_its_own_connection(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """A service with its own account gets that account's token and never the tools' one, not even before it has one.
+
+    Without its own account there is no connect link either: the provider's link would connect the tools' account.
+    """
+    _connect_demo(manager, "tools-access")
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
+
+    before = _resolve_mine(config, runtime_paths, manager)
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    own = _resolve_mine(config, runtime_paths, manager)
+
+    assert before == SecretMissing(own_account=True)
+    assert before.connect_url is None
+    assert own == Secret("own-access")
+
+
+@pytest.mark.parametrize("own_first", [True, False], ids=["own-consent", "tools-consent"])
+@pytest.mark.usefixtures("demo_registry")
+def test_an_opt_in_unlocks_only_the_connection_it_was_given_for(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    own_first: bool,
+) -> None:
+    """A service switched between its own and the tools' account finds the opt-in off before anyone stops it.
+
+    So a request routed by the new definition while the old opt-in is still stored never uses the other account.
+    """
+    _connect_demo(manager, "tools-access")
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO if own_first else _DEMO)
+
+    allowed = _resolve_mine(config, runtime_paths, manager, separate_account=own_first)
+    switched = _resolve_mine(config, runtime_paths, manager, separate_account=not own_first)
+
+    assert allowed == Secret("own-access" if own_first else "tools-access")
+    assert switched == SecretMissing(provider="demo", reuse_off=True)
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_an_opt_in_without_a_credential_service_counts_for_the_tools_connection_only(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """An entry stored before opt-ins named their connection was given for the provider's own one."""
+    _connect_demo(manager, "tools-access")
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    entry = {"provider": "demo", "enabled_by": "@alice:example.org", "enabled_at": "2026-10-01T00:00:00Z"}
+    save_egress_document(
+        manager,
+        _broker_target("@alice:example.org"),
+        OAUTH_REUSE_CREDENTIAL_SERVICE,
+        {"services": {"mine": entry}},
+    )
+
+    assert _resolve_mine(config, runtime_paths, manager, separate_account=False) == Secret("tools-access")
+    assert _resolve_mine(config, runtime_paths, manager) == SecretMissing(provider="demo", reuse_off=True)
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_status_of_a_separate_account_reads_its_own_connection(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The status, which placeholders and the agent tool read, shows the service's own account, not the tools'."""
+    alice = _broker_target("@alice:example.org")
+    claims = {"_oauth_claims_verified": True}
+    _connect_demo(manager, "tools-access", _oauth_claims={"login": "tools"}, **claims)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
+
+    def status() -> OAuthStatus | None:
+        return _status(config, runtime_paths, manager, alice, provider_id="demo", service="mine", separate_account=True)
+
+    before = status()
+    _connect_demo(manager, "own-access", _OWN_DEMO, _oauth_claims={"login": "own"}, **claims)
+    after = status()
+
+    assert before is not None
+    assert after is not None
+    assert (before.connected, before.account_label, before.reuse_enabled) == (False, None, True)
+    assert (after.connected, after.account_label, after.reuse_enabled) == (True, "own", True)
+
+
+@pytest.mark.usefixtures("demo_registry", "enable_reuse")
+def test_a_refresh_outage_of_one_connection_never_holds_back_another(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh backoff follows the stored connection, so the tools' outage leaves a service's own account working."""
+    _connect_demo(manager, "stale-access", expires_at=1.0)
+    _connect_demo(manager, "own-access", _OWN_DEMO)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
+    serve_token_endpoint(monkeypatch, [httpx.Response(503, json={"error": "temporarily_unavailable"})])
+
+    tools = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"), provider_id="demo")
+    own = _resolve_mine(config, runtime_paths, manager)
+
+    assert tools == SecretUnavailable(provider="demo")
+    assert own == Secret("own-access")
+
+
+@pytest.mark.usefixtures("demo_registry")
+def test_a_separate_account_whose_grant_was_revoked_gets_no_connect_link(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reconnect never offers the provider's link, which would connect the tools' account instead."""
+    _connect_demo(manager, "stale-access", _OWN_DEMO, expires_at=1.0)
+    _allow_mine(manager, runtime_paths, _OWN_DEMO)
+    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+
+    assert _resolve_mine(config, runtime_paths, manager) == SecretNeedsReconnect(provider="demo", connect_url=None)

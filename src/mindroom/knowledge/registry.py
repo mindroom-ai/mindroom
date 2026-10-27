@@ -30,6 +30,7 @@ from mindroom.knowledge.vector_store import KnowledgeCollection
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.dependencies import ensure_optional_deps
+from mindroom.tool_system.worker_routing import shared_storage_root, written_by_other_workers
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,6 +101,9 @@ _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
+#: Vectors one search may load from a base whose files worker code can write, so code that grows those files cannot
+#: make a search exhaust the primary's memory. About 43,000 chunks of the default 1,536-dimension embedder.
+_WORKER_WRITTEN_BASE_MATRIX_BYTES = 256 * 1024 * 1024
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -376,7 +380,27 @@ def _build_published_index_reader(
         path=str(published_index_storage_path(key)),
         embedder=create_configured_embedder(config, runtime_paths),
         published_settings=state.settings,
+        max_matrix_bytes=(
+            _WORKER_WRITTEN_BASE_MATRIX_BYTES
+            if _workers_write_sources(Path(key.knowledge_path), shared_storage_root(runtime_paths.storage_root))
+            else None
+        ),
     )
+
+
+def _workers_write_sources(knowledge_path: Path, storage_root: Path) -> bool:
+    """Return whether the base's path lies in, or holds, storage that sandbox workers write.
+
+    That covers private knowledge, file memory, and shared bases inside a workspace or shared directory, such as one
+    over thread exports. Other shared bases stay unlimited, since the operator chose and sized their sources.
+    """
+    if storage_root.is_relative_to(knowledge_path):
+        return True
+    if not knowledge_path.is_relative_to(storage_root):
+        return False
+    relative = knowledge_path.relative_to(storage_root)
+    # A base at `agents` or `agents/<name>` also indexes the workspaces below it.
+    return written_by_other_workers(relative) or (relative.parts[:1] == ("agents",) and len(relative.parts) <= 2)
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:

@@ -21,10 +21,10 @@ from mindroom.model_defaults import (
     DEEPSEEK_BASE_URL_DEFAULT,
     GROQ_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
-    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
     OPENROUTER_BASE_URL_DEFAULT,
     ZAI_BASE_URL_DEFAULT,
     claude_rejects_sampling_controls,
+    openai_rejects_sampling_controls,
 )
 from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
@@ -33,7 +33,7 @@ from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
-from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire
+from mindroom.providers.openai.chat_wire import ChatDialect, ChatWire, deepseek_request_thinks
 from mindroom.providers.openai.codex_auth import (
     CODEX_BASE_URL,
     CodexAuthError,
@@ -132,7 +132,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=DEEPSEEK_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["deepseek"],
         accepted=CHAT_FIELDS | {"use_thinking"},
-        structured_output="json_mode",
+        structured_output="forced_tool",
     ),
     "zai": _ChatRoute(provider="ZAI", provider_name="ZAI", api_key_env=None, base_url=ZAI_BASE_URL_DEFAULT),
     "llama_cpp": _ChatRoute(
@@ -154,7 +154,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         api_key_env=PROVIDER_ENV_KEYS["groq"],
         dialect="groq",
         accepted=GROQ_FIELDS,
-        structured_output="json_mode",
+        structured_output="forced_tool",
         omitted_media=frozenset({"audio", "file", "video"}),
         base_url_variable="GROQ_BASE_URL",
     ),
@@ -208,9 +208,7 @@ def _configured_key(route_key: str, model_config: ModelConfig, runtime: Provider
 
 def _provider_default_sampling(model_id: str) -> bool:
     """Return whether the model rejects a temperature, so overrides must leave sampling to the provider."""
-    return claude_rejects_sampling_controls(model_id) or model_id.casefold().rsplit("/", 1)[-1].startswith(
-        OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
-    )
+    return claude_rejects_sampling_controls(model_id) or openai_rejects_sampling_controls(model_id)
 
 
 def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | None) -> str | None:
@@ -441,8 +439,12 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         provider_name=route.provider_name,
         endpoint=endpoint.rstrip("/") if endpoint else None,
     )
+    structured_output = route.structured_output
+    if route_key == "deepseek" and deepseek_request_thinks(settings):
+        # DeepSeek rejects a forced tool call in thinking mode (https://api-docs.deepseek.com/api/create-chat-completion).
+        structured_output = "json_mode"
     capabilities = Capabilities(
-        structured_output=route.structured_output,
+        structured_output=structured_output,
         omitted_media=route.omitted_media,
         provider_default_sampling=_provider_default_sampling(model_id),
     )

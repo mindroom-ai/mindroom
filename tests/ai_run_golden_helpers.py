@@ -283,10 +283,12 @@ async def _team_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[
     [checker] = _member_runs("team-approved")
     team.models["leader"] = _resumed_model(_RUNS["team-approved"])
     team.models["checker-model"] = _resumed_model(checker)
-    store = team.storage
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    with closing(sqlite3.connect(store.path)) as connection:
+    # The Agno-layout database the pause was stored in replaces the new one, and the next open converts it.
+    database = team.storage.path
+    database.unlink()
+    with closing(sqlite3.connect(database)) as connection:
         connection.executescript((STORAGE / "team_squad__before_team-approved.sql").read_text(encoding="utf-8"))
+    store = team.storage
     paused = store.get_run("team-approved")
     assert isinstance(paused, TeamRunRecord)
     assert paused.status is RunStatus.paused

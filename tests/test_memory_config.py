@@ -13,6 +13,9 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from anthropic.types import Message as AnthropicMessage
+from anthropic.types import TextBlock
+from anthropic.types import Usage as AnthropicUsage
 from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
@@ -168,19 +171,18 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "expected_reasoning_effort"),
         [
-            ("gpt-6-astra", None, None, False, False),
-            (OPENAI_GPT_LUNA, None, None, False, False),
-            (OPENAI_GPT_SOL, None, None, False, False),
-            ("gpt-5.6-luna", None, None, False, False),
-            ("gpt-5.6-terra", None, None, False, False),
-            ("gpt-5.4-mini", None, None, False, False),
-            ("gpt-5-mini", None, None, False, False),
-            ("gpt-5-2025-08-07", None, None, False, False),
+            ("gpt-6-astra", None, None, False, "low"),
+            (OPENAI_GPT_LUNA, None, None, False, "low"),
+            (OPENAI_GPT_SOL, None, None, False, "low"),
+            ("gpt-5.6-luna", None, None, False, "low"),
+            ("gpt-5.6-terra", None, None, False, "low"),
+            ("gpt-5.4-mini", None, None, False, "low"),
+            ("gpt-5-mini", None, None, False, "low"),
+            ("gpt-5-2025-08-07", None, None, False, "low"),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, True, False),
-            (OPENAI_GPT_SOL, None, None, False, True),
+            ("gpt-4", 0.1, 0.8, True, None),
         ],
         ids=[
             "astra",
@@ -192,7 +194,6 @@ class TestMemoryConfig:
             "gpt-5-mini",
             "gpt-5-snapshot",
             "gpt-4",
-            "sol-legacy-mem0",
         ],
     )
     async def test_mem0_openai_request_parameters_are_model_specific(
@@ -202,9 +203,9 @@ class TestMemoryConfig:
         expected_temperature: float | None,
         expected_top_p: float | None,
         sends_max_tokens: bool,
-        legacy_request_builder: bool,
+        expected_reasoning_effort: str | None,
     ) -> None:
-        """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
+        """Memory extraction sends GPT-5 and later models what Mem0 sends the reasoning models it knows."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -217,6 +218,7 @@ class TestMemoryConfig:
                     "model": model_id,
                     "temperature": 0.1,
                     "top_p": 0.8,
+                    "reasoning_effort": "low",
                 },
             ),
         )
@@ -231,27 +233,12 @@ class TestMemoryConfig:
         with patch.object(
             AsyncMemory,
             "from_config",
-            return_value=SimpleNamespace(llm=mem0_llm, vector_store=object()),
+            return_value=SimpleNamespace(llm=mem0_llm),
         ):
             instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
         assert instance.llm is mem0_llm
-        messages = [{"role": "user", "content": "remember this"}]
-        if legacy_request_builder:
-
-            def legacy_generate_response(llm: OpenAILLM, request_messages: list[dict[str, str]]) -> object:
-                return llm.client.chat.completions.create(
-                    model=llm.config.model,
-                    messages=request_messages,
-                    temperature=llm.config.temperature,
-                    max_tokens=llm.config.max_tokens,
-                    top_p=llm.config.top_p,
-                )
-
-            with patch.object(OpenAILLM, "generate_response", legacy_generate_response):
-                instance.llm.generate_response(messages)
-        else:
-            instance.llm.generate_response(messages)
+        instance.llm.generate_response([{"role": "user", "content": "remember this"}])
 
         request_params = create_completion.call_args.kwargs
         expected_sampling = {"temperature": expected_temperature, "top_p": expected_top_p}
@@ -261,6 +248,117 @@ class TestMemoryConfig:
         assert ("max_tokens" in request_params) is sends_max_tokens
         # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
         assert "max_completion_tokens" not in request_params
+        assert request_params.get("reasoning_effort") == expected_reasoning_effort
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("provider", "authored_config", "expected_reasoning_model"),
+        [
+            ("openrouter", {"model": "openai/gpt-6-luna"}, True),
+            ("openrouter", {"model": "anthropic/claude-sonnet-5.5"}, None),
+            ("openai", {"model": OPENAI_GPT_LUNA, "is_reasoning_model": False}, False),
+        ],
+        ids=["openrouter-gpt-6", "openrouter-claude", "authored-false"],
+    )
+    async def test_mem0_reasoning_model_request_follows_the_routed_model_and_the_authored_setting(
+        self,
+        tmp_path: Path,
+        provider: str,
+        authored_config: dict[str, object],
+        expected_reasoning_model: bool | None,
+    ) -> None:
+        """GPT-5 and GPT-6 models get the reasoning-model request through OpenRouter too, unless config sets it."""
+        memory = MemoryConfig(
+            embedder=_MemoryEmbedderConfig(
+                provider="ollama",
+                config=EmbedderConfig(model="nomic-embed-text", host="http://localhost:11434"),
+            ),
+            llm=_MemoryLLMConfig(provider=provider, config={"api_key": "test-key", **authored_config}),
+        )
+        config = Config(memory=memory, router=RouterConfig(model="default"))
+        runtime_paths = _runtime_paths(tmp_path)
+        create_completion = MagicMock(
+            return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]),
+        )
+        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_completion)))
+        with patch("mem0.llms.openai.OpenAI", return_value=fake_client):
+            mem0_llm = OpenAILLM(_get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"])
+
+        with patch.object(AsyncMemory, "from_config", return_value=SimpleNamespace(llm=mem0_llm)):
+            instance = await create_memory_instance(tmp_path / "memory", config, runtime_paths)
+        instance.llm.generate_response([{"role": "user", "content": "remember this"}])
+
+        assert instance.llm.config.is_reasoning_model is expected_reasoning_model
+        # Mem0 sends its default temperature to every model that does not get the reasoning-model request.
+        assert ("temperature" in create_completion.call_args.kwargs) is (expected_reasoning_model is not True)
+
+    @pytest.mark.parametrize(
+        ("authored_config", "expected_sampling"),
+        [
+            ({"model": "claude-sonnet-5-5"}, {}),
+            ({"model": "claude-opus-5-5", "temperature": 0.3}, {}),
+            ({"model": "claude-fable-5-1", "top_p": 0.8}, {}),
+            ({"model": "claude-sonnet-5-5", "temperature": None}, {}),
+            ({"model": "claude-sonnet-5-5", "temperature": 0.3, "top_p": 0.8, "top_k": 5}, {}),
+            # Models that accept sampling values keep Mem0's default temperature and the authored values.
+            ({"model": "claude-sonnet-4-5"}, {"temperature": 0.1}),
+            ({"model": "claude-sonnet-4-5", "temperature": None, "top_p": 0.8}, {"top_p": 0.8}),
+            ({}, {"temperature": 0.1}),
+        ],
+        ids=[
+            "sonnet-5.5-default",
+            "opus-5.5-temperature",
+            "fable-5.1-top-p",
+            "sonnet-5.5-null-temperature",
+            "sonnet-5.5-all-three",
+            "sonnet-4.5-default",
+            "sonnet-4.5-top-p",
+            "mem0-default-model",
+        ],
+    )
+    def test_mem0_anthropic_sends_sampling_only_to_models_that_accept_it(
+        self,
+        tmp_path: Path,
+        authored_config: dict[str, object],
+        expected_sampling: dict[str, float],
+    ) -> None:
+        """A Claude memory LLM sends no ``temperature``, ``top_p``, or ``top_k`` to the models that reject them."""
+        config = Config(
+            memory={"llm": {"provider": "anthropic", "config": {"api_key": "sk-ant-test", **authored_config}}},
+            router=RouterConfig(model="default"),
+        )
+        llm_config = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))["llm"]
+        mem0_llm = LlmFactory.create(llm_config["provider"], llm_config["config"])
+        reply = AnthropicMessage(
+            id="msg_test",
+            type="message",
+            role="assistant",
+            model=mem0_llm.config.model,
+            content=[TextBlock(type="text", text='{"memory": []}')],
+            stop_reason="end_turn",
+            usage=AnthropicUsage(input_tokens=1, output_tokens=1),
+        )
+        create_message = MagicMock(return_value=reply)
+        mem0_llm.client.messages.create = create_message
+
+        assert mem0_llm.generate_response([{"role": "user", "content": "remember this"}]) == '{"memory": []}'
+
+        request_params = create_message.call_args.kwargs
+        sampling_names = ("temperature", "top_p", "top_k")
+        assert {name: request_params[name] for name in sampling_names if name in request_params} == expected_sampling
+
+    def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(self, tmp_path: Path) -> None:
+        """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""
+        authored_config = {"model": "anthropic/claude-sonnet-5.5", "temperature": 0.3}
+        config = Config(
+            memory={"llm": {"provider": "openrouter", "config": authored_config}},
+            router=RouterConfig(model="default"),
+        )
+
+        llm_config = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))["llm"]["config"]
+
+        assert llm_config["temperature"] == 0.3
+        assert "top_p" not in llm_config
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
@@ -740,6 +838,36 @@ class TestMemoryConfig:
         assert str(embedder._sdk_client().base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
         assert embedder._request_parameters(["hi"], purpose="query")["dimensions"] == 1536
 
+    @pytest.mark.parametrize(
+        ("provider", "canonical", "mem0_provider"),
+        [
+            (" OpenRouter ", "openrouter", "openai"),
+            ("Ollama", "ollama", "ollama"),
+            ("ANTHROPIC", "anthropic", "anthropic"),
+        ],
+    )
+    def test_memory_llm_provider_loads_in_any_spelling_as_the_name_mem0_accepts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        canonical: str,
+        mem0_provider: str,
+    ) -> None:
+        """A memory LLM provider is spelled as model providers are, so Mem0 builds it instead of rejecting the name."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        config = Config(
+            memory={"llm": {"provider": provider, "config": {"model": "m", "api_key": "sk-test"}}},
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))
+
+        assert config.memory.llm is not None
+        assert config.memory.llm.provider == canonical
+        assert result["llm"]["provider"] == mem0_provider
+        LlmFactory.create(result["llm"]["provider"], result["llm"]["config"])
+
     def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
         """Credential-backed Ollama host should override the embedder config host."""
         runtime_paths = _runtime_paths(tmp_path)
@@ -906,24 +1034,26 @@ class TestMemoryConfig:
         assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["sentence_transformers", "huggingface"])
     @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
     @patch.object(AsyncMemory, "from_config")
     async def test_create_memory_instance_auto_installs_sentence_transformers(
         self,
         mock_from_config: MagicMock,
         mock_ensure_sentence_transformers_dependencies: MagicMock,
+        provider: str,
         tmp_path: Path,
     ) -> None:
-        """Creating a local-embedder Mem0 instance should trigger optional runtime install."""
+        """Both local embedders load Mem0's huggingface embedder, which imports sentence-transformers, so both install it."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
-                provider="sentence_transformers",
+                provider=provider,
                 config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
             ),
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -942,7 +1072,7 @@ class TestMemoryConfig:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
+        """Mem0 checks dependencies and waits for a running install without stalling the event loop."""
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
@@ -952,7 +1082,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm())
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -1007,7 +1137,7 @@ class TestMemoryConfig:
             client=client,
             health_recorder=capture_embedder_health_recorder(),
         )
-        memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=object())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),
@@ -1071,9 +1201,11 @@ class TestMemoryConfig:
         adapter.embed("remember", "add")
         adapter.embed("changed", "update")
         adapter.embed_batch(["one", "two"])
+        # Mem0 embeds the entities it finds in a search query in one batch.
+        adapter.embed_batch(["Alice", "Bob"], "search")
 
         inputs = [call.kwargs["input"] for call in client.embeddings.create.call_args_list]
-        assert inputs == ["q: find me", "d: remember", "d: changed", ["d: one", "d: two"]]
+        assert inputs == ["q: find me", "d: remember", "d: changed", ["d: one", "d: two"], ["q: Alice", "q: Bob"]]
 
     def test_memory_auto_flush_batch_config_is_parameterized(self) -> None:
         """Auto-flush batch/extractor limits should be configurable."""

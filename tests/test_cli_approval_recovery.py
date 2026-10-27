@@ -74,7 +74,7 @@ from tests.approval_continuation_helpers import (
     carries_approval_receipt,
     receipts,
 )
-from tests.conftest import install_model_providers, unwrap_extracted_collaborator
+from tests.conftest import install_model_providers, stored_session_state, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
 from tests.identity_helpers import persist_entity_accounts
@@ -124,9 +124,10 @@ def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
     """Store ``record`` as the run an approval paused in, and return it with its session as recovery reads them."""
-    store.save_runs(
+    store.save_run(
         ConversationSession(session_id=session_id, kind="agent", owner_id="helper"),
-        [record],
+        record,
+        record_usage=False,
     )
     session = store.load_session(session_id, "agent")
     persisted = store.get_run(record.run_id)
@@ -613,9 +614,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
 
     await persist_to(store, session)(RunRecord(run_id="later", session_id="session", agent_id="helper"))
 
-    fields = store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state == {"recovered": "v"}
+    assert stored_session_state(store, "session") == {"recovered": "v"}
 
 
 def _outer_bash_approval(arguments: dict[str, object]) -> RunRequirement:
@@ -726,8 +725,8 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
         result="nested tool output",
         is_error=False,
     )
-    # The fold took the earlier shell call out of the run's record and stored it on its summary row.
-    store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tools=[folded.to_dict()])
+    # A fold took the earlier shell call's result out of the run's replay view, and its summary holds it.
+    store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tool_call_ids=["folded-bash"])
     arguments = {"command": "touch never"}
     requirement = _outer_bash_approval(arguments)
     persisted, session = _saved(

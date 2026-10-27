@@ -31,7 +31,7 @@ from mindroom.path_confinement import (
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from mindroom.config.main import Config
 
@@ -216,6 +216,32 @@ def open_knowledge_file(path: Path) -> Iterator[int]:
     """
     with open_regular_file_within_root(Path(path.anchor), path.relative_to(path.anchor)) as file_fd:
         yield file_fd
+
+
+@contextmanager
+def pinned_directories(root: Path) -> Iterator[Callable[[Path], int]]:
+    """Yield a function that pins a directory below ``root`` by a no-follow walk, reusing the one it pinned last.
+
+    Files signed in listing order arrive grouped by directory, so each directory costs one walk instead of one per
+    file. The descriptors stay owned here.
+    """
+    last: list[tuple[Path, int]] = []
+
+    def pin(relative_directory: Path) -> int:
+        if last and last[0][0] == relative_directory:
+            return last[0][1]
+        with open_directory_within_root(root, relative_directory) as descriptor:
+            pinned = os.dup(descriptor)
+        if last:
+            os.close(last.pop()[1])
+        last.append((relative_directory, pinned))
+        return pinned
+
+    try:
+        yield pin
+    finally:
+        for _directory, descriptor in last:
+            os.close(descriptor)
 
 
 def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:

@@ -24,6 +24,11 @@ def _bearer(host: str, path_prefix: str = "/") -> dict[str, object]:
     return {"host": host, "path_prefix": path_prefix, "auth": {"type": "bearer"}}
 
 
+# These APIs read with GET and HEAD, so a connected account allowed read-only is safe there. GitHub is left out: git
+# clone and fetch read with POST to `.../git-upload-pack`, which a path prefix cannot name.
+_READ_ONLY: dict[str, object] = {"post_paths": []}
+
+
 EGRESS_PRESETS: Mapping[str, dict[str, object]] = MappingProxyType(
     {
         "github": {
@@ -45,6 +50,7 @@ EGRESS_PRESETS: Mapping[str, dict[str, object]] = MappingProxyType(
                 _bearer(_GOOGLE_API_HOST, "/drive/"),
                 _bearer(_GOOGLE_API_HOST, "/upload/drive/"),
             ],
+            "read_only": _READ_ONLY,
         },
         "google_gmail": {
             "display_name": "Gmail",
@@ -54,24 +60,29 @@ EGRESS_PRESETS: Mapping[str, dict[str, object]] = MappingProxyType(
                 _bearer("gmail.googleapis.com"),
                 _bearer(_GOOGLE_API_HOST, "/gmail/"),
             ],
+            "read_only": _READ_ONLY,
         },
         "google_calendar": {
             "display_name": "Google Calendar",
             "description": "Google Calendar API",
             "oauth_provider": "google_calendar",
             "rules": [_bearer(_GOOGLE_API_HOST, "/calendar/")],
+            # Free/busy queries read with POST.
+            "read_only": {"post_paths": ["/calendar/v3/freeBusy"]},
         },
         "google_sheets": {
             "display_name": "Google Sheets",
             "description": "Google Sheets API",
             "oauth_provider": "google_sheets",
             "rules": [_bearer("sheets.googleapis.com")],
+            "read_only": _READ_ONLY,
         },
         "google_docs": {
             "display_name": "Google Docs",
             "description": "Google Docs API",
             "oauth_provider": "google_docs",
             "rules": [_bearer("docs.googleapis.com")],
+            "read_only": _READ_ONLY,
         },
         "google_tasks": {
             "display_name": "Google Tasks",
@@ -81,12 +92,14 @@ EGRESS_PRESETS: Mapping[str, dict[str, object]] = MappingProxyType(
                 _bearer("tasks.googleapis.com"),
                 _bearer(_GOOGLE_API_HOST, "/tasks/"),
             ],
+            "read_only": _READ_ONLY,
         },
         "atlassian": {
             "display_name": "Atlassian",
             "description": "Atlassian Cloud APIs (Jira and Confluence)",
             "oauth_provider": "atlassian",
             "rules": [_bearer("api.atlassian.com")],
+            "read_only": _READ_ONLY,
         },
         "openai": {
             "display_name": "OpenAI",

@@ -27,6 +27,8 @@ from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
     SecretNeedsReconnect,
+    SecretReadOnly,
+    SecretRequest,
     SecretServiceChanged,
     SecretUnavailable,
 )
@@ -42,6 +44,9 @@ if TYPE_CHECKING:
 __all__ = ["TlsInterceptor"]
 
 logger = get_logger(__name__)
+
+# Headers that ask a server to act as if the request had another method; h11 gives header names in lowercase.
+_METHOD_OVERRIDE_HEADERS = frozenset({b"x-http-method-override", b"x-http-method", b"x-method-override"})
 
 
 def _verifying_context() -> ssl.SSLContext:
@@ -185,12 +190,13 @@ class TlsInterceptor:
             # Forwarding another Host to the same address is domain fronting: it could carry the secret elsewhere.
             await self._relay.deny(client, entry, refusal_body("host_mismatch"))
             return False
-        routed = await self._relay.route(client, entry, tunnel.port)
+        routed = await self._relay.route(client, entry, tunnel.port, request.headers)
         if routed is None:
             return False
         rules, route = routed
         headers = upstream_request_headers(list(request.headers), host=host_header or tunnel.authority)
-        if _is_websocket_upgrade(list(request.headers)):
+        websocket = _is_websocket_upgrade(list(request.headers))
+        if websocket:
             if client.close_after_response:
                 # Conflicting lengths mean the connection closes after this response, so it never becomes a splice.
                 await self._relay.deny(client, entry, refusal_body("bad_request"), status=400)
@@ -200,7 +206,13 @@ class TlsInterceptor:
             upstream_request = h11.Request(method=request.method, target=request.target, headers=headers)
         else:
             entry.service = match.service
-            if (secret := await self._secret(client, entry, match)) is None:
+            facts = SecretRequest(
+                method=entry.method,
+                path=entry.path,
+                websocket=websocket,
+                method_override=any(name in _METHOD_OVERRIDE_HEADERS for name, _value in request.headers),
+            )
+            if (secret := await self._secret(client, entry, match, facts)) is None:
                 return False
             if (upstream_request := _injected_request(request, headers, match, secret)) is None:
                 logger.warning("egress_broker_secret_unusable", service=match.service)
@@ -208,13 +220,14 @@ class TlsInterceptor:
                 return False
         return await self._forward(client, entry, tunnel, upstream_request, rules, strip_cookies=route.host_has_rules)
 
-    async def _secret(self, client: Peer, entry: AuditEntry, match: RuleMatch) -> str | None:
+    async def _secret(self, client: Peer, entry: AuditEntry, match: RuleMatch, request: SecretRequest) -> str | None:
         """Return the worker scope's secret for the matched service; otherwise answer the client, audit, and return None.
 
-        The resolver also gets the definition the match came from, and resolves nothing once the service has changed.
+        The resolver also gets the definition the match came from, and resolves nothing once the service has changed,
+        and the request's facts, which decide whether an account allowed only to read may serve it.
         """
         try:
-            result = await self._resolve_secret(entry.claims, match.service, match.definition)
+            result = await self._resolve_secret(entry.claims, match.service, match.definition, request)
             if isinstance(result, Secret) and result.value:
                 return result.value
             status, body = self._refusal(entry.claims, match.service, result)
@@ -234,7 +247,8 @@ class TlsInterceptor:
 
         Each body but the `broker_error` for a changed service carries `manage_url`, which its message names, unless
         no page sets the scope's keys (a personal scope without the personal page), and a connect link only in
-        `connect_url`. An account nobody allowed Agent Keys to use gets `oauth_reuse: "off"` and no connect link.
+        `connect_url`. An account nobody allowed Agent Keys to use gets `oauth_reuse: "off"` and no connect link, and a
+        request an account allowed only to read may not serve gets `read_only`.
         """
         if isinstance(result, SecretServiceChanged):
             # The service changed after routing, so its credential may be for other hosts; a retry routes afresh.
@@ -250,6 +264,17 @@ class TlsInterceptor:
                 provider=result.provider,
                 shared=scope.shared,
                 personal_page=scope.personal_page,
+                manage_url=manage_url,
+            )
+        if isinstance(result, SecretReadOnly):
+            return 403, refusal_body(
+                "read_only",
+                service=service,
+                provider=result.provider,
+                managers=scope.managers,
+                shared=scope.shared,
+                personal_page=scope.personal_page,
+                requester_owned=result.requester_owned,
                 manage_url=manage_url,
             )
         if isinstance(result, SecretNeedsReconnect):
@@ -278,6 +303,7 @@ class TlsInterceptor:
             connectable=lookup.provider is not None and lookup.connect_url is not None,
             reuse_off=lookup.reuse_off,
             requester_owned=lookup.requester_owned,
+            own_account=lookup.own_account,
             manage_url=manage_url,
         )
         if lookup.provider is not None and not lookup.reuse_off:

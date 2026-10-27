@@ -126,9 +126,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -150,13 +148,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Look up one order by id.",
-        "external_execution": false,
         "name": "lookup_order",
         "parameters": {
           "properties": {
@@ -169,13 +164,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Email the invoice for one order.",
-        "external_execution": false,
         "name": "send_invoice",
         "parameters": {
           "properties": {
@@ -188,7 +180,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -303,6 +294,12 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "tools": [
         {
           "type": "tool_search_tool_regex_20251119",
@@ -312,7 +309,6 @@
           "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -330,7 +326,7 @@
             "required": [
               "city"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "cache_control": {
             "type": "ephemeral",
@@ -341,17 +337,15 @@
           "name": "lookup_order",
           "description": "Look up one order by id.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "order_id": {
-                "type": "string",
-                "description": ""
+                "type": "string"
               }
             },
             "required": [
               "order_id"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "defer_loading": true
         },
@@ -359,17 +353,15 @@
           "name": "send_invoice",
           "description": "Email the invoice for one order.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "order_id": {
-                "type": "string",
-                "description": ""
+                "type": "string"
               }
             },
             "required": [
               "order_id"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "defer_loading": true
         }
@@ -378,11 +370,12 @@
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "anthropic-version": "2023-06-01",
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://api.anthropic.com/v1/messages"
+    "url": "https://api.anthropic.com/v1/messages?beta=true"
   },
   "response_raw": {
     "headers": {

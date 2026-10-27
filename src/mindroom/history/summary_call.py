@@ -1,9 +1,9 @@
 """One portable summary call and its bounded retry policy.
 
 The summary request goes through the provider pipeline as one call with every retry below this module, the SDK's and
-the pipeline's, and the prompt cache turned off, and thinking off where the route can turn it off, bounded by the
-compaction deadline. This module owns the call's lifecycle, cancellation, complete-output validation, and the retry
-decision chunk execution uses.
+the pipeline's, and the prompt cache turned off, and on the Claude routes without the model's authored thinking setting,
+bounded by the compaction deadline. This module owns the call's lifecycle, cancellation, complete-output validation,
+and the retry decision chunk execution uses.
 """
 
 from __future__ import annotations
@@ -40,10 +40,11 @@ _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 # A provider that times out on its own side says so only in the text of its HTTP error or stream error event, such as
 # a gateway's "upstream request timed out": no status or code marks it, so provider errors are matched by wording.
 _PROVIDER_TIMEOUT_FRAGMENT = "timed out"
-# ``SummaryRetryPolicy`` alone retries a failed summary, a one-off summary never reuses its prefix, and thinking would
-# spend the output budget the summary needs. The transport timeout stays the route's own, so a shorter authored
-# provider timeout still applies; the summary call's wall deadline bounds every request.
-_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, disable_thinking=True)
+# ``SummaryRetryPolicy`` alone retries a failed summary, and a one-off summary never reuses its prefix. Leaving out the
+# authored thinking setting keeps a model that thinks only when asked, such as Claude 4.x, from spending the
+# output budget the summary needs; a model that thinks by default still thinks. The transport timeout stays the route's
+# own, so a shorter authored provider timeout still applies; the summary call's wall deadline bounds every request.
+_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
 
 
 class _CompactionSummaryTimeoutError(TimeoutError):

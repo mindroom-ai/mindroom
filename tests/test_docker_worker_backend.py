@@ -57,7 +57,6 @@ from mindroom.workers.backends.docker import (
     DockerWorkerBackend,
     _DockerLaunchConfig,
     _load_docker_client_and_errors,
-    _worker_health_compatibility_error,
     _WorkerImageIncompatibleError,
     check_docker_workers_absent_for_storage_upgrade,
     ensure_docker_dependencies,
@@ -74,7 +73,7 @@ from mindroom.workers.backends.docker_projection import (
 )
 from mindroom.workers.backends.legacy_state_root_mounts import _remove_docker_workers_mounting_state_roots
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
-from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
+from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import primary_worker_backend_available, primary_worker_backend_name
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -1022,6 +1021,8 @@ def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWor
 def _install_health_by_image(
     monkeypatch: pytest.MonkeyPatch,
     fake_client: _FakeDockerClient,
+    *,
+    stale_protocol: int = 0,
 ) -> None:
     class _HealthByImage:
         def __init__(self, *, timeout: float) -> None:
@@ -1045,7 +1046,7 @@ def _install_health_by_image(
                 None,
             )
             assert container is not None, f"no running fake container publishes host port {port}"
-            protocol = WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else 0
+            protocol = _WORKER_PROTOCOL_VERSION if container.attrs["Image"] == "sha256:image-v2" else stale_protocol
             return httpx.Response(
                 200,
                 json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol},
@@ -3490,59 +3491,6 @@ def test_warm_ensure_resolves_image_once_and_detects_next_call_tag_change(
     assert client.containers.created_containers[-1].attrs["Image"] == "sha256:image-v2"
 
 
-def test_docker_worker_health_accepts_matching_protocol() -> None:
-    """A worker using the host protocol should pass the compatibility handshake."""
-    response = httpx.Response(
-        200,
-        json={
-            "status": "ok",
-            "mindroom_version": "2026.8.1",
-            "worker_protocol": WORKER_PROTOCOL_VERSION,
-        },
-    )
-
-    assert _worker_health_compatibility_error(response, image="mindroom:2026.8.1") is None
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"status": "ok"},
-        {"status": "ok", "mindroom_version": "2026.7.1", "worker_protocol": 0},
-        # Workers from releases that mounted whole state roots write private identity records the new mounts forbid.
-        {"status": "ok", "mindroom_version": "2026.9.324", "worker_protocol": 1},
-        {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
-        {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
-    ],
-)
-def test_docker_worker_health_rejects_incompatible_protocol(payload: dict[str, object]) -> None:
-    """Missing and stale worker protocols should fail with image guidance."""
-    response = httpx.Response(200, json=payload)
-
-    error = _worker_health_compatibility_error(response, image="mindroom:stale")
-
-    assert error is not None
-    assert "mindroom:stale" in error
-    assert f"expected worker protocol {WORKER_PROTOCOL_VERSION}" in error
-    assert "Use a worker image built for this MindRoom release" in error
-
-
-@pytest.mark.parametrize(
-    "response",
-    [
-        pytest.param(httpx.Response(200, text="ok"), id="invalid-json"),
-        pytest.param(httpx.Response(200, json=[]), id="non-object-json"),
-    ],
-)
-def test_docker_worker_health_rejects_malformed_payload(response: httpx.Response) -> None:
-    """Malformed worker health responses should be treated as incompatible."""
-    error = _worker_health_compatibility_error(response, image="mindroom:malformed")
-
-    assert error is not None
-    assert "got missing" in error
-    assert "worker MindRoom version unknown" in error
-
-
 def test_docker_worker_readiness_rejects_incompatible_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3574,20 +3522,25 @@ def test_docker_worker_readiness_rejects_incompatible_image(
 
     monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _IncompatibleHealthClient)
 
-    with pytest.raises(WorkerBackendError, match="expected worker protocol"):
+    with pytest.raises(
+        WorkerBackendError,
+        match=r"^Docker worker image '.+' is incompatible.*expected worker protocol",
+    ):
         DockerWorkerBackend._wait_for_ready(backend, container)
 
 
+@pytest.mark.parametrize("stale_protocol", [0, 3], ids=["no-protocol", "before-environment-removals"])
 def test_docker_worker_stale_image_pulls_and_relaunches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    stale_protocol: int,
 ) -> None:
-    """A stale-image protocol mismatch pulls the configured image and relaunches once."""
+    """A stale-image protocol mismatch pulls the configured image and relaunches once, before any call reaches it."""
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     fake_client.images.pull_image_id = "sha256:image-v2"
     _use_real_wait_for_ready(monkeypatch, backend)
 
-    _install_health_by_image(monkeypatch, fake_client)
+    _install_health_by_image(monkeypatch, fake_client, stale_protocol=stale_protocol)
 
     progress_events: list[WorkerReadyProgress] = []
 

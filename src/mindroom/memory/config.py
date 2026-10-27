@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -12,7 +13,13 @@ from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.memory._mem0_usage import install_mem0_usage_capture
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.model_defaults import (
+    MEMORY_OLLAMA_LLM,
+    OLLAMA_HOST_DEFAULT,
+    OPENROUTER_BASE_URL_DEFAULT,
+    claude_rejects_sampling_controls,
+    openai_rejects_sampling_controls,
+)
 from mindroom.timing import timed
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
@@ -20,7 +27,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mem0 import AsyncMemory
-    from mem0.llms.openai import OpenAILLM
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -28,6 +34,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
+# Chroma publishes each store's shared system before starting it, so a build that overlaps the first build of the same
+# store can reach the unstarted system, and both builds fail. Builds of one store take turns; Chroma keys that shared
+# state by store path, so different stores still build in parallel.
+_STORE_BUILD_LOCKS: dict[str, threading.Lock] = {}
 
 
 @dataclass
@@ -57,71 +67,20 @@ class _Mem0StrictOpenAIEmbedder:
         text: str,
         memory_action: Literal["add", "search", "update"] | None = None,
     ) -> list[float]:
-        text = text.replace("\n", " ")
-        try:
-            # Stored memories are documents; anything else is a search query.
-            purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
-            return self.embedder.embed([text], purpose=purpose)[0]
-        except Exception as exc:
-            self._remember_operation_failure(exc)
-            raise
+        return self.embed_batch([text], memory_action)[0]
 
     def embed_batch(
         self,
         texts: list[str],
-        memory_action: Literal["add", "search", "update"] = "add",
+        memory_action: Literal["add", "search", "update"] | None = "add",
     ) -> list[list[float]]:
-        del memory_action
+        # Stored memories are documents; anything else, including the entities of a search query, is a query.
+        purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
         try:
-            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose="document")
+            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose=purpose)
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
-
-
-def _chroma_similarity_from_distance(distance: float | None, space: str) -> float | None:
-    """Convert one Chroma distance to the similarity score mem0 expects."""
-    if distance is None:
-        return None
-    if space == "l2":
-        # Chroma's l2 is squared L2; for unit-normalized embeddings d = 2 * (1 - cos).
-        return 1.0 - distance / 2.0
-    # Chroma's cosine distance = 1 - cos and ip distance = 1 - dot.
-    return 1.0 - distance
-
-
-def _install_chroma_similarity_scores(vector_store: object) -> None:
-    """Make mem0's Chroma adapter report similarities instead of raw distances.
-
-    mem0 2.x treats ``OutputData.score`` as a similarity everywhere (the search
-    gate drops hits with ``score < threshold``, ranking sorts descending, and
-    add-time dedup checks ``score >= 0.95``), but its Chroma adapter fills
-    ``score`` with the raw Chroma distance. That inversion silently drops the
-    closest matches, so near-verbatim memory queries return nothing.
-    Rewriting the scores at the store boundary makes mem0's threshold and
-    ranking semantics correct for Chroma-backed memory.
-    """
-    # Imported at first use to keep chromadb out of module import time.
-    from mem0.vector_stores.chroma import ChromaDB, OutputData  # noqa: PLC0415
-
-    if not isinstance(vector_store, ChromaDB):
-        return
-    original_search = vector_store.search
-    collection_metadata = vector_store.collection.metadata or {}
-    space = str(collection_metadata.get("hnsw:space", "l2"))
-
-    def search_with_similarity_scores(
-        query: str,
-        vectors: list[list[float]],
-        top_k: int = 5,
-        filters: dict[str, Any] | None = None,
-    ) -> list[OutputData]:
-        hits = original_search(query=query, vectors=vectors, top_k=top_k, filters=filters)
-        for hit in hits:
-            hit.score = _chroma_similarity_from_distance(hit.score, space)
-        return hits
-
-    vector_store.search = search_with_similarity_scores  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -173,12 +132,19 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
         if api_key:
             llm_provider_config["api_key"] = api_key
 
+    model = llm_provider_config.get("model")
+    if llm_provider == "anthropic" and isinstance(model, str) and claude_rejects_sampling_controls(model):
+        # Mem0's Anthropic LLM sends its default temperature of 0.1, else a set top_p, and never top_k; these models
+        # reject every sampling value, and Mem0 sends neither when both are None.
+        llm_provider_config["temperature"] = None
+        llm_provider_config["top_p"] = None
+
     if llm_provider == "openrouter":
         # Mem0's OpenAI LLM reads openrouter_base_url instead when OPENROUTER_API_KEY is exported.
         llm_provider_config.setdefault("openai_base_url", OPENROUTER_BASE_URL_DEFAULT)
         llm_provider_config.setdefault("openrouter_base_url", OPENROUTER_BASE_URL_DEFAULT)
 
-    logger.info("Configured memory LLM", provider=llm_provider, model=memory_llm.config.get("model"))
+    logger.info("Configured memory LLM", provider=llm_provider, model=model)
     return {
         # Mem0 has no OpenRouter provider; its OpenAI LLM speaks the same API.
         "provider": "openai" if llm_provider == "openrouter" else llm_provider,
@@ -187,7 +153,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
 
 
 def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:
-    """Get Mem0 configuration with ChromaDB backend.
+    """Get Mem0 configuration with a ChromaDB backend and history database under ``storage_path``.
 
     Args:
         storage_path: Base directory for memory storage
@@ -205,6 +171,10 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
+    # Mem0's history database keeps the text of changed and deleted memories, and the latest messages it adds to the
+    # next extraction prompt under keys that do not name the requester, so each storage root needs its own.
+    history_dir = resolved_storage_path / "mem0"
+    history_dir.mkdir(exist_ok=True)
     resolved_embedder = resolve_embedder_settings(app_config, runtime_paths)
     embedder_provider = resolved_embedder.provider
 
@@ -238,6 +208,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
                 "path": str(chroma_path),
             },
         },
+        "history_db_path": str(history_dir / "history.db"),
     }
 
 
@@ -258,31 +229,36 @@ async def create_memory_instance(
         Configured AsyncMemory instance
 
     """
-    # Mem0 and its Chroma store install on first use, off the event loop.
-    await asyncio.to_thread(ensure_optional_deps, ["mem0ai"], "mem0", runtime_paths)
-    await asyncio.to_thread(ensure_optional_deps, ["chromadb"], "chromadb", runtime_paths)
-    from mem0 import AsyncMemory  # noqa: PLC0415
-
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
-    # Create AsyncMemory instance with dictionary config directly
-    # Mem0 expects a dict for configuration, not config objects
-    if config_dict["embedder"]["provider"] == "huggingface":
-        # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
-        # Install and wait for running installs in a worker thread so the event loop keeps serving other tasks.
-        def from_config_with_local_embedder() -> AsyncMemory:
-            if config.memory.embedder.provider == "sentence_transformers":
-                ensure_sentence_transformers_dependencies(runtime_paths)
-            with optional_dependency_environment():
-                return AsyncMemory.from_config(config_dict)
+    store_path = config_dict["vector_store"]["config"]["path"]
 
-        memory = await asyncio.to_thread(from_config_with_local_embedder)
-    else:
-        memory = AsyncMemory.from_config(config_dict)
+    def build_memory() -> AsyncMemory:
+        # Mem0 and its Chroma store install on first use, and Mem0's huggingface embedder, which both local providers
+        # load, imports sentence-transformers. Building the memory imports Chroma and the provider SDKs, so it waits
+        # until no install runs. All of it runs in a worker thread, so the event loop keeps serving other tasks.
+        ensure_optional_deps(["mem0ai"], "mem0", runtime_paths)
+        ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
+        if config_dict["embedder"]["provider"] == "huggingface":
+            ensure_sentence_transformers_dependencies(runtime_paths)
+        with _STORE_BUILD_LOCKS.setdefault(store_path, threading.Lock()), optional_dependency_environment():
+            from mem0 import AsyncMemory  # noqa: PLC0415
+
+            return AsyncMemory.from_config(config_dict)
+
+    memory = await asyncio.to_thread(build_memory)
     memory_llm = config.memory.llm
-    if memory_llm is not None and memory_llm.provider == "openai":
-        from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
-
-        install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
+    llm_config = memory.llm.config
+    if (
+        memory_llm is not None
+        and memory_llm.provider in {"openai", "openrouter"}
+        and llm_config.is_reasoning_model is None
+        and openai_rejects_sampling_controls(str(llm_config.model))
+    ):
+        # Mem0 knows only a few GPT-5 IDs as reasoning models and sends every other model temperature, top_p, and a
+        # token cap. GPT-5 and GPT-6 models, directly or through OpenRouter, reject max_tokens and most of them those
+        # sampling values, and their max_completion_tokens cap would also count reasoning, so they get Mem0's
+        # reasoning-model request instead, unless the config sets ``is_reasoning_model`` itself.
+        llm_config.is_reasoning_model = True
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
@@ -291,7 +267,6 @@ async def create_memory_instance(
 
         strict_embedder = create_configured_embedder(config, runtime_paths)
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
-    _install_chroma_similarity_scores(memory.vector_store)
 
-    logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
+    logger.info("created_memory_instance", path=store_path)
     return memory

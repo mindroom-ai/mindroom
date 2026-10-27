@@ -124,9 +124,6 @@
                 "type": "text",
                 "media_type": "text/plain",
                 "data": "UGFja2luZyBsaXN0OiB1bWJyZWxsYSwgc2NhcmYsIHdhbGtpbmcgc2hvZXMuCg=="
-              },
-              "citations": {
-                "enabled": true
               }
             }
           ]
@@ -169,15 +166,22 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "stream": true
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "anthropic-version": "2023-06-01",
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://api.anthropic.com/v1/messages"
+    "url": "https://api.anthropic.com/v1/messages?beta=true"
   },
   "response_raw": {
     "headers": {

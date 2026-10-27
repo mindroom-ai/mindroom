@@ -1,4 +1,4 @@
-"""What the leader reads for a finished member run, with and without streaming, which is never ``null``.
+"""What the leader reads for a finished member run: its text, else its tool results, else a notice, never ``null``.
 
 ``answer_delegation`` answers a delegation call that waited on a paused member once the member's run ends.
 """
@@ -34,41 +34,32 @@ _TOOLS = [
 ]
 
 
-def test_a_streamed_member_result_is_its_text_else_its_tool_results_else_the_no_response_notice() -> None:
-    assert member_result_text(RunRecord(run_id="r", content="42"), stream=True) == "42"
-    assert member_result_text(RunRecord(run_id="r", content="", tools=_TOOLS), stream=True) == "first,second"
-    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=True) == "first,second"
-    assert member_result_text(RunRecord(run_id="r", content=None), stream=True) == NO_MEMBER_RESPONSE
-    assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=True) == NO_MEMBER_RESPONSE
+def test_member_result_text_gives_text_else_tool_results_else_the_no_response_notice() -> None:
+    assert member_result_text(RunRecord(run_id="r", content="42")) == "42"
+    assert member_result_text(RunRecord(run_id="r", content="", tools=_TOOLS)) == "first,second"
+    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS)) == "first,second"
+    assert member_result_text(RunRecord(run_id="r", content=None)) == NO_MEMBER_RESPONSE
+    assert member_result_text(RunRecord(run_id="r", content=" ", tools=[])) == NO_MEMBER_RESPONSE
 
 
-def test_blocking_member_result_text_differs_only_for_a_blank_run_without_tools() -> None:
-    assert member_result_text(RunRecord(run_id="r", content="42"), stream=False) == "42"
-    assert member_result_text(RunRecord(run_id="r", content="", tools=_TOOLS), stream=False) == "first,second"
-    assert member_result_text(RunRecord(run_id="r", content=None, tools=_TOOLS), stream=False) == "first,second"
-    assert member_result_text(RunRecord(run_id="r", content=None), stream=False) == NO_MEMBER_RESPONSE
-    # A blank run without tools reads empty, where the streamed rules give the no-response notice.
-    assert member_result_text(RunRecord(run_id="r", content=" ", tools=[]), stream=False) == ""
-
-
-def test_collaborate_result_text_labels_content_and_a_failed_member_only_without_streaming() -> None:
+def test_collaborate_result_text_labels_every_member_s_piece_and_separates_them() -> None:
     members = [
         member("writer", "Writer", scripted("writer-model")),
         member("checker", "Checker", scripted("checker-model")),
+        member("reader", "Reader", scripted("reader-model")),
     ]
     # A failed member hands over the reason its run recorded instead of the text it wrote, which the broadcast reads
-    # like any result.
+    # like any result; a member that ran tools without text gives their results.
     children = [
         RunRecord(run_id="w", status=RunStatus.completed, content="42"),
         RunRecord(run_id="c", status=RunStatus.error, content="I will check.", error="Checker overloaded"),
+        RunRecord(run_id="r", status=RunStatus.completed, content=None, tools=_TOOLS),
     ]
     record = TeamRunRecord(run_id="t", team_id="squad")
 
-    blocking = collaborate_result_text(members, children, record, stream=False)
-    streamed = collaborate_result_text(members, children, record, stream=True)
-
-    assert blocking == "Agent Writer: 42Agent Checker: Checker overloaded"
-    assert streamed == "42Checker overloaded"
+    assert collaborate_result_text(members, children, record) == (
+        "Agent Writer: 42\n\nAgent Checker: Checker overloaded\n\nAgent Reader: first,second"
+    )
     assert record.member_responses == []
 
 
@@ -89,11 +80,11 @@ def test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_n
         for call_id, agent_id in (("call-w", "writer"), ("call-c", "checker"))
     ]
 
-    answered = answer_delegation(tools, checker, RunRecord(run_id="c", content="Checked."), stream=True)
+    answered = answer_delegation(tools, checker, RunRecord(run_id="c", content="Checked."))
 
     assert answered is tools[1]
     assert [tool.result for tool in tools] == [notice, "Checked."]
-    assert answer_delegation(tools, writer, RunRecord(run_id="w", content="Wrote."), stream=True) is tools[0]
+    assert answer_delegation(tools, writer, RunRecord(run_id="w", content="Wrote.")) is tools[0]
 
 
 def test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume() -> None:
@@ -110,8 +101,8 @@ def test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume
         for call_id in ("call-1", "call-2")
     ]
 
-    answer_delegation(tools, checker, RunRecord(run_id="first", content="First."), stream=True)
-    answer_delegation(tools, checker, RunRecord(run_id="second", content="Second."), stream=True)
+    answer_delegation(tools, checker, RunRecord(run_id="first", content="First."))
+    answer_delegation(tools, checker, RunRecord(run_id="second", content="Second."))
 
     assert [tool.result for tool in tools] == ["First.", "Second."]
 
@@ -121,13 +112,17 @@ def test_each_of_two_paused_pieces_under_one_name_is_answered_by_its_own_member(
     writer, checker = (member(agent_id, "Twin", scripted(f"{agent_id}-model")) for agent_id in ("writer", "checker"))
     paused_piece = "Agent Twin: Requires human input before continuing."
     [tool] = tools = [
-        ToolExecution(tool_call_id="call-all", tool_name="delegate_task_to_members", result=paused_piece * 2),
+        ToolExecution(
+            tool_call_id="call-all",
+            tool_name="delegate_task_to_members",
+            result=f"{paused_piece}\n\n{paused_piece}",
+        ),
     ]
 
-    answer_delegation(tools, writer, RunRecord(run_id="w", content="Wrote."), stream=True)
-    answer_delegation(tools, checker, RunRecord(run_id="c", content="Checked."), stream=True)
+    answer_delegation(tools, writer, RunRecord(run_id="w", content="Wrote."))
+    answer_delegation(tools, checker, RunRecord(run_id="c", content="Checked."))
 
-    assert tool.result == "Agent Twin: Wrote.Agent Twin: Checked."
+    assert tool.result == "Agent Twin: Wrote.\n\nAgent Twin: Checked."
 
 
 @pytest.mark.asyncio
@@ -153,7 +148,7 @@ async def test_a_delegation_with_arguments_its_definition_refuses_fails_and_runs
 
     members = [member("writer", "Writer", scripted("writer-model"))]
     record = TeamRunRecord(run_id="t", team_id="squad")
-    [function] = delegate_functions(members, mode, record=record, run_member=run_member, stream=True).functions
+    [function] = delegate_functions(members, mode, record=record, run_member=run_member).functions
 
     outcome = await execute_tool_call(
         function,

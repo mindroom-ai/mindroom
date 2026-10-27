@@ -1,4 +1,4 @@
-"""One-shot helper model calls: one request without tools, optionally read into a structured-output schema.
+"""One-shot helper model calls: one request without the caller's tools, optionally read into a structured-output schema.
 
 Routing, team-mode selection, schedule parsing, thread summaries, room topics, knowledge-graph extraction, memory
 flushes, and voice normalization each send one request like this.
@@ -14,8 +14,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from mindroom.agent_loop.prompt import PromptSpec, render_system_message
-from mindroom.agent_loop.structured import output_format_prompt, parse_structured
+from mindroom.agent_loop.prompt import join_sections
+from mindroom.agent_loop.structured import output_format_prompt, parse_structured, structured_answer_text
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -48,25 +48,19 @@ async def complete_prompt[T: BaseModel](
     provider: ModelProvider,
     prompt: str,
     *,
-    role: str | None = None,
     instructions: Sequence[str] = (),
     schema: type[T] | None = None,
     overrides: RequestOverrides = _NO_OVERRIDES,
     run_id: str | None = None,
 ) -> HelperResult[T]:
-    """Send ``prompt`` under a system message rendered from ``role`` and ``instructions`` as one request.
+    """Send ``prompt`` as one request under a system message of the caller's ``instructions``, each as written.
 
-    Returns the answer with a completed run record. ``schema`` asks for structured output the way ``provider``
-    supports it, so JSON-mode routes also get the JSON prompt at the end of the system message.
+    The instructions join with one blank line between them. Returns the answer with a completed run record.
+    ``schema`` asks for structured output the way ``provider`` supports it: a ``forced_tool`` route answers with a
+    forced tool call, and a JSON-mode route also gets the JSON prompt at the end of the system message.
     """
-    system = render_system_message(
-        PromptSpec(
-            role=role,
-            instructions=tuple(instructions),
-            output_format_prompt=output_format_prompt(provider.capabilities, schema),
-        ),
-    )
-    messages = [system, Message(role="user", content=prompt)]
+    system = join_sections((*instructions, output_format_prompt(provider.capabilities, schema)))
+    messages = [*([Message(role="system", content=system)] if system else []), Message(role="user", content=prompt)]
     started = perf_counter()
     turn = await complete(
         provider,
@@ -79,8 +73,9 @@ async def complete_prompt[T: BaseModel](
     identity = provider.identity
     metrics = RunMetrics(duration=perf_counter() - started)
     metrics.add(turn.usage, model_id=identity.id, provider=identity.provider_name)
-    text = turn.content
-    parsed = None if schema is None else parse_structured(text, schema)
+    text = turn.content if schema is None else structured_answer_text(turn, provider.capabilities)
+    lenient = provider.capabilities.structured_output == "json_mode"
+    parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)
     if schema is not None and parsed is None:
         logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
     record = RunRecord(

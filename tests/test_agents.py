@@ -54,6 +54,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
@@ -4248,10 +4249,10 @@ def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(
     config.tool_approval = ToolApprovalConfig(default="require_approval")
     agent = _create_agent_for_test("general", config, knowledge=_knowledge("docs"))
 
-    message = prompt_for_turn(agent)
+    prompt = system_text(prompt_for_turn(agent))
 
     for advertised in ("<skills_system>", "get_skill_instructions", "get_skill_script", "search_knowledge_base"):
-        assert advertised not in str(message.content)
+        assert advertised not in prompt
 
 
 @pytest.mark.asyncio

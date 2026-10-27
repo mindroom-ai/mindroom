@@ -126,6 +126,7 @@ agents:
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
+The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, `slack`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
 
 ## Browse By Topic
 
@@ -178,6 +179,7 @@ The agent can also call `get_mindroom_update_status()` to report both versions.
 When an enabled tool's optional Python dependencies are missing, MindRoom installs them the first time the tool loads.
 Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable this.
 When auto-install is disabled or fails, the tool fails to load with `Missing dependencies for tool '<tool>': <packages>`.
+An installed dependency at a version its extra does not allow, such as one an older MindRoom installed, counts as missing; when it cannot be installed again, loading fails with `Unsupported dependency versions: <package> <version> (needs <requirement>)`.
 Install the tool's extra manually, for example `pip install 'mindroom[<tool>]'` or `uv sync --extra <tool>` in a source checkout.
 
 ## Related Docs

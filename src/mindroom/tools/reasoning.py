@@ -38,13 +38,6 @@ if TYPE_CHECKING:
             default=True,
         ),
         ConfigField(
-            name="add_instructions",
-            label="Add Instructions",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
             name="add_few_shot",
             label="Add Few-Shot Examples",
             type="boolean",

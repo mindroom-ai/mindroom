@@ -1,18 +1,20 @@
 # History compaction
 
 This page records the assumptions and decisions behind portable history compaction before and during a reply, its summary rows, and seen-message tracking.
-User-facing behavior is in [Context Window](../configuration/history.md#context-window), and the Claude replay workaround is in `history/claude_replay_compat.py`.
-When upgrading a provider SDK, run that module's contract tests before removing the workaround.
+User-facing behavior is in [Context Window](../configuration/history.md#context-window).
 
 ## Assumptions
 
-Session rows and runs are saved whole from in-memory snapshots, so a stale save can arrive after a compaction or a redaction has moved on.
-The summary rows are therefore authoritative: `session.summary` is derived from the owner scope's latest row on every read, and run writes refuse a stale copy of a folded run or of a run a cut removed.
+Runs are saved whole from in-memory snapshots, so a stale save can arrive after a compaction or a redaction has moved on.
+The summary rows are therefore authoritative: `session.summary` is derived from the owner scope's latest row on every read, and a full save of a run is refused once it, or a member's team run, has completed, or once a cut has removed it.
+Only an interrupted record, which holds what the user saw or heard, replaces a completed run, and facts added after a run ends, such as its reply event or delegation state, are patched onto its stored row.
 A compaction, a redaction, and an approval's completion can overlap on one scope, so each summary chunk checks, under the write lock, that the history it summarized is still the stored history before it appends.
 
 ## Decisions
 
-- A summary request goes out with the provider's own retries and prompt cache off, and with thinking off where the route can turn it off (the Claude routes), because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix.
+- A summary request goes out with the provider's own retries and prompt cache off, and on the Claude routes without the model's authored thinking setting, because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix; other routes keep the authored setting.
+  Leaving it out turns thinking off only on the Claude models before Claude 5 other than Mythos Preview; every Claude 5 and 5.x model and Mythos Preview runs adaptive thinking when a request sets none, so their summaries still think.
+  The request sends no `disabled` or `between_tools` setting, which only some of those models accept; Fable 5.1, Fable 5, Mythos 5.1, Mythos 5, Mythos Preview, and Opus 5.5 cannot turn thinking off at all.
   It keeps the route's transport timeout instead of overriding it with `timeout_seconds`, because a shorter authored provider timeout must still apply; the summary call's own deadline cancels a slower request.
 - A summary counts as complete only when the provider reports that it ended on its own; a summary cut off by the output limit, a content filter, or a tool call is never stored.
   A route that reports no stop reason cannot show a cut-off, so its summaries count as complete.
@@ -34,13 +36,14 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   It reads those runs from storage, not from the running loop's session, because that session still holds every run loaded when the turn started, so a second fold of the same turn would summarize them again.
   The request keeps each tool batch whole, but the summarizer reads every folded message as its own unit, because a model can read several large files in one parallel batch, and a batch larger than one summary input would be cut short and lose the later results.
   Each tool result names its own tool and arguments in the summary input, so it reads correctly apart from its call message, including for providers whose calls carry no ids.
-- A fold appends one summary row that also holds its segment: the folded messages, the tool executions they hold, and the member responses attached so far, taken from the live request because a run is stored only when it ends.
-  The two are written together and a cut must remove them together; the running run sorts after the row (a stored paused or checkpointed copy moves there), and a copy saved before the fold loads without the segment's messages.
-- A cut removes a run whole: when a removed run holds a segment on an earlier row, the cut starts at that row, and the run of every removed segment is fenced, which covers a running turn that has not stored a row yet.
+- A fold appends one summary row and, in the same transaction, stores the messages it took and the member runs that had ended as rows of its running run, flagged with that row, because a run is stored only when it ends; a running run without a row gets a cancelled one.
+  A flagged message never replays again, whichever copy of the run is saved later, and the running run sorts after the row (a stored paused or checkpointed copy moves there).
+  The row keeps the event ids the running run had answered and read at the fold, so a cut finds what the fold summarized even after that run's row is gone.
+- A cut removes a run whole: when a removed run folded into an earlier summary row, the cut starts at that row, and the running run of every removed fold row is fenced, so a running turn whose row the cut removed stores nothing more.
   Retiring summaries also removes every run that folded mid-turn, because its stored part starts mid-turn and would replay without what it built on.
 - The fold's in-memory effects (the request rewrite, the recorder's folded tool calls, the folded requests' usage in run metadata, and the live session summary) and its success notice happen together with its commit, even when the turn is cancelled meanwhile, so a stopped reply never reports a stored fold as failed.
-  An interrupted record therefore leaves out exactly the calls the stored summary holds; its write also reads that set from the run's summary rows, so paths without a turn recorder and a restarted CLI approval recovery leave them out too.
-- A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through its segment.
+  An interrupted record therefore leaves out exactly the calls the stored summary holds; its write also reads that set from the run's folded rows, so paths without a turn recorder and a restarted CLI approval recovery leave them out too.
+- A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through the fold's row.
 - Text compaction starts from the latest readable native checkpoint, because the provider already summarized everything its request replayed, and re-summarizing that history after a model switch took a local model over an hour.
   The checkpoint's text also covers its own run's prompt, so the summary built on it always folds that run; an edit or redaction of the prompt then removes that summary with the run.
   Each checkpoint records the summary and run ids its request replayed, and stands in only while those still precede its run, because a completed approval sorts after the turns it waited for and retiring a legacy summary keeps its runs; checkpoints recorded without this record are not reused.
@@ -54,3 +57,6 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 Metadata seen ids, such as team consumption, have no summary-row counterpart, so a stale whole-row session write can restore ids that a redaction dropped; that only withholds those messages from unseen thread context.
 Stored history grows until the conversation is deleted.
 Folded requests' usage lives in the run's metadata, so it is lost when the run never saves, as a crashed run's usage is.
+An approval resume loads a fresh session, which can replay turns stored after its run's mid-turn fold, so an edit or redaction of such a turn during the resume leaves the resuming run unfenced, because the run sorts before that turn, and its completion can store content derived from the cut turn.
+A run paused before that turn has the same race (`tests/test_summary_rows.py::test_a_pending_approval_before_the_cut_survives`); both need an edit or redaction of a recent turn while an approval of an older turn is resuming.
+A voice-call reply runs outside the conversation's lifecycle lock, so an edit or redaction of an earlier turn that lands after the reply folded mid-turn removes the reply's run row and fences it, and its answer is not stored.

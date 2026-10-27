@@ -18,6 +18,7 @@ from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from structlog.testing import capture_logs
 
@@ -64,6 +65,7 @@ from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_WORKER_KEY,
     worker_auth_token,
 )
+from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
     primary_worker_backend_available,
@@ -706,6 +708,7 @@ def _backend(
     tmp_size_limit: str | None = None,
     user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
     image_pull_secrets: tuple[str, ...] = (),
+    image_pull_policy: str = "IfNotPresent",
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -716,7 +719,7 @@ def _backend(
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
-        image_pull_policy="IfNotPresent",
+        image_pull_policy=image_pull_policy,
         worker_port=worker_port,
         service_account_name="mindroom-worker",
         storage_pvc_name="mindroom-storage",
@@ -792,7 +795,24 @@ def _backend(
             spec=SimpleNamespace(replicas=1),
             status=SimpleNamespace(ready_replicas=1, observed_generation=1),
         )
+    _answer_worker_health(backend, lambda: _WORKER_PROTOCOL_VERSION)
     return backend, apps_api, core_api
+
+
+def _answer_worker_health(backend: KubernetesWorkerBackend, protocol: Callable[[], object]) -> list[str]:
+    """Answer each health read through a worker Service with ``protocol()``, recording the workers read."""
+    reads: list[str] = []
+
+    def _read(_self: object, worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        assert timeout_seconds > 0
+        reads.append(worker_id)
+        return httpx.Response(
+            200,
+            json={"status": "ok", "mindroom_version": "test", "worker_protocol": protocol()},
+        )
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+    return reads
 
 
 def _install_real_elapsed_wait_for_ready(
@@ -4508,6 +4528,190 @@ def test_kubernetes_backend_records_failed_startup_state() -> None:
     assert handle.failure_reason == error_message
     assert worker_id not in _core_api.services
     assert worker_id not in _core_api.secrets
+
+
+@pytest.mark.parametrize("stale_protocol", [0, 3], ids=["no-protocol", "before-environment-removals"])
+def test_kubernetes_stale_worker_is_recreated_before_a_call_reaches_it(stale_protocol: int) -> None:
+    """A new worker pod that speaks an older protocol is replaced once, so its new pod pulls the image again."""
+    backend, apps_api, _core_api = _backend()
+    reads = _answer_worker_health(
+        backend,
+        lambda: _WORKER_PROTOCOL_VERSION if len(apps_api.created_bodies) > 1 else stale_protocol,
+    )
+
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert handle.status == "ready"
+    assert handle.startup_count == 2
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert len(apps_api.created_bodies) == 2
+    assert reads == [handle.worker_id, handle.worker_id]
+
+
+def test_kubernetes_stale_running_worker_is_recreated_after_primary_restart() -> None:
+    """A worker left running from an older release under the same image tag is replaced on its next use."""
+    backend, apps_api, _core_api = _backend()
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    assert first_handle.startup_count == 1
+    # Manager replacement, as on a primary restart, forgets which workers were already checked.
+    backend.shutdown()
+    _answer_worker_health(backend, lambda: _WORKER_PROTOCOL_VERSION if len(apps_api.created_bodies) > 1 else 3)
+
+    recovered_handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0)
+
+    assert recovered_handle.status == "ready"
+    assert recovered_handle.startup_count == 2
+    assert recovered_handle.last_started_at == 20.0
+    assert apps_api.deleted_names == [first_handle.worker_id]
+    assert len(apps_api.created_bodies) == 2
+
+
+def test_kubernetes_stale_worker_replacement_is_not_retried() -> None:
+    """A replacement pod with the same protocol mismatch fails the worker after one recreate."""
+    backend, apps_api, core_api = _backend()
+    _answer_worker_health(backend, lambda: 3)
+
+    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 3") as exc:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert str(exc.value).startswith("Kubernetes worker image 'ghcr.io/mindroom-ai/mindroom:latest' is incompatible")
+    assert "Use a worker image built for this MindRoom release." in str(exc.value)
+    assert str(exc.value).endswith(
+        "set the worker image pull policy to Always (https://docs.mindroom.chat/deployment/kubernetes/#worker-settings).",
+    )
+    worker_id = next(iter(apps_api.deployments))
+    assert apps_api.deleted_names == [worker_id]
+    assert len(apps_api.created_bodies) == 2
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.spec.replicas == 0
+    assert worker_id not in core_api.services
+
+
+def test_kubernetes_stale_running_worker_is_refused_when_its_replacement_is_still_stale() -> None:
+    """A ready worker from an older release whose replacement lands on a cached old image is marked failed."""
+    backend, apps_api, core_api = _backend()
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    assert first_handle.status == "ready"
+    # Manager replacement, as on a primary restart, forgets which workers were already checked.
+    backend.shutdown()
+    # Under the default `IfNotPresent` the replacement pod reuses the node's cached old image.
+    _answer_worker_health(backend, lambda: 3)
+    _install_real_elapsed_wait_for_ready(backend, ready_after_seconds=1.6)
+    events: list[WorkerReadyProgress] = []
+
+    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 3"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0, progress_sink=events.append)
+
+    worker_id = first_handle.worker_id
+    assert apps_api.deleted_names == [worker_id]
+    assert len(apps_api.created_bodies) == 2
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.spec.replicas == 0
+    assert worker_id not in core_api.services
+    assert [event.phase for event in events] == ["cold_start", "failed"]
+
+
+def test_kubernetes_stale_worker_refusal_under_always_blames_no_cached_copy() -> None:
+    """Under pull policy Always a replacement pulls the tag again, so a stale replacement means the tag itself is old."""
+    backend, apps_api, _core_api = _backend(image_pull_policy="Always")
+    _answer_worker_health(backend, lambda: 3)
+
+    with pytest.raises(WorkerBackendError, match="got 3") as exc:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert str(exc.value).endswith("Use a worker image built for this MindRoom release.")
+    assert len(apps_api.created_bodies) == 2
+
+
+@pytest.mark.parametrize("image_pull_policy", ["IfNotPresent", "Always"])
+def test_kubernetes_newer_worker_refusal_says_to_run_the_primary_on_its_release(image_pull_policy: str) -> None:
+    """A worker that started from a newer tag than the primary is refused with the fix on the primary's side."""
+    backend, apps_api, _core_api = _backend(image_pull_policy=image_pull_policy)
+    newer_protocol = _WORKER_PROTOCOL_VERSION + 1
+    _answer_worker_health(backend, lambda: newer_protocol)
+
+    with pytest.raises(WorkerBackendError, match=f"got {newer_protocol} ") as exc:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert str(exc.value).endswith(
+        "The worker image comes from a newer MindRoom release: "
+        "upgrade this runtime to the worker's release, or pin both to one release tag. "
+        "For example, when this runtime's pod runs the same mutable tag such as ':latest' and pulls it on every start, "
+        "restarting the pod picks up the worker's release.",
+    )
+    assert "pull policy" not in str(exc.value)
+    assert len(apps_api.created_bodies) == 2
+
+
+def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Service may route nowhere for a moment after the Deployment turns ready, so the read retries."""
+    backend, _apps_api, _core_api = _backend()
+    answers: list[httpx.Response | httpx.HTTPError] = [
+        httpx.ConnectError("no endpoints yet"),
+        httpx.Response(503),
+        httpx.Response(200, json={"status": "ok"}),
+    ]
+    urls: list[str] = []
+
+    class _HealthClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, url: str) -> httpx.Response:
+            urls.append(url)
+            answer = answers.pop(0)
+            if isinstance(answer, httpx.HTTPError):
+                raise answer
+            return answer
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _HealthClient)
+    monkeypatch.setattr(kubernetes_resources_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+
+    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+        backend._resources,
+        "mindroom-worker-abc",
+        timeout_seconds=5.0,
+    )
+
+    assert response.status_code == 200
+    assert urls == ["http://mindroom-worker-abc.chat.svc.cluster.local:8766/healthz"] * 3
+
+
+def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that never answers its health check fails the read instead of handing out its endpoint."""
+    backend, _apps_api, _core_api = _backend()
+
+    class _UnreachableClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            message = "connection refused"
+            raise httpx.ConnectError(message)
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _UnreachableClient)
+    monkeypatch.setattr(kubernetes_resources_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+
+    with pytest.raises(WorkerBackendError, match="did not answer its health check"):
+        kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+            backend._resources,
+            "mindroom-worker-abc",
+            timeout_seconds=0.01,
+        )
 
 
 def test_kubernetes_backend_progress_respects_real_elapsed_time(

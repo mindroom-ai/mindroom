@@ -98,7 +98,10 @@ export function statusLabel(service: EgressCredentialService): string {
     // The row names the account below the status label.
     if (service.active_source === "oauth") return "Using connected account";
     if (oauth.connected && !oauth.reuse_enabled)
-      return "Connected for tools only";
+      // The tools never use a service's own account.
+      return service.separate_account
+        ? "Connected, not used for Agent Keys yet"
+        : "Connected for tools only";
     return oauth.reset_required ? "Reset required" : "Not set";
   }
   if (!service.configured) return "Not set";

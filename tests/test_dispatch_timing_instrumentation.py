@@ -15,9 +15,11 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
     hook,
 )
 from mindroom.llm.events import ToolCompleted, ToolStarted
@@ -269,6 +271,45 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
     assert isinstance(bridge_finish["total_bridge_ms"], float)
     assert isinstance(bridge_finish["before_hooks_ms"], float)
     assert isinstance(bridge_finish["tool_body_ms"], float)
+    assert timing_events[0][1]["has_environment_hooks"] is False
+    assert bridge_finish["environment_hooks_ms"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_times_the_environment_hooks() -> None:
+    """A call with environment hooks reports them at entry and their duration at finish, apart from the tool body."""
+    timing_events: list[tuple[str, dict[str, object]]] = []
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def environment(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("PLUGIN_VALUE", "set")
+
+    registry = HookRegistry.from_plugins(
+        [
+            SimpleNamespace(
+                name="tool-environment",
+                discovered_hooks=(environment,),
+                discovered_automations=(),
+                entry_config=PluginEntryConfig(path="./plugins/tool-environment", settings={}),
+                plugin_order=0,
+            ),
+        ],
+    )
+
+    async def echo(text: str) -> str:
+        return text
+
+    with patch(
+        "mindroom.tool_system.tool_hooks.emit_timing_event",
+        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    ):
+        await tool_policy(registry, agent_name="code")("echo", echo, {"text": "hello"})
+
+    phases = {event_data["phase"]: event_data for _event_name, event_data in timing_events}
+    assert phases["bridge_entry"]["has_environment_hooks"] is True
+    environment_hooks_ms = phases["bridge_finish"]["environment_hooks_ms"]
+    assert isinstance(environment_hooks_ms, float)
+    assert environment_hooks_ms >= 0
 
 
 @pytest.mark.asyncio

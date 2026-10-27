@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import quote, unquote, urlsplit
 
-from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService  # noqa: TC001
+from mindroom.config.egress_broker import (  # noqa: TC001
+    EgressAuth,
+    EgressBrokerConfig,
+    EgressReadOnly,
+    EgressRule,
+    EgressService,
+)
+from mindroom.egress_broker.secrets import SecretRequest  # noqa: TC001
 
 __all__ = [
     "EgressRules",
@@ -23,6 +30,7 @@ __all__ = [
     "is_ambiguous_path",
     "match_rule",
     "path_matches",
+    "read_only_allows",
     "route_request",
     "strip_hop_by_hop",
 ]
@@ -40,6 +48,9 @@ _HOP_BY_HOP = {
     "upgrade",
 }
 
+
+# Methods that read on every API that declares `read_only`; POST reads only on the paths a declaration lists.
+_READ_METHODS = frozenset({"GET", "HEAD"})
 
 # Percent-decoding rounds checked for dot segments; a path still changing after these is refused outright.
 _MAX_DECODE_LAYERS = 4
@@ -72,7 +83,8 @@ class Route:
     """How the broker handles one request, decided from the target host, port, and path alone.
 
     `match` names the rule whose service secret is injected. `refusal` is the error code when the request
-    is refused instead: `bad_request` (400) for an ambiguous path, `path_not_allowed` (403) for a path that a
+    is refused instead: `bad_request` (400) for an ambiguous path, `service_not_matched` (403) for a request naming a
+    service none of whose rules matches, `path_not_allowed` (403) for a path that a
     restricted host's rules do not list (see `route_request`), and then `restricted_by` names the service whose
     restriction refused it, `restricted_by_label` its display name (its name without one), for the message, and
     `restricted_by_operator` whether it is the operator's service, which only an administrator can change.
@@ -82,7 +94,7 @@ class Route:
 
     host_has_rules: bool
     match: RuleMatch | None = None
-    refusal: Literal["bad_request", "path_not_allowed"] | None = None
+    refusal: Literal["bad_request", "path_not_allowed", "service_not_matched"] | None = None
     restricted_by: str | None = None
     restricted_by_label: str | None = None
     restricted_by_operator: bool = False
@@ -195,6 +207,26 @@ def is_ambiguous_path(path: str) -> bool:
             return False
         layers = decoded_layers
     return True
+
+
+def read_only_allows(read_only: EgressReadOnly | None, request: SecretRequest) -> bool:
+    """Return whether a connected account allowed only to read may serve `request`, for a service declaring `read_only`.
+
+    `GET` and `HEAD` read, in any letter case, and so does a `POST` to one of `post_paths`, matched by segment like a
+    rule's path prefix and never for an ambiguous path. A WebSocket upgrade or a method-override header can write
+    whatever the method says, so neither reads. Without a declaration, as when a service's config dropped it after an
+    account was allowed read-only, nothing says how the API reads, so no request does.
+    """
+    if read_only is None or request.websocket or request.method_override:
+        return False
+    method = request.method.upper()
+    if method in _READ_METHODS:
+        return True
+    return (
+        method == "POST"
+        and not is_ambiguous_path(request.path)
+        and any(path_matches(prefix, request.path) for prefix in read_only.post_paths)
+    )
 
 
 def host_has_rules(config: EgressBrokerConfig, host: str, port: int) -> bool:
@@ -346,18 +378,26 @@ def _restriction_refusal(
     )
 
 
-def route_request(rules: EgressRules, host: str, port: int, path: str) -> Route:
+def route_request(  # noqa: PLR0911 - one return per row of the table
+    rules: EgressRules,
+    host: str,
+    port: int,
+    path: str,
+    *,
+    requested: str | None = None,
+) -> Route:
     """Decide how to handle a request for `path` (origin-form, query removed) on `host`:`port`.
 
     The first row whose condition holds decides:
 
-    | Row | Condition                                                         | Route                              |
-    |-----|-------------------------------------------------------------------|------------------------------------|
-    | 1   | No applicable rule names the host and port.                       | `host_has_rules=False`             |
-    | 2   | The path is ambiguous (`is_ambiguous_path`).                      | `refusal="bad_request"` (400)      |
-    | 3   | An operator service restricts the host; no operator rule matches. | `refusal="path_not_allowed"` (403) |
-    | 4   | A user service restricts the host; no user rule matches.          | `refusal="path_not_allowed"` (403) |
-    | 5   | Otherwise.                                                        | `match=match_rule(...)`, or None   |
+    | Row | Condition                                                         | Route                                 |
+    |-----|-------------------------------------------------------------------|---------------------------------------|
+    | 1   | No applicable rule names the host and port.                       | `host_has_rules=False`                |
+    | 2   | The path is ambiguous (`is_ambiguous_path`).                      | `refusal="bad_request"` (400)         |
+    | 3   | An operator service restricts the host; no operator rule matches. | `refusal="path_not_allowed"` (403)    |
+    | 4   | A user service restricts the host; no user rule matches.          | `refusal="path_not_allowed"` (403)    |
+    | 5   | The request names a user service; no rule of it matches.          | `refusal="service_not_matched"` (403) |
+    | 6   | Otherwise.                                                        | `match=match_rule(...)`, or None      |
 
     Row 1 leaves the request to the caller's `unmatched_hosts`, whatever the path. `EgressRules.intercepts` decides
     whether rules apply: under `deny` a user rule applies only on a host and port that an operator rule names.
@@ -367,7 +407,11 @@ def route_request(rules: EgressRules, host: str, port: int, path: str) -> Route:
     `restrict_only` ones included. So a user's limit narrows the operator's services on that host for that requester
     alone, and never opens a path the operator's limit refuses. The refusal names the party's restricting service
     whose name sorts first and sets `restricted_by_operator` in row 3.
-    Row 5 chooses the credential: the most specific applicable rule, operator's or user's, outside `restrict_only`
+    Row 5 applies to a request naming a service (`requested`, its `X-Agent-Keys-Service` header): only the rules of that
+    service of the scope's own can match it, and an operator service, a `restrict_only` service, or a name the scope
+    does not have matches nothing. So a request picks a user service that ties with an operator service on purpose
+    only, and never changes which operator credential the most specific operator rule picks.
+    Without a name, row 6 chooses the credential: the most specific applicable rule, operator's or user's, outside `restrict_only`
     services; an operator rule wins a tie with a user rule. So a user's limit in place keeps the operator's service,
     with the user's connection or key, for the paths it allows. With no matching rule the request goes out without
     credentials; `unmatched_hosts` does not apply, since the host has rules.
@@ -386,7 +430,13 @@ def route_request(rules: EgressRules, host: str, port: int, path: str) -> Route:
     user_refusal = _restriction_refusal(user, host, port, path, by_operator=False)
     if user_refusal is not None:
         return user_refusal
-    return Route(host_has_rules=True, match=match_rule(rules.effective, host, port, path, preferred=operator))
+    if requested is None:
+        return Route(host_has_rules=True, match=match_rule(rules.effective, host, port, path, preferred=operator))
+    named = user.get(requested)
+    match = None if named is None or named.restrict_only else _best_match({requested: named}, host, port, path)
+    if match is None:
+        return Route(host_has_rules=True, refusal="service_not_matched")
+    return Route(host_has_rules=True, match=match)
 
 
 def _inject_query_param(target: bytes, param_name: str, template: str, secret: str) -> bytes:

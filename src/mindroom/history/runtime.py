@@ -35,7 +35,7 @@ from mindroom.history.replay import (
     scope_visible_runs,
 )
 from mindroom.history.storage import (
-    consume_pending_force_compaction_scope,
+    first_scope_session,
     read_scope_state,
     set_force_compaction,
 )
@@ -59,7 +59,6 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.types import session_state_snapshot
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
@@ -69,7 +68,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
-    from mindroom.history.summary_rows import Segment
+    from mindroom.history.summary_rows import Fold
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
@@ -347,7 +346,7 @@ def _reported_history_tokens(
         or (latest_run.model, latest_run.model_provider) != (model.identity.id, model.identity.provider)
     ):
         return None
-    messages = [message for message in latest_run.messages if not message.from_history]
+    messages = latest_run.messages
     anchor = next(
         (index for index in range(len(messages) - 1, -1, -1) if is_own_model_message(messages[index])),
         None,
@@ -589,7 +588,7 @@ async def compact_scope_mid_turn(
     scope: HistoryScope,
     resolved_inputs: HistoryPreparationInputs,
     basis: FoldBasis,
-    segment: Segment,
+    fold: Fold,
     snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
     before_tokens: int,
@@ -612,7 +611,7 @@ async def compact_scope_mid_turn(
             session=session,
             scope=scope,
             basis=basis,
-            segment=segment,
+            fold=fold,
             snapshots=snapshots,
             folded_messages=folded_messages,
             summarizer=load_summarizer(
@@ -622,7 +621,12 @@ async def compact_scope_mid_turn(
                 runtime_paths=runtime_paths,
                 session_id=session.session_id,
                 scope=scope,
-                on_usage=scope_usage_recorder(storage, session.session_id),
+                # A first turn's fold records its summary usage before any run of the conversation is stored.
+                on_usage=scope_usage_recorder(
+                    storage,
+                    session.session_id,
+                    initial_session=first_scope_session(scope, session.session_id),
+                ),
             ),
             before_tokens=before_tokens,
             replay_window_tokens=execution_plan.replay_window_tokens,
@@ -830,11 +834,6 @@ def _prepare_scope_state_for_run(
     execution_plan: ResolvedHistoryExecutionPlan,
 ) -> HistoryScopeState:
     state = read_scope_state(session, scope)
-    if consume_pending_force_compaction_scope(session, scope):
-        # The flag is stored before the request leaves the tools' state, so a crash between the two writes repeats
-        # the request instead of losing it.
-        state = set_force_compaction(storage, session=session, scope=scope, forced=True)
-        storage.save_session_state(session, session_state_snapshot(session.session_state))
     if state.force_compact_before_next_run and not execution_plan.text_compaction_available:
         state = set_force_compaction(storage, session=session, scope=scope, forced=False)
         logger.warning(

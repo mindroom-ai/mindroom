@@ -79,6 +79,7 @@ from tests.conftest import (
     message_origin,
     process_and_respond_for_test,
     request_envelope,
+    seed_session_row,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.reply_span_helpers import response_span
@@ -103,7 +104,7 @@ def _history_store(tmp_path: Path) -> ConversationStore:
 
 def _start_session(storage: ConversationStore, session_id: str) -> None:
     """Store the session row a reply's first run creates."""
-    storage.ensure_session_row(ConversationSession(session_id=session_id, kind="agent", owner_id="general"))
+    seed_session_row(storage, ConversationSession(session_id=session_id, kind="agent", owner_id="general"))
 
 
 def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_ID) -> AnyRunRecord:
@@ -932,9 +933,9 @@ async def test_process_and_respond_streaming_persists_interrupted_history_when_m
 
 
 def test_strip_visible_tool_markers_handles_blank_lined_markers() -> None:
-    """The tool-marker stripper should leave bodies intact when markers are followed by blank lines."""
+    """A marker, its blank lines, and its separator go, and the text around it stays one blank line apart."""
     text = "Intro\n\n🔧 `run_shell_command` [1]\n\n---\n\nBody"
-    assert strip_visible_tool_markers(text) == "Intro\n\n\nBody"
+    assert strip_visible_tool_markers(text) == "Intro\n\nBody"
 
 
 def test_strip_visible_tool_markers_preserves_marker_free_text_byte_for_byte() -> None:

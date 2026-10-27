@@ -9,7 +9,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-/** A question with a Cancel and one answer, destructive unless told otherwise, for the actions a row confirms. */
+/**
+ * A question with a Cancel and one answer, destructive unless told otherwise,
+ * for the actions a row confirms; `children` go between the question and the
+ * answers, such as a choice the answer takes.
+ */
 export function ConfirmDialog({
   open,
   title,
@@ -18,6 +22,7 @@ export function ConfirmDialog({
   destructive = true,
   onCancel,
   onConfirm,
+  children,
 }: {
   open: boolean;
   title: ReactNode;
@@ -26,6 +31,7 @@ export function ConfirmDialog({
   destructive?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  children?: ReactNode;
 }) {
   // Opened from a button rather than a trigger of its own, so it gives focus
   // back to whatever had it when it opened.
@@ -48,6 +54,7 @@ export function ConfirmDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+        {children}
         <DialogFooter>
           <Button variant="outline" onClick={onCancel}>
             Cancel

@@ -37,6 +37,7 @@ from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
+from mindroom.providers.openai.media import chat_file_part, responses_file_part
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
@@ -48,7 +49,8 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
-from mindroom.system_prompt import render_session_context
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from tests.agent_loop.helpers import collect, context, gated
 from tests.providers.golden_support import responses_events, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
@@ -546,8 +548,11 @@ async def _reply(adapter: ResponsesAdapter, messages: list[Message]) -> Message:
     return next(event.message for event in events if isinstance(event, TurnCompleted))
 
 
-def _dated_prompt(day: str) -> Message:
-    return Message(role="system", content="You are Parity.\n" + render_session_context(f"Today is {day}."))
+def _dated_prompt(day: str) -> list[Message]:
+    return [
+        Message(role="system", content="You are Parity."),
+        Message(role="system", content=f"Today is {day}."),
+    ]
 
 
 @pytest.mark.asyncio
@@ -555,9 +560,9 @@ async def test_a_reply_with_an_unchanged_prompt_continues_the_stored_chain(tmp_p
     """A stored chain holds the prompt it started with, so the same prompt sends only what follows the stored reply."""
     adapter, sent = _stored_reply_route(tmp_path)
     question = Message(role="user", content="Plan my day.")
-    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+    reply = await _reply(adapter, [*_dated_prompt("Monday"), question])
 
-    await _reply(adapter, [_dated_prompt("Monday"), question, reply, Message(role="user", content="And tomorrow?")])
+    await _reply(adapter, [*_dated_prompt("Monday"), question, reply, Message(role="user", content="And tomorrow?")])
 
     assert (sent[1]["previous_response_id"], sent[1]["input"]) == (
         "resp_1",
@@ -566,7 +571,7 @@ async def test_a_reply_with_an_unchanged_prompt_continues_the_stored_chain(tmp_p
 
 
 def _next_day(history: list[Message]) -> list[Message]:
-    return [_dated_prompt("Tuesday"), *history[1:]]
+    return [*_dated_prompt("Tuesday"), *history[2:]]
 
 
 @pytest.mark.asyncio
@@ -574,10 +579,10 @@ async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(tmp_
     """A stored chain holds the prompt it started with, so a changed prompt replays the history instead of chaining."""
     adapter, sent = _stored_reply_route(tmp_path)
     question = Message(role="user", content="Plan my day.")
-    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+    reply = await _reply(adapter, [*_dated_prompt("Monday"), question])
     follow_up = Message(role="user", content="And tomorrow?")
 
-    await _reply(adapter, _next_day([_dated_prompt("Monday"), question, reply, follow_up]))
+    await _reply(adapter, _next_day([*_dated_prompt("Monday"), question, reply, follow_up]))
 
     assert "previous_response_id" not in sent[1]
     assert [item["role"] for item in sent[1]["input"]] == ["developer", "developer", "user", "assistant", "user"]
@@ -595,11 +600,11 @@ async def test_an_approval_resume_on_a_stored_chain_continues_it_with_the_result
     adapter, sent = _stored_reply_route(tmp_path, [{"type": "reasoning", "id": "rs_first", "summary": []}, _CALL])
     prompt = _dated_prompt("Monday")
     question = Message(role="user", content="Look it up.")
-    call = await _reply(adapter, [prompt, question])
+    call = await _reply(adapter, [*prompt, question])
     result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
     receipt = Message(role="user", content="trusted approval receipt", add_to_agent_memory=False)
 
-    await _reply(adapter, [prompt, question, call, result, receipt])
+    await _reply(adapter, [*prompt, question, call, result, receipt])
 
     assert (sent[1]["store"], sent[1]["previous_response_id"]) == (True, "resp_1")
     assert sent[1]["input"] == [
@@ -651,7 +656,7 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
         Message(role="tool", tool_call_id="fc_second", content="Declined"),
     ]
     decided = (_decided("fc_first", ApprovalDecision.APPROVED), _decided("fc_second", ApprovalDecision.DENIED))
-    spec = AgentSpec(id="code", name="Code", model=adapter, system_message=prompt, toolkits=())
+    spec = AgentSpec(id="code", name="Code", model=adapter, system_messages=(prompt,), toolkits=())
 
     with approval_receipt_context(decided, run_id="run-1"):
         await collect(
@@ -675,6 +680,15 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
     assert "fc_" not in json.dumps(request["input"])
 
 
+def _stored(tmp_path: Path, run: RunRecord) -> RunRecord:
+    """Save ``run`` to a conversation store and return it as the store loads it."""
+    store = create_state_storage("code", tmp_path / "state")
+    store.save_run(ConversationSession(session_id="session-1", kind="agent", owner_id="code"), run, record_usage=False)
+    stored = store.get_run(run.run_id)
+    assert isinstance(stored, RunRecord)
+    return stored
+
+
 @pytest.mark.asyncio
 async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continuing_the_chain_it_left(
     tmp_path: Path,
@@ -695,7 +709,7 @@ async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continui
         id="code",
         name="Code",
         model=adapter,
-        system_message=Message(role="system", content="You are Code."),
+        system_messages=(Message(role="system", content="You are Code."),),
         toolkits=(gated(lookup),),
     )
     memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", add_to_agent_memory=False)
@@ -709,7 +723,7 @@ async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continui
             request_template=ModelRequest(messages=()),
         ),
     )
-    stored = RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
+    stored = _stored(tmp_path, paused)
     approval = ApprovalCall(
         tool_call_id="fc_lookup",
         tool_name="lookup",
@@ -736,7 +750,7 @@ async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continui
             ),
         )
     history = scope_history_messages(
-        [RunRecord.from_dict(json.loads(json.dumps(finished.to_dict())))],
+        [_stored(tmp_path, finished)],
         scope=HistoryScope(kind="agent", scope_id="code"),
         num_history_runs=None,
         num_history_messages=None,
@@ -798,7 +812,7 @@ async def test_a_follow_up_to_a_photo_continues_the_chain_only_while_history_rep
         id="code",
         name="Code",
         model=adapter,
-        system_message=Message(role="system", content="You are Code."),
+        system_messages=(Message(role="system", content="You are Code."),),
         toolkits=(),
     )
     photo_turn = TurnMessages(prompt=Message(role="user", content="What is this?"))
@@ -812,7 +826,7 @@ async def test_a_follow_up_to_a_photo_continues_the_chain_only_while_history_rep
         ),
     )
     history = scope_history_messages(
-        [RunRecord.from_dict(json.loads(json.dumps(answered.to_dict())))],
+        [_stored(tmp_path, answered)],
         scope=HistoryScope(kind="agent", scope_id="code"),
         num_history_runs=None,
         num_history_messages=None,
@@ -853,10 +867,10 @@ async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_witho
     output = [_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, {**_REASONING, "id": "rs_second"}, _CALL]
     adapter, sent = _stored_reply_route(tmp_path, output)
     question = Message(role="user", content="Look it up.")
-    call = await _reply(adapter, [_dated_prompt("Monday"), question])
+    call = await _reply(adapter, [*_dated_prompt("Monday"), question])
     result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
 
-    await _reply(adapter, _next_day([_dated_prompt("Monday"), question, call, result]))
+    await _reply(adapter, _next_day([*_dated_prompt("Monday"), question, call, result]))
 
     assert sent[1]["store"] is True
     assert "previous_response_id" not in sent[1]
@@ -888,7 +902,7 @@ async def test_a_reply_stored_without_a_conversation_digest_replays_once(
     which matched here.
     """
     adapter, sent = _stored_reply_route(tmp_path)
-    before = [_dated_prompt("Monday"), Message(role="user", content="What should I pack?")]
+    before = [*_dated_prompt("Monday"), Message(role="user", content="What should I pack?")]
     legacy = {"mindroom_system_sha256": _legacy_system_text_digest(before)} if system_digest else {}
     older = Message(
         role="assistant",
@@ -964,18 +978,19 @@ def test_only_a_completed_response_records_its_replay_policy(*, portable: bool, 
         assert "mindroom_portable_replay" not in parts.provider_data
 
 
-# --- The shared instruction prefix ----------------------------------------------------------------------------
+# --- The stable prompt prefix ---------------------------------------------------------------------------------
 
 
 def _messages(day: str) -> list[Message]:
     return [
-        Message(role="system", content="Shared agent instructions.\n" + render_session_context(f"Current day: {day}.")),
+        Message(role="system", content="Shared agent instructions."),
+        Message(role="system", content=f"Current day: {day}."),
         Message(role="user", content="Write an introduction."),
     ]
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_the_shared_instructions_are_independent_of_the_session_context(*, explicit: bool) -> None:
+def test_the_stable_prompt_is_independent_of_the_turn_context(*, explicit: bool) -> None:
     """A changed date leaves the first developer message, the cacheable prefix, byte-identical."""
     original = _messages("Monday")
     snapshot = [message.to_dict() for message in original]
@@ -985,11 +1000,13 @@ def test_the_shared_instructions_are_independent_of_the_session_context(*, expli
 
     assert first[0] == second[0]
     assert first[0]["role"] == first[1]["role"] == "developer"
-    assert first[0]["content"][0]["text"] == "Shared agent instructions.\n"
-    assert "Current day: Monday." in first[1]["content"]
-    assert first[0]["content"][0]["text"] + first[1]["content"] == original[0].content
+    assert first[0]["content"] == (
+        [{"type": "input_text", "text": "Shared agent instructions.", "prompt_cache_breakpoint": {"mode": "explicit"}}]
+        if explicit
+        else "Shared agent instructions."
+    )
+    assert first[1]["content"] == original[1].content
     assert first[2] == {"role": "user", "content": "Write an introduction."}
-    assert ("prompt_cache_breakpoint" in first[0]["content"][0]) is explicit
     assert [message.to_dict() for message in original] == snapshot
 
 
@@ -1018,37 +1035,34 @@ def test_explicit_breakpoints_need_a_supported_model_on_the_public_api(
     assert responses_adapter(tmp_path, model_id=model_id, **extra_kwargs).wire.explicit_breakpoint is supported
 
 
-def test_codex_sends_the_shared_prefix_without_an_explicit_breakpoint(tmp_path: Path) -> None:
+def test_codex_sends_the_stable_prompt_without_an_explicit_breakpoint(tmp_path: Path) -> None:
     """The Codex endpoint caches the prefix implicitly."""
     adapter = _codex(tmp_path)
 
     first = _request(adapter, _messages("Monday"))["input"][0]
 
-    assert first["content"][0]["text"] == "Shared agent instructions.\n"
-    assert "prompt_cache_breakpoint" not in first["content"][0]
+    assert first == {"role": "developer", "content": "Shared agent instructions."}
 
 
-def test_a_disabled_cache_boundary_sends_the_instructions_unsplit() -> None:
-    """``cache_system_prompt: false`` keeps the wire prompt as one developer message."""
+def test_a_disabled_cache_sends_each_system_message_without_a_breakpoint() -> None:
+    """``cache_system_prompt: false`` sends each system message as its own developer message, as authored."""
     messages = _messages("Monday")
 
-    assert _input(messages, cache_system_prompt=False) == [
+    assert _input(messages, cache_system_prompt=False, explicit_breakpoint=True) == [
         {"role": "developer", "content": messages[0].content},
-        {"role": "user", "content": messages[1].content},
+        {"role": "developer", "content": messages[1].content},
+        {"role": "user", "content": messages[2].content},
     ]
 
 
-def test_only_the_initial_text_system_message_is_split() -> None:
-    """Custom system content and a boundary inside a user message are sent as authored."""
-    custom = [{"type": "input_text", "text": render_session_context("Custom content.")}]
-    messages = [
-        Message(role="system", content=custom),
-        Message(role="user", content=render_session_context("User text.")),
-    ]
+def test_a_system_message_with_custom_content_goes_as_authored() -> None:
+    """Only a text system message takes the breakpoint; custom content blocks are sent as they are."""
+    custom = [{"type": "input_text", "text": "Custom content."}]
+    messages = [Message(role="system", content=custom), Message(role="user", content="User text.")]
 
-    assert _input(messages, cache_system_prompt=True) == [
+    assert _input(messages, cache_system_prompt=True, explicit_breakpoint=True) == [
         {"role": "developer", "content": custom},
-        {"role": "user", "content": messages[1].content},
+        {"role": "user", "content": "User text."},
     ]
 
 
@@ -1114,6 +1128,26 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
             "file_data": f"data:{expected_mime};base64,{base64.b64encode(payload).decode()}",
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("file", "expected_mime"),
+    [
+        (File(content=b"a,b", filename="report.csv.gz"), "application/octet-stream"),
+        (File(content=b"notes", filename="notes.txt", mime_type="application/octet-stream"), "text/plain"),
+        (File(content=b"%PDF", filename="report.pdf"), "application/pdf"),
+    ],
+)
+def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: str) -> None:
+    """Both wires name a file by its original filename and type it by the same rule; a compressed name has no type."""
+    chat = chat_file_part(file)
+    responses = responses_file_part(file)
+
+    assert chat is not None
+    assert responses is not None
+    assert chat["file"]["filename"] == responses["filename"] == file.filename
+    assert chat["file"]["file_data"].startswith(f"data:{expected_mime};base64,")
+    assert responses["file_data"] == chat["file"]["file_data"]
 
 
 def test_an_attachment_without_a_filename_is_named_by_its_stored_file(tmp_path: Path) -> None:

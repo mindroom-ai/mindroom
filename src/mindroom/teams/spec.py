@@ -30,10 +30,9 @@ class TeamMember:
     """One member as the leader sees and runs it, in the team one turn or approval resume builds.
 
     ``spec.id`` is the member id the leader delegates to and the stored ``agent_id``; ``spec.name`` the roster name
-    and stored ``agent_name``. ``role`` is the roster text the leader reads. ``new_hooks`` builds the hooks of one
-    run of this member; a run takes its hooks only through ``hooks(run_id)``, which keeps them across the run's
-    continuations in this team. ``request_template`` applies to every run and resume, except that the team run's
-    stream mode overrides its ``stream`` field, so a member streams exactly when its team run does.
+    and stored ``agent_name``. ``role`` is the member's authored role, which the leader's roster shows. ``new_hooks``
+    builds the hooks of one run of this member; a run takes its hooks only through ``hooks(run_id)``, which keeps them
+    across the run's continuations in this team. ``request_template`` applies to every run and resume.
     """
 
     spec: AgentSpec
@@ -62,7 +61,7 @@ class TeamSpec:
     """One team as the leader loop runs it: the leader, which works its ``members`` as ``mode`` says.
 
     ``leader.id`` is the team's id, stored on every team run as ``team_id``; ``leader.name`` is the team's label, which
-    no run stores. ``leader.system_message`` is the rendered leader prompt (``prompt.render_leader_system_message``);
+    no run stores. ``leader.system_messages`` are the rendered leader prompt (``prompt.render_leader_system_messages``);
     ``leader.toolkits`` are the leader's own tools, to which each run adds the delegation tool for ``mode``;
     ``leader.max_tool_calls_per_turn`` bounds the leader's calls, delegations included.
     """

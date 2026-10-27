@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import httpx
@@ -42,6 +43,7 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.errors import classify_provider_error, provider_failure
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import TableNames
 from mindroom.token_budget import estimate_compaction_input_tokens
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import Await
@@ -53,6 +55,10 @@ from tests.history_helpers import (
     _session,
     replay_settings,
 )
+from tests.session_storage.agno_layout import converted_store
+
+if TYPE_CHECKING:
+    from mindroom.llm.runs import AnyRunRecord
 
 
 @pytest.mark.asyncio
@@ -91,7 +97,7 @@ async def test_compaction_summary_uses_configured_system_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_summary_request_is_one_call_without_provider_retries_thinking_or_cache() -> None:
+async def test_the_summary_request_is_one_call_without_provider_retries_a_thinking_setting_or_cache() -> None:
     """The request is sent once, without tools, leaving the transport timeout to the route."""
     model = summary_model()
 
@@ -106,7 +112,7 @@ async def test_the_summary_request_is_one_call_without_provider_retries_thinking
     [request] = model.requests
     assert request.tools == ()
     assert request.tool_choice is None
-    assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, disable_thinking=True)
+    assert request.overrides == RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
 
 
 class _ProviderCall:
@@ -408,7 +414,7 @@ def test_build_summary_input_advances_past_oversized_oldest_run() -> None:
     assert 'run_id="run-big"' in summary_input
 
 
-def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema() -> None:
+def test_build_summary_input_oversized_run_preserves_messages_before_omitted_metadata() -> None:
     root_request = "Look into how the automatic memory flush in mindroom is supposed to work."
     run = _completed_run(
         "run-big-metadata",
@@ -420,7 +426,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
     run.metadata = {
         "matrix_event_id": "$root",
         "thread_id": "$root",
-        "tools_schema": [{"name": f"tool_{index}", "description": "x" * 2000} for index in range(30)],
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {f"$event_{index}": "x" * 2000 for index in range(30)},
     }
 
     summary_input, included_runs = build_summary_input(
@@ -433,7 +439,7 @@ def test_build_summary_input_oversized_run_preserves_messages_before_tool_schema
 
     assert [included_run.run_id for included_run in included_runs] == ["run-big-metadata"]
     assert root_request in summary_input
-    assert "tools_schema" not in summary_input
+    assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
 
 
 def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> None:
@@ -445,7 +451,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
         ],
     )
     run.metadata = {
-        "tools_schema": [{"name": "deployment_status", "description": "x" * 2_000}],
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "x" * 2_000},
         "model_params": {"temperature": 0.2},
     }
 
@@ -465,7 +471,7 @@ def test_build_summary_input_oversized_run_omits_empty_filtered_metadata() -> No
 def test_build_summary_input_normal_run_omits_empty_filtered_metadata() -> None:
     run = _completed_run("run-bulky-metadata")
     run.metadata = {
-        "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
+        MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "x" * 1_000},
         "model_params": {"temperature": 0.2},
     }
 
@@ -514,7 +520,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
         "matrix_event_id": "$request",
         "started_at": "2026-07-17T20:00:00Z",
         "durable_outcome": {"state": "delivered"},
-        "tools_schema": [{"name": "deployment_status", "description": "x" * 1_000}],
         "model_params": {"temperature": 0.2},
     }
     run.metadata = metadata.copy()
@@ -529,7 +534,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
 
     assert included_runs == [run]
     assert run.metadata == metadata
-    assert "tools_schema" not in summary_input
     assert "model_params" not in summary_input
     assert AI_RUN_METADATA_KEY not in summary_input
     assert MINDROOM_COMPACTION_METADATA_KEY not in summary_input
@@ -614,10 +618,19 @@ def test_build_summary_input_renders_a_block_list_one_block_per_line() -> None:
     assert '{"text":"first block","type":"text"}\n{"text":"second block","type":"text"}' in summary_input
 
 
-def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> None:
-    run = _completed_run(
-        "run-1",
-        messages=[
+def _converted_run(tmp_path: Path, messages: list[Message]) -> AnyRunRecord:
+    """Return ``run-1`` holding ``messages`` as an earlier release stored it, once its database converts."""
+    stored = _completed_run("run-1", messages=messages).to_dict()
+    run = converted_store(TableNames("code").database_path(tmp_path), stored).get_run("run-1")
+    assert run is not None
+    return run
+
+
+def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles(tmp_path: Path) -> None:
+    """A run an earlier release stored with its system prompt converts without it, so compaction never reads it."""
+    run = _converted_run(
+        tmp_path,
+        [
             Message(role="system", content="legacy system prompt"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),
@@ -637,37 +650,11 @@ def test_compaction_replay_messages_exclude_legacy_persisted_prompt_roles() -> N
     ]
 
 
-def test_build_summary_input_skips_replayed_history_copies() -> None:
-    """A run that stored the history its request replayed is summarized from its own turn only."""
-    run = _completed_run(
-        "run-2",
-        messages=[
-            Message(role="user", content="earlier question", from_history=True),
-            Message(role="assistant", content="earlier answer", from_history=True),
-            Message(role="tool", content="earlier tool output", from_history=True),
-            Message(role="user", content="current question"),
-            Message(role="assistant", content="current answer"),
-        ],
-    )
-
-    summary_input, included_runs = build_summary_input(
-        previous_summary=None,
-        compacted_runs=[run],
-        history_settings=replay_settings(),
-        max_input_tokens=1_000,
-        token_estimator=estimate_compaction_input_tokens,
-    )
-
-    assert included_runs == [run]
-    assert "earlier" not in summary_input
-    assert "current question" in summary_input
-    assert "current answer" in summary_input
-
-
-def test_build_summary_input_excludes_legacy_persisted_prompt_roles() -> None:
-    run = _completed_run(
-        "run-1",
-        messages=[
+def test_build_summary_input_excludes_legacy_persisted_prompt_roles(tmp_path: Path) -> None:
+    """A run an earlier release stored with its system prompt converts without it, so no summary input holds it."""
+    run = _converted_run(
+        tmp_path,
+        [
             Message(role="system", content="Persisted system prompt that should not be summarized"),
             Message(role="user", content="user request"),
             Message(role="assistant", content="assistant answer"),

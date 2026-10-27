@@ -12,6 +12,7 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from google.oauth2.credentials import Credentials
 
 from mindroom.cli.doctor import (
+    _check_config_valid,
     _check_matrix_homeserver,
     _check_memory_config,
     _check_memory_embedder,
@@ -195,7 +196,7 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         ("openrouter", "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
         ("anthropic", "https://api.anthropic.com/v1/models", {"x-api-key": "k", "anthropic-version": "2023-06-01"}),
         ("openai", "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
-        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": "k"}),
         ("groq", "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
     ],
 )
@@ -481,7 +482,7 @@ def test_doctor_skips_the_shared_key_check_wherever_an_endpoint_setting_or_varia
         (
             "google",
             {"GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS": "example.com"},
-            "https://generativelanguage.googleapis.com/v1beta/models?key=shared",
+            "https://generativelanguage.googleapis.com/v1beta/models",
         ),
     ],
 )
@@ -586,6 +587,48 @@ def test_doctor_checks_a_shared_key_at_the_provider_s_own_api_beside_a_custom_en
     assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer shared"})]
     output = " ".join(capsys.readouterr().out.split())
     assert "OPENAI_API_KEY not checked: models.gateway.extra_kwargs.client_params.base_url may send" in output
+
+
+def test_doctor_names_a_setting_it_did_not_check_as_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A settings key that looks like Rich markup appears verbatim in the setting path doctor reports."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        models={
+            "fast": ModelConfig(
+                provider="openai",
+                id="m",
+                extra_kwargs={"client_params": {"[/fast]": {"base_url": _GATEWAY}}},
+            ),
+        },
+        router=RouterConfig(model="fast"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert "OPENAI_API_KEY not checked: models.fast.extra_kwargs.client_params.[/fast].base_url may send" in output
+
+
+def test_doctor_names_a_rejected_key_that_looks_like_markup_as_written(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A config error that quotes a bracketed key reaches the doctor report verbatim instead of breaking it."""
+    (tmp_path / "config.yaml").write_text(
+        'models:\n  default:\n    provider: ollama\n    id: gemma4\n  "[/fast]":\n    provider: ollama\n    id: gemma4\n'
+        "router:\n  model: default\n",
+        encoding="utf-8",
+    )
+
+    config, *_counts = _check_config_valid(resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml"))
+
+    assert config is None
+    assert "rename models.[/fast] and update every reference" in " ".join(capsys.readouterr().out.split())
 
 
 def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(
@@ -777,7 +820,7 @@ def test_memory_llm_key_is_checked_at_the_provider_s_own_api_without_endpoint_se
 @pytest.mark.parametrize(
     ("env_file", "expected", "urls"),
     [
-        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models?key=shared"]),
+        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models"]),
         ({"GOOGLE_GEMINI_BASE_URL": "https://embed-gateway.example"}, (0, 0, 1), []),
     ],
 )

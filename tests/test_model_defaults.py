@@ -10,6 +10,7 @@ import yaml
 
 from mindroom import model_defaults
 from mindroom.config.main import Config
+from mindroom.providers.anthropic.wire import checks_thinking_prefix
 
 
 def test_default_model_strings_are_not_redeclared_in_source() -> None:
@@ -177,6 +178,43 @@ def test_native_compaction_covers_current_claude_models() -> None:
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
+def _current_presets() -> list[model_defaults.ModelPreset]:
+    """Return every model preset config init and the hosted platform write."""
+    return [
+        *model_defaults.CONFIG_INIT_MODEL_PRESETS.values(),
+        *(
+            preset
+            for alternatives in model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES.values()
+            for _, preset in alternatives
+        ),
+        *(preset for additions in model_defaults.CONFIG_INIT_ADDITIONAL_MODELS.values() for _, preset in additions),
+        *model_defaults.SAAS_MODEL_PRESETS.values(),
+    ]
+
+
+def test_thinking_prefix_check_covers_current_claude_models() -> None:
+    """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
+    claude_ids = {
+        preset.id
+        for preset in _current_presets()
+        if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
+    }
+    assert len(claude_ids) >= 6
+    assert [model_id for model_id in sorted(claude_ids) if not checks_thinking_prefix(model_id)] == []
+
+
+def test_sampling_rule_covers_current_claude_models() -> None:
+    """Every current Claude default must count as rejecting non-default sampling, on its own route or a gateway.
+
+    A default bump to a model the rule does not name would send it the thread summary temperature.
+    """
+    claude_ids = {preset.id for preset in _current_presets() if "claude" in preset.id}
+    assert len(claude_ids) >= 12
+    assert [
+        model_id for model_id in sorted(claude_ids) if not model_defaults.claude_rejects_sampling_controls(model_id)
+    ] == []
+
+
 def test_current_google_and_openrouter_specialist_models() -> None:
     """Google media and OpenRouter specialist presets should use current IDs."""
     openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
@@ -188,16 +226,18 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
     )
-    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
-        "claude-fable-5-1",
-        "claude-fable-5.1",
+    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS == (
         "claude-fable-5",
-        "claude-opus-5-5",
-        "claude-opus-5.5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
         "claude-opus-5",
-        "claude-sonnet-5-5",
-        "claude-sonnet-5.5",
+        "claude-opus-4-8",
+        "claude-opus-4.8",
+        "claude-opus-4-7",
+        "claude-opus-4.7",
         "claude-sonnet-5",
+        "claude-haiku-5-5",
+        "claude-haiku-5.5",
     )
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
         "openrouter",
@@ -294,7 +334,6 @@ def test_openai_presets_use_current_models() -> None:
         "openai/gpt-6-luna",
         1_050_000,
     )
-    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES == ("gpt-5", "gpt-6")
 
 
 def test_glm_presets_use_current_generation() -> None:
@@ -327,9 +366,45 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
         ("anthropic/claude-fable-5.1", True),
         ("Claude-Opus-5-5", True),
         ("claude-sonnet-4-5", False),
-        ("anthropic/claude-haiku-5.5", False),
+        ("claude-opus-4-7", True),
+        ("anthropic/claude-opus-4.8", True),
+        ("claude-opus-4-6", False),
+        ("claude-mythos-preview", True),
+        ("claude-haiku-5-5", True),
+        ("anthropic.claude-haiku-5-5", True),
+        ("anthropic/claude-haiku-5.5", True),
+        ("claude-haiku-4-5", False),
+        ("claude-haiku-5-5@20261001", True),
+        ("us.anthropic.claude-opus-4-7-v1:0", True),
+        ("claude-opus-5-5-20261001", True),
+        ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", False),
+        ("databricks-claude-sonnet-5-5", True),
     ],
 )
 def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:
-    """Direct, Bedrock, and gateway ids name the same generation, in any letter case."""
+    """Direct, dated, Vertex, Bedrock, and gateway ids name the same generation, in any letter case."""
     assert model_defaults.claude_rejects_sampling_controls(model_id) is rejects
+
+
+@pytest.mark.parametrize(
+    ("model_id", "rejects"),
+    [
+        ("gpt-6-luna", True),
+        ("gpt-6.1-sol", True),
+        ("gpt-5-mini", True),
+        ("gpt-5.5", True),
+        ("gpt-5-2025-08-07", True),
+        ("GPT-6-Astra", True),
+        ("openai/gpt-6-luna", True),
+        ("OpenAI/GPT-5.4-mini", True),
+        ("azure/gpt-5.6-terra", True),
+        ("gpt-4.1", False),
+        ("o3-mini", False),
+        ("openai/gpt-4o", False),
+        ("anthropic/claude-sonnet-5.5", False),
+        ("my-gpt-6-proxy", False),
+    ],
+)
+def test_openai_sampling_rule_reads_the_model_behind_a_gateway_prefix(model_id: str, *, rejects: bool) -> None:
+    """GPT-5 and GPT-6 ids match directly or behind a gateway prefix, in any letter case, and only at the start."""
+    assert model_defaults.openai_rejects_sampling_controls(model_id) is rejects

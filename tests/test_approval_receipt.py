@@ -250,7 +250,7 @@ def test_approval_receipt_rejects_unsettled_calls() -> None:
 async def test_a_reader_keeps_the_receipt_after_its_input_in_every_request_and_no_finished_run_stores_it() -> None:
     """The run the receipt names gets it before its first request and keeps it for its later ones; no other run does.
 
-    It follows the run's input, as a user message of its own, so the system prompt stays the one every request sends.
+    It follows the run's input, as a user message of its own, so the system messages stay the ones every request sends.
     """
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
 
@@ -330,7 +330,7 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
         id="code",
         name="Code",
         model=built.provider,
-        system_message=Message(role="system", content="You are Code."),
+        system_messages=(Message(role="system", content="You are Code."),),
         toolkits=(gated(echo),),
     )
     _, paused = await collect(
@@ -419,7 +419,10 @@ async def test_a_resumed_claude_run_sends_the_paused_request_unchanged_before_th
         id="code",
         name="Code",
         model=route_provider(route, tmp_path, wire),
-        system_message=Message(role="system", content="You are Code."),
+        system_messages=(
+            Message(role="system", content="You are Code."),
+            Message(role="system", content="Today is Monday."),
+        ),
         toolkits=(gated(echo), toolkit(add)),
     )
     history = [
@@ -733,8 +736,8 @@ async def test_a_fresh_turn_the_receipt_names_keeps_it_after_its_input_across_it
     assert "".join(streamed_text(chunks)).endswith("Both parts are fine.")
     # The first request, then one continuation after each delegation.
     first, *continued = leader.requests
-    assert [message.role for message in first.messages] == ["system", "user", "user", "user"]
-    assert RECALLED_MEMORY in str(first.messages[2].content)
+    assert [message.role for message in first.messages] == ["system", "system", "user", "user", "user"]
+    assert RECALLED_MEMORY in str(first.messages[3].content)
     assert receipts(first) == [RECEIPT_TEXT]
     assert repeats_each_request(leader.requests)
     assert [len(receipts(request)) for request in continued] == [1, 1]

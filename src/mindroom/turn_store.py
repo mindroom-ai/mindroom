@@ -814,7 +814,7 @@ class TurnStore:
         if response_action.kind == "team":
             assert response_action.form_team is not None
             return self.deps.state_writer.team_history_scope(
-                response_action.form_team.eligible_members,
+                response_action.form_team.eligible_member_names,
                 requester_user_id=requester_user_id,
             )
         msg = f"Response history scope is not defined for {response_action.kind!r} actions"

@@ -62,6 +62,7 @@ _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
         "chroma",
         "knowledge_db",
         "learning",
+        "mem0",
         "memory_files",
         "sessions",
     },
@@ -297,7 +298,10 @@ class AgentConfig(BaseModel):
             "invites from matching inviter Matrix IDs or glob patterns"
         ),
     )
-    markdown: bool | None = Field(default=None, description="Whether to use markdown formatting")
+    markdown: bool | None = Field(
+        default=None,
+        description="Whether the system prompt tells the agent its replies are shown as Markdown",
+    )
     knowledge_graph: bool | None = Field(
         default=None,
         description="Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
@@ -505,6 +509,8 @@ class AgentConfig(BaseModel):
 class TeamConfig(BaseModel):
     """Configuration for a team of agents."""
 
+    model_config = ConfigDict(extra="forbid")
+
     display_name: str = Field(description="Human-readable name for the team")
     role: str = Field(
         description="Description of the team's purpose",
@@ -536,7 +542,10 @@ class TeamConfig(BaseModel):
         description="Configured model alias used for this team's replies",
         json_schema_extra=dashboard_hint(reference="model"),
     )
-    mode: str = Field(default="coordinate", description="Team collaboration mode: coordinate or collaborate")
+    mode: Literal["coordinate", "collaborate"] = Field(
+        default="coordinate",
+        description="Team collaboration mode: coordinate or collaborate",
+    )
     compaction: CompactionOverrideConfig | None = Field(
         default=None,
         description="Per-team required-compaction overrides",

@@ -828,7 +828,7 @@ class ScriptToolBroker:
             source_config=source_config,
             execution_identity=execution_identity,
             toolkit=toolkit,
-            function=adapt_function(function),
+            function=replace(adapt_function(function), registered_toolkit=call.grant.toolkit_name),
             approval_config=_background_approval_config(context, run),
         )
 

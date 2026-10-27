@@ -19,7 +19,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session, test_runtime_paths
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,7 +102,6 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
     )
     persist_entity_accounts(config, runtime_paths_for(config))
     runtime_paths = runtime_paths_for(config)
-    ids = entity_ids(config, runtime_paths)
     writer = ConversationStateWriter(
         ConversationStateWriterDeps(
             runtime=SimpleNamespace(config=config),
@@ -113,11 +112,11 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
     )
 
     alice_scope = writer.team_history_scope(
-        [ids["private_worker"], ids["shared"]],
+        ["private_worker", "shared"],
         requester_user_id="@alice:localhost",
     )
     bob_scope = writer.team_history_scope(
-        [ids["private_worker"], ids["shared"]],
+        ["private_worker", "shared"],
         requester_user_id="@bob:localhost",
     )
 
@@ -127,7 +126,7 @@ def test_private_ad_hoc_team_history_scope_is_requester_partitioned(tmp_path: Pa
     assert bob_scope.scope_id.startswith("team_private_worker+shared_requester_")
     assert alice_scope != bob_scope
     with pytest.raises(ValueError, match=r"^Private ad hoc team history scope requires requester identity$"):
-        writer.team_history_scope([ids["private_worker"], ids["shared"]], requester_user_id=None)
+        writer.team_history_scope(["private_worker", "shared"], requester_user_id=None)
 
 
 def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: Path) -> None:
@@ -148,7 +147,6 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
     )
     persist_entity_accounts(config, runtime_paths_for(config))
     runtime_paths = runtime_paths_for(config)
-    ids = entity_ids(config, runtime_paths)
     writer = ConversationStateWriter(
         ConversationStateWriterDeps(
             runtime=SimpleNamespace(config=config),
@@ -167,7 +165,7 @@ def test_private_ad_hoc_team_history_scope_matches_bound_team_storage(tmp_path: 
         session_id="session-1",
     )
     writer_scope = writer.team_history_scope(
-        [ids["private_worker"], ids["shared"]],
+        ["private_worker", "shared"],
         requester_user_id="@alice:localhost",
     )
     writer_storage = create_scope_session_storage(

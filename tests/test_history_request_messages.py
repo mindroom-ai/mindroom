@@ -11,7 +11,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -29,8 +29,13 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
+from mindroom.session_storage.types import ConversationSession
+from tests.conftest import seed_session
 from tests.history_helpers import replay_settings
 from tests.llm.agno_dict_helpers import stored_run_record
+
+if TYPE_CHECKING:
+    from mindroom.session_storage.store import ConversationStore
 
 _PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
 _LOADED_SESSIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
@@ -285,19 +290,16 @@ def test_team_scope_replays_only_its_own_finished_top_level_runs() -> None:
     assert _contents(_replay(runs, scope=_TEAM)) == ["team question", "team answer"]
 
 
-def test_prompt_roles_and_stored_history_copies_never_replay() -> None:
-    stored_copy = Message(role="user", content="replayed earlier", from_history=True)
-    runs: list[AnyRunRecord] = [
-        _agent_run(
-            "run",
-            messages=[
-                Message(role="system", content="old system prompt"),
-                stored_copy,
-                *_exchange("run"),
-            ],
-        ),
-    ]
-    assert _contents(_replay(runs)) == ["run question", "run answer"]
+def test_a_save_keeps_no_system_message_in_a_visible_run_so_none_replays(store: ConversationStore) -> None:
+    """Replay takes every stored message, because a save never keeps a prompt message in a run that replays."""
+    run = _agent_run("run", messages=[Message(role="system", content="old system prompt"), *_exchange("run")])
+    seed_session(store, ConversationSession(session_id="s1", kind="agent", owner_id="code", runs=[run]))
+
+    loaded = store.load_session("s1", "agent")
+
+    assert loaded is not None
+    assert [message.role for message in loaded.runs[0].messages] == ["user", "assistant"]
+    assert _contents(_replay(loaded.runs)) == ["run question", "run answer"]
 
 
 def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_results() -> None:
@@ -644,6 +646,23 @@ def test_resumed_request_moves_the_stored_system_message_first() -> None:
     resumed = build_resume_request(paused=paused, summary=None, history=_replay([_agent_run("earlier")]))
 
     assert _contents(resumed) == ["Be precise.", "earlier question", "earlier answer", "multiply", None]
+
+
+def test_a_resumed_request_keeps_both_stored_system_messages_in_order() -> None:
+    """A run paused with a stable and a turn system message resumes with both, ahead of history, as it sent them."""
+    turn = Message(role="system", content="Today is Monday.")
+    paused = [_system(), turn, Message(role="user", content="multiply"), _tool_call("call")]
+
+    resumed = build_resume_request(paused=paused, summary=None, history=_replay([_agent_run("earlier")]))
+
+    assert _contents(resumed) == [
+        "Be precise.",
+        "Today is Monday.",
+        "earlier question",
+        "earlier answer",
+        "multiply",
+        None,
+    ]
 
 
 def test_resuming_a_pause_whose_system_message_embeds_the_summary_adds_no_second_summary() -> None:

@@ -1,8 +1,8 @@
 """One attempt of a team run, a turn's or a resumed run's: the reply document its events build and what it produced.
 
-A streamed attempt records ``TeamReplyText``, the reply's text without tool markers, however it ends; a blocking
-attempt renders and records its reply from the records the run hands over, which give every attempt's run metadata.
-An attempt of either kind that pauses shows the document its events built.
+A streamed attempt records its document's text without tool markers, however it ends; a blocking attempt renders and
+records its reply from the records the run hands over, which give every attempt's run metadata. An attempt of either
+kind that pauses shows the document its events built.
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
 from mindroom.run_storage import TerminalRecord
-from mindroom.teams.presentation import apply_team_event, format_team_response, render_team_member_slots
+from mindroom.teams.presentation import apply_team_event, format_team_response
 from mindroom.teams.runtime import MemberEvent, team_usage
 from mindroom.timing import emit_timing_event
-from mindroom.tool_system.events import StructuredStreamChunk, append_stream_text
+from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -56,55 +56,6 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
     return None if streamed and handover == run.content else handover
 
 
-# TODO(simplify): A second copy of each slot's text joins text around a hidden tool call directly, so a streamed reply
-# records "Looking.Four seats." where it showed two paragraphs: the streamed side of #3075's blocking-reply join.
-# Record the shown document's text without tool markers, one copy. Replayed history and models would notice.
-@dataclass
-class TeamReplyText:
-    """The text of one team reply without tool markers: each member's text and the consensus, as the run's events build it.
-
-    ``presentation`` owns the member identities: the configured slot order, the display names, and the slot an event's
-    member resolves to. A member's deltas join directly, so a hidden tool call between them leaves no gap, as the
-    run's own content joins them. ``streamed_member_runs`` names the member runs whose deltas gave text, by run id,
-    since a member's slot holds the text of each of its runs.
-    """
-
-    presentation: TeamStreamPresentation
-    per_member: dict[str, str] = field(init=False)
-    consensus: str = ""
-    streamed_member_runs: set[str] = field(default_factory=set, init=False)
-
-    def __post_init__(self) -> None:
-        """Give every configured slot empty text."""
-        self.per_member = dict.fromkeys(self.presentation.member_ids, "")
-
-    def apply(self, event: TeamRunEvent) -> None:
-        """Fold one run event into the text: a member's or the leader's delta."""
-        if isinstance(event, MemberEvent):
-            if isinstance(event.event, TextDelta):
-                member_id = self.presentation.resolve_member_id(event.member_id, event.member_name)
-                self.per_member[member_id] += event.event.text
-                if event.event.text:
-                    self.streamed_member_runs.add(event.run_id)
-        elif isinstance(event, TextDelta):
-            self.consensus += event.text
-
-    def canonical_text(self, *, finished: bool) -> str:
-        """Return the text in the configured member order, then the consensus: what a streamed reply records.
-
-        Only a ``finished`` reply, one whose team run completed, ends with the no-consensus note.
-        """
-        return "\n\n".join(
-            render_team_member_slots(
-                self.presentation.member_ids,
-                display_names_by_id=self.presentation.display_names_by_id,
-                per_member=self.per_member,
-                consensus=self.consensus,
-                finished=finished,
-            ),
-        )
-
-
 @dataclass
 class TeamAttempt:
     """One attempt of a team turn or resumed run: its members, its document, and what the run produced so far."""
@@ -119,13 +70,11 @@ class TeamAttempt:
     runtime_model_name: str
     # The history preparation of a new run; a resume prepares none.
     prepared_history: PreparedHistoryState | None
-    # The reply without tool markers: what a streamed turn records.
-    reply: TeamReplyText = field(init=False)
     records: TerminalRecord[TeamRunRecord] = field(default_factory=partial(TerminalRecord, TeamRunRecord))
-
-    def __post_init__(self) -> None:
-        """Start the reply's text from the presentation's member slots."""
-        self.reply = TeamReplyText(self.presentation)
+    # Whether the leader's deltas gave text, and the member runs whose deltas did, by run id: a member's slot holds the
+    # text of each of its runs.
+    leader_streamed: bool = field(default=False, init=False)
+    streamed_member_runs: set[str] = field(default_factory=set, init=False)
 
     def terminal_record(self) -> TeamRunRecord:
         """Return the team run's terminal record, which the run hands over before its events end."""
@@ -144,7 +93,7 @@ class TeamAttempt:
     def interrupted_text(self) -> str:
         """Return the text the turn records when this attempt is stopped or fails.
 
-        A streamed attempt records its reply's text (``TeamReplyText``); a blocking one its stored runs' document,
+        A streamed attempt records its document's text without tool markers; a blocking one its stored runs' document,
         stripped, or nothing before the run stored a record. A stopped leader that wrote nothing
         contributes nothing; a failed one contributes the reason its run recorded, credentials redacted. Either text
         ends with the no-consensus note only once the team run completed, so it matches the message a stopped
@@ -152,12 +101,17 @@ class TeamAttempt:
         """
         record = self.records.record
         if self.stream:
-            return self.reply.canonical_text(finished=record is not None and record.status is RunStatus.completed)
-        return format_team_response(record).strip() if record is not None else ""
+            return self.presentation.text_without_tool_markers(
+                finished=record is not None and record.status is RunStatus.completed,
+            )
+        return format_team_response(record, self.presentation).strip() if record is not None else ""
 
     def apply(self, event: TeamRunEvent) -> bool:
         """Fold one run event into the attempt; return whether the document changed."""
-        self.reply.apply(event)
+        if isinstance(event, MemberEvent) and isinstance(event.event, TextDelta) and event.event.text:
+            self.streamed_member_runs.add(event.run_id)
+        elif isinstance(event, TextDelta) and event.text:
+            self.leader_streamed = True
         if self.records.collect(event):
             return False
         member = event if isinstance(event, MemberEvent) else None
@@ -183,18 +137,15 @@ class TeamAttempt:
 
         The team run is the leader, whose text only the consensus holds; a member run goes to its member's slot and is
         matched by its run id, so an earlier run of the same member keeps its text without standing for a later one.
-        The addition starts a paragraph of its own, in the document and in the reply's text alike.
+        The addition starts a paragraph of its own.
         """
-        reply = self.reply
         if isinstance(run, TeamRunRecord):
-            handover = _unshown_handover(run, streamed=bool(reply.consensus))
+            handover = _unshown_handover(run, streamed=self.leader_streamed)
             self.presentation.append_consensus(handover, separate=True)
-            reply.consensus = append_stream_text(reply.consensus, handover, separate=True)
         else:
             member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_display_name)
-            handover = _unshown_handover(run, streamed=run.run_id in reply.streamed_member_runs)
+            handover = _unshown_handover(run, streamed=run.run_id in self.streamed_member_runs)
             self.presentation.append_member(member_id, handover, separate=True)
-            reply.per_member[member_id] = append_stream_text(reply.per_member[member_id], handover, separate=True)
         return bool(handover)
 
     def show_failure_reasons(self, record: TeamRunRecord) -> bool:
@@ -252,4 +203,4 @@ class TeamAttempt:
         )
 
 
-__all__ = ["TeamAttempt", "TeamReplyText", "team_tool_executions"]
+__all__ = ["TeamAttempt", "team_tool_executions"]

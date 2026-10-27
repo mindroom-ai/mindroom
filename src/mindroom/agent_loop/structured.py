@@ -1,8 +1,10 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Ask a model for structured output the way its provider supports, and read the answer back into the schema.
 
-Each adapter renders a request's output schema in its provider's wire format; a route that only offers JSON mode
-also needs a JSON prompt at the end of the system message, which the model reads.
+Each adapter renders a request's output schema in its provider's wire format: a ``forced_tool`` route as a forced
+call of the ``structured_output_tools`` tool, whose arguments are the answer. A route that only offers JSON mode also
+needs a JSON prompt, derived from the schema, at the end of the system message. An answer from a route that enforces
+the schema is parsed strictly; only a JSON-mode answer gets the lenient repairs.
 """
 
 from __future__ import annotations
@@ -13,10 +15,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from mindroom.llm.provider import STRUCTURED_OUTPUT_TOOL
 
-    from mindroom.llm.provider import Capabilities
+if TYPE_CHECKING:
+    from mindroom.llm.provider import Capabilities, ModelTurn
 
 _MARKDOWN_KEY = re.compile(r'[*`#]?"([A-Za-z0-9_]+)"[*`#]?')
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1F\x7F]")
@@ -33,58 +35,36 @@ def output_format_prompt(capabilities: Capabilities, schema: type[BaseModel] | N
     return json_output_prompt(schema)
 
 
+def structured_answer_text(turn: ModelTurn, capabilities: Capabilities) -> str:
+    """Return the text of a structured answer: a ``forced_tool`` route's forced call arguments, else the turn's text."""
+    if capabilities.structured_output == "forced_tool":
+        for call in turn.tool_calls:
+            function = call.get("function") or {}
+            if function.get("name") == STRUCTURED_OUTPUT_TOOL:
+                return str(function.get("arguments") or "")
+    return turn.content
+
+
 def json_output_prompt(schema: type[BaseModel]) -> str:
     """Return the system-message prompt that asks a JSON-mode model for an object matching ``schema``."""
-    prompt = "Provide your output as a JSON containing the following fields:"
-    json_schema = schema.model_json_schema()
-    properties: dict[str, Any] = {
-        name: _without_title(field) for name, field in (json_schema.get("properties") or {}).items()
-    }
-    definitions = json_schema.get("$defs")
-    if definitions is not None:
-        properties["$defs"] = {}
-        for name, definition in definitions.items():
-            if "enum" in definition:
-                properties["$defs"][name] = {
-                    "type": "string",
-                    "enum": definition["enum"],
-                    "description": definition.get("description", ""),
-                }
-                continue
-            fields = {
-                field_name: _without_title(field) for field_name, field in (definition.get("properties") or {}).items()
-            }
-            if fields:
-                properties["$defs"][name] = fields
-    if properties:
-        field_names = [name for name in properties if name != "$defs"]
-        prompt += f"\n<json_fields>\n{json.dumps(field_names, ensure_ascii=False)}\n</json_fields>"
-        prompt += "\n\nHere are the properties for each field:"
-        prompt += f"\n<json_field_properties>\n{json.dumps(properties, indent=2, ensure_ascii=False)}"
-        prompt += "\n</json_field_properties>"
-    prompt += "\nStart your response with `{` and end it with `}`."
-    prompt += "\nYour output will be passed to json.loads() to convert it to a Python object."
-    prompt += "\nMake sure it only contains valid JSON."
-    return prompt
+    json_schema = json.dumps(schema.model_json_schema(), indent=2, ensure_ascii=False)
+    return (
+        "Answer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it."
+        f"\n<json_schema>\n{json_schema}\n</json_schema>"
+    )
 
 
-def _without_title(field: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in field.items() if key != "title"}
+def parse_structured[T: BaseModel](content: str, schema: type[T], *, lenient: bool) -> T | None:
+    """Read a model's text answer into ``schema``, or return None when it does not validate.
 
-
-# TODO(simplify): every helper answer parses leniently, repairing fences, markdown, and quotes and merging several
-# objects, also on routes that enforce the schema. Ask by forced tool call or schema where a route supports it, a
-# schema-derived prompt otherwise, and parse strictly (#3114). Helper models would notice: a malformed answer fails.
-def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T | None:
-    """Read a model's text answer into ``schema``, or return None when no attempt validates.
-
-    Tries the text as is, then with code fences, markdown around keys, control characters, and unescaped quotes in
-    values cleaned up, then each top-level JSON object, merging several by the schema's fields.
-    Inline reasoning is dropped first (``_answer_text``).
+    Inline reasoning is dropped first (``_answer_text``). A route that enforces the schema answers with the object, so
+    its answer is validated as it is. With ``lenient``, for a JSON-mode answer, the text is tried with code fences,
+    markdown around keys, control characters, and unescaped quotes in values cleaned up, then each top-level JSON
+    object, merging several by the schema's fields.
     """
     content = _answer_text(content)
     parsed = _validated(content, schema)
-    if parsed is not None:
+    if parsed is not None or not lenient:
         return parsed
     cleaned = _cleaned_json(content)
     parsed = _validated(cleaned, schema)
@@ -204,4 +184,5 @@ __all__ = [
     "json_output_prompt",
     "output_format_prompt",
     "parse_structured",
+    "structured_answer_text",
 ]
