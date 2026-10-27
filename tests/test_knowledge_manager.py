@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import weakref
 from contextlib import asynccontextmanager, suppress
@@ -1467,6 +1468,41 @@ async def test_source_watcher_sync_converts_chroma_era_bases_once(
     await scheduler.shutdown()
 
     assert refreshed == ["legacy"]
+
+
+@pytest.mark.asyncio
+async def test_source_watcher_sync_reads_published_collections_ahead_of_searches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync reads each shared base's published collection file in the background, until shutdown stops it.
+
+    After a restart on a cold disk, the first search's matrix load then reads from the page cache instead.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "doc.md").write_text("prefetched", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs, "unpublished": tmp_path / "unpublished"}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    state = load_published_index_state(published_index_metadata_path(key))
+    assert state is not None
+    published = KnowledgeCollection(path=published_index_storage_path(key), name=state.collection).file
+    reads: list[tuple[list[Path], threading.Event]] = []
+    monkeypatch.setattr(
+        "mindroom.knowledge.registry.read_into_page_cache",
+        lambda files, stop: reads.append((list(files), stop)),
+    )
+    source_watcher = KnowledgeSourceWatcher(MagicMock())
+
+    await source_watcher.sync(config=config, runtime_paths=runtime_paths)
+    await _wait_until(lambda: bool(reads), "the published collection was not read")
+    await source_watcher.shutdown()
+
+    [(files, stop)] = reads
+    assert files == [published]
+    assert stop.is_set()
 
 
 @pytest.mark.asyncio

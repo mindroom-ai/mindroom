@@ -26,12 +26,13 @@ from mindroom.knowledge.indexing_config import (
     published_index_settings_compatible,
     storage_key_for_base,
 )
-from mindroom.knowledge.vector_store import KnowledgeCollection
+from mindroom.knowledge.vector_store import KnowledgeCollection, read_into_page_cache
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.dependencies import ensure_optional_deps
 
 if TYPE_CHECKING:
+    import threading
     from collections.abc import Callable
 
     from mindroom.config.main import Config
@@ -179,6 +180,24 @@ def resolve_published_index_key(
         create=create,
     )
     return key
+
+
+def prefetch_shared_collections(config: Config, runtime_paths: RuntimePaths, stop: threading.Event) -> None:
+    """Read every configured shared semantic base's published collection file into the page cache, until ``stop``."""
+    files: list[Path] = []
+    for base_id in config.knowledge_bases:
+        if config.get_knowledge_base_config(base_id).mode != "semantic":
+            continue
+        if config.get_private_knowledge_base_agent(base_id) is not None:
+            continue
+        try:
+            key = resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths)
+        except (OSError, ValueError):
+            continue
+        state = load_published_index_state(published_index_metadata_path(key))
+        if state is not None and state.collection:
+            files.append(KnowledgeCollection(path=published_index_storage_path(key), name=state.collection).file)
+    read_into_page_cache(files, stop)
 
 
 def refresh_target_for_published_index_key(key: PublishedIndexKey) -> KnowledgeRefreshTarget:

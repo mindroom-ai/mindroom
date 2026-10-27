@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY, SearchHit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     import numpy as np
 
@@ -43,6 +43,8 @@ _WORD = re.compile(r"\w+")
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
+#: Bytes read per step while reading a collection file into the page cache.
+_PREFETCH_CHUNK_BYTES = 8 * 1024 * 1024
 #: Rows normalized at a time while a matrix loads.
 _NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
@@ -451,6 +453,23 @@ def _file_version(file: Path) -> tuple[str, int, int, int, int] | None:
     except FileNotFoundError:
         return None
     return (str(file), status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns)
+
+
+def read_into_page_cache(files: Iterable[Path], stop: threading.Event) -> None:
+    """Read each collection file once, front to back, so the operating system keeps it in its page cache.
+
+    A search's first matrix load reads a whole collection in row order. On a cold network disk that takes longer
+    than its budget for a base of a few GB, while a sequential read is several times faster. A file swept since it
+    was listed is skipped, and ``stop`` ends the reading.
+    """
+    buffer = bytearray(_PREFETCH_CHUNK_BYTES)
+    for file in files:
+        try:
+            with file.open("rb", buffering=0) as handle:
+                while not stop.is_set() and handle.readinto(buffer):
+                    pass
+        except OSError:
+            continue
 
 
 def _vector_index(connection: sqlite3.Connection, file: Path) -> _VectorIndex:
