@@ -131,6 +131,16 @@ _VERTEX_ENDPOINTS = {
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
+def vertex_project_and_region(settings: ClaudeSettings) -> tuple[str | None, str | None]:
+    """Return the project and region a Vertex AI Claude client gets from its settings, None for one they leave unset.
+
+    ``client_params`` win over the values the builder filled from the model's settings and the runtime env, as the
+    client takes them.
+    """
+    client_params = settings.client_params or {}
+    return client_params.get("project_id") or settings.project_id, client_params.get("region") or settings.region
+
+
 def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | None:
     """Return the endpoint identity of one Claude route, or None on Bedrock, which has none.
 
@@ -143,8 +153,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
     if route == "anthropic":
         return str(client_params.get("base_url") or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
-        region = client_params.get("region") or settings.region
-        project = client_params.get("project_id") or settings.project_id
+        project, region = vertex_project_and_region(settings)
         base_url = (
             client_params.get("base_url")
             or settings.base_url
@@ -794,4 +803,4 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
-__all__ = ["ClaudeProvider", "build_provider"]
+__all__ = ["ClaudeProvider", "build_provider", "vertex_project_and_region"]
