@@ -179,7 +179,7 @@ def test_native_compaction_covers_current_claude_models() -> None:
 
 
 def test_thinking_prefix_check_covers_current_claude_models() -> None:
-    """Every Claude preset on a Claude wire must get the thinking binding, so a default bump cannot leave one out."""
+    """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
     presets = [
         *model_defaults.CONFIG_INIT_MODEL_PRESETS.values(),
         *(
