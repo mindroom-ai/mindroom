@@ -21,9 +21,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Plan a multi-stop trip.",
-        "external_execution": false,
         "name": "plan_trip",
         "parameters": {
           "properties": {
@@ -127,13 +125,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Create a calendar event and invite attendees.",
-        "external_execution": false,
         "name": "calendar_create_event",
         "parameters": {
           "$defs": {
@@ -265,7 +260,6 @@
           "title": "create_eventArguments",
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -451,9 +445,7 @@
               ],
               "title": "create_eventArguments",
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+            }
           }
         },
         {
@@ -562,9 +554,7 @@
                 "stops"
               ],
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+            }
           }
         }
       ]

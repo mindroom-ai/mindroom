@@ -65,8 +65,8 @@ _QUERY_EMBEDDING_ERROR = "embedder request failed (HTTP 503)"
 # Each cosine distance is computed in float32 and summed in an order the CPU's vector width decides, so its last bits
 # can differ between machines: an x86_64 run returned 0.604523241519928 where an aarch64 run returned
 # 0.6045231819152832, one float32 ulp apart. Comparisons accept up to this relative difference in a search document's
-# distances.
-DISTANCE_KEYS = ("distances", "similarity_score")
+# distance.
+DISTANCE_KEYS = ("distance",)
 DISTANCE_RELATIVE_TOLERANCE = 1e-6
 
 
@@ -257,16 +257,11 @@ async def refresh_golden_bases(config: Config, runtime_paths: RuntimePaths) -> d
 
 
 def _normalized_search_documents(output: str) -> list[dict[str, Any]]:
-    """Parse a search result, checking its layout and normalizing the per-version content hash and stamp."""
+    """Parse a search result, checking its layout."""
     documents = json.loads(output)
     assert output == json.dumps(documents, indent=2, ensure_ascii=False)
     for document in documents:
         assert list(document) == ["name", "meta_data", "content"], document
-        assert _HEX64.fullmatch(document["meta_data"]["content_hash"]), document
-        document["meta_data"]["content_hash"] = "<sha256>"
-        if "source_mtime_ns" in document["meta_data"]:
-            assert isinstance(document["meta_data"]["source_mtime_ns"], int), document
-            document["meta_data"]["source_mtime_ns"] = "<stamp>"
     return documents
 
 

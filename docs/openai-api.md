@@ -111,6 +111,7 @@ When routing itself fails, the request goes to the first available agent.
 ## Teams
 
 Teams appear as `team/<team_name>` models, and selecting one runs the team in its configured `coordinate` or `collaborate` mode.
+A team completion's content is the team model's answer, written from its members' results, whether or not it streams; members' own text is not sent.
 A team is not listed when any member agent, or any agent a member delegates to, uses a requester-private scope (see [Model selection](#model-selection)).
 For mapped callers, the team's own `access` decides whether they can use it, and that grant covers its member agents for the request.
 

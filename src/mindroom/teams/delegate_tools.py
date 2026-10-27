@@ -62,9 +62,6 @@ DELEGATION_TOOLS: Mapping[TeamMode, ToolSpec] = {
             "additionalProperties": False,
         },
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
     TeamMode.COLLABORATE: ToolSpec(
         name="delegate_task_to_members",
@@ -85,9 +82,6 @@ DELEGATION_TOOLS: Mapping[TeamMode, ToolSpec] = {
             "additionalProperties": False,
         },
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
 }
 
@@ -98,12 +92,10 @@ def delegate_functions(
     *,
     record: TeamRunRecord,
     run_member: MemberRunner,
-    stream: bool,
 ) -> AdaptedToolkit:
     """Return the delegation tool for ``mode`` as a toolkit bound to the team run ``record``.
 
-    ``stream`` says whether the turn's reply streams, which selects the rules of a member's result. The
-    arguments are checked against the entrypoint's signature before it runs, so a call with a missing or mistyped
+    The arguments are checked against the entrypoint's signature before it runs, so a call with a missing or mistyped
     argument fails with the validation error the model reads.
     """
     by_id = {member.spec.id: member for member in members}
@@ -118,13 +110,13 @@ def delegate_functions(
             propagate_member_pause(record, member, child)
             _running_call(record).child_run_id = child.run_id
             return MEMBER_PAUSED_RESULT.format(name=member.spec.name)
-        return member_result_text(child, stream=stream)
+        return member_result_text(child)
 
     async def delegate_task_to_members(task: str) -> str:
         """Run every member on ``task`` at once and return what the leader reads of their runs."""
         async with asyncio.TaskGroup() as group:
             runs = [group.create_task(run_member(member, task)) for member in members]
-        return collaborate_result_text(members, [run.result() for run in runs], record, stream=stream)
+        return collaborate_result_text(members, [run.result() for run in runs], record)
 
     entrypoint = delegate_task_to_members if mode is TeamMode.COLLABORATE else delegate_task_to_member
     definition = DELEGATION_TOOLS[mode]
@@ -137,74 +129,40 @@ def delegate_functions(
     return AdaptedToolkit(name="team_delegation", functions=(function,), instructions=None)
 
 
-def member_result_text(child: RunRecord, *, stream: bool) -> str:
-    """Return what a coordinate leader reads for a finished member run, by the rules of the leader's stream mode.
+def member_result_text(child: RunRecord) -> str:
+    """Return what the leader reads for a finished member run: its text, else its tool results, else a notice.
 
-    The rules read the content the run hands over (``handover_content``), so a failed member gives the reason its
-    run recorded, credentials redacted.
+    The text is the content the run hands over (``handover_content``), so a failed member gives the reason its run
+    recorded, credentials redacted. A run without text that ran tools gives their results, and one that did neither
+    gives the no-response notice.
     """
-    # TODO(simplify): The rules differ by stream mode: without streaming, a run whose text is blank and that ran no
-    # tools reads empty. Use the streamed rules in both modes. Models would notice.
-    return _streamed_result(child) if stream else _blocking_result(child)
-
-
-def _streamed_result(child: RunRecord) -> str:
-    """Return the member's text, else its tool results, else the no-response notice."""
     content = child.handover_content
     if content is not None and content.strip():
         return content
     if child.tools:
-        return _tool_results(child)
+        return ",".join(tool.result for tool in child.tools if tool.result)
     return NO_MEMBER_RESPONSE
-
-
-def _blocking_result(child: RunRecord) -> str:
-    """Return the streamed result, except that a blank run without tools reads empty."""
-    content = child.handover_content
-    if content is not None and not content.strip() and not child.tools:
-        return ""
-    return _streamed_result(child)
-
-
-def _tool_results(child: RunRecord) -> str:
-    return ",".join(tool.result for tool in child.tools or () if tool.result)
 
 
 def collaborate_result_text(
     members: Sequence[TeamMember],
     children: Sequence[RunRecord],
     record: TeamRunRecord,
-    *,
-    stream: bool,
 ) -> str:
-    """Return the collaborate result: one piece per member in member order, joined with no separator.
+    """Return the collaborate result: one piece per member in member order, a blank line between pieces.
 
-    Member order keeps the result deterministic whatever order the members finish in. Streaming, a piece is the
-    member's result (``_streamed_result``); blocking, it is the result labeled with the member's name
-    (``_labeled_result``). A paused member contributes its labeled pause notice and its requirements reach the team
-    run.
+    Member order keeps the result deterministic whatever order the members finish in. A piece is the member's result
+    (``member_result_text``) labeled with the member's name. A paused member contributes its pause notice, labeled the
+    same way, and its requirements reach the team run.
     """
-    # TODO(simplify): Pieces join with no separator, and a finished member's piece is labeled only without streaming,
-    # by a third result rule (``_labeled_result``). Label every piece by one rule and separate pieces with blank lines.
-    # Models would notice.
     pieces: list[str] = []
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
             pieces.append(_labeled_piece(member.spec.name, _COLLABORATE_PAUSED_NOTICE))
-        elif stream:
-            pieces.append(_streamed_result(child))
         else:
-            pieces.append(_labeled_piece(member.spec.name, _labeled_result(child)))
-    return "".join(pieces)
-
-
-def _labeled_result(child: RunRecord) -> str:
-    """Return ``_streamed_result``, but blank text gives all tool results, empty ones too, else ``No Response``."""
-    content = child.handover_content
-    if content is not None and not content.strip():
-        return ",".join(tool.result or "" for tool in child.tools) if child.tools else "No Response"
-    return _streamed_result(child)
+            pieces.append(_labeled_piece(member.spec.name, member_result_text(child)))
+    return "\n\n".join(pieces)
 
 
 def _labeled_piece(name: str, text: str) -> str:
@@ -216,8 +174,6 @@ def answer_delegation(
     tools: Sequence[ToolExecution],
     member: TeamMember,
     run: RunRecord,
-    *,
-    stream: bool,
 ) -> ToolExecution | None:
     """Answer the leader's delegation call that waited on ``member``'s paused run, which ended as ``run``.
 
@@ -225,13 +181,13 @@ def answer_delegation(
     renamed since is still found. A coordinate call names the member and reads the member's result as a call whose
     member never paused reads it (``member_result_text``). A collaborate call holds one piece per member: the member's
     pause notice becomes its result under the same label, and every other piece stays as it was, so the leader keeps
-    the result of a member that finished before the pause or in an earlier resume. ``stream`` selects the result
-    rules. Return the answered call, or None when no call waits on the run.
+    the result of a member that finished before the pause or in an earlier resume. Return the answered call, or None
+    when no call waits on the run.
     """
     # TODO(simplify): A resumed member that wrote nothing hands over its carried pause notice ("I have tools to
     # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
     # (``new_handover_content``) or a completion note. The leader model would notice.
-    result = member_result_text(run, stream=stream)
+    result = member_result_text(run)
     name = run.agent_display_name or member.spec.name
     coordinate = _waiting_coordinate_call(tools, member.spec.id, run, MEMBER_PAUSED_RESULT.format(name=name))
     if coordinate is not None:

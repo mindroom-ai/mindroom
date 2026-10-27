@@ -31,7 +31,7 @@ from mindroom.history.storage import read_scope_seen_event_ids, update_scope_see
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunStatus, TeamRunRecord
@@ -53,7 +53,7 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import install_model_providers, make_visible_message, seed_session
+from tests.conftest import install_model_providers, make_visible_message, seed_session, unstored_team_scope_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.providers.anthropic_family_support import (
@@ -152,7 +152,7 @@ def _contents(request_messages: Sequence[Message]) -> list[tuple[str, str]]:
 
 def _leader_turn_messages(team: TeamTurn) -> list[tuple[str, str]]:
     """Return the leader's first request after its system message: the replayed history, then the turn."""
-    return _contents(_leader(team).requests[0].messages[1:])
+    return _contents([message for message in _leader(team).requests[0].messages if message.role != "system"])
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +265,25 @@ async def test_the_router_in_a_direct_member_list_is_skipped(
 
     assert text == f"{HEADER}\n**Team Consensus**:\n\nGeneral response"
     assert '<member id="general" name="GeneralAgent">' in str(_leader(team).requests[0].messages[0].content)
+
+
+@pytest.mark.asyncio
+async def test_the_leader_reads_each_member_s_authored_role_and_its_own_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The roster shows each member's authored role, not its whole prompt, and the leader prompt opens with the team."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("Team response")], members=("general", "research"))
+    await team.reply(stream=True, agent_names=["general", "research"])
+
+    leader_prompt = str(_leader(team).requests[0].messages[0].content)
+    assert leader_prompt.startswith(
+        "<your_role>\n## Your Identity\nYou are Team (GeneralAgent, ResearchAgent), a team in the Mindroom",
+    )
+    assert "<conversation>" in leader_prompt
+    assert '<member id="general" name="GeneralAgent">\n  Role: Answers.\n</member>' in leader_prompt
+    assert '<member id="research" name="ResearchAgent">\n  Role: Researches.\n</member>' in leader_prompt
+    assert "Matrix ID: @mindroom_general" not in leader_prompt
 
 
 @pytest.mark.asyncio
@@ -530,21 +549,15 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stream", "expected"),
-    [
-        (False, "Agent GeneralAgent: Five is prime.Agent ResearchAgent: Five is odd."),
-        (True, "Five is prime.Five is odd."),
-    ],
-)
-async def test_a_collaborate_leader_reads_its_members_results_labeled_only_from_a_blocking_reply(
+@pytest.mark.parametrize("stream", [False, True])
+async def test_a_collaborate_leader_reads_its_members_labeled_results_on_either_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
-    expected: str,
 ) -> None:
-    """A blocking reply labels each member's result with its name; a streamed reply joins the results as they are."""
+    """Whether the reply streams or not, each member's result is labeled with its name, a blank line apart."""
+    expected = "Agent GeneralAgent: Five is prime.\n\nAgent ResearchAgent: Five is odd."
     team = _team(
         tmp_path,
         monkeypatch,
@@ -576,8 +589,8 @@ async def test_system_enrichment_follows_the_leader_s_and_each_member_s_configur
 
     await team.respond(ctx=team.ctx(system_enrichment_items=(EnrichmentItem(key="weather", text="72F and sunny"),)))
 
-    leader_system = str(_leader(team).requests[0].messages[0].content)
-    member_system = str(team.models["general-model"].requests[0].messages[0].content)
+    leader_system = system_text(_leader(team).requests[0].messages)
+    member_system = system_text(team.models["general-model"].requests[0].messages)
     for system in (leader_system, member_system):
         assert system.index("Timezone: UTC") < system.index('<item key="weather"') < system.index("72F and sunny")
 
@@ -666,7 +679,9 @@ async def test_a_private_ad_hoc_team_stores_under_its_requester_scope_and_replay
         ("run-1", team.scope.scope_id),
         ("run-2", team.scope.scope_id),
     ]
-    first_prompt, _answer, second_prompt = _contents(_leader(team).requests[1].messages[1:])
+    first_prompt, _answer, second_prompt = _contents(
+        [message for message in _leader(team).requests[1].messages if message.role != "system"],
+    )
     assert "First question" in first_prompt[1]
     assert _answer == ("assistant", "First answer")
     assert "Second question" in second_prompt[1]
@@ -937,11 +952,11 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     assert _notices(team, "prior-response") == [("run-earlier", "persisted", QUEUED_MESSAGE_NOTICE_TEXT)]
 
 
-def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one(
+def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every agent build renders a role, so a build without one is a broken invariant, not a member with no role."""
+    """The leader reads the role the member's config authors, whatever the member's own prompt renders around it."""
     team = _team(tmp_path, monkeypatch)
     members = materialize_team_members(
         list(team.member_names),
@@ -953,20 +968,22 @@ def test_a_member_build_without_a_role_is_refused_not_rostered_with_an_empty_one
         active_model_names=dict.fromkeys(team.member_names, "default"),
     )
     [build] = members.builds
-    roleless = replace(members, builds=[replace(build, prompt=replace(build.prompt, role=None))])
+    assert build.prompt.role is not None
+    assert build.prompt.role != "Answers."
 
-    with pytest.raises(ValueError, match="Team member 'general' has no role for the leader's roster"):
-        build_team_spec(
-            members=roleless,
-            mode=team.mode,
-            config=team.config,
-            runtime_paths=team.runtime_paths,
-            scope_context=None,
-            execution_identity=team.identity,
-            model_name="default",
-            configured_team_name=None,
-            timezone="UTC",
-        )
+    built = build_team_spec(
+        members=members,
+        mode=team.mode,
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        scope_context=unstored_team_scope_context(team.config, team.member_names, team_name=None),
+        execution_identity=team.identity,
+        model_name="default",
+        configured_team_name=None,
+        timezone="UTC",
+    )
+
+    assert [member.role for member in built.spec.members] == ["Answers."]
 
 
 @pytest.mark.asyncio

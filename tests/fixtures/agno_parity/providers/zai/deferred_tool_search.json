@@ -28,9 +28,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -52,13 +50,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
-        "external_execution": false,
         "name": "tool_search",
         "parameters": {
           "properties": {
@@ -74,13 +69,10 @@
           "required": [],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
-        "external_execution": false,
         "name": "call_tool",
         "parameters": {
           "properties": {
@@ -98,13 +90,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Look up one order by id.",
-        "external_execution": false,
         "name": "lookup_order",
         "parameters": {
           "properties": {
@@ -117,13 +106,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Email the invoice for one order.",
-        "external_execution": false,
         "name": "send_invoice",
         "parameters": {
           "properties": {
@@ -136,7 +122,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -208,9 +193,7 @@
                 "name"
               ],
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+            }
           }
         },
         {
@@ -237,9 +220,7 @@
                 "city"
               ],
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+            }
           }
         },
         {
@@ -260,9 +241,7 @@
               },
               "required": [],
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+            }
           }
         }
       ]

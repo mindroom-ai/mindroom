@@ -87,8 +87,8 @@ def test_delete_source_paths_and_paths_with_vectors(collection: KnowledgeCollect
 
 def test_copy_rows_keeps_selected_rows_verbatim(collection: KnowledgeCollection, tmp_path: Path) -> None:
     """Copying keeps the selected rows' text, metadata, and vectors."""
-    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0], source_size=5)])
-    collection.write_source_rows("b.md", [_row("b1", "b.md", "beta", [0.0, 1.0], source_size=4)])
+    collection.write_source_rows("a.md", [_row("a1", "a.md", "alpha", [1.0, 0.0], page=5)])
+    collection.write_source_rows("b.md", [_row("b1", "b.md", "beta", [0.0, 1.0], page=4)])
     candidate = KnowledgeCollection(path=tmp_path, name="mindroom_knowledge_docs_candidate_x")
     candidate.reset()
 
@@ -96,16 +96,26 @@ def test_copy_rows_keeps_selected_rows_verbatim(collection: KnowledgeCollection,
 
     [hit] = candidate.search([1.0, 0.0], limit=5)
     assert hit.content == "alpha"
-    assert hit.meta_data["source_size"] == 5
+    assert hit.meta_data["page"] == 5
     assert candidate.paths_with_vectors(["a.md", "b.md"]) == {"a.md"}
 
 
-def test_search_ranks_by_cosine_distance_and_shapes_hits(collection: KnowledgeCollection) -> None:
-    """Search ranks by cosine distance and shapes hits the way knowledge search always has."""
+def test_search_ranks_by_cosine_distance_and_shows_each_hit_s_source_reader_keys_and_distance(
+    collection: KnowledgeCollection,
+) -> None:
+    """A hit shows its source, its reader keys, and one distance, without the row keys that serve indexing."""
+    indexing = {
+        "source_mtime_ns": 1,
+        "source_size": 2,
+        "source_digest": "digest",
+        "content_id": "cid",
+        "content_hash": "hash",
+        "linked_to": "",
+    }
     collection.write_source_rows(
         "a.md",
         [
-            _row("a1", "a.md", "east", [2.0, 0.0], content_id="cid", chunk=1),
+            _row("a1", "a.md", "east", [2.0, 0.0], chunk=1, **indexing),
             _row("a2", "a.md", "north", [0.0, 3.0], chunk=2),
             _row("a3", "a.md", "northeast", [1.0, 1.0], chunk=3),
         ],
@@ -116,12 +126,8 @@ def test_search_ranks_by_cosine_distance_and_shapes_hits(collection: KnowledgeCo
     assert [hit.content for hit in hits] == ["east", "northeast"]
     east = hits[0]
     assert east.name == "a.md"
-    assert "name" not in east.meta_data
-    assert "content_id" not in east.meta_data
-    assert east.meta_data["chunk"] == 1
     expected = 1 - 1.0 / math.hypot(1.0, 0.1)
-    assert east.meta_data["distances"] == pytest.approx(expected, abs=1e-6)
-    assert east.meta_data["similarity_score"] == east.meta_data["distances"]
+    assert east.meta_data == {"source_path": "a.md", "chunk": 1, "distance": pytest.approx(expected, abs=1e-6)}
 
 
 def test_search_drops_repeated_chunks_of_one_document(collection: KnowledgeCollection) -> None:
@@ -214,7 +220,7 @@ def test_hybrid_search_surfaces_an_exact_keyword_match_the_embedding_misses(coll
 
     assert dense[-1].content.startswith("Set MINDROOM_STORAGE_PATH")
     assert hybrid[0].content.startswith("Set MINDROOM_STORAGE_PATH")
-    assert hybrid[0].meta_data["distances"] == pytest.approx(1.0, abs=1e-6)
+    assert hybrid[0].meta_data["distance"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_hybrid_search_stems_words_and_ignores_punctuation(collection: KnowledgeCollection) -> None:

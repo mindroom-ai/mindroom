@@ -7,6 +7,7 @@ import base64
 import json
 import re
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -48,7 +49,6 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.tool_policy import without_provider_tools
 from tests.providers.golden_support import PacedBytes, encoded_response
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -353,28 +353,80 @@ class _Packing(BaseModel):
     item: str
 
 
-@pytest.mark.asyncio
-async def test_a_groq_request_for_structured_output_reads_the_whole_reply(tmp_path: Path) -> None:
-    """Groq does not stream structured output, so a request for it asks for the whole reply instead of a stream."""
-    completion = {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "openai/gpt-oss-120b",
-        "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": '{"item": "coat"}'}, "finish_reason": "stop"},
-        ],
-        "usage": {**_USAGE, "queue_time": 0.011},
+def _answer_call_reply(arguments: str) -> dict[str, Any]:
+    """Return a Chat stream whose one call is the forced ``structured_output`` call with ``arguments``."""
+    call = {
+        "index": 0,
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "structured_output", "arguments": arguments},
     }
-    built = _Built(tmp_path, _DECISION_ROUTES["groq"][0], _json_reply(completion))
+    return _chat_reply(_chunk({"tool_calls": [call]}, finish_reason="tool_calls"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"provider": "groq", "id": "openai/gpt-oss-120b", "api_key": "k"},
+        {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k", "extra_kwargs": {"use_thinking": False}},
+    ],
+    ids=["groq", "deepseek-without-thinking"],
+)
+async def test_a_route_that_can_force_a_tool_asks_for_structured_output_with_a_forced_call(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    """The output schema goes as the one tool the request forces, streamed, and the call carries the answer."""
+    built = _Built(tmp_path, model_config, _answer_call_reply('{"item": "coat"}'))
 
     turn = await _turn(built, ModelRequest(messages=[_user()], output_schema=_Packing))
 
     body = built.body()
-    assert ("stream" in body, body["response_format"]) == (False, {"type": "json_object"})
-    assert (turn.content, turn.stop_reason) == ('{"item": "coat"}', "end")
-    tokens = turn.usage.tokens
-    assert (tokens.input_tokens, tokens.output_tokens, turn.usage.provider_metrics) == (42, 12, {"queue_time": 0.011})
+    assert built.adapter.capabilities.structured_output == "forced_tool"
+    assert "response_format" not in body
+    assert body["stream"] is True
+    assert body["tool_choice"] == {"type": "function", "function": {"name": "structured_output"}}
+    assert [tool["function"]["name"] for tool in body["tools"]] == ["structured_output"]
+    assert body["tools"][0]["function"]["parameters"] == _Packing.model_json_schema()
+    assert [call["function"]["arguments"] for call in turn.tool_calls] == ['{"item": "coat"}']
+
+
+@pytest.mark.parametrize(
+    ("extra_kwargs", "structured_output"),
+    [
+        ({"use_thinking": False, "extra_body": {"thinking": {"type": "enabled"}}}, "json_mode"),
+        ({"request_params": {"extra_body": {"thinking": {"type": "disabled"}}}}, "forced_tool"),
+    ],
+    ids=["authored-on", "authored-off"],
+)
+def test_a_deepseek_route_follows_the_thinking_its_requests_send(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    structured_output: str,
+) -> None:
+    """An authored ``extra_body.thinking`` wins over ``use_thinking`` on the wire, so the structured-output mode follows it."""
+    config = {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k", "extra_kwargs": extra_kwargs}
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "{}"}, finish_reason="stop")))
+
+    assert built.adapter.capabilities.structured_output == structured_output
+
+
+@pytest.mark.asyncio
+async def test_a_thinking_deepseek_model_asks_for_structured_output_in_json_mode(tmp_path: Path) -> None:
+    """DeepSeek rejects a forced tool call in thinking mode, so a thinking model asks for JSON instead."""
+    built = _Built(
+        tmp_path,
+        {"provider": "deepseek", "id": "deepseek-flash", "api_key": "k"},
+        _chat_reply(_chunk({"content": '{"item": "coat"}'}, finish_reason="stop")),
+    )
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], output_schema=_Packing))
+
+    body = built.body()
+    assert built.adapter.capabilities.structured_output == "json_mode"
+    assert (body["response_format"], "tools" in body, "tool_choice" in body) == ({"type": "json_object"}, False, False)
+    assert turn.content == '{"item": "coat"}'
 
 
 def _tool_call_reply(server_id: str | None) -> dict[str, Any]:
@@ -536,7 +588,10 @@ async def test_a_thread_switching_to_a_chat_route_rewrites_foreign_call_ids(tmp_
 
 @pytest.mark.asyncio
 async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Path) -> None:
-    """Chat Completions carries attachments as inline parts, the file ahead of the text and the audio after it."""
+    """Chat Completions carries attachments as inline parts, the file ahead of the text and the audio after it.
+
+    The file part is named by the attachment's original filename, not its stored path.
+    """
     voice = tmp_path / "att_voice.wav"
     voice.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt synthetic")
     report = tmp_path / "att_report.pdf"
@@ -553,7 +608,7 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
     pdf = base64.b64encode(report.read_bytes()).decode()
     assert built.body()["messages"][0]["content"] == [
-        {"type": "file", "file": {"filename": "att_report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
+        {"type": "file", "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
         {"type": "text", "text": "Summarize both."},
         {
             "type": "input_audio",
@@ -1162,9 +1217,6 @@ async def test_a_temperature_override_is_sent_as_the_models_temperature(
         description="Forecast.",
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
     await _turn(built, ModelRequest(messages=[_user()], tools=[tool], overrides=RequestOverrides(temperature=0.2)))
@@ -1196,9 +1248,6 @@ _DECISION_TOOL = ToolSpec(
     description="Forecast.",
     parameters={"type": "object"},
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 _DECISION_ROUTES = {
     "openai-chat": (_OPENAI_CHAT, "text"),
@@ -1220,12 +1269,11 @@ async def _regular_and_decision_bodies(
     model_config: dict[str, Any],
     request: ModelRequest,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Send ``request`` once as a reply and once as a decision, returning both wire bodies."""
+    """Send ``request`` once as a reply and once as a decision (``tool_choice`` "none"), returning both wire bodies."""
     reply_kind = "responses" if model_config.get("api") == "responses" else "text"
     built = _Built(tmp_path, model_config, _decision_reply(reply_kind))
     await _turn(built, request)
-    with without_provider_tools():
-        await _turn(built, request)
+    await _turn(built, replace(request, tool_choice="none"))
     return built.body(0), built.body(1)
 
 
@@ -1346,8 +1394,8 @@ async def test_decisions_fail_before_sending_on_routes_whose_hosted_search_alway
 ) -> None:
     built = _Built(tmp_path, model_config, _chat_reply())
 
-    with without_provider_tools(), pytest.raises(ValueError, match=error):
-        await _turn(built, ModelRequest(messages=[_user()], tools=[_DECISION_TOOL]))
+    with pytest.raises(ValueError, match=error):
+        await _turn(built, ModelRequest(messages=[_user()], tools=[_DECISION_TOOL], tool_choice="none"))
 
     assert built.requests == []
 
@@ -1369,16 +1417,20 @@ async def test_a_disabled_openrouter_web_plugin_still_lets_decisions_run_without
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model_id", "use_thinking", "thinking"),
-    [("deepseek-flash", {"use_thinking": False}, {"type": "disabled"}), ("deepseek-chat", {}, None)],
-    ids=["turned-off", "non-thinking-model"],
+    [
+        ("deepseek-flash", {"use_thinking": False}, {"type": "disabled"}),
+        ("deepseek-v4-pro", {}, {"type": "enabled"}),
+        ("deepseek-chat", {}, {"type": "enabled"}),
+    ],
+    ids=["turned-off", "default", "any-model-id"],
 )
 async def test_deepseek_thinking_follows_use_thinking(
     tmp_path: Path,
     model_id: str,
     use_thinking: dict[str, bool],
-    thinking: dict[str, str] | None,
+    thinking: dict[str, str],
 ) -> None:
-    """Without thinking no reasoning effort is sent; only a config that turns thinking off says so."""
+    """Every DeepSeek model thinks unless the config turns it off, and without thinking no reasoning effort is sent."""
     config = {
         "provider": "deepseek",
         "id": model_id,
@@ -1391,7 +1443,7 @@ async def test_deepseek_thinking_follows_use_thinking(
 
     body = built.body()
     assert body.get("thinking") == thinking
-    assert "reasoning_effort" not in body
+    assert ("reasoning_effort" in body) is (thinking["type"] == "enabled")
 
 
 @pytest.mark.asyncio
@@ -1516,8 +1568,8 @@ async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reason
 
 
 @pytest.mark.asyncio
-async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_path: Path) -> None:
-    """An MCP tool may declare a nullable parameter as a list of types; Responses receives the first one."""
+async def test_responses_tool_parameters_keep_a_list_of_types(tmp_path: Path) -> None:
+    """An MCP tool may declare a nullable parameter as a list of types; Responses receives the list as authored."""
     tool = ToolSpec(
         name="search_issues",
         description="Search issues.",
@@ -1526,16 +1578,13 @@ async def test_responses_tool_parameters_send_the_first_of_several_types(tmp_pat
             "properties": {"label": {"type": ["string", "null"]}, "limit": {"type": "integer"}},
         },
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
     built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()))
 
     await _turn(built, ModelRequest(messages=[_user()], tools=[tool]))
 
     sent = built.body()["tools"][0]["parameters"]["properties"]
-    assert sent == {"label": {"type": "string"}, "limit": {"type": "integer"}}
+    assert sent == {"label": {"type": ["string", "null"]}, "limit": {"type": "integer"}}
     assert tool.parameters["properties"]["label"]["type"] == ["string", "null"]
 
 

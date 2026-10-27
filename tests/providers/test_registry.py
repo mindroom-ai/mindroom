@@ -266,6 +266,7 @@ def test_model_params_record_the_route_settings_without_credentials_or_clients(r
         "strict_output": True,
         "cache_system_prompt": True,
         "extended_cache_time": True,
+        "use_thinking": True,
     }
     params["metadata"]["team"] = "b"
     assert provider.model_params["metadata"] == {"team": "a"}
@@ -889,9 +890,6 @@ async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_
             description="Weather.",
             parameters=_SCHEMA,
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
 

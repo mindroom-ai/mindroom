@@ -80,7 +80,7 @@ from mindroom.teams.members import (
     build_team_spec,
     materialize_exact_team_members,
 )
-from mindroom.teams.presentation import format_team_response
+from mindroom.teams.presentation import finished_run_text
 from mindroom.teams.runtime import MemberEvent, team_usage_runs
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -1012,6 +1012,7 @@ def _build_team(
         model_name=models.team_model_name,
         configured_team_name=team_name,
         timezone=config.get_entity_timezone(team_name),
+        include_openai_compat_guidance=True,
     )
 
 
@@ -1161,7 +1162,6 @@ async def _non_stream_team_completion(
                 scope_context=scope_context,
                 team_name=team_name,
                 user_id=requester_id,
-                stream=False,
             )
             async with closing_async_stream(events):
                 async for event in events:
@@ -1170,9 +1170,8 @@ async def _non_stream_team_completion(
         logger.exception("Team execution failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
     record = records.terminal(team_name)
-    # The blocking Matrix reply's member and consensus document, which API clients replay as history. A run where
-    # nobody wrote anything gives empty text, where the Matrix reply falls back to the leader's own messages.
-    response_text = format_team_response(record)
+    # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it.
+    response_text = finished_run_text(record)
 
     if is_error_response(response_text):
         logger.warning("Team response returned error", team=team_name, error=response_text)
@@ -1251,7 +1250,6 @@ async def _stream_team_completion(  # noqa: C901, PLR0915
                             scope_context=scope_context,
                             team_name=team_name,
                             user_id=requester_id,
-                            stream=True,
                         ),
                         request_context=request_log_context,
                     ),

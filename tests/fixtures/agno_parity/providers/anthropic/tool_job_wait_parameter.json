@@ -27,9 +27,7 @@
     },
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -51,13 +49,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Search the user's travel notes.",
-        "external_execution": false,
         "name": "search_notes",
         "parameters": {
           "properties": {
@@ -75,7 +70,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -167,7 +161,6 @@
           "name": "get_weather",
           "description": "Return the forecast for one city.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "city": {
                 "description": "City name.",
@@ -197,14 +190,13 @@
             "required": [
               "city"
             ],
-            "additionalProperties": false
+            "type": "object"
           }
         },
         {
           "name": "search_notes",
           "description": "Search the user's travel notes.",
           "input_schema": {
-            "type": "object",
             "properties": {
               "limit": {
                 "description": "Maximum results.",
@@ -218,7 +210,7 @@
             "required": [
               "query"
             ],
-            "additionalProperties": false
+            "type": "object"
           },
           "cache_control": {
             "type": "ephemeral",

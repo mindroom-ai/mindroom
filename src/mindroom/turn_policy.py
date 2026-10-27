@@ -579,7 +579,7 @@ class TurnPolicy:
         team_config = self.deps.runtime.config.teams.get(self.deps.agent_name)
         if team_config is None:
             return None
-        configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
+        configured_mode = TeamMode(team_config.mode)
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
         team_resolution = resolve_configured_team(

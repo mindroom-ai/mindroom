@@ -108,7 +108,7 @@ class TestMemoryIntegration:
 
         # The recalled memory follows the prompt as transient context the run never stores.
         [request] = model.requests
-        _system, prompt, transient = request.messages
+        _stable, _turn, prompt, transient = request.messages
         assert prompt.role == "user"
         assert prompt.content == "What is 2+2?"
         assert prompt.add_to_agent_memory is True

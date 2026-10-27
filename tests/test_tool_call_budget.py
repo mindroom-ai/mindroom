@@ -89,7 +89,7 @@ async def test_model_that_keeps_requesting_tools_ends_its_run(shape: str) -> Non
     assert len(model.requests) == _CAP
     assert executed == (["probe"] * _BUDGET if shape == "known_tool" else [])
     assert record.status is RunStatus.completed
-    assert record.content == "Working. " * _CAP
+    assert record.content == "\n\n".join(["Working."] * _CAP)
     # The refused request reached no provider, so it adds no usage of its own.
     assert record.metrics is not None
     assert record.metrics.tokens.input_tokens == 10 * _CAP
@@ -119,7 +119,7 @@ async def test_model_that_answers_after_the_first_refused_batch_keeps_its_closin
     assert len(model.requests) == _CAP
     assert executed == ["probe"] * _BUDGET
     assert record.status is RunStatus.completed
-    assert record.content == "Working. " * (_BUDGET + 1) + "Closing reply."
+    assert record.content == "\n\n".join([*["Working."] * (_BUDGET + 1), "Closing reply."])
     assert _cap_warnings(logs) == []
 
 
@@ -143,7 +143,7 @@ async def test_tool_calls_within_the_budget_are_untouched() -> None:
 
     assert len(model.requests) == _BUDGET + 1
     assert executed == ["probe"] * _BUDGET
-    assert record.content == "Working. " * _BUDGET + "Closing reply."
+    assert record.content == "\n\n".join([*["Working."] * _BUDGET, "Closing reply."])
     assert _cap_warnings(logs) == []
 
 

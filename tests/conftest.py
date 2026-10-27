@@ -137,7 +137,6 @@ from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
 from mindroom.legacy_delivery_payloads import _inline_final_result
-from mindroom.llm.messages import Message
 from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -725,7 +724,7 @@ async def prepare_history_for_run_for_test(
     ``model`` is the provider the run's requests go to; without one, history is sized by estimate alone.
     """
     resolved_scope = scope or HistoryScope(kind="agent", scope_id=agent_name)
-    static_token_estimator = build_static_token_estimator(Message(role="system", content=""), (), frozenset())
+    static_token_estimator = build_static_token_estimator((), (), frozenset())
     if static_prompt_tokens is None:
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_entity_preparation_inputs(

@@ -226,7 +226,7 @@ _SIGNATURES = {
     "build_execution_identity_from_runtime_context": "(context)",
     "build_model_provider": "(config, runtime_paths, model_name, *, execution_identity)",
     "build_oauth_connect_instruction": "(provider, connect_url)",
-    "complete_prompt": "(provider, prompt, *, role, instructions, schema, overrides, run_id)",
+    "complete_prompt": "(provider, prompt, *, instructions, schema, overrides, run_id)",
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "get_logger": "(name)",
     "get_tool_by_name": (

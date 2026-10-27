@@ -33,6 +33,8 @@ class ToolConstruction:
     name: str
     factory_origin: tuple[str, str] | None
     config_signature: str = tool_config_signature(None)
+    # The constructor got instructions from its settings, from config.yaml or saved tool settings, not its defaults.
+    authored_instructions: bool = False
 
     @classmethod
     def from_factory(

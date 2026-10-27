@@ -598,9 +598,6 @@ BIG_TOOL = ToolSpec(
     description="d" * 80_000,
     parameters={},
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 _TEST_MODEL = ModelIdentity(id="test-model", provider="test", provider_name="test")
 

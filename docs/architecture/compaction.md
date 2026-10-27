@@ -1,8 +1,7 @@
 # History compaction
 
 This page records the assumptions and decisions behind portable history compaction before and during a reply, its summary rows, and seen-message tracking.
-User-facing behavior is in [Context Window](../configuration/history.md#context-window), and the Claude replay workaround is in `history/claude_replay_compat.py`.
-When upgrading a provider SDK, run that module's contract tests before removing the workaround.
+User-facing behavior is in [Context Window](../configuration/history.md#context-window).
 
 ## Assumptions
 

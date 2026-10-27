@@ -76,20 +76,9 @@ class ToolFunction:
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
 
-    # TODO(simplify): The definition carries the pause flags only because Chat and Responses send them on the wire.
-    # Dropping them here and from ``ToolSpec`` leaves name, description, schema, and strict.
-    # Models would notice: Chat and Responses requests stop sending them for the tools that set them (#3075).
     def definition(self) -> ToolSpec:
-        """Return the model-facing definition a provider adapter formats, with the flags the tool never set as None."""
-        return ToolSpec(
-            name=self.name,
-            description=self.description,
-            parameters=self.parameters,
-            strict=self.strict,
-            requires_confirmation=self.requires_confirmation,
-            external_execution=self.external_execution,
-            approval_type=self.approval_type,
-        )
+        """Return the model-facing definition a provider adapter formats; a field the tool never set is None."""
+        return ToolSpec(name=self.name, description=self.description, parameters=self.parameters, strict=self.strict)
 
     def planned_execution(self, call_id: str, arguments: dict[str, Any] | None) -> ToolExecution:
         """Return the execution a call of this function starts as, before it runs.
@@ -113,10 +102,11 @@ class ToolFunction:
 
 @dataclass(frozen=True, slots=True)
 class AdaptedToolkit:
-    """One Agno toolkit as the agent loop sees it; ``instructions`` is set only when ``add_instructions`` asks for it.
+    """One Agno toolkit as the agent loop sees it; ``instructions`` is what the prompt shows of its instructions.
 
-    ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which the agent CLI shows when
-    it describes the toolkit's functions and minimal mode offers as a context document.
+    The prompt shows them whenever the toolkit offers a function, unless the toolkit is deferred, whose instructions
+    tool search shows instead. ``guidance`` is the toolkit's instructions whether or not the prompt shows them, which
+    the agent CLI shows when it describes the toolkit's functions and minimal mode offers as a context document.
     ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which
     only tool search shows, for a deferred toolkit; an agent refuses an eager toolkit that offers such a function.
     ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the agent loop cannot

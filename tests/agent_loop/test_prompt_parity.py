@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.prompt import PromptSpec, render_instructions, render_system_message
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec, render_instructions, render_system_messages
 from mindroom.llm.messages import Message
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import (
@@ -56,39 +56,56 @@ async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) ->
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:
-    """One instruction stays verbatim, single-line ones become bullets, and a multi-line one keeps its own layout."""
+    """One instruction stays verbatim, single-line ones become bullets, and a multi-line one keeps its own layout.
+
+    Each is stripped, so a block that ends with a newline is still one blank line from the next.
+    """
     assert render_instructions(["Answer briefly.\n"]) == "Answer briefly.\n"
     assert render_instructions(["Answer briefly.", " Cite sources. "]) == "- Answer briefly.\n- Cite sources."
     assert render_instructions(["Answer briefly.", "When unsure:\n- say so\n"]) == (
-        "- Answer briefly.\n\nWhen unsure:\n- say so\n"
+        "- Answer briefly.\n\nWhen unsure:\n- say so"
+    )
+    assert render_instructions(["When unsure:\n- say so\n", "Then:\n- stop\n"]) == (
+        "When unsure:\n- say so\n\nThen:\n- stop"
     )
 
 
-def test_sections_render_in_a_fixed_order_with_fixed_separators() -> None:
-    """Each input lands in its section, in a fixed order and with fixed separators."""
+def test_sections_render_as_a_stable_part_and_a_turn_part() -> None:
+    """Each input lands in its section, one blank line apart; the turn context is its own system message, last."""
     spec = PromptSpec(
-        persona="Persona.",
+        persona="Persona.\n",
         role="Role.",
         instructions=("One.", "Two."),
         markdown=True,
-        tool_instructions=("Toolkit guidance.", "More guidance."),
-        turn_context="<context>",
+        tool_instructions=("Toolkit guidance.\n", "More guidance."),
+        turn_context="<context>\n",
         skills_block="<skills_system>\n</skills_system>",
         knowledge_block="<knowledge_base>\n</knowledge_base>",
-        model_note="Model note.\n\n",
-        output_format_prompt="JSON prompt.",
     )
 
-    assert render_system_message(spec).content == (
-        "Persona.\n\n<your_role>\nRole.\n</your_role>\n\n- One.\n- Two.\n\n"
-        "<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n"
-        "Toolkit guidance.\nMore guidance.\n<context>\n\n<skills_system>\n</skills_system>\n"
-        "<knowledge_base>\n</knowledge_base>\nModel note.\n\nJSON prompt."
+    stable, turn = render_system_messages(spec)
+    assert stable.content == (
+        f"Persona.\n\n<your_role>\nRole.\n</your_role>\n\n{MARKDOWN_OUTPUT_FORMAT}\n\n- One.\n- Two.\n\n"
+        "Toolkit guidance.\n\nMore guidance.\n\n<skills_system>\n</skills_system>\n\n"
+        "<knowledge_base>\n</knowledge_base>"
     )
+    assert (stable.role, turn.role, turn.content) == ("system", "system", "<context>")
 
 
-def test_an_empty_skills_block_adds_nothing() -> None:
-    """Only a non-empty skills block is added."""
-    assert render_system_message(PromptSpec(role="Role.", skills_block="", instructions=())).content == (
-        "<your_role>\nRole.\n</your_role>"
-    )
+def test_a_changed_turn_context_leaves_the_stable_part_byte_identical() -> None:
+    """Only the turn part carries the turn's context, so the cacheable stable part is the same every turn."""
+    spec = PromptSpec(role="Role.", instructions=("One.",), turn_context="Monday.")
+
+    monday = render_system_messages(spec)
+    tuesday = render_system_messages(PromptSpec(role="Role.", instructions=("One.",), turn_context="Tuesday."))
+
+    assert monday[0].content == tuesday[0].content == "<your_role>\nRole.\n</your_role>\n\nOne."
+    assert (monday[1].content, tuesday[1].content) == ("Monday.", "Tuesday.")
+
+
+def test_empty_sections_and_parts_add_nothing() -> None:
+    """An empty skills block or a blank role adds no section, and a prompt without turn context sends one message."""
+    [stable] = render_system_messages(PromptSpec(role="Role.", skills_block="", instructions=()))
+    assert stable.content == "<your_role>\nRole.\n</your_role>"
+    [turn] = render_system_messages(PromptSpec(role=" ", instructions=(), turn_context="Today."))
+    assert turn.content == "Today."

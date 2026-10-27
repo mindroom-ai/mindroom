@@ -52,7 +52,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\nGenerate contextual room topics\n</your_role>",
+          "content": "Generate contextual room topics",
           "role": "system"
         },
         {

@@ -200,6 +200,7 @@ async def test_model_params_mask_credentials_nested_in_request_params_and_extra_
         "strict_output": True,
         "cache_system_prompt": True,
         "extended_cache_time": True,
+        "use_thinking": True,
     }
     (log_file,) = log_dir.glob("llm-requests-*.jsonl")
     [request_record] = [json.loads(line) for line in log_file.read_text().splitlines()]

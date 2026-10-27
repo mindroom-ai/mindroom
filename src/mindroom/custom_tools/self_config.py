@@ -102,7 +102,7 @@ class SelfConfigTools(Toolkit):
             tools: List of tool names to enable
             model: Model name to use
             rooms: List of room names to auto-join
-            markdown: Whether to use markdown formatting
+            markdown: Whether your system prompt says your replies are shown as Markdown
             knowledge_bases: List of knowledge base IDs
             skills: List of skill names
             include_default_tools: Whether to merge defaults.tools

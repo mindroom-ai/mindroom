@@ -62,7 +62,7 @@ def _configured_team_is_materializable(
 
     registry = entity_identity_registry(config, runtime_paths)
     team_agents = [registry.current_id(agent_name) for agent_name in team_config.agents]
-    configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
+    configured_mode = TeamMode(team_config.mode)
     team_resolution = resolve_configured_team(
         team_name,
         team_agents,

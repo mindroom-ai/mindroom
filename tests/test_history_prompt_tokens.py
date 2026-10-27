@@ -39,23 +39,17 @@ _SEARCH_DOCS = ToolSpec(
     description="Search the engineering docs for a matching answer.",
     parameters=_SEARCH_PARAMETERS,
     strict=None,
-    requires_confirmation=None,
-    external_execution=None,
-    approval_type=None,
 )
 _EXPORT_NOTES = ToolSpec(
     name="export_notes",
     description="Export the current working notes as markdown.",
     parameters=_EXPORT_PARAMETERS,
     strict=True,
-    requires_confirmation=True,
-    external_execution=None,
-    approval_type=None,
 )
 
 
 def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
-    estimator = build_static_token_estimator(_SYSTEM_MESSAGE, (), frozenset())
+    estimator = build_static_token_estimator((_SYSTEM_MESSAGE,), (), frozenset())
 
     assert estimator.non_prompt_tokens() == estimate_text_tokens(str(_SYSTEM_MESSAGE.content))
     assert estimator.estimate("Current prompt") == estimate_text_tokens("Current prompt") + estimate_text_tokens(
@@ -65,7 +59,7 @@ def test_static_estimate_counts_the_system_message_and_the_prompt() -> None:
 
 def test_static_estimate_counts_each_offered_tool_definition_as_the_request_sends_it() -> None:
     """Tool definitions count with every field the tool set; fields it left unset are not sent, so they do not count."""
-    estimator = build_static_token_estimator(_SYSTEM_MESSAGE, (_SEARCH_DOCS, _EXPORT_NOTES), frozenset())
+    estimator = build_static_token_estimator((_SYSTEM_MESSAGE,), (_SEARCH_DOCS, _EXPORT_NOTES), frozenset())
 
     sent_definitions = [
         {
@@ -78,7 +72,6 @@ def test_static_estimate_counts_each_offered_tool_definition_as_the_request_send
             "description": "Export the current working notes as markdown.",
             "parameters": _EXPORT_PARAMETERS,
             "strict": True,
-            "requires_confirmation": True,
         },
     ]
     assert estimator.non_prompt_tokens() == (
@@ -89,13 +82,13 @@ def test_static_estimate_counts_each_offered_tool_definition_as_the_request_send
 def test_static_estimate_leaves_deferred_tools_out() -> None:
     """A tool that tool search keeps off the request until it is found costs nothing up front."""
     tools = (_SEARCH_DOCS, _EXPORT_NOTES)
-    nothing_deferred = build_static_token_estimator(_SYSTEM_MESSAGE, tools, frozenset())
-    export_deferred = build_static_token_estimator(_SYSTEM_MESSAGE, tools, frozenset({"export_notes"}))
-    all_deferred = build_static_token_estimator(_SYSTEM_MESSAGE, tools, frozenset({"search_docs", "export_notes"}))
+    nothing_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset())
+    export_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset({"export_notes"}))
+    all_deferred = build_static_token_estimator((_SYSTEM_MESSAGE,), tools, frozenset({"search_docs", "export_notes"}))
 
     assert export_deferred.non_prompt_tokens() < nothing_deferred.non_prompt_tokens()
     assert export_deferred.estimate("Current prompt") == build_static_token_estimator(
-        _SYSTEM_MESSAGE,
+        (_SYSTEM_MESSAGE,),
         (_SEARCH_DOCS,),
         frozenset(),
     ).estimate("Current prompt")

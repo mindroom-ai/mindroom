@@ -153,18 +153,12 @@ def test_a_strict_definition_requires_the_wait_budget_and_a_declared_one_stays()
         description=None,
         parameters={"type": "object", "properties": {}},
         strict=True,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
     declared = ToolSpec(
         name="declared",
         description=None,
         parameters={"type": "object", "properties": {"background_after": {"type": "integer"}}},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
     projected = project_definitions((strict, declared), {"strict", "declared"})

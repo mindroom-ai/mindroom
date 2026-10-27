@@ -1,7 +1,7 @@
 """Building a team: its exact members as agent builds, the leader's and members' models, and the team spec.
 
 ``build_team_spec`` turns the materialized members into the team the leader loop runs: the leader's model, prompt,
-job controls, and call budget, and each member's system message, roster role, and loop hooks.
+job controls, and call budget, and each member's system messages, roster role, and loop hooks.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.build import appended_context, prompt_for_turn
-from mindroom.agent_loop.prompt import model_note_for
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
@@ -18,14 +17,15 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
+from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
-from mindroom.system_prompt import render_date_context
+from mindroom.system_prompt import render_session_context
 from mindroom.teams.formation import (
     not_materializable_team_agents_message,
     resolve_live_shared_agent_names,
     resolve_team_materializable_agent_names,
 )
-from mindroom.teams.prompt import render_leader_system_message
+from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import TeamMember, TeamSpec
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
@@ -322,7 +322,7 @@ def _team_member(
     runtime_paths: RuntimePaths,
     model_name: str,
 ) -> TeamMember:
-    """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
+    """Return one member as the team runs it: this turn's system messages, the roster role, and its loop hooks.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
     mid-turn compaction, and the approval receipt hook; its tool-call policy and tools run under its own identity. It
@@ -343,13 +343,9 @@ def _team_member(
     def new_hooks() -> LoopHooks:
         return agent_loop_hooks(as_member, turn, queued_notices=False)
 
-    # An agent build always renders its role; only a helper's prompt may go without one.
-    if build.prompt.role is None:
-        msg = f"Team member {build.spec.id!r} has no role for the leader's roster"
-        raise ValueError(msg)
     return TeamMember(
-        spec=replace(build.spec, system_message=prompt_for_turn(build, system_enrichment)),
-        role=build.prompt.role,
+        spec=replace(build.spec, system_messages=prompt_for_turn(build, system_enrichment)),
+        role=config.agents[build.spec.id].role,
         new_hooks=new_hooks,
         request_template=build.request_template,
     )
@@ -397,6 +393,35 @@ class BuiltTeam:
     leader_jobs: JobActor | None
 
 
+def _leader_identity(
+    config: Config,
+    *,
+    display_name: str,
+    team_purpose: str,
+    include_openai_compat_guidance: bool,
+) -> str:
+    """Render the leader's identity for its channel, as an agent's is rendered: Matrix, or the OpenAI-compatible API."""
+    matrix_identity = render_prompt_template(
+        config.get_prompt("TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),
+        display_name=display_name,
+        team_purpose=team_purpose,
+    )
+    if not include_openai_compat_guidance:
+        return matrix_identity
+    return openai_compat_identity(
+        config.prompts,
+        openai_identity=render_prompt_template(
+            config.get_prompt("OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE"),
+            display_name=display_name,
+            team_purpose=team_purpose,
+            openai_compat_history_guidance=config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE"),
+        ),
+        matrix_identity=matrix_identity,
+        openai_prompt_name="OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
+        matrix_prompt_name="TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
+    )
+
+
 def build_team_spec(
     *,
     members: ResolvedExactTeamMembers,
@@ -409,14 +434,16 @@ def build_team_spec(
     configured_team_name: str | None,
     timezone: str,
     system_enrichment: str = "",
+    include_openai_compat_guidance: bool = False,
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the history scope of
-    ``scope_context``. The leader prompt holds each member's roster role, the leader's tool instructions in offer
-    order, the provider family's note, and the date context in ``timezone`` with ``system_enrichment`` appended; the
-    team's own history settings and call budget come from the configured team ``configured_team_name``, or the
-    defaults when it is None for an ad hoc one.
+    ``scope_context``. The leader prompt opens with the team's identity, the configured team's name and purpose or the
+    ad hoc team's label, in the OpenAI-compatible API's form with ``include_openai_compat_guidance``, then holds each
+    member's authored role and the leader's tool instructions in offer order, then the date and session context in
+    ``timezone`` with ``system_enrichment`` appended; the team's own history settings and call budget come from the
+    configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
     """
     model = provider_registry.build_model_provider(
         config,
@@ -441,24 +468,27 @@ def build_team_spec(
         id=scope_context.scope.scope_id,
         name=label,
         model=model,
-        system_message=None,
+        system_messages=(),
         toolkits=() if jobs is None else (jobs.controls,),
         max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
     )
-    additional_context = appended_context(
-        render_date_context(timezone, datetime_context_template=config.get_prompt("DATETIME_CONTEXT_TEMPLATE")),
-        system_enrichment,
-    )
-    system_message = render_leader_system_message(
+    turn_context = appended_context(render_session_context(config, timezone), system_enrichment)
+    team_config = config.teams.get(configured_team_name) if configured_team_name is not None else None
+    system_messages = render_leader_system_messages(
         team_members,
         mode,
+        identity=_leader_identity(
+            config,
+            display_name=label if team_config is None else team_config.display_name,
+            team_purpose="" if team_config is None else f"Team purpose: {team_config.role}\n",
+            include_openai_compat_guidance=include_openai_compat_guidance,
+        ),
+        markdown=config.defaults.markdown,
         tool_instructions=toolkit_instructions(leader.toolkits),
-        # The delegation tool is always offered, so every leader request offers tools.
-        model_note=model_note_for(model.capabilities, offers_tools=True),
-        additional_context=additional_context,
+        turn_context=turn_context,
     )
     return BuiltTeam(
-        spec=TeamSpec(leader=replace(leader, system_message=system_message), mode=mode, members=team_members),
+        spec=TeamSpec(leader=replace(leader, system_messages=system_messages), mode=mode, members=team_members),
         history_settings=team_view.history_settings,
         timezone=timezone,
         leader_middleware=() if jobs is None else jobs.middleware,

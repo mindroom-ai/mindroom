@@ -9,7 +9,7 @@ import os
 import sys
 import threading
 import weakref
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -776,7 +776,8 @@ def get_tool_by_name(
                 shared_storage_root_path=shared_storage_root_path,
                 worker_target=worker_target,
             )
-        return bind_toolkit_construction(toolkit, construction)
+        authored = bool(init_kwargs.get("instructions"))
+        return bind_toolkit_construction(toolkit, replace(construction, authored_instructions=authored))
 
     return _build_with_tool_dependencies(tool_name, runtime_paths, build)
 

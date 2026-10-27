@@ -51,9 +51,6 @@ from mindroom.knowledge.candidate_checkpoint import (
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
 from mindroom.knowledge.collections import (
-    SOURCE_DIGEST_KEY,
-    SOURCE_MTIME_NS_KEY,
-    SOURCE_SIZE_KEY,
     VECTOR_VERIFY_BATCH,
     CollectionSpace,
     KnowledgeChunk,
@@ -90,7 +87,7 @@ from mindroom.knowledge.legacy_chroma_storage import (
     copy_legacy_chroma_rows,
     legacy_chroma_store_exists,
 )
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
 from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome

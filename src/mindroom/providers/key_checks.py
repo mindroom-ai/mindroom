@@ -21,23 +21,16 @@ __all__ = ["PROVIDER_KEY_CHECKS", "ProviderKeyCheck"]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProviderKeyCheck:
-    """One provider's key check: where it is sent and how the key travels.
-
-    ``header_name`` carries the key after ``header_prefix``; without one, the key travels as the ``key`` query
-    parameter, as Google's Gemini API takes it.
-    """
+    """One provider's key check: where it is sent and the header that carries the key after ``header_prefix``."""
 
     url: str
-    header_name: str | None
+    header_name: str
     header_prefix: str = ""
     extra_headers: tuple[tuple[str, str], ...] = ()
 
     def request(self, api_key: str) -> tuple[str, dict[str, str]]:
         """Return the URL and headers that send ``api_key`` to the check's URL."""
-        headers = dict(self.extra_headers)
-        if self.header_name is None:
-            return f"{self.url}?key={api_key}", headers
-        return self.url, {self.header_name: f"{self.header_prefix}{api_key}", **headers}
+        return self.url, {self.header_name: f"{self.header_prefix}{api_key}", **dict(self.extra_headers)}
 
 
 def _bearer(url: str) -> ProviderKeyCheck:
@@ -53,12 +46,10 @@ PROVIDER_KEY_CHECKS: dict[str, ProviderKeyCheck] = {
         extra_headers=(("anthropic-version", "2023-06-01"),),
     ),
     "openai": _bearer(f"{OPENAI_BASE_URL_DEFAULT}/models"),
-    # TODO(simplify): The Gemini check sends the key as a URL query parameter, which proxy and HTTP logs record.
-    # Send it in the `x-goog-api-key` header, as the Gemini SDK does, and drop the query branch. Operators reading
-    # those logs would notice.
+    # The key goes in the header the Gemini SDK uses, so proxy and HTTP logs never record it in the URL.
     "google": ProviderKeyCheck(
         url="https://generativelanguage.googleapis.com/v1beta/models",
-        header_name=None,
+        header_name="x-goog-api-key",
     ),
     # OpenRouter's key endpoint describes the key it is sent, so only a valid key reads it.
     "openrouter": _bearer(f"{OPENROUTER_BASE_URL_DEFAULT}/key"),

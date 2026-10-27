@@ -22,9 +22,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Plan a multi-stop trip.",
-        "external_execution": false,
         "name": "plan_trip",
         "parameters": {
           "properties": {
@@ -128,13 +126,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Create a calendar event and invite attendees.",
-        "external_execution": false,
         "name": "calendar_create_event",
         "parameters": {
           "$defs": {
@@ -266,7 +261,6 @@
           "title": "create_eventArguments",
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -445,6 +439,10 @@
               ],
               "properties": {
                 "budget": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
                   "description": "Optional total budget."
                 },
                 "days": {
@@ -490,6 +488,19 @@
                   "description": "Ordered stops with nights per stop."
                 },
                 "travelers": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
                   "description": "Traveler names and roles."
                 }
               }

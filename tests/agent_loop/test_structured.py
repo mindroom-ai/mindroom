@@ -1,7 +1,8 @@
-"""Structured output is requested and read back as main does on each of its three provider paths."""
+"""Structured output is requested and read back on each of the three structured-output routes."""
 
 from __future__ import annotations
 
+import json
 from enum import StrEnum
 from typing import Any
 
@@ -72,101 +73,13 @@ class _Palette(BaseModel):
     notes: str | None = None
 
 
-# The JSON prompts main's renderer produced for these schemas.
-# The helper schemas' prompts are pinned by their goldens above.
-_SWATCH_PROMPT = """\
-Provide your output as a JSON containing the following fields:
-<json_fields>
-["name", "color"]
-</json_fields>
-
-Here are the properties for each field:
-<json_field_properties>
-{
-  "name": {
-    "description": "What the swatch is called",
-    "type": "string"
-  },
-  "color": {
-    "$ref": "#/$defs/_Color"
-  },
-  "$defs": {
-    "_Color": {
-      "type": "string",
-      "enum": [
-        "red",
-        "blue"
-      ],
-      "description": ""
-    }
-  }
-}
-</json_field_properties>
-Start your response with `{` and end it with `}`.
-Your output will be passed to json.loads() to convert it to a Python object.
-Make sure it only contains valid JSON."""
-_PALETTE_PROMPT = """\
-Provide your output as a JSON containing the following fields:
-<json_fields>
-["title", "primary", "swatches", "notes"]
-</json_fields>
-
-Here are the properties for each field:
-<json_field_properties>
-{
-  "title": {
-    "type": "string"
-  },
-  "primary": {
-    "$ref": "#/$defs/_Color"
-  },
-  "swatches": {
-    "items": {
-      "$ref": "#/$defs/_Swatch"
-    },
-    "type": "array"
-  },
-  "notes": {
-    "anyOf": [
-      {
-        "type": "string"
-      },
-      {
-        "type": "null"
-      }
-    ],
-    "default": null
-  },
-  "$defs": {
-    "_Color": {
-      "type": "string",
-      "enum": [
-        "red",
-        "blue"
-      ],
-      "description": ""
-    },
-    "_Swatch": {
-      "name": {
-        "description": "What the swatch is called",
-        "type": "string"
-      },
-      "color": {
-        "$ref": "#/$defs/_Color"
-      }
-    }
-  }
-}
-</json_field_properties>
-Start your response with `{` and end it with `}`.
-Your output will be passed to json.loads() to convert it to a Python object.
-Make sure it only contains valid JSON."""
-
-
-@pytest.mark.parametrize(("schema", "expected"), [(_Swatch, _SWATCH_PROMPT), (_Palette, _PALETTE_PROMPT)])
-def test_the_json_prompt_lists_fields_and_definitions(schema: type[BaseModel], expected: str) -> None:
-    """Field lists, enum and object definitions, and the closing instructions keep the model-visible prompt."""
-    assert json_output_prompt(schema) == expected
+@pytest.mark.parametrize("schema", [_Swatch, _Palette])
+def test_the_json_prompt_carries_the_schema_as_written(schema: type[BaseModel]) -> None:
+    """The JSON-mode prompt asks for one object and shows the schema's own JSON schema, definitions included."""
+    assert json_output_prompt(schema) == (
+        "Answer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it."
+        f"\n<json_schema>\n{json.dumps(schema.model_json_schema(), indent=2, ensure_ascii=False)}\n</json_schema>"
+    )
 
 
 _ROUTING_JSON = '{"entity_name": "assistant", "reasoning": "Handbook questions."}'
@@ -237,7 +150,26 @@ PARSE_CASES: dict[str, tuple[type[BaseModel], str, BaseModel | None]] = {
 
 
 @pytest.mark.parametrize("case", sorted(PARSE_CASES))
-def test_parsing_recovers_common_answer_shapes(case: str) -> None:
+def test_lenient_parsing_recovers_common_json_mode_answer_shapes(case: str) -> None:
     """Fenced, unclosed-fence, thinking-prefixed, and split answers validate; text without a valid object does not."""
     schema, text, expected = PARSE_CASES[case]
-    assert parse_structured(text, schema) == expected
+    assert parse_structured(text, schema, lenient=True) == expected
+
+
+@pytest.mark.parametrize(
+    ("case", "parses"),
+    [
+        ("plain", True),
+        ("nested", True),
+        ("thinking", True),
+        ("template_opened_thinking", True),
+        ("fenced", False),
+        ("markdown_keys", False),
+        ("surrounding_prose", False),
+        ("split_objects", False),
+    ],
+)
+def test_strict_parsing_takes_only_the_object_a_schema_enforcing_route_answers(case: str, *, parses: bool) -> None:
+    """A route that enforces the schema answers with the object itself, so no repair runs on its answer."""
+    schema, text, expected = PARSE_CASES[case]
+    assert parse_structured(text, schema, lenient=False) == (expected if parses else None)
