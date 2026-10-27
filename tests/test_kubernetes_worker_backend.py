@@ -4611,8 +4611,10 @@ def test_kubernetes_newer_worker_refusal_says_to_run_the_primary_on_its_release(
         backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     assert str(exc.value).endswith(
-        "The worker image comes from a newer MindRoom release: run this runtime on the same release, "
-        "for example by restarting it so it pulls the same mutable tag, or pin both to one release tag.",
+        "The worker image comes from a newer MindRoom release: "
+        "upgrade this runtime to the worker's release, or pin both to one release tag. "
+        "For example, when this runtime's pod runs the same mutable tag such as ':latest' and pulls it on every start, "
+        "restarting the pod picks up the worker's release.",
     )
     assert "pull policy" not in str(exc.value)
     assert len(apps_api.created_bodies) == 2

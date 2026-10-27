@@ -39,10 +39,12 @@ def worker_health_compatibility_error(
     backend_label: str,
     image: str,
     older_worker_hint: str | None = None,
+    newer_worker_hint: str | None = None,
 ) -> str | None:
     """Return an actionable error when a ready worker's health check reports another protocol.
 
-    ``older_worker_hint`` is appended only when the worker reports an older or no protocol.
+    ``older_worker_hint`` is appended only when the worker reports an older or no protocol,
+    and ``newer_worker_hint`` only when it reports a newer one.
     """
     try:
         payload = response.json()
@@ -67,9 +69,12 @@ def worker_health_compatibility_error(
         f"(worker MindRoom version {reported_version})."
     )
     if newer_worker:
-        return (
-            f"{mismatch} The worker image comes from a newer MindRoom release: run this runtime on the same release, "
-            "for example by restarting it so it pulls the same mutable tag, or pin both to one release tag."
+        advice = (
+            f"{mismatch} The worker image comes from a newer MindRoom release: "
+            "upgrade this runtime to the worker's release, or pin both to one release tag."
         )
-    advice = f"{mismatch} Use a worker image built for this MindRoom release."
-    return advice if older_worker_hint is None else f"{advice} {older_worker_hint}"
+        hint = newer_worker_hint
+    else:
+        advice = f"{mismatch} Use a worker image built for this MindRoom release."
+        hint = older_worker_hint
+    return advice if hint is None else f"{advice} {hint}"

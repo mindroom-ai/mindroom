@@ -72,6 +72,10 @@ _CACHED_IMAGE_HINT = (
     "A replacement pod reported the same protocol, so with a mutable tag such as ':latest' its node may still "
     f"hold an older copy: use this release's tag or set the worker image pull policy to Always ({_PULL_POLICY_DOCS_URL})."
 )
+_RESTART_RUNTIME_HINT = (
+    "For example, when this runtime's pod runs the same mutable tag such as ':latest' and pulls it on every start, "
+    "restarting the pod picks up the worker's release."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -638,6 +642,7 @@ class KubernetesWorkerBackend:
             image=self.config.image,
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
+            newer_worker_hint=_RESTART_RUNTIME_HINT,
         )
         if compatibility_error is not None and is_replacement:
             raise WorkerBackendError(compatibility_error)
