@@ -999,7 +999,7 @@ Set up the homeserver (examples use `chat.example.com`):
     }
     ```
 
-   The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`; the token only gets past Access for this host, until the Access session ends.
+   The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`; the token gets past Access for every host of that Access application, until the Access session ends.
 3. Turn on "Bypass OPTIONS requests to origin" (`options_preflight_bypass`) on the Access application, because browsers send CORS preflights without credentials.
    Every `OPTIONS` request then reaches the origin without an Access session, so make sure no route answers `OPTIONS` with private content; nginx `return` answers any method.
 4. Let `/_matrix/client/versions`, `/_matrix/client/v1/media` and `/_matrix/media/v3/upload` bypass Access.
