@@ -167,6 +167,7 @@ They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effor
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
 Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
 With Sonnet 5.5's `between_tools`, with Haiku 5.5's `thinking: {type: disabled}`, or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is.
+A reply that resumes after a tool approval or a delegation can also answer without the reasoning behind the paused call, and with `between_tools`, Haiku 5.5's disabled thinking, or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
 ## Environment Variables
 

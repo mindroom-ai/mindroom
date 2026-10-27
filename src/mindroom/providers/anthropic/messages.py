@@ -379,7 +379,8 @@ class ClaudeProvider:
 
         The default ``drop_block`` binding goes only on the routes that take the beta, and rides on adaptive
         thinking, which these models run when the request sends no thinking setting; the API rejects it beside any
-        other thinking type. An authored ``block_binding`` is kept, and a request that disables thinking gets none.
+        other thinking type. An authored ``block_binding`` is kept, a null one counts as none, and a request that
+        disables thinking gets none.
         """
         if (
             self.route not in _THINKING_BINDING_ROUTES
@@ -389,8 +390,8 @@ class ClaudeProvider:
             return params
         owner = _thinking_owner(params)
         thinking = dict(owner.get("thinking") or {"type": "adaptive"})
-        if thinking.get("type") == "adaptive":
-            thinking.setdefault("block_binding", {"prefix_mismatch_behavior": "drop_block"})
+        if thinking.get("type") == "adaptive" and thinking.get("block_binding") is None:
+            thinking["block_binding"] = {"prefix_mismatch_behavior": "drop_block"}
             owner["thinking"] = thinking
         return params
 

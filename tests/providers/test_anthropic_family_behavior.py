@@ -868,6 +868,13 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             id="authored-default-binding",
         ),
         pytest.param(
+            "claude-sonnet-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": None}},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="authored-null-binding",
+        ),
+        pytest.param(
             "anthropic/claude-sonnet-5-5",
             {},
             RequestOverrides(),
