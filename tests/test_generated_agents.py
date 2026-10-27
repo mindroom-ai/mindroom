@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -23,11 +26,25 @@ from mindroom.config.personal_agents import (
     read_personal_agent_roster,
     read_personal_agent_roster_file,
 )
+from mindroom.matrix.state import MatrixState
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.personal_agents import (
+    GeneratedAgentError,
+    _activate_personal_agent_roster_entry,
+    _append_personal_agent_roster_entry,
+    _taken_agent_names,
+    delete_created_agent,
+    generated_agent_settings,
+    provision_created_agent,
+    update_generated_agent,
+)
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 OWNER = "@alice:localhost"
 CO_OWNER = "@bob:localhost"
@@ -403,3 +420,324 @@ def test_an_edited_created_agent_stays_out_of_the_authored_dump(tmp_path: Path) 
     config = _load(tmp_path, created=[_created()])
     config.agents["creator_research"].display_name = "Edited"
     assert set(config.authored_model_dump()["agents"]) == {"creator"}
+
+
+STRANGER = "@mallory:localhost"
+ALLOWED = "browser is not among the tools this agent may use; allowed: calculator, shell"
+
+
+def _register(seen: list[bool] | None = None) -> AsyncMock:
+    def register(_homeserver: str, agent_name: str, display_name: str, paths: RuntimePaths) -> AgentMatrixUser:
+        if seen is not None:
+            seen.extend(entry.pending for entry in read_personal_agent_roster_file(paths).created)
+        return AgentMatrixUser(
+            agent_name=agent_name,
+            user_id=f"@mindroom_{agent_name}:localhost",
+            display_name=display_name,
+            password=None,
+        )
+
+    return AsyncMock(side_effect=register)
+
+
+async def _create(
+    config: Config,
+    paths: RuntimePaths,
+    register: AsyncMock,
+    *,
+    name: str = "Research",
+    requester: str = OWNER,
+    tools: list[str] | None = None,
+) -> str:
+    with patch("mindroom.personal_agents.create_agent_user", new=register):
+        return await provision_created_agent(
+            config,
+            paths,
+            creator="creator",
+            requester_id=requester,
+            name=name,
+            display_name="Research",
+            role="Finds things",
+            instructions=None,
+            tools=tools,
+        )
+
+
+def _update(
+    config: Config,
+    paths: RuntimePaths,
+    changes: dict[str, object],
+    *,
+    requester: str = OWNER,
+    agent_name: str = "creator_research",
+) -> None:
+    update_generated_agent(config, paths, agent_name=agent_name, requester_id=requester, changes=changes)
+
+
+def _delete(
+    config: Config,
+    paths: RuntimePaths,
+    *,
+    requester: str = OWNER,
+    agent_name: str = "creator_research",
+) -> None:
+    delete_created_agent(config, paths, agent_name=agent_name, requester_id=requester)
+
+
+def _add_account(paths: RuntimePaths, agent_name: str) -> None:
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account(f"agent_{agent_name}", f"mindroom_{agent_name}", None, domain="localhost")
+    state.save(runtime_paths=paths)
+
+
+def test_only_owners_may_change_a_created_agent(tmp_path: Path) -> None:
+    """Anyone but the owner and co-owners is refused with the owner's name, and nothing is written."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(GeneratedAgentError, match=re.escape(OWNER)):
+        _update(config, paths, {"role": "Spy"}, requester=STRANGER)
+    with pytest.raises(GeneratedAgentError, match=re.escape(OWNER)):
+        generated_agent_settings(config, paths, "creator_research", requester_id=STRANGER)
+    with pytest.raises(GeneratedAgentError, match=re.escape(OWNER)):
+        _delete(config, paths, requester=STRANGER)
+    with pytest.raises(GeneratedAgentError, match="creator is not a generated agent"):
+        _update(config, paths, {"role": "Spy"}, agent_name="creator")
+    assert read_personal_agent_roster_file(paths).created == [_created()]
+
+
+def test_co_owners_cannot_change_co_owners(tmp_path: Path) -> None:
+    """A co-owner may edit the agent, but only the owner decides who co-owns it."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    _update(config, paths, {"role": "Scout"}, requester=CO_OWNER)
+    with pytest.raises(GeneratedAgentError, match=f"Only {re.escape(OWNER)} may change co_owners"):
+        _update(config, paths, {"co_owners": []}, requester=CO_OWNER)
+    _update(config, paths, {"co_owners": ["@carol:localhost"]})
+    [entry] = read_personal_agent_roster_file(paths).created
+    assert entry.edits == GeneratedAgentEdits(display_name="Research", role="Scout")
+    assert entry.co_owners == ["@carol:localhost"]
+    _update(config, paths, {"co_owners": None})
+    assert read_personal_agent_roster_file(paths).created[0].co_owners == []
+
+
+def test_co_owners_must_be_concrete_people(tmp_path: Path) -> None:
+    """Globs, brackets, the owner again and MindRoom accounts would break loading or hand the agent to an agent."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    _add_account(paths, "helper")
+    for co_owners, refusal in (
+        (["@*:localhost"], "concrete Matrix user IDs"),
+        (["@b[o]b:localhost"], "brackets"),
+        ([OWNER], "Duplicate"),
+        (["@mindroom_helper:localhost"], "MindRoom account"),
+        ("@bob:localhost", "co_owners"),
+    ):
+        with pytest.raises(GeneratedAgentError, match=re.escape(refusal)):
+            _update(config, paths, {"co_owners": co_owners})
+    assert read_personal_agent_roster_file(paths).created == [_created()]
+
+
+def test_update_refuses_tools_outside_the_ceiling_with_the_allowed_names(tmp_path: Path) -> None:
+    """A tool the base does not offer is refused, naming the tools it does."""
+    config = _load(tmp_path, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(GeneratedAgentError, match=ALLOWED):
+        _update(config, paths, {"tools": ["calculator", "browser"]})
+    _update(config, paths, {"tools": ["calculator"]})
+    assert read_personal_agent_roster_file(paths).created[0].edits.tools == ["calculator"]
+
+
+def test_update_refuses_fields_that_are_not_editable(tmp_path: Path) -> None:
+    """Only the edit fields, plus co_owners on a created agent, change, and only to values of the right type."""
+    roster = PersonalAgentRoster(entries=[_personal()], created=[_created()])
+    config = _load(tmp_path, _with_template(), entries=roster.entries, created=roster.created)
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(
+        GeneratedAgentError,
+        match="model cannot be changed; allowed: display_name, role, instructions, tools, co_owners",
+    ):
+        _update(config, paths, {"model": "opus"})
+    with pytest.raises(GeneratedAgentError, match="co_owners cannot be changed"):
+        _update(config, paths, {"co_owners": [CO_OWNER]}, agent_name="mind_alice")
+    with pytest.raises(GeneratedAgentError, match="instructions"):
+        _update(config, paths, {"instructions": "Be brief"})
+    assert read_personal_agent_roster_file(paths) == roster
+
+
+def test_null_restores_the_base_value(tmp_path: Path) -> None:
+    """A None value drops the stored edit, so the next load uses the creator's value."""
+    config = _load(tmp_path, created=[_created(edits=GeneratedAgentEdits(display_name="Research", role="Scout"))])
+    paths = test_runtime_paths(tmp_path)
+    _update(config, paths, {"role": None})
+    assert read_personal_agent_roster_file(paths).created[0].edits == GeneratedAgentEdits(display_name="Research")
+    assert Config.validate_with_runtime(deepcopy(BASE), paths).agents["creator_research"].role == "Makes agents"
+
+
+def test_settings_show_the_current_values_and_the_allowed_tools(tmp_path: Path) -> None:
+    """Owners see the current editable values and the tools to choose from; created agents also show their owners."""
+    config = _load(tmp_path, _with_template(), entries=[_personal()], created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    assert generated_agent_settings(config, paths, "creator_research", requester_id=CO_OWNER) == {
+        "agent_name": "creator_research",
+        "edits": {
+            "display_name": "Research",
+            "role": "Makes agents",
+            "instructions": ["Be useful"],
+            "tools": ["calculator", "shell"],
+        },
+        "allowed_tools": ["calculator", "shell"],
+        "owner": OWNER,
+        "co_owners": [CO_OWNER],
+    }
+    settings = generated_agent_settings(config, paths, "mind_alice", requester_id=OWNER)
+    assert settings["edits"]["display_name"] == "Alice's Mind"
+    assert settings["allowed_tools"] == ["calculator", "shell"]
+    assert set(settings) == {"agent_name", "edits", "allowed_tools"}
+
+
+def test_personal_agent_owner_may_update_but_not_delete(tmp_path: Path) -> None:
+    """The owner of a personal agent edits it within its template, and nobody else does."""
+    config = _load(tmp_path, _with_template(), entries=[_personal()])
+    paths = test_runtime_paths(tmp_path)
+    _update(config, paths, {"display_name": "Scout", "tools": ["shell"]}, agent_name="mind_alice")
+    with pytest.raises(GeneratedAgentError, match=re.escape(OWNER)):
+        _update(config, paths, {"role": "Spy"}, requester=CO_OWNER, agent_name="mind_alice")
+    with pytest.raises(GeneratedAgentError, match="mind_alice is a personal agent and cannot be deleted"):
+        _delete(config, paths, agent_name="mind_alice")
+    edits = GeneratedAgentEdits(display_name="Scout", tools=["shell"])
+    assert read_personal_agent_roster_file(paths).entries == [_personal(edits=edits)]
+    assert Config.validate_with_runtime(_with_template(), paths).agents["mind_alice"].display_name == "Scout"
+
+
+@pytest.mark.asyncio
+async def test_create_names_the_agent_after_its_creator_and_registers_it(tmp_path: Path) -> None:
+    """The entry is pending while the account registers, then active and loaded with the requester as owner."""
+    config = _config(tmp_path)
+    paths = test_runtime_paths(tmp_path)
+    pending: list[bool] = []
+    register = _register(pending)
+
+    user_id = await _create(config, paths, register, name=" Research! ", tools=["shell"])
+
+    assert user_id == "@mindroom_creator_research:localhost"
+    register.assert_awaited_once_with("http://localhost:8008", "creator_research", "Research", paths)
+    assert pending == [True]
+    assert read_personal_agent_roster_file(paths).created == [
+        CreatedAgentEntry(
+            agent_name="creator_research",
+            creator="creator",
+            owner=OWNER,
+            edits=GeneratedAgentEdits(display_name="Research", role="Finds things", tools=["shell"]),
+        ),
+    ]
+    reloaded = Config.validate_with_runtime(deepcopy(BASE), paths)
+    assert reloaded.generated_agent("creator_research").owner == OWNER
+    assert [entry.name for entry in reloaded._get_agent_authored_tool_configs("creator_research")] == ["shell"]
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_at_the_cap(tmp_path: Path) -> None:
+    """Active and pending agents from this creator count against each owner's cap; other owners keep theirs."""
+    config = _load(tmp_path, created=[_created(co_owners=[]), _created(agent_name="creator_draft", pending=True)])
+    paths = test_runtime_paths(tmp_path)
+    register = _register()
+    with pytest.raises(GeneratedAgentError, match=re.escape(f"{OWNER} already has 2")):
+        await _create(config, paths, register, name="writer")
+    register.assert_not_awaited()
+    await _create(config, paths, register, name="writer", requester=CO_OWNER)
+    assert [entry.owner for entry in read_personal_agent_roster_file(paths).created] == [OWNER, OWNER, CO_OWNER]
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_a_taken_name(tmp_path: Path) -> None:
+    """Another entry, an agent saved but not loaded, a left account and a name without letters are refused."""
+    config = _load(tmp_path, created=[_created(owner=CO_OWNER, co_owners=[])])
+    paths = test_runtime_paths(tmp_path)
+    paths.config_path.write_text("agents:\n  creator_saved:\n    display_name: Saved\n", encoding="utf-8")
+    _add_account(paths, "creator_old")
+    register = _register()
+    for name in ("research", "Saved", "old"):
+        with pytest.raises(GeneratedAgentError, match=f"creator_{name.lower()} is taken; choose another name"):
+            await _create(config, paths, register, name=name)
+    with pytest.raises(GeneratedAgentError, match="choose another name"):
+        await _create(config, paths, register, name="!!!")
+    register.assert_not_awaited()
+    assert len(read_personal_agent_roster_file(paths).created) == 1
+
+
+def test_taken_names_include_reserved_and_created_names(tmp_path: Path) -> None:
+    """Personal and created agents never take a reserved name or a created agent's name."""
+    taken = _taken_agent_names(
+        _config(tmp_path),
+        test_runtime_paths(tmp_path),
+        PersonalAgentRoster(created=[_created(pending=True)]),
+    )
+    assert {"router", "creator", "creator_research"} <= taken
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_a_mindroom_account_requester(tmp_path: Path) -> None:
+    """An agent's account, or an ID with brackets, never owns a created agent."""
+    config = _config(tmp_path)
+    paths = test_runtime_paths(tmp_path)
+    _add_account(paths, "mind_bob")
+    register = _register()
+    with pytest.raises(GeneratedAgentError, match="MindRoom account"):
+        await _create(config, paths, register, requester="@mindroom_mind_bob:localhost")
+    with pytest.raises(GeneratedAgentError, match="brackets"):
+        await _create(config, paths, register, requester="@al[i]ce:localhost")
+    register.assert_not_awaited()
+    assert read_personal_agent_roster_file(paths).created == []
+
+
+@pytest.mark.asyncio
+async def test_create_refuses_tools_the_creator_lacks(tmp_path: Path) -> None:
+    """A created agent's tools come from its creator's effective list, and a refusal names that list."""
+    register = _register()
+    with pytest.raises(GeneratedAgentError, match=ALLOWED):
+        await _create(_config(tmp_path), test_runtime_paths(tmp_path), register, tools=["browser"])
+    register.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_registration_leaves_no_entry(tmp_path: Path) -> None:
+    """A failed or cancelled registration removes the pending entry, so it holds no name and no cap slot."""
+    config = _config(tmp_path)
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(GeneratedAgentError, match="M_EXCLUSIVE"):
+        await _create(config, paths, AsyncMock(side_effect=RuntimeError("M_EXCLUSIVE")))
+    assert read_personal_agent_roster_file(paths).created == []
+    with pytest.raises(asyncio.CancelledError):
+        await _create(config, paths, AsyncMock(side_effect=asyncio.CancelledError()))
+    assert read_personal_agent_roster_file(paths).created == []
+
+
+def test_delete_removes_the_entry_for_its_owner_only(tmp_path: Path) -> None:
+    """Only the owner deletes a created agent, and the other entries stay."""
+    config = _load(tmp_path, created=[_created(), _created(agent_name="creator_writer")])
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(GeneratedAgentError, match=f"Only {re.escape(OWNER)} may delete creator_research"):
+        _delete(config, paths, requester=CO_OWNER)
+    _delete(config, paths)
+    assert [entry.agent_name for entry in read_personal_agent_roster_file(paths).created] == ["creator_writer"]
+
+
+@pytest.mark.asyncio
+async def test_writes_keep_the_other_roster_list(tmp_path: Path) -> None:
+    """Writing created agents keeps personal entries, and writing personal entries keeps created agents."""
+    config = _load(tmp_path, _with_template(), entries=[_personal()], created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    _update(config, paths, {"role": "Scout"})
+    await _create(config, paths, _register(), name="writer")
+    _delete(config, paths)
+    assert read_personal_agent_roster_file(paths).entries == [_personal()]
+
+    created = read_personal_agent_roster_file(paths).created
+    assert [entry.agent_name for entry in created] == ["creator_writer"]
+    _update(config, paths, {"role": "Scout"}, agent_name="mind_alice")
+    _append_personal_agent_roster_entry(paths, _personal(CO_OWNER, pending=True))
+    _activate_personal_agent_roster_entry(paths, _personal(CO_OWNER, pending=True))
+    assert read_personal_agent_roster_file(paths) == PersonalAgentRoster(
+        entries=[_personal(edits=GeneratedAgentEdits(role="Scout")), _personal(CO_OWNER)],
+        created=created,
+    )
