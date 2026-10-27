@@ -761,10 +761,12 @@ async def test_team_session_started_fires_once_for_the_reply_that_creates_its_se
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stored_by", ["stream", "interrupted record"])
 async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_delivery_error(
     tmp_path: Path,
+    stored_by: str,
 ) -> None:
-    """session:started should still fire for team streams that fail after persisting the session."""
+    """session:started fires for a team stream that fails after its session persisted, by the run or its record."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -824,7 +826,8 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             async def fake_stream() -> AsyncIterator[str]:
                 session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
-                _start_team_session(store, session_id)
+                if stored_by == "stream":
+                    _start_team_session(store, session_id)
                 sequence.append("stream")
                 yield "Team hello"
 
@@ -849,6 +852,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "deliver:Team hello",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
     ]
+    assert store.load_session(TEAM_SESSION_ID, "team") is not None
 
 
 @pytest.mark.asyncio

@@ -46,7 +46,7 @@ from mindroom.response_runner import (
     _NonStreamingGeneration,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry, strip_visible_tool_markers
@@ -314,7 +314,8 @@ def _session_runner(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     if streaming:
         _mark_requester_online(bot.client, "@alice:localhost")
-    storage = _history_store(tmp_path)
+    # The agent's own store, which its run saves and the runner's interrupted records both write, as in production.
+    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
     coordinator = _build_response_runner(
         bot,
         config=config,
