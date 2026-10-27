@@ -94,9 +94,6 @@
                 "media_type": "text/plain",
                 "data": "UGFja2luZyBsaXN0OiB1bWJyZWxsYSwgc2NhcmYsIHdhbGtpbmcgc2hvZXMuCg=="
               },
-              "citations": {
-                "enabled": true
-              },
               "cache_control": {
                 "type": "ephemeral",
                 "ttl": "1h"

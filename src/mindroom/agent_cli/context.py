@@ -39,7 +39,7 @@ def minimal_system_message(
             f"File memory: `{(memory_root / 'MEMORY.md').as_posix()}`, `{(memory_root / 'memory').as_posix()}/`.",
         )
     return "\n".join(
-        part
+        part.strip()
         for part in [
             identity if identity is not None else f"You are {display_name} ({agent_name}) in minimal mode.",
             "Bash starts in your workspace.",
@@ -49,5 +49,5 @@ def minimal_system_message(
             runtime_context,
             *instructions,
         ]
-        if part
+        if part.strip()
     )

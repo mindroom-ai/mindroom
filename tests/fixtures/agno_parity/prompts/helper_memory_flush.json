@@ -52,7 +52,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\nExtract durable memory statements for long-term memory storage.\n</your_role>",
+          "content": "Extract durable memory statements for long-term memory storage.",
           "role": "system"
         },
         {

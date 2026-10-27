@@ -37,7 +37,6 @@ from tests.conftest import (
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import fixture_entity_matrix_id
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
@@ -355,7 +354,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
         ):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                member_names=["general"],
                 team_mode="coordinate",
             )
 
@@ -430,7 +429,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
         ):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                member_names=["general"],
                 team_mode="coordinate",
             )
 

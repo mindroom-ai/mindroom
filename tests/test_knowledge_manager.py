@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import weakref
 from contextlib import asynccontextmanager, suppress
@@ -119,7 +120,7 @@ from tests.knowledge_test_support import (
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
@@ -297,22 +298,25 @@ async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_loads(
+async def test_only_bases_whose_files_workers_write_limit_the_vectors_a_search_loads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker code can grow private knowledge and file memory, so their searches refuse vectors past the limit."""
-    monkeypatch.setattr(knowledge_registry, "_AGENT_WRITTEN_BASE_MATRIX_BYTES", 1)
+    """Worker code can grow private knowledge, file memory, and shared bases in workspaces, so their searches refuse."""
+    monkeypatch.setattr(knowledge_registry, "_WORKER_WRITTEN_BASE_MATRIX_BYTES", 1)
     runtime_paths = test_runtime_paths(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "note.md").write_text("shared note", encoding="utf-8")
+    exports = agent_workspace_root_path(runtime_paths.storage_root, "helper") / "thread_exports"
+    exports.mkdir(parents=True)
+    (exports / "note.md").write_text("exported note", encoding="utf-8")
     config = bind_runtime_paths(
         Config(
             agents={
                 "helper": AgentConfig(
                     display_name="Helper",
-                    knowledge_bases=["docs"],
+                    knowledge_bases=["docs", "exports"],
                     private=AgentPrivateConfig(
                         per="user",
                         root="mind_data",
@@ -320,7 +324,10 @@ async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_
                     ),
                 ),
             },
-            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs), watch=False)},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path=str(docs), watch=False),
+                "exports": KnowledgeBaseConfig(path=str(exports), watch=False),
+            },
             models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
@@ -342,7 +349,7 @@ async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_
     assert memory is not None
     (memory.root / "memory").mkdir(parents=True)
     (memory.root / "memory" / "note.md").write_text("memory note", encoding="utf-8")
-    bases = {"docs": config, private_base_id: config, memory.base_id: memory.config}
+    bases = {"docs": config, "exports": config, private_base_id: config, memory.base_id: memory.config}
     for base_id, base_config in bases.items():
         await refresh_knowledge_binding(
             base_id,
@@ -368,6 +375,34 @@ async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_
         assert index is not None
         with pytest.raises(_KnowledgeIndexTooLargeError):
             await index.reader.asearch("note", limit=1)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "limited"),
+    [
+        ("agents/helper/workspace/thread_exports", True),
+        ("private_instances/scope/helper_data/knowledge", True),
+        ("shared_directories/team/docs", True),
+        ("workers/worker-a/notes", True),
+        ("agents/helper", True),
+        ("agents", True),
+        (".", True),
+        ("..", True),
+        ("agents/helper/knowledge/docs", False),
+        ("knowledge_docs", False),
+        ("../outside", False),
+    ],
+)
+def test_a_base_is_limited_when_its_path_lies_in_or_holds_storage_workers_write(
+    tmp_path: Path,
+    relative_path: str,
+    limited: bool,
+) -> None:
+    """The limit follows where the base's files live, not how the base is configured."""
+    storage_root = tmp_path / "storage"
+    knowledge_path = Path(os.path.normpath(storage_root / relative_path))
+
+    assert knowledge_registry._workers_write_sources(knowledge_path, storage_root) is limited
 
 
 @pytest.mark.asyncio
@@ -1863,6 +1898,82 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
     assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def _signed(config: Config, docs_path: Path, known: Mapping[str, FileSignature] | None = None) -> FileSignature:
+    scanned: dict[str, tuple[FileSignature, Path]] = {}
+    _knowledge_source_signature(config, "docs", docs_path, git_dir=docs_path / ".git", scanned=scanned, known=known)
+    [(signature, _path)] = scanned.values()
+    return signature
+
+
+def test_a_file_signed_right_after_a_write_records_a_stamp_no_stat_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signature taken within the racy window records stamp 0, so the next scan reads the file again."""
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 10**18)
+    docs_path = (tmp_path / "docs").resolve()
+    docs_path.mkdir()
+    (docs_path / "note.md").write_text("one", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert _signed(config, docs_path)[0] == 0
+
+
+def test_a_same_size_rewrite_that_restores_the_mtime_is_read_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamp is the ctime, which restoring the mtime moves, so a timestamp-preserving rewrite is not missed."""
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 0)
+    docs_path = (tmp_path / "docs").resolve()
+    docs_path.mkdir()
+    note = docs_path / "note.md"
+    note.write_text("one", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    signature = _signed(config, docs_path)
+    written = note.stat()
+    # The rewrite must land in a later timestamp tick than the signed write, as any real later edit does.
+    while time.time_ns() < written.st_ctime_ns + 50_000_000:
+        time.sleep(0.01)
+    note.write_text("two", encoding="utf-8")
+    os.utime(note, ns=(written.st_atime_ns, written.st_mtime_ns))
+    assert note.stat().st_ctime_ns != written.st_ctime_ns
+
+    assert _signed(config, docs_path, known={"note.md": signature})[2] != signature[2]
+
+
+def test_a_link_swapped_onto_a_listed_file_is_not_trusted_by_its_stat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link swapped onto a path after listing never inherits a signature, even one matching its target's stat."""
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 0)
+    docs_path = (tmp_path / "docs").resolve()
+    docs_path.mkdir()
+    secret = tmp_path / "secret.md"
+    secret.write_text("secret", encoding="utf-8")
+    note = docs_path / "note.md"
+    note.write_text("public", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    [listed] = list_knowledge_files(config, "docs", docs_path)
+    note.unlink()
+    note.symlink_to(secret)
+
+    scanned = list(
+        knowledge_manager_module._scan_file_signatures(
+            [("note.md", listed)],
+            {"note.md": _descriptor_signature_of(secret)},
+        ),
+    )
+
+    assert scanned == []
+
+
+def _descriptor_signature_of(path: Path) -> FileSignature:
+    with knowledge_file_listing_module.open_knowledge_file(path) as descriptor:
+        return knowledge_manager_module._descriptor_signature(descriptor, path)
 
 
 def test_tracked_path_listing_skips_per_file_strict_resolution(
@@ -8654,6 +8765,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
         scanned: dict[str, tuple[FileSignature, Path]] | None = None,
+        known: Mapping[str, FileSignature] | None = None,
     ) -> str:
         counter.calls += 1
         return original_signature(
@@ -8663,6 +8775,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
             git_dir=git_dir,
             tracked_relative_paths=tracked_relative_paths,
             scanned=scanned,
+            known=known,
         )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
@@ -8844,9 +8957,10 @@ async def test_git_update_uses_reliable_delta_for_file_signature_scan(
     async def _record_scanned_files(
         self: KnowledgeManager,
         files: Sequence[Path],
+        known: Mapping[str, tuple[int, int, str]] | None = None,
     ) -> dict[str, tuple[tuple[int, int, str], Path]]:
         scanned.append(tuple(sorted(path.name for path in files)))
-        return await original_file_signatures_for(self, files)
+        return await original_file_signatures_for(self, files, known)
 
     monkeypatch.setattr(KnowledgeManager, "_file_signatures_for", _record_scanned_files)
 
@@ -9036,16 +9150,16 @@ async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
     )
     _install_git_revisions(monkeypatch, ["rev-a"])
 
-    original_file_signature = knowledge_manager_module._file_signature
+    original_signature = knowledge_manager_module._descriptor_signature
     remaining_failures = {"flaky.md": 1}
 
-    def _flaky_signature(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
-        if remaining_failures.get(file_path.name):
+    def _flaky_signature(descriptor: int, file_path: Path, output: object = None) -> tuple[int, int, str]:
+        if output is None and remaining_failures.get(file_path.name):
             remaining_failures[file_path.name] -= 1
             raise OSError(116, "Stale file handle")
-        return original_file_signature(file_path, snapshot)
+        return original_signature(descriptor, file_path, output)
 
-    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _flaky_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_descriptor_signature", _flaky_signature)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 

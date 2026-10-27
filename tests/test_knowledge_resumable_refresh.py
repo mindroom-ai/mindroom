@@ -21,7 +21,7 @@ from contextlib import closing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 import pytest
 from agno.knowledge.document.base import Document
@@ -843,30 +843,44 @@ async def test_source_change_during_final_verification_reconciles_without_losing
 
 
 @pytest.mark.asyncio
-async def test_a_changed_local_refresh_signs_each_file_once_before_and_once_after_indexing(
+async def test_a_local_refresh_reads_only_the_files_whose_stat_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reconciliation adopts the scan that found the source changed instead of reading every file again."""
+    """A file whose ctime and size still match its recorded signature is not read again, before or after indexing.
+
+    The changed file is read once, by the scan that found it, and then copied for indexing; a refresh with nothing
+    changed reads no file at all. A ctime-only change (``chmod``) is read once and then trusted again, because the
+    restamped signature reaches the published seal the next refresh compares against.
+    """
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 0)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     (docs_path / names[0]).write_text("changed body", encoding="utf-8")
-    signed: list[str] = []
-    original_signature = knowledge_manager_module._file_signature
+    read: list[str] = []
+    original_signature = knowledge_manager_module._descriptor_signature
 
-    def _recording_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
-        if snapshot is None:
-            signed.append(file_path.name)
-        return original_signature(file_path, snapshot)
+    def _recording_signature(descriptor: int, file_path: Path, output: BinaryIO | None = None) -> FileSignature:
+        if output is None:
+            read.append(file_path.name)
+        return original_signature(descriptor, file_path, output)
 
-    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _recording_signature)
-    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(knowledge_manager_module, "_descriptor_signature", _recording_signature)
 
-    assert result.index_published
-    assert sorted(signed) == sorted(names * 2)
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).index_published
+    assert read == [names[0]]
+    read.clear()
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert read == []
+    (docs_path / names[1]).chmod(0o600)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert read == [names[1]]
+    read.clear()
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert read == []
 
 
 @pytest.mark.asyncio

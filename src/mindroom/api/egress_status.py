@@ -14,7 +14,7 @@ from mindroom.api import config_lifecycle, oauth
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.egress_broker.env import egress_broker_enabled
-from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
 from mindroom.egress_broker.oauth_source import (
     broker_credential_context,
     oauth_connection_for_display,
@@ -22,7 +22,7 @@ from mindroom.egress_broker.oauth_source import (
     shared_worker_unavailable_status,
 )
 from mindroom.egress_broker.presets import EGRESS_PRESETS
-from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
+from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthAccess, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import (
     MAX_RULES_PER_SERVICE,
     MAX_SERVICE_BYTES,
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+_READ_ONLY_UNSUPPORTED = "This service does not offer read-only access"
 
 # Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
 # OAuth store's SQLite connection open between its thread steps, so this bounds the open connections and file
@@ -323,15 +324,27 @@ class PutSecretRequest(BaseModel):
 
 
 class OAuthReuseRequest(BaseModel):
-    """Body that lets Agent Keys use a service's connected account.
+    """Body that lets Agent Keys use a service's connected account, or changes the level it may use it at.
 
     The account's tools ask for approval before they write, but the agent's shell and python then act as the account
-    with its full access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`).
+    with its access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`). `access` is
+    `read_write` or, for a service that declares `read_only`, `read` (see `require_access_offered`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     acknowledge_approval_bypass: Literal[True]
+    access: OAuthAccess = "read_write"
+
+
+def require_access_offered(
+    service: EgressService,
+    access: OAuthAccess,
+    headers: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse read-only access with a 409 for a service that does not declare how its API reads."""
+    if access == "read" and service.read_only is None:
+        raise HTTPException(409, _READ_ONLY_UNSUPPORTED, headers=headers)
 
 
 class EgressSourceStatus(BaseModel):
@@ -365,8 +378,8 @@ async def egress_oauth_status(
 
     `connection_status` loads the provider's state without a token refresh, so a stalled provider never stalls a page:
     the personal page passes the helper behind the portal's status route, the admin panel the dashboard's.
-    `reuse_target` returns the target whose connection that status shows, where `reuse_enabled` is read through
-    `broker_credential_context` as the broker reads it. A provider the broker refuses in a shared sandbox
+    `reuse_target` returns the target whose connection that status shows, where `reuse_enabled` and `reuse_access` are
+    read through `broker_credential_context` as the broker reads them. A provider the broker refuses in a shared sandbox
     (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
     connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
@@ -388,7 +401,7 @@ async def egress_oauth_status(
             return shared_worker_unavailable_status(provider, runtime_paths)
         result = await connection_status(provider)
         context = broker_credential_context(provider, config, runtime_paths, manager, reuse_target(provider))
-        reuse_enabled = await asyncio.to_thread(oauth_reuse_enabled, context, name, provider.id)
+        reuse_access = await asyncio.to_thread(oauth_reuse_access, context, name, provider.id)
         if result.has_service_account_config:
             # Shown whether or not Agent Keys may use it, so the user can allow or disconnect it.
             connected, account_label = await asyncio.to_thread(oauth_connection_for_display, context)
@@ -400,7 +413,8 @@ async def egress_oauth_status(
                 can_connect=False,
                 reset_required=result.reset_required,
                 service_account=True,
-                reuse_enabled=reuse_enabled,
+                reuse_enabled=reuse_access is not None,
+                reuse_access=reuse_access,
             )
         else:
             view: oauth.PersonalConnectionView = oauth.personal_connection_view(
@@ -414,7 +428,8 @@ async def egress_oauth_status(
                 account_label=view.account_label,
                 can_connect=view.can_connect,
                 reset_required=view.reset_required,
-                reuse_enabled=reuse_enabled,
+                reuse_enabled=reuse_access is not None,
+                reuse_access=reuse_access,
             )
     except Exception as exc:
         # OAuth provider code, plugin providers included, can raise anything.

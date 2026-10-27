@@ -39,6 +39,7 @@ from mindroom.api.egress_status import (
     load_concurrently,
     oauth_provider_of_service,
     presets_response,
+    require_access_offered,
     require_egress_broker_enabled,
     rule_summaries,
     service_oauth_provider,
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.egress_broker.secrets import OAuthAccess
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -237,7 +239,8 @@ class EgressCredentialService(EgressSourceStatus):
     can tell which services overlap, and how each rule sends the key (`auth_type` and `auth_name`, never the key).
     `placeholder_names` lists the variables the service sets in the sandbox (a preset's included), names only, so the
     editor can warn when a service of one's own sets the same one. `restrict_only` marks a service that only limits
-    the paths of the other services on its hosts and never has a key or account of its own.
+    the paths of the other services on its hosts and never has a key or account of its own. `read_only_supported` says
+    whether its account can be allowed read-only.
     """
 
     name: str
@@ -249,6 +252,7 @@ class EgressCredentialService(EgressSourceStatus):
     rules: list[EgressRuleSummary]
     placeholder_names: list[str]
     restrict_only: bool
+    read_only_supported: bool
 
 
 class EgressCredentialAgent(BaseModel):
@@ -343,6 +347,7 @@ async def egress_services_for_agent(
             rules=rule_summaries(service),
             placeholder_names=list(service.placeholder_env),
             restrict_only=service.restrict_only,
+            read_only_supported=service.read_only is not None,
             **asdict(sources),
         )
 
@@ -602,7 +607,7 @@ async def _account_provider(
     service: str,
     *,
     connecting: bool,
-) -> tuple[_ResolvedAgent, OAuthProvider]:
+) -> tuple[_ResolvedAgent, EgressService, OAuthProvider]:
     """Run the account gates in order: same origin, agent and service access, then the provider."""
     _require_egress_same_origin(request)
     agent, egress_service = await asyncio.to_thread(
@@ -620,13 +625,21 @@ async def _account_provider(
         connecting=connecting,
         headers=CONNECTIONS_HEADERS,
     )
-    return agent, provider
+    return agent, egress_service, provider
 
 
-def _set_account_reuse(agent: _ResolvedAgent, provider: OAuthProvider, service: str, *, enabled: bool, by: str) -> None:
+def _set_account_reuse(
+    agent: _ResolvedAgent,
+    provider: OAuthProvider,
+    service: str,
+    *,
+    enabled: bool,
+    by: str,
+    access: OAuthAccess = "read_write",
+) -> None:
     """Allow or stop Agent Keys using the service's account, in the store the broker reads it from for this agent."""
     context = broker_credential_context(provider, agent.config, agent.runtime_paths, agent.manager, agent.target)
-    set_oauth_reuse(context, service, provider.id, enabled=enabled, by=by)
+    set_oauth_reuse(context, service, provider.id, enabled=enabled, by=by, access=access)
 
 
 @router.post("/agents/{agent_name}/{service}/connect")
@@ -638,7 +651,7 @@ async def connect_egress_account(
     _body: _EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
-    _agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=True)
+    _agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=True)
     return await masked_oauth_call(
         oauth.connect(provider.id, request, agent_name=agent_name),
         "Could not start account connection",
@@ -654,7 +667,7 @@ async def disconnect_egress_account(
     _body: _EmptyMutation,
 ) -> dict[str, str]:
     """Reset the OAuth connection of a service's provider for one agent's credential scope; its opt-in stays."""
-    _agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
+    _agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
     return await masked_oauth_call(
         oauth.disconnect(provider.id, request, agent_name=agent_name),
         "Could not disconnect account",
@@ -667,15 +680,32 @@ async def allow_egress_account_reuse(
     agent_name: str,
     service: str,
     requester_id: _EgressUser,
-    _body: OAuthReuseRequest,
+    body: OAuthReuseRequest,
 ) -> None:
     """Let Agent Keys use the service's connected account for this agent; the body must confirm the approval bypass.
 
-    The account's own connection, connected now or later, is then injected for the agent's shell and python. Who may
-    do this, and the 403, 404, and 409 answers, follow the connect route; a body without the confirmation is a 422.
+    The account's own connection, connected now or later, is then injected for the agent's shell and python, for
+    reads only when `access` is `read`; allowing it again changes the level. Who may do this, and the 403, 404, and
+    409 answers, follow the connect route; a body without the confirmation is a 422, and `read` for a service that
+    does not offer it a 409.
     """
-    agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
-    await asyncio.to_thread(_set_account_reuse, agent, provider, service, enabled=True, by=requester_id)
+    agent, egress_service, provider = await _account_provider(
+        request,
+        requester_id,
+        agent_name,
+        service,
+        connecting=False,
+    )
+    require_access_offered(egress_service, body.access, CONNECTIONS_HEADERS)
+    await asyncio.to_thread(
+        _set_account_reuse,
+        agent,
+        provider,
+        service,
+        enabled=True,
+        by=requester_id,
+        access=body.access,
+    )
 
 
 @router.delete("/agents/{agent_name}/{service}/oauth-reuse", status_code=204)
@@ -686,7 +716,7 @@ async def stop_egress_account_reuse(
     requester_id: _EgressUser,
 ) -> None:
     """Stop Agent Keys using the service's connected account for this agent; the connection stays for its tools."""
-    agent, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
+    agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
     await asyncio.to_thread(_set_account_reuse, agent, provider, service, enabled=False, by=requester_id)
 
 

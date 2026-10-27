@@ -34,10 +34,9 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 - `input.deferred_tool_search` installs the native or portable deferred tool search exactly as `agents.py` does, and `input.portable_replay` calls `configure_portable_replay` as history replay planning does.
 - `input.native_compaction` calls `configure_native_compaction` with its threshold and history generation, as history planning does when it enables native compaction.
 - `input.tool_jobs` installs `install_tool_job_execution` as agent construction does, and the harness answers the per-turn job checks (a background job runtime, execution resources, and which functions are managed calls), because `Function.from_dict` cannot carry the assembled toolkit those checks read.
-- `input.provider_tools_disabled` sends the request inside `without_provider_tools()`, as participation decisions and judgments do.
 - Goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes.
   The `output_limit_stop`, `structured_output`, `structured_output_nested`, and `tool_choice_none` scenarios were captured through `aresponse`, Agno's non-streaming path, except on Codex; the owned adapters stream them, so they hold the streamed request the owned adapter sends and the same reply as a stream, with the parsed reply regenerated from it.
-  Groq's `structured_output` and `structured_output_nested` are the exception and keep their whole request and reply, because Groq does not stream structured output.
+  On Groq, which answers an output schema with a forced tool call, their reply is that call, streamed.
 - Every SDK request is answered at the httpx transport layer with `response_raw`, so the SDK clients production builds (MindRoom's pooled client, Agno's shared client, SDK-built clients) are unchanged.
 - Each golden must produce exactly one provider request.
 
@@ -48,12 +47,11 @@ The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay eve
 | `family`, `scenario` | The provider route and scenario names. |
 | `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
 | `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter sends or parses. |
-| `input.tools` | The request's `ToolSpec` definitions, every field present and null where the tool sets none; the capture's `Function.to_dict()` dicts left out unset approval flags, which Agno read as false. |
+| `input.tools` | The request's `ToolSpec` definitions (`name`, `description`, `parameters`, `strict`), every field present and null where the tool sets none. |
 | `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
 | `input.output_schema` | `null`, or the request's output schema as `{"model": "module:Class", "json_schema": ...}`; the route renders it as its structured-output support asks, and replay fails when the class's JSON schema no longer equals `json_schema`. |
 | `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
 | `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
-| `input.provider_tools_disabled` | Present only as `true`, for a request sent inside `without_provider_tools()`. |
 | `input.tool_jobs` | Present only as `{"managed": [...]}`, the functions a turn that can start tool jobs offers as managed calls. |
 | `input.native_compaction` | Present only as `{"threshold", "history_generation"}`, the arguments of `configure_native_compaction`. |
 | `request` | `method`, `url`, the stable `headers`, and the JSON `body` of the SDK request. |
@@ -96,22 +94,22 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
 | `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
 | `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
-| `claude_citations`, `claude_citations_replay` | A text document with citations, then the cited turn replayed. |
+| `claude_citations`, `claude_citations_replay` | A text document, which the request sends without asking for citations, and a reply that still carries them, as turns earlier releases stored do; then that turn replayed without them. |
 | `claude_server_tool_blocks`, `claude_server_tool_blocks_replay` | Native tool-search server blocks with a deferred tool call, then the turn replayed with its result. |
 | `responses_continuation` | A stored response continued with `previous_response_id`. |
 | `responses_explicit_replay` | On Responses routes, `reasoning_tool_call` runs under portable replay and this golden replays its items and result explicitly. |
 | `responses_store_false_turn`, `responses_store_false` | The same reasoning tool turn and explicit replay with `store: false`. |
-| `structured_output` | `mindroom.routing._RoutingSuggestion` as native schema, JSON schema, or JSON mode, per route. |
+| `structured_output` | `mindroom.routing._RoutingSuggestion` as native schema, JSON schema, forced tool call, or JSON mode, per route. |
 | `structured_output_nested` | `mindroom.scheduling.tasks.ScheduledWorkflow`, whose schema has `$defs`/`$ref`, nullable `anyOf`, defaults, a format, and a bound, the same way. |
 | `prompt_cache` | A system prompt with the session-context boundary plus the route's cache settings. |
 | `prompt_cache_disabled` | Claude with `cache_system_prompt` and `extended_cache_time` off. |
 | `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind the production `dynamic_tools` functions `tool_search`/`call_tool`, then a deferred call replayed. |
 | `output_limit_stop` | A reply the output limit cut off mid-sentence, as a compaction summary can be: Claude `max_tokens`, Chat and Ollama `length`, Gemini `MAX_TOKENS`, or an incomplete Responses response. |
 | `output_limit_stop_tool_call` | A streamed reply the output limit cut off inside a tool call's arguments JSON. |
-| `approval_gated_tools` | A function the approval policy gates (`requires_confirmation`, `approval_type` `mindroom_policy`) and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the reply calls the gated one. |
+| `approval_gated_tools` | A function the approval policy gates and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the gating stays with the functions, so their definitions go out like the ungated one's, and the reply calls the gated one. |
 | `tool_job_wait_parameter` | A turn whose calls can become tool jobs: the managed function gains the optional `background_after` parameter, the other function keeps its schema, and the reply passes `background_after`. |
 | `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
-| `tool_choice_none` | A decision request: `tool_choice` `"none"` with provider tools disabled and the tools still defined. |
+| `tool_choice_none` | A decision request: `tool_choice` `"none"`, which allows no tool use, with the tools still defined. |
 | `search_grounding` | Google Search grounding (`search: true`) on `gemini-3.1-pro-preview`, on Vertex AI at the `global` location: the search tool goes out in place of the two offered function tools, and the streamed reply carries grounding metadata, which the owned message does not keep, plus tool-use prompt tokens in its usage. |
 
 Skipped where the route has nothing to pin:
@@ -320,9 +318,8 @@ Normalization:
 The file holds only its `searches`; the agents and bases are `rows.json`'s `input`, so a search for a new agent adds that agent there.
 Each search sends one query through the `search_knowledge_base` tool as its agent, over the bases an owned refresh writes from that `input`: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the search marked `"embedding_fails": true` runs with its query embedding failing.
 A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
-The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`.
-`content_hash` in each document's `meta_data` becomes `<sha256>`.
-Each cosine distance is summed in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distances` or `similarity_score` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
+The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`, and each `meta_data` holds the chunk's `source_path`, its reader keys, and its `distance`.
+Each cosine distance is summed in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distance` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
 
 ## Codec goldens (`codecs.json`)
 

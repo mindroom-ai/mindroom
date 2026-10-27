@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.constants import llm_request_log_dir
+from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
@@ -77,17 +78,14 @@ def _write_request_record(
         for message in request.messages
     ]
     tools = [json_safe(tool) for tool in request.tools]
-    system_prompt = next((message.get_content_string() for message in request.messages if message.role == "system"), "")
+    system_prompt = system_text(request.messages)
     _write_line(
         path,
         {
             "timestamp": datetime.now().astimezone().isoformat(),
             "request_log_id": request_log_id,
-            # TODO(simplify): A request whose log context binds no `agent_id` records the model config name as its
-            # `agent_id`, here and in the response record. Record that name as `model_name` and take `agent_id` only
-            # from the context. Operators reading the request log would notice.
-            "agent_id": log.model_name,
             **context,
+            "model_name": log.model_name,
             "model_id": model_id,
             "system_prompt": system_prompt,
             "messages": json_safe(messages),
@@ -184,7 +182,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 context=context,
             )
         except Exception:
-            logger.exception("Failed to persist LLM request log", agent_name=log.model_name, model_id=inner.identity.id)
+            logger.exception("Failed to persist LLM request log", model_name=log.model_name, model_id=inner.identity.id)
             log_path = None
     reported = ReportedUsage()
     served_provider: str | None = None
@@ -207,8 +205,8 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                     "timestamp": datetime.now().astimezone().isoformat(),
                     "record": "response",
                     "request_log_id": request_log_id,
-                    "agent_id": log.model_name,
                     **_attribution(context),
+                    "model_name": log.model_name,
                     "model_id": inner.identity.id,
                     "usage": {
                         "input_tokens": usage.tokens.input_tokens,
@@ -221,6 +219,6 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
         except Exception:
             logger.exception(
                 "Failed to emit LLM response telemetry",
-                agent_name=log.model_name,
+                model_name=log.model_name,
                 model_id=inner.identity.id,
             )

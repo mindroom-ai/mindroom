@@ -565,9 +565,6 @@ def _tool(name: str) -> ToolSpec:
         description=name,
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
 
@@ -900,7 +897,31 @@ async def test_request_log_masks_credentials_before_writing(tmp_path: Path) -> N
         "call failed with Authorization: Bearer ***redacted*** and api_key=***redacted***"
     )
     assert record["callback_url"] == "https://example.test/cb?code=***redacted***&keep=1"
-    assert record["agent_id"] == "default"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context", "agent"),
+    [({}, None), ({"agent_id": "code", "session_id": "session-1"}, "code")],
+    ids=["no-agent", "agent"],
+)
+async def test_request_log_names_the_model_config_and_takes_the_agent_from_the_context(
+    tmp_path: Path,
+    context: dict[str, str],
+    agent: str | None,
+) -> None:
+    """Both records name the model config as ``model_name``; only a context that binds an agent gives ``agent_id``."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+
+    with bind_llm_request_log_context(**context):
+        await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    records = _log_records(tmp_path)
+    assert [(record.get("record"), record.get("model_name"), record.get("agent_id")) for record in records] == [
+        (None, "default", agent),
+        ("response", "default", agent),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1060,6 +1081,11 @@ async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_err
 
     assert isinstance(events[-1], TurnCompleted)
     assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [True, False]
+    assert [
+        (entry.get("model_name"), entry.get("agent_name"))
+        for entry in logs
+        if entry["event"] == "Failed to persist LLM request log"
+    ] == [("default", None)] * 2
 
 
 @pytest.mark.asyncio
@@ -1091,6 +1117,8 @@ async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answ
         "LLM usage",
         "Failed to emit LLM response telemetry",
     ]
+    [failure] = [entry for entry in logs if entry["event"] == "Failed to emit LLM response telemetry"]
+    assert (failure.get("model_name"), failure.get("agent_name")) == ("default", None)
 
 
 def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) -> None:
@@ -1312,7 +1340,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
         id="code",
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
-        system_message=None,
+        system_messages=(),
         toolkits=(),
     )
 
@@ -1363,7 +1391,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         id="code",
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
-        system_message=None,
+        system_messages=(),
         toolkits=(),
     )
 

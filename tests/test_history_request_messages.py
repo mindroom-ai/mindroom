@@ -625,6 +625,23 @@ def test_resumed_request_moves_the_stored_system_message_first() -> None:
     assert _contents(resumed) == ["Be precise.", "earlier question", "earlier answer", "multiply", None]
 
 
+def test_a_resumed_request_keeps_both_stored_system_messages_in_order() -> None:
+    """A run paused with a stable and a turn system message resumes with both, ahead of history, as it sent them."""
+    turn = Message(role="system", content="Today is Monday.")
+    paused = [_system(), turn, Message(role="user", content="multiply"), _tool_call("call")]
+
+    resumed = build_resume_request(paused=paused, summary=None, history=_replay([_agent_run("earlier")]))
+
+    assert _contents(resumed) == [
+        "Be precise.",
+        "Today is Monday.",
+        "earlier question",
+        "earlier answer",
+        "multiply",
+        None,
+    ]
+
+
 def test_resuming_a_pause_whose_system_message_embeds_the_summary_adds_no_second_summary() -> None:
     legacy_system = Message(
         role="system",

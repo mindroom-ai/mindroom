@@ -3035,7 +3035,7 @@ class TeamBot(AgentBot):
             )
         assert self.client is not None
         team_config = self.config.teams[self.agent_name]
-        configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
+        configured_mode = TeamMode(team_config.mode)
         availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,
@@ -3049,7 +3049,7 @@ class TeamBot(AgentBot):
             assert team_resolution.reason is not None
             return await self._response_runner.generate_team_response_helper(
                 request,
-                team_agents=self.current_configured_team_agents(),
+                member_names=team_config.agents,
                 team_mode=configured_mode.value,
                 resolution_reason=team_resolution.reason,
             )
@@ -3062,7 +3062,7 @@ class TeamBot(AgentBot):
                 user_id=request.user_id or "",
                 correlation_id=request.correlation_id or target.reply_to_event_id,
             ),
-            team_agents=team_resolution.eligible_members,
+            member_names=team_resolution.eligible_member_names,
             team_mode=team_resolution.mode.value,
             reason_prefix=f"Team '{self.agent_name}'",
         )

@@ -1,8 +1,7 @@
 # History compaction
 
 This page records the assumptions and decisions behind portable history compaction before and during a reply, its summary rows, and seen-message tracking.
-User-facing behavior is in [Context Window](../configuration/history.md#context-window), and the Claude replay workaround is in `history/claude_replay_compat.py`.
-When upgrading a provider SDK, run that module's contract tests before removing the workaround.
+User-facing behavior is in [Context Window](../configuration/history.md#context-window).
 
 ## Assumptions
 
@@ -13,7 +12,9 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 
 ## Decisions
 
-- A summary request goes out with the provider's own retries and prompt cache off, and with thinking off where the route can turn it off (the Claude routes), because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix.
+- A summary request goes out with the provider's own retries and prompt cache off, and on the Claude routes without the model's authored thinking setting, because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix; other routes keep the authored setting.
+  Leaving it out turns thinking off only on the Claude models before Claude 5 other than Mythos Preview; every Claude 5 and 5.x model and Mythos Preview runs adaptive thinking when a request sets none, so their summaries still think.
+  The request sends no `disabled` or `between_tools` setting, which only some of those models accept; Fable 5.1, Fable 5, Mythos 5.1, Mythos 5, Mythos Preview, and Opus 5.5 cannot turn thinking off at all.
   It keeps the route's transport timeout instead of overriding it with `timeout_seconds`, because a shorter authored provider timeout must still apply; the summary call's own deadline cancels a slower request.
 - A summary counts as complete only when the provider reports that it ended on its own; a summary cut off by the output limit, a content filter, or a tool call is never stored.
   A route that reports no stop reason cannot show a cut-off, so its summaries count as complete.

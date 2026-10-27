@@ -141,3 +141,22 @@ def test_googleapis_presets_share_host_and_match_by_longest_path() -> None:
     assert service_for("/") is None
     assert match_rule(config, "gmail.googleapis.com", 443, "/gmail/v1/users/me").service == "gmail"  # type: ignore[union-attr]
     assert match_rule(config, "tasks.googleapis.com", 443, "/tasks/v1/lists").service == "tasks"  # type: ignore[union-attr]
+
+
+def test_presets_declare_read_only() -> None:
+    """The Google presets and Atlassian offer read-only access; GitHub does not, and only Calendar reads with POST."""
+    read_only = {name for name in _EXPECTED if EgressService(preset=name).read_only is not None}
+
+    assert read_only == {
+        "google_drive",
+        "google_gmail",
+        "google_calendar",
+        "google_sheets",
+        "google_docs",
+        "google_tasks",
+        "atlassian",
+    }
+    calendar = EgressService(preset="google_calendar").read_only
+    assert calendar is not None
+    assert calendar.post_paths == ["/calendar/v3/freeBusy"]
+    assert EgressService(preset="google_drive").read_only.post_paths == []  # type: ignore[union-attr]

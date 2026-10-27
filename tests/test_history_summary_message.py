@@ -34,7 +34,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
     ScopeSummary,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import ResponsePausedForApproval
@@ -244,13 +244,13 @@ async def test_a_team_turn_replays_the_summary_before_its_history_and_outside_an
 
     request = team.models["default"].requests[0].messages
     [summary] = _owned_summaries(request)
-    assert [message.role for message in request].count("system") == 1
-    assert request[0].role == "system"
-    assert _SUMMARY not in str(request[0].content)
-    assert request[1] is summary
+    assert [message.role for message in request[:2]] == ["system", "system"]
+    assert [message.role for message in request].count("system") == 2
+    assert _SUMMARY not in system_text(request)
+    assert request[2] is summary
     assert (summary.role, summary.from_history) == ("user", True)
     assert f"<compacted_history>\n{_SUMMARY}\n</compacted_history>" in str(summary.content)
-    assert _contents(request[2:6]) == _PAST
+    assert _contents(request[3:7]) == _PAST
     assert "Hello" in str(request[-1].content)
 
 

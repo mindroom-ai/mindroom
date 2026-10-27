@@ -16,8 +16,8 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
-from mindroom.system_prompt import render_date_context
+from mindroom.llm.messages import system_text
+from mindroom.system_prompt import render_session_context
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.conftest import (
@@ -52,32 +52,33 @@ def _datetime_test_config() -> Config:
     )
 
 
-def test_render_date_context_format() -> None:
-    """Test the datetime context formatting."""
+def test_the_session_context_names_the_date_and_timezone() -> None:
+    """The session context holds the date and the timezone it is rendered in, without a clock time."""
     frozen_now = datetime(2026, 3, 20, 13, 30, tzinfo=ZoneInfo("America/New_York"))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = render_date_context("America/New_York", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        context = render_session_context(Config(), "America/New_York")
 
     assert context == (
-        "## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: America/New_York (EDT)\n\n"
+        "<mindroom_session_context>\n## Current Date and Time\nToday is Friday, March 20, 2026.\n"
+        "Timezone: America/New_York (EDT)\n</mindroom_session_context>"
     )
 
 
-def test_render_date_context_utc() -> None:
-    """Test datetime context with UTC timezone."""
+def test_the_session_context_in_utc() -> None:
+    """The default timezone is UTC."""
     frozen_now = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = render_date_context("UTC", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        context = render_session_context(Config(), Config().timezone)
 
-    assert context == ("## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n\n")
+    assert "Today is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n" in context
 
 
-def test_render_date_context_invalid_timezone() -> None:
-    """Test that invalid timezone raises ZoneInfoNotFoundError."""
+def test_the_session_context_rejects_an_unknown_timezone() -> None:
+    """An unknown timezone raises ZoneInfoNotFoundError."""
     with pytest.raises(ZoneInfoNotFoundError):
-        render_date_context("Invalid/Timezone", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        render_session_context(Config(), "Invalid/Timezone")
 
 
 def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:
@@ -111,13 +112,14 @@ def test_agent_prompt_includes_datetime(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert "General assistant" in role
     assert "## Current Date and Time" not in role
-    message = prompt_for_turn(build)
-    assert isinstance(message.content, str)
-    assert "## Current Date and Time" in message.content
-    assert "Today is Friday, March 20, 2026." in message.content
-    assert "Timezone: America/Los_Angeles (PDT)" in message.content
-    assert "The current time is" not in message.content
-    assert message.content.index("General assistant") < message.content.index("## Current Date and Time")
+    stable, turn = prompt_for_turn(build)
+    assert isinstance(turn.content, str)
+    assert "## Current Date and Time" in turn.content
+    assert "Today is Friday, March 20, 2026." in turn.content
+    assert "Timezone: America/Los_Angeles (PDT)" in turn.content
+    assert "The current time is" not in turn.content
+    assert "General assistant" in str(stable.content)
+    assert "## Current Date and Time" not in str(stable.content)
 
 
 def test_agent_timezone_overrides_the_global_timezone_in_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,8 +207,6 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     [member] = members.builds
     assert member.prompt.role is not None
     assert "## Current Date and Time" not in member.prompt.role
-    message = team.spec.leader.system_message
-    assert message is not None
-    assert isinstance(message.content, str)
-    assert "Today is Friday, March 20, 2026." in message.content
-    assert "Timezone: UTC (UTC)" in message.content
+    leader_prompt = system_text(team.spec.leader.system_messages)
+    assert "Today is Friday, March 20, 2026." in leader_prompt
+    assert "Timezone: UTC (UTC)" in leader_prompt

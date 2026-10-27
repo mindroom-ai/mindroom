@@ -1552,7 +1552,7 @@ export function AgentEditor() {
       {/* Markdown */}
       <FieldGroup
         label="Markdown"
-        helperText={`Use markdown formatting in responses (global default: ${
+        helperText={`Tell the agent its replies are shown as Markdown (global default: ${
           defaultMarkdown ? "on" : "off"
         })`}
         htmlFor="markdown"

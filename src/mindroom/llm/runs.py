@@ -269,6 +269,9 @@ class _RunRecordCommon:
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
     tools: list[ToolExecution] | None = None
+    # How many of ``tools`` are refused calls that do not count toward the run's tool-call limit: a call naming no
+    # offered function, one whose arguments do not decode, and one of a cut-off response. A resume counts the rest.
+    uncounted_tool_calls: int = 0
     requirements: list[RunRequirement] | None = None
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
@@ -336,7 +339,9 @@ class _RunRecordCommon:
         return result
 
     def _tools_dict(self) -> dict[str, Any]:
-        return {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
+        tools = {} if self.tools is None else {"tools": [tool.to_dict() for tool in self.tools]}
+        # Written only when some call does not count, so a run whose every call counts stores no key.
+        return tools | ({"uncounted_tool_calls": self.uncounted_tool_calls} if self.uncounted_tool_calls else {})
 
     def _requirements_dict(self) -> dict[str, Any]:
         return {} if self.requirements is None else {"requirements": [item.to_dict() for item in self.requirements]}
@@ -357,6 +362,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "model_provider": data.get("model_provider"),
         "messages": [Message.from_dict(message) for message in data.get("messages") or []],
         "tools": None if tools is None else [ToolExecution.from_dict(tool) for tool in tools],
+        "uncounted_tool_calls": data.get("uncounted_tool_calls", 0),
         "requirements": None if requirements is None else [RunRequirement.from_dict(item) for item in requirements],
         "metrics": None if metrics is None else RunMetrics.from_dict(metrics),
         "metadata": data.get("metadata"),

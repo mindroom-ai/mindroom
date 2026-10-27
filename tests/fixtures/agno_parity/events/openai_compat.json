@@ -99,7 +99,7 @@
           "index": 0,
           "message": {
             "role": "assistant",
-            "content": "**Writer**: 5\n\n\n**Team Consensus**:\n\nThe writer found 5."
+            "content": "The writer found 5."
           },
           "finish_reason": "stop"
         }

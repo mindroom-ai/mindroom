@@ -6,15 +6,9 @@
         {
           "content": "city, cap",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 0.604523241519928,
-            "linked_to": "",
+            "distance": 0.604523241519928,
             "row_number": 1,
-            "similarity_score": 0.604523241519928,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         },
@@ -23,14 +17,8 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 1.1543808579444885,
-            "linked_to": "",
-            "similarity_score": 1.1543808579444885,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.1543808579444885,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -39,14 +27,8 @@
           "meta_data": {
             "chunk": 3,
             "chunk_size": 68,
-            "content_hash": "<sha256>",
-            "distances": 1.362712413072586,
-            "linked_to": "",
-            "similarity_score": 1.362712413072586,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.362712413072586,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -55,14 +37,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 0.5828447341918945,
-            "linked_to": "",
-            "similarity_score": 0.5828447341918945,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 0.5828447341918945,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -71,14 +47,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 123,
-            "content_hash": "<sha256>",
-            "distances": 0.8707394003868103,
-            "linked_to": "",
-            "similarity_score": 0.8707394003868103,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 0.8707394003868103,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
@@ -87,14 +57,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 26,
-            "content_hash": "<sha256>",
-            "distances": 0.9601258039474487,
-            "linked_to": "",
-            "similarity_score": 0.9601258039474487,
-            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "control.txt",
-            "source_size": 26
+            "distance": 0.9601258039474487,
+            "source_path": "control.txt"
           },
           "name": "control.txt"
         },
@@ -103,15 +67,9 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 31,
-            "content_hash": "<sha256>",
-            "distances": 0.9958947077393532,
-            "linked_to": "",
+            "distance": 0.9958947077393532,
             "page": 1,
-            "similarity_score": 0.9958947077393532,
-            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "records.json",
-            "source_size": 99
+            "source_path": "records.json"
           },
           "name": "records.json"
         },
@@ -120,15 +78,9 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 49,
-            "content_hash": "<sha256>",
-            "distances": 1.0876812189817429,
-            "linked_to": "",
+            "distance": 1.0876812189817429,
             "page": 1,
-            "similarity_score": 1.0876812189817429,
-            "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "settings.json",
-            "source_size": 49
+            "source_path": "settings.json"
           },
           "name": "settings.json"
         },
@@ -137,29 +89,17 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "content_hash": "<sha256>",
-            "distances": 1.1320684850215912,
-            "linked_to": "",
-            "similarity_score": 1.1320684850215912,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 1.1320684850215912,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
         {
           "content": "Paris, 200",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 1.2025228589773178,
-            "linked_to": "",
+            "distance": 1.2025228589773178,
             "row_number": 3,
-            "similarity_score": 1.2025228589773178,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         }
@@ -174,15 +114,9 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 31,
-            "content_hash": "<sha256>",
-            "distances": 0.9332063496112823,
-            "linked_to": "",
+            "distance": 0.9332063496112823,
             "page": 1,
-            "similarity_score": 0.9332063496112823,
-            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "records.json",
-            "source_size": 99
+            "source_path": "records.json"
           },
           "name": "records.json"
         },
@@ -191,14 +125,8 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 0.5304010808467865,
-            "linked_to": "",
-            "similarity_score": 0.5304010808467865,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 0.5304010808467865,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -207,14 +135,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 26,
-            "content_hash": "<sha256>",
-            "distances": 0.9311468601226807,
-            "linked_to": "",
-            "similarity_score": 0.9311468601226807,
-            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "control.txt",
-            "source_size": 26
+            "distance": 0.9311469197273254,
+            "source_path": "control.txt"
           },
           "name": "control.txt"
         },
@@ -223,14 +145,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 123,
-            "content_hash": "<sha256>",
-            "distances": 0.6581577956676483,
-            "linked_to": "",
-            "similarity_score": 0.6581577956676483,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 0.6581577956676483,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
@@ -239,14 +155,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 1.006945788860321,
-            "linked_to": "",
-            "similarity_score": 1.006945788860321,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.006945788860321,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -255,44 +165,26 @@
           "meta_data": {
             "chunk": 3,
             "chunk_size": 68,
-            "content_hash": "<sha256>",
-            "distances": 1.3080187439918518,
-            "linked_to": "",
-            "similarity_score": 1.3080187439918518,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.3080187439918518,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
         {
           "content": "Paris, 200",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 0.9381504952907562,
-            "linked_to": "",
+            "distance": 0.9381504952907562,
             "row_number": 3,
-            "similarity_score": 0.9381504952907562,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         },
         {
           "content": "city, cap",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 1.0494847148656845,
-            "linked_to": "",
+            "distance": 1.0494847148656845,
             "row_number": 1,
-            "similarity_score": 1.0494847148656845,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         },
@@ -301,29 +193,17 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "content_hash": "<sha256>",
-            "distances": 1.0581740736961365,
-            "linked_to": "",
-            "similarity_score": 1.0581740736961365,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 1.0581740736961365,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
         {
           "content": "London, 220",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 1.0838376134634018,
-            "linked_to": "",
+            "distance": 1.0838376134634018,
             "row_number": 5,
-            "similarity_score": 1.0838376134634018,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         }
@@ -336,15 +216,9 @@
         {
           "content": "city, cap",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 0.604523241519928,
-            "linked_to": "",
+            "distance": 0.604523241519928,
             "row_number": 1,
-            "similarity_score": 0.604523241519928,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         },
@@ -353,14 +227,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 78,
-            "content_hash": "<sha256>",
-            "distances": 1.3297736644744873,
-            "linked_to": "",
-            "similarity_score": 1.3297736644744873,
-            "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "notes.md",
-            "source_size": 78
+            "distance": 1.3297736644744873,
+            "source_path": "notes.md"
           },
           "name": "notes.md"
         },
@@ -369,14 +237,8 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 1.1543808579444885,
-            "linked_to": "",
-            "similarity_score": 1.1543808579444885,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.1543808579444885,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -385,14 +247,8 @@
           "meta_data": {
             "chunk": 3,
             "chunk_size": 68,
-            "content_hash": "<sha256>",
-            "distances": 1.362712413072586,
-            "linked_to": "",
-            "similarity_score": 1.362712413072586,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.362712413072586,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -401,14 +257,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 0.5828447341918945,
-            "linked_to": "",
-            "similarity_score": 0.5828447341918945,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 0.5828447341918945,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -417,14 +267,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 123,
-            "content_hash": "<sha256>",
-            "distances": 0.8707394003868103,
-            "linked_to": "",
-            "similarity_score": 0.8707394003868103,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 0.8707394003868103,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
@@ -433,14 +277,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 26,
-            "content_hash": "<sha256>",
-            "distances": 0.9601258039474487,
-            "linked_to": "",
-            "similarity_score": 0.9601258039474487,
-            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "control.txt",
-            "source_size": 26
+            "distance": 0.9601258039474487,
+            "source_path": "control.txt"
           },
           "name": "control.txt"
         },
@@ -449,15 +287,9 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 31,
-            "content_hash": "<sha256>",
-            "distances": 0.9958947077393532,
-            "linked_to": "",
+            "distance": 0.9958947077393532,
             "page": 1,
-            "similarity_score": 0.9958947077393532,
-            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "records.json",
-            "source_size": 99
+            "source_path": "records.json"
           },
           "name": "records.json"
         },
@@ -466,15 +298,9 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 49,
-            "content_hash": "<sha256>",
-            "distances": 1.0876812189817429,
-            "linked_to": "",
+            "distance": 1.0876812189817429,
             "page": 1,
-            "similarity_score": 1.0876812189817429,
-            "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "settings.json",
-            "source_size": 49
+            "source_path": "settings.json"
           },
           "name": "settings.json"
         },
@@ -483,14 +309,8 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "content_hash": "<sha256>",
-            "distances": 1.1320684850215912,
-            "linked_to": "",
-            "similarity_score": 1.1320684850215912,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 1.1320684850215912,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         }
@@ -505,15 +325,9 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 31,
-            "content_hash": "<sha256>",
-            "distances": 0.9332063496112823,
-            "linked_to": "",
+            "distance": 0.9332063496112823,
             "page": 1,
-            "similarity_score": 0.9332063496112823,
-            "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "records.json",
-            "source_size": 99
+            "source_path": "records.json"
           },
           "name": "records.json"
         },
@@ -522,14 +336,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 78,
-            "content_hash": "<sha256>",
-            "distances": 0.34666454792022705,
-            "linked_to": "",
-            "similarity_score": 0.34666454792022705,
-            "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "notes.md",
-            "source_size": 78
+            "distance": 0.34666454792022705,
+            "source_path": "notes.md"
           },
           "name": "notes.md"
         },
@@ -538,14 +346,8 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 0.5304010808467865,
-            "linked_to": "",
-            "similarity_score": 0.5304010808467865,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 0.5304010808467865,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -554,14 +356,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 26,
-            "content_hash": "<sha256>",
-            "distances": 0.9311468601226807,
-            "linked_to": "",
-            "similarity_score": 0.9311468601226807,
-            "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "control.txt",
-            "source_size": 26
+            "distance": 0.9311469197273254,
+            "source_path": "control.txt"
           },
           "name": "control.txt"
         },
@@ -570,14 +366,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 123,
-            "content_hash": "<sha256>",
-            "distances": 0.6581577956676483,
-            "linked_to": "",
-            "similarity_score": 0.6581577956676483,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 0.6581577956676483,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         },
@@ -586,14 +376,8 @@
           "meta_data": {
             "chunk": 1,
             "chunk_size": 128,
-            "content_hash": "<sha256>",
-            "distances": 1.006945788860321,
-            "linked_to": "",
-            "similarity_score": 1.006945788860321,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.006945788860321,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
@@ -602,44 +386,26 @@
           "meta_data": {
             "chunk": 3,
             "chunk_size": 68,
-            "content_hash": "<sha256>",
-            "distances": 1.3080187439918518,
-            "linked_to": "",
-            "similarity_score": 1.3080187439918518,
-            "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "guide.md",
-            "source_size": 279
+            "distance": 1.3080187439918518,
+            "source_path": "guide.md"
           },
           "name": "guide.md"
         },
         {
           "content": "Paris, 200",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 0.9381504952907562,
-            "linked_to": "",
+            "distance": 0.9381504952907562,
             "row_number": 3,
-            "similarity_score": 0.9381504952907562,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         },
         {
           "content": "city, cap",
           "meta_data": {
-            "content_hash": "<sha256>",
-            "distances": 1.0494847148656845,
-            "linked_to": "",
+            "distance": 1.0494847148656845,
             "row_number": 1,
-            "similarity_score": 1.0494847148656845,
-            "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "table.csv",
-            "source_size": 46
+            "source_path": "table.csv"
           },
           "name": "table.csv"
         },
@@ -648,14 +414,8 @@
           "meta_data": {
             "chunk": 2,
             "chunk_size": 47,
-            "content_hash": "<sha256>",
-            "distances": 1.0581740736961365,
-            "linked_to": "",
-            "similarity_score": 1.0581740736961365,
-            "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
-            "source_path": "team/policies.txt",
-            "source_size": 149
+            "distance": 1.0581740736961365,
+            "source_path": "team/policies.txt"
           },
           "name": "policies.txt"
         }

@@ -23,6 +23,55 @@ def _client_nginx_conf(*set_args: str) -> str:
     return next(doc["data"]["default.conf"] for doc in docs if "default.conf" in doc.get("data", {}))
 
 
+def _serve(
+    nginx_conf: str,
+    files: dict[str, str],
+    paths: list[str],
+    headers: tuple[str, ...],
+) -> dict[str, tuple[str, ...]]:
+    """Serve nginx_conf in nginx with files planted at their absolute paths.
+
+    Returns each path's status code, the requested response headers, and the body.
+    """
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker is required to serve the rendered nginx config")
+    if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
+        pytest.skip("Docker daemon is unavailable to serve the rendered nginx config")
+    write_out = "\\t".join(["%{http_code}", *(f"%header{{{header}}}" for header in headers)])
+    script = "\n".join(
+        [
+            "set -eu",
+            "cat > /etc/nginx/conf.d/default.conf",
+            *(
+                f"mkdir -p {shlex.quote(str(PurePosixPath(path).parent))} && printf %s {shlex.quote(body)} > {path}"
+                for path, body in files.items()
+            ),
+            # The image logs requests to stdout, which carries the responses.
+            "nginx >&2",
+            *(
+                f"curl -s -o /tmp/body -w '{write_out}\\t' "
+                f"{shlex.quote(f'http://127.0.0.1:8080{path}')} && tr -d '\\r\\n' < /tmp/body && echo"
+                for path in paths
+            ),
+        ],
+    )
+
+    completed = subprocess.run(
+        [docker, "run", "--rm", "-i", _NGINX_IMAGE, "sh", "-c", script],
+        input=nginx_conf,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    return {
+        path: tuple(line.split("\t", len(headers) + 1))
+        for path, line in zip(paths, completed.stdout.splitlines(), strict=True)
+    }
+
+
 @pytest.mark.parametrize(("base_path", "app_shell_location"), [("/", "location / {"), ("/chat", "location /chat/ {")])
 def test_client_chart_lets_only_its_own_origin_frame_the_app_shell(base_path: str, app_shell_location: str) -> None:
     """A page framing the signed-in client could trick its user into clicking the client's controls."""
@@ -42,16 +91,11 @@ def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: s
     pinned the broken call in the browser.
     Base paths and route segments named assets or public must still resolve to the top-level build files.
     """
-    docker = shutil.which("docker")
-    if docker is None:
-        pytest.skip("Docker is required to serve the rendered nginx config")
-    if subprocess.run([docker, "info"], check=False, capture_output=True).returncode != 0:
-        pytest.skip("Docker daemon is unavailable to serve the rendered nginx config")
     files = {
-        "assets/app-1a2b.js": "app bundle",
-        "public/locales/en.json": "translations",
-        "public/element-call/index.html": "call page",
-        "public/element-call/assets/call-3c4d.js": "call bundle",
+        "/usr/share/nginx/html/assets/app-1a2b.js": "app bundle",
+        "/usr/share/nginx/html/public/locales/en.json": "translations",
+        "/usr/share/nginx/html/public/element-call/index.html": "call page",
+        "/usr/share/nginx/html/public/element-call/assets/call-3c4d.js": "call bundle",
     }
     prefix = base_path.rstrip("/")
     expected = {
@@ -69,40 +113,55 @@ def test_client_chart_serves_nested_build_files_from_their_own_path(base_path: s
             "/assets/missing-5e6f.js": ("404", "", None),
         }.items()
     }
-    html = PurePosixPath("/usr/share/nginx/html")
-    script = "\n".join(
-        [
-            "set -eu",
-            "cat > /etc/nginx/conf.d/default.conf",
-            *(
-                f"mkdir -p {shlex.quote(str((html / name).parent))} && printf %s {shlex.quote(body)} > {html / name}"
-                for name, body in files.items()
-            ),
-            # The image logs requests to stdout, which carries the responses.
-            "nginx >&2",
-            *(
-                f"curl -s -o /tmp/body -w '%{{http_code}}\\t%header{{cache-control}}\\t' "
-                f"{shlex.quote(f'http://127.0.0.1:8080{path}')} && tr -d '\\r\\n' < /tmp/body && echo"
-                for path in expected
-            ),
-        ],
+
+    responses = _serve(
+        _client_nginx_conf(f"basePath={base_path}", "nginx.ipv6=false"),
+        files,
+        list(expected),
+        ("cache-control",),
     )
 
-    completed = subprocess.run(
-        [docker, "run", "--rm", "-i", _NGINX_IMAGE, "sh", "-c", script],
-        input=_client_nginx_conf(f"basePath={base_path}", "nginx.ipv6=false"),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    responses = [line.split("\t", 2) for line in completed.stdout.splitlines()]
     actual = {
         path: (status, cache_control, body if status == "200" else None)
-        for path, (status, cache_control, body) in zip(expected, responses, strict=True)
+        for path, (status, cache_control, body) in responses.items()
     }
     assert actual == expected
+
+
+@pytest.mark.parametrize("base_path", ["/", "/chat"])
+def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_path: str) -> None:
+    """The chart replaces the image's nginx config, so it must keep the image's routes for these client features.
+
+    The pairing page approves a sign-in, so no origin may frame it, unlike the rest of the app.
+    Notices come from the image's notices directory, which operators replace, not from the build output.
+    iOS reads app links from the origin root whatever the base path.
+    """
+    prefix = base_path.rstrip("/")
+    app_links = '{"applinks":{}}'
+    files = {
+        "/usr/share/nginx/html/index.html": "app shell",
+        "/usr/share/nginx/html/notices.json": "[]",
+        "/usr/share/nginx/html/.well-known/apple-app-site-association": app_links,
+        "/opt/mindroom/notices/notices.json": '[{"id":"maintenance"}]',
+    }
+    no_store = "no-store, no-cache, must-revalidate, max-age=0"
+    pairing = ("200", "text/html", no_store, "frame-ancestors 'none'", "DENY", "app shell")
+    expected = {
+        f"{prefix}/connect": pairing,
+        f"{prefix}/connect/": pairing,
+        f"{prefix}/connections": ("200", "text/html", no_store, "frame-ancestors 'self'", "SAMEORIGIN", "app shell"),
+        f"{prefix}/notices.json": ("200", "application/json", "no-store, max-age=0", "", "", '[{"id":"maintenance"}]'),
+        "/.well-known/apple-app-site-association": ("200", "application/json", "", "", "", app_links),
+    }
+
+    responses = _serve(
+        _client_nginx_conf(f"basePath={base_path}", "nginx.ipv6=false"),
+        files,
+        list(expected),
+        ("content-type", "cache-control", "content-security-policy", "x-frame-options"),
+    )
+
+    assert responses == expected
 
 
 # Historical uppercase localparts, ports, and IPv6 server names are valid Matrix user IDs the client accepts.

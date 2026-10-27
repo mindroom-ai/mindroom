@@ -48,7 +48,6 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_call, usage
-from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
@@ -58,7 +57,6 @@ if TYPE_CHECKING:
     import pytest
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
@@ -188,11 +186,6 @@ class TeamTurn:
             execution_identity=self.identity,
         )
 
-    def member_ids(self) -> list[MatrixID]:
-        """Return the members' Matrix ids, as a team request names them."""
-        ids = entity_ids(self.config, self.runtime_paths)
-        return [ids[name] for name in self.member_names]
-
     def ctx(self, **overrides: Any) -> ResponseTurnContext:  # noqa: ANN401
         """Return the turn context the runner passes for a reply to ``EVENT_ID`` in the thread."""
         ctx = make_turn_context(
@@ -298,7 +291,8 @@ class TeamTurn:
     ) -> CompletedApprovalRun | PausedAttempt:
         """Resume ``paused`` with every saved approval call approved or denied, as an approval from ``session_id`` does.
 
-        The leader and the members run on the models the pause pinned, as the runner resumes them.
+        The leader and the members run on the models the pause pinned, as the runner resumes them, in the team's scope
+        unless ``history_scope`` names the scope the approval retained, or None for an approval that retained none.
         """
         call_ids = [call.tool_call_id for call in approvals]
         kwargs.setdefault("decisions", dict.fromkeys(call_ids, approved))
@@ -308,6 +302,7 @@ class TeamTurn:
         kwargs.setdefault("show_tool_calls", False)
         kwargs.setdefault("tool_trace_collector", [])
         kwargs.setdefault("progress", None)
+        kwargs.setdefault("history_scope", self.scope)
         with tool_runtime_context(self.runtime):
             return await continue_paused_team_run(
                 member_names=self.member_names,
@@ -321,7 +316,6 @@ class TeamTurn:
                 configured_team_name=self.team_name or self.member_names[0],
                 refresh_scheduler=None,
                 approval_calls=approvals,
-                history_scope=self.scope,
                 prior_tool_trace=paused.tool_trace,
                 prior_presentation_state=paused.response_presentation_state,
                 **kwargs,
@@ -378,7 +372,7 @@ def build_team_turn(
         member_names=members,
         config=config,
         team_name=team_name,
-        execution_identity=identity,
+        requester_user_id=identity.requester_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
     orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}

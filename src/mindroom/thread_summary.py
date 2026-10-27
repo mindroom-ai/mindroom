@@ -604,7 +604,7 @@ async def _generate_summary(
     response = await complete_prompt(
         provider,
         prompt,
-        instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS").splitlines(),
+        instructions=[config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")],
         schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
         overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
     )

@@ -65,8 +65,8 @@ _QUERY_EMBEDDING_ERROR = "embedder request failed (HTTP 503)"
 # Each cosine distance is computed in float32 and summed in an order the CPU's vector width decides, so its last bits
 # can differ between machines: an x86_64 run returned 0.604523241519928 where an aarch64 run returned
 # 0.6045231819152832, one float32 ulp apart. Comparisons accept up to this relative difference in a search document's
-# distances.
-DISTANCE_KEYS = ("distances", "similarity_score")
+# distance.
+DISTANCE_KEYS = ("distance",)
 DISTANCE_RELATIVE_TOLERANCE = 1e-6
 
 
@@ -204,7 +204,10 @@ def golden_config(root: Path) -> tuple[Config, RuntimePaths]:
 
 
 def _normalized_rows(database: Path) -> list[dict[str, Any]]:
-    """Read every row of one collection file, checking and normalizing the values that hash per-version identity."""
+    """Read every row of one collection file, checking and normalizing the values that hash per-version identity.
+
+    The stamp is the file's ctime, which no test can set, so it is normalized like the hashes it feeds.
+    """
     with closing(sqlite3.connect(database)) as connection:
         rows = connection.execute("SELECT id, document, metadata, embedding FROM chunks").fetchall()
     normalized: list[dict[str, Any]] = []
@@ -215,6 +218,8 @@ def _normalized_rows(database: Path) -> list[dict[str, Any]]:
         assert stored["content_id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, str(stored["content_hash"])))
         stored["content_hash"] = "<sha256>"
         stored["content_id"] = "<uuid5>"
+        assert isinstance(stored["source_mtime_ns"], int), stored
+        stored["source_mtime_ns"] = "<stamp>"
         normalized.append(
             {
                 "id": "<md5>",
@@ -252,13 +257,11 @@ async def refresh_golden_bases(config: Config, runtime_paths: RuntimePaths) -> d
 
 
 def _normalized_search_documents(output: str) -> list[dict[str, Any]]:
-    """Parse a search result, checking its layout and normalizing the per-version content hash."""
+    """Parse a search result, checking its layout."""
     documents = json.loads(output)
     assert output == json.dumps(documents, indent=2, ensure_ascii=False)
     for document in documents:
         assert list(document) == ["name", "meta_data", "content"], document
-        assert _HEX64.fullmatch(document["meta_data"]["content_hash"]), document
-        document["meta_data"]["content_hash"] = "<sha256>"
     return documents
 
 

@@ -52,7 +52,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\nParse scheduling requests into structured workflows\n</your_role>",
+          "content": "Parse scheduling requests into structured workflows",
           "role": "system"
         },
         {

@@ -64,15 +64,15 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
 def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: str) -> list[Message]:
     """Return the request's messages with the trusted receipt projected in, leaving ``messages`` as they are.
 
-    The receipt is appended to the first prompt message as a copy; a request without one gets a system message of
-    its own, first.
+    The receipt is appended to the last system message as a copy, so the stable prompt before it keeps its bytes; a
+    request without one gets a system message of its own, first.
     """
     outbound = list(messages)
     system_index = next(
         (
             index
-            for index, message in enumerate(outbound)
-            if message.role == "system" and isinstance(message.content, str)
+            for index in range(len(outbound) - 1, -1, -1)
+            if outbound[index].role == "system" and isinstance(outbound[index].content, str)
         ),
         None,
     )

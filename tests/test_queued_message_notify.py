@@ -1851,7 +1851,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
             ),
-            team_agents=[],
+            member_names=[bot.agent_name],
             team_mode="coordinate",
         )
 
@@ -1937,7 +1937,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
                 payload_preparation=_payload_preparation(stable_target),
             ),
-            team_agents=[],
+            member_names=[bot.agent_name],
             team_mode="coordinate",
         )
 
@@ -2018,7 +2018,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
                         user_id="@user:localhost",
                         response_envelope=response_envelope,
                     ),
-                    team_agents=[],
+                    member_names=[],
                     team_mode="coordinate",
                 ),
             )
@@ -2145,7 +2145,7 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
                         user_id="@user:localhost",
                         response_envelope=response_envelope_b,
                     ),
-                    team_agents=[],
+                    member_names=[],
                     team_mode="coordinate",
                 ),
             )
@@ -2162,7 +2162,7 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
                         user_id="@user:localhost",
                         response_envelope=response_envelope_c,
                     ),
-                    team_agents=[],
+                    member_names=[],
                     team_mode="coordinate",
                 ),
             )

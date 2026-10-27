@@ -405,7 +405,7 @@ async def pause_parent(
         active_model_name=None,
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id=agent_name, is_team=False)
-    request = [prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
+    request = [*prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
     ctx = RunContext(run_id=run_id, session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     record: RunRecord | None = None
     async for event in run_agent(

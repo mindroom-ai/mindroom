@@ -2,21 +2,23 @@
 
 OpenRouter forwards ``cache_control`` markers on content parts and function tools to Anthropic-family upstreams,
 which cache only up to explicit breakpoints, so only model ids routed to Anthropic are marked. Placement follows
-:mod:`mindroom.providers.cache_ladder`: the shared system prefix, the two newest cacheable messages, and the last
-tool, with one TTL and at most four markers.
+:mod:`mindroom.providers.cache_ladder`: the stable system prompt (the first system message), the two newest cacheable
+messages, and the last tool, with one TTL and at most four markers.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mindroom.providers.cache_ladder import (
     MESSAGE_RUNG_COUNT,
     mark_last_tool,
     mark_message_cache_rungs,
     prompt_cache_control,
-    split_shared_system_prefix,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = ["openrouter_prompt_cache_control", "request_kwargs_with_prompt_cache"]
 
@@ -38,13 +40,20 @@ def openrouter_prompt_cache_control(
     return prompt_cache_control(extended_cache_time=extended_cache_time)
 
 
-def _with_marked_system_prompt(message: dict[str, Any], cache_control: dict[str, str]) -> dict[str, Any]:
-    """Mark the system prompt, splitting the shared prefix from session context."""
-    content = message.get("content")
-    if not isinstance(content, str) or not content:
+def _with_marked_system_prompt(
+    message: dict[str, Any],
+    system: Sequence[str],
+    cache_control: dict[str, str],
+) -> dict[str, Any]:
+    """Send the joined system prompt as one text part per system text, marking the first, the stable prefix.
+
+    The turn's context follows in its own part, so it can change without invalidating the prefix.
+    """
+    if not isinstance(message.get("content"), str) or not system:
         return message
-    system_blocks = split_shared_system_prefix([{"type": "text", "text": content, "cache_control": cache_control}])
-    return {**message, "content": system_blocks}
+    marker = {"cache_control": dict(cache_control)}
+    parts = [{"type": "text", "text": text, **(marker if index == 0 else {})} for index, text in enumerate(system)]
+    return {**message, "content": parts}
 
 
 def _with_text_part_content(message: dict[str, Any]) -> dict[str, Any]:
@@ -62,8 +71,12 @@ def _contains_cache_marker(value: object) -> bool:
     return False
 
 
-def request_kwargs_with_prompt_cache(request_kwargs: dict[str, Any], cache_control: dict[str, str]) -> dict[str, Any]:
-    """Return Chat Completions kwargs with Claude ladder breakpoints.
+def request_kwargs_with_prompt_cache(
+    request_kwargs: dict[str, Any],
+    cache_control: dict[str, str],
+    system: Sequence[str],
+) -> dict[str, Any]:
+    """Return Chat Completions kwargs with Claude ladder breakpoints; ``system`` holds the request's system texts.
 
     A request that already carries any authored ``cache_control`` (on messages, tools, or the ``extra_body`` the
     SDK merges into the payload) is left untouched, so automatic markers never exceed the limit or mix TTLs with
@@ -81,7 +94,7 @@ def request_kwargs_with_prompt_cache(request_kwargs: dict[str, Any], cache_contr
     while system_count < len(prepared) and prepared[system_count].get("role") in _SYSTEM_ROLES:
         system_count += 1
     if system_count:
-        prepared[0] = _with_marked_system_prompt(prepared[0], cache_control)
+        prepared[0] = _with_marked_system_prompt(prepared[0], system, cache_control)
 
     conversation = prepared[system_count:]
     # Only messages that receive a marker keep the text-part form; others stay unchanged.

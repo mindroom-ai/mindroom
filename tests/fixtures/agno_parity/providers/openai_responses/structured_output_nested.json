@@ -230,7 +230,15 @@
       "input": [
         {
           "role": "developer",
-          "content": "Parse the scheduling request into a workflow."
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Parse the scheduling request into a workflow.",
+              "prompt_cache_breakpoint": {
+                "mode": "explicit"
+              }
+            }
+          ]
         },
         {
           "role": "user",

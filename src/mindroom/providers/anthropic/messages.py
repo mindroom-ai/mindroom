@@ -36,6 +36,7 @@ from anthropic.types.beta import (
 from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
+    STRUCTURED_OUTPUT_TOOL,
     Capabilities,
     ModelIdentity,
     ModelRequest,
@@ -48,6 +49,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
     hosted_tool_started,
+    structured_output_tools,
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
@@ -77,6 +79,7 @@ from mindroom.providers.anthropic.wire import (
     inline_url_media,
     parse_claude_usage,
     stop_reason_of,
+    supports_forced_tool_use,
     supports_prefill,
     supports_structured_outputs,
     tool_call_from_block,
@@ -103,7 +106,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import NativeHistoryRoute
+    from mindroom.llm.provider import NativeHistoryRoute, StructuredOutput
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -131,6 +134,16 @@ _VERTEX_ENDPOINTS = {
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
+def vertex_project_and_region(settings: ClaudeSettings) -> tuple[str | None, str | None]:
+    """Return the project and region a Vertex AI Claude client gets from its settings, None for one they leave unset.
+
+    ``client_params`` win over the values the builder filled from the model's settings and the runtime env, as the
+    client takes them.
+    """
+    client_params = settings.client_params or {}
+    return client_params.get("project_id") or settings.project_id, client_params.get("region") or settings.region
+
+
 def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | None:
     """Return the endpoint identity of one Claude route, or None on Bedrock, which has none.
 
@@ -143,8 +156,7 @@ def _route_endpoint(route: ClaudeRouteKind, settings: ClaudeSettings) -> str | N
     if route == "anthropic":
         return str(client_params.get("base_url") or ANTHROPIC_BASE_URL_DEFAULT).rstrip("/")
     if route == "vertexai_claude":
-        region = client_params.get("region") or settings.region
-        project = client_params.get("project_id") or settings.project_id
+        project, region = vertex_project_and_region(settings)
         base_url = (
             client_params.get("base_url")
             or settings.base_url
@@ -327,9 +339,10 @@ class ClaudeProvider:
         return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
-        """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
+        """Return the ``output_config.format`` value, or None on every route but ``native``.
 
-        A JSON-mode route relies on the prompt asking for JSON.
+        A ``forced_tool`` route answers through the forced ``structured_output`` call, and a JSON-mode route relies on
+        the prompt asking for JSON.
         """
         if schema is None or self.capabilities.structured_output != "native":
             return None
@@ -341,7 +354,7 @@ class ClaudeProvider:
         params: dict[str, Any] = {}
         if settings.max_tokens:
             params["max_tokens"] = settings.max_tokens
-        if settings.thinking and not overrides.disable_thinking:
+        if settings.thinking and not overrides.omit_thinking_setting:
             # A null field is unset, so an authored null ``block_binding`` is no binding on every route.
             params["thinking"] = {key: value for key, value in settings.thinking.items() if value is not None}
         if settings.output_config:
@@ -359,7 +372,7 @@ class ClaudeProvider:
         if replay is not None and replay.threshold is not None:
             params["context_management"] = compaction_context_management(replay.threshold)
         # The raw request overrides merge last, as the SDK merges a raw body.
-        params.update(_raw_request_params(settings, disable_thinking=overrides.disable_thinking))
+        params.update(_raw_request_params(settings, omit_thinking_setting=overrides.omit_thinking_setting))
         return params
 
     def _with_sampling_in_extra_body(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -381,11 +394,11 @@ class ClaudeProvider:
         The default ``drop_block`` binding goes only on the routes that take the beta, and rides on adaptive
         thinking, which these models run when the request sends no thinking setting; the API rejects it beside any
         other thinking type. An authored ``block_binding`` is kept, a null one counts as none, and a request that
-        disables thinking gets none.
+        omits the thinking setting gets none.
         """
         if (
             self.route not in _THINKING_BINDING_ROUTES
-            or request.overrides.disable_thinking
+            or request.overrides.omit_thinking_setting
             or not checks_thinking_prefix(self.identity.id)
         ):
             return params
@@ -453,16 +466,16 @@ class ClaudeProvider:
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
         )
         output_format = self._output_format(request.output_schema)
+        output_tool = structured_output_tools(self.capabilities.structured_output, request.output_schema)
         # Vertex rejects the tool-level strict field.
         strict_allowed = self.route != "vertexai_claude"
-        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
+        tools = format_claude_tools((*request.tools, *output_tool), strict_allowed=strict_allowed)
         strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
         params = self._request_params(request, output_format, strict_tools=strict_tools)
-        thinking_enabled = settings.thinking_enabled() and not overrides.disable_thinking
+        authors_thinking = settings.authors_thinking() and not overrides.omit_thinking_setting
         conversation = format_claude_messages(
             projected,
-            append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
-            citations=output_format is None,
+            append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
             earlier_thinking=self._replays_earlier_thinking(params),
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
@@ -477,6 +490,8 @@ class ClaudeProvider:
             extended_cache_time=settings.extended_cache_time,
             cache_system_prompt=settings.cache_system_prompt and overrides.prompt_cache,
         )
+        if output_tool:
+            body = {**body, "tool_choice": {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}}
         return _PreparedRequest(
             client=self._client(caller_retries=overrides.caller_retries),
             kwargs=body,
@@ -625,12 +640,12 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
     return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
-def _raw_request_params(settings: ClaudeSettings, *, disable_thinking: bool) -> dict[str, Any]:
-    """Return a copy of the authored raw request overrides, without thinking when the request disables it."""
+def _raw_request_params(settings: ClaudeSettings, *, omit_thinking_setting: bool) -> dict[str, Any]:
+    """Return a copy of the authored raw request overrides, without thinking when the request omits the setting."""
     request_params = {
         key: dict(value) if isinstance(value, dict) else value for key, value in (settings.request_params or {}).items()
     }
-    if disable_thinking:
+    if omit_thinking_setting:
         request_params.pop("thinking", None)
         if isinstance(request_params.get("extra_body"), dict):
             request_params["extra_body"].pop("thinking", None)
@@ -662,6 +677,18 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
     }
 
 
+def _structured_output(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> StructuredOutput:
+    """Return how the route answers an output schema.
+
+    The direct API answers natively where the model offers it; otherwise a forced tool call answers where the model
+    accepts one, and JSON mode where it does not.
+    """
+    if route == "anthropic" and supports_structured_outputs(model_id):
+        return "native"
+    manual_thinking = (settings.effective_thinking() or {}).get("type") == "enabled"
+    return "forced_tool" if supports_forced_tool_use(model_id, manual_thinking=manual_thinking) else "json_mode"
+
+
 def _claude_capabilities(
     route: ClaudeRouteKind,
     model_id: str,
@@ -670,7 +697,7 @@ def _claude_capabilities(
 ) -> Capabilities:
     """Return what one Claude route offers for this model."""
     return Capabilities(
-        structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
+        structured_output=_structured_output(route, model_id, settings),
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
@@ -682,7 +709,8 @@ def _claude_capabilities(
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
         provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
-        claude_family=True,
+        # Claude's tokenizer has no local encoding and counts more tokens than o200k for some text.
+        conservative_token_estimates=True,
     )
 
 
@@ -794,4 +822,4 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 
 
-__all__ = ["ClaudeProvider", "build_provider"]
+__all__ = ["ClaudeProvider", "build_provider", "vertex_project_and_region"]

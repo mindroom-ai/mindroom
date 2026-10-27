@@ -890,6 +890,43 @@ async def test_a_connected_account_is_refused_until_agent_keys_may_use_it(
     assert tls_upstream.hits == ["/echo"]
 
 
+@pytest.mark.usefixtures("github_oauth_client", "allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_a_read_only_account_reads_through_the_running_broker_and_a_stored_key_still_writes(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """An account allowed read-only gets the token for GET and for POST to the service's read paths only.
+
+    A stored key is the user's own choice of credential, so the opt-in's level never limits it.
+    """
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github={**_GITHUB_OAUTH, "read_only": {"post_paths": ["/echo"]}})
+    target = _routable_target()
+    connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), access="read")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        async with _worker_client(env, tmp_path / "runner") as client:
+            read = await client.get(tls_upstream.url("/echo"))
+            listed_post = await client.post(tls_upstream.url("/echo"), content=b"{}")
+            write = await client.post(tls_upstream.url("/ok"), content=b"{}")
+            save_secret(manager, target, "github", "s3cret")
+            write_with_key = await client.post(tls_upstream.url("/ok"), content=b"{}")
+    assert read.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert listed_post.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert (write.status_code, write.json()["error"]) == (403, "read_only")
+    assert "alice-oauth" not in write.text
+    assert write_with_key.status_code == 200
+    assert [seen.headers["authorization"] for seen in tls_upstream.requests] == [
+        ["Bearer alice-oauth"],
+        ["Bearer alice-oauth"],
+        ["Bearer s3cret"],
+    ]
+
+
 @pytest.mark.usefixtures("github_oauth_client")
 @pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
 @pytest.mark.asyncio

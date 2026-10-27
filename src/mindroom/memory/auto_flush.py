@@ -313,7 +313,7 @@ async def _extract_memory_summary(
     response = await complete_prompt(
         provider_registry.build_model_provider(config, runtime_paths, model_name),
         prompt,
-        role="Extract durable memory statements for long-term memory storage.",
+        instructions=["Extract durable memory statements for long-term memory storage."],
         run_id=invocation_id,
     )
     await record_helper_usage(

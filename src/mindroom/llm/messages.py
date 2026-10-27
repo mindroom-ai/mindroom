@@ -216,6 +216,33 @@ class Message:
         )
 
 
+def system_texts(messages: Sequence[Message]) -> tuple[str, ...]:
+    """Return the text of each system message in ``messages``, in order.
+
+    A request's system prompt is its system messages: the first is the stable prefix providers may cache, and the rest
+    hold the turn's context. A wire that takes one system text joins them with ``system_text``.
+    """
+    return tuple(text for message in messages if message.role == "system" and (text := message.get_content_string()))
+
+
+def system_text(messages: Sequence[Message]) -> str:
+    """Return the system prompt of ``messages`` as one text: each system message's text, a blank line between them."""
+    return "\n\n".join(system_texts(messages))
+
+
+def with_joined_system(messages: Sequence[Message]) -> list[Message]:
+    """Return ``messages`` with their system messages joined into one (``system_text``), in the first one's place.
+
+    Chat templates of many local models accept only one system message, so wires that send messages by role send the
+    system prompt as one.
+    """
+    first = next((index for index, message in enumerate(messages) if message.role == "system"), None)
+    if first is None or sum(message.role == "system" for message in messages) == 1:
+        return list(messages)
+    rest = [message for message in messages[first:] if message.role != "system"]
+    return [*messages[:first], Message(role="system", content=system_text(messages)), *rest]
+
+
 _NO_ERROR_TEXT = "The tool call failed without an error message."
 
 
@@ -271,5 +298,8 @@ __all__ = [
     "is_own_model_message",
     "model_provenance",
     "read_model_provenance",
+    "system_text",
+    "system_texts",
     "tool_result_view",
+    "with_joined_system",
 ]

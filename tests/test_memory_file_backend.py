@@ -19,8 +19,9 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
+from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -299,7 +300,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
             return [
                 SearchHit(
                     content="Published semantic memory.",
-                    meta_data={"source_path": "memory/2026-06-02.md", "distances": 0.2},
+                    meta_data={"source_path": "memory/2026-06-02.md", DISTANCE_KEY: 0.2},
                 ),
             ]
 
@@ -364,8 +365,8 @@ async def test_semantic_memory_scores_each_hit_by_its_similarity(
     class FakeKnowledge:
         async def asearch(self, _query: str, _limit: int) -> list[SearchHit]:
             return [
-                SearchHit(content="Close note.", meta_data={"source_path": "memory/notes.md", "distances": 0.25}),
-                SearchHit(content="Far note.", meta_data={"source_path": "memory/notes.md", "distances": 0.75}),
+                SearchHit(content="Close note.", meta_data={"source_path": "memory/notes.md", DISTANCE_KEY: 0.25}),
+                SearchHit(content="Far note.", meta_data={"source_path": "memory/notes.md", DISTANCE_KEY: 0.75}),
             ]
 
     async def resolve_access(*_args: object, **_kwargs: object) -> object:
@@ -387,6 +388,57 @@ async def test_semantic_memory_scores_each_hit_by_its_similarity(
     assert [(result["memory"], result["score"]) for result in results] == [("Close note.", 0.75), ("Far note.", 0.25)]
 
 
+@pytest.mark.asyncio
+async def test_semantic_memory_scores_the_hits_the_owned_store_returns(
+    storage_path: Path,
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hits from a real collection search score as one minus their cosine distance, nearest first."""
+    root = storage_path / "memory-root"
+    memory_file = root / "memory" / "notes.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("Close note.\nFar note.\n", encoding="utf-8")
+    collection = KnowledgeCollection(path=storage_path, name="mindroom_knowledge_memory_hits")
+    collection.reset()
+    collection.write_source_rows(
+        "memory/notes.md",
+        [
+            StoredRow(
+                id=row_id,
+                document=document,
+                metadata={"source_path": "memory/notes.md", "name": "notes"},
+                embedding=embedding,
+            )
+            for row_id, document, embedding in (("far", "Far note.", [0.0, 1.0]), ("close", "Close note.", [1.0, 0.0]))
+        ],
+    )
+    hits = collection.search([1.0, 0.0], limit=2)
+
+    class RealHitsKnowledge:
+        async def asearch(self, _query: str, _limit: int) -> list[SearchHit]:
+            return hits
+
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(knowledge=RealHitsKnowledge(), availability=KnowledgeAvailability.READY)
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args: [memory_file.resolve()])
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
+
+    results = await semantic_file_search.search_semantic_file_memories(
+        "note",
+        scope_user_id="agent_general",
+        root=root,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        search_config=config.memory.search,
+        limit=5,
+    )
+
+    assert [result["memory"] for result in results] == ["Close note.", "Far note."]
+    assert [result["score"] for result in results] == [pytest.approx(1.0, abs=1e-6), pytest.approx(0.0, abs=1e-6)]
+
+
 class _FakeSemanticTimingKnowledge:
     async def asearch(self, query: str, limit: int) -> list[SearchHit]:
         assert query == "semantic memory"
@@ -394,7 +446,7 @@ class _FakeSemanticTimingKnowledge:
         return [
             SearchHit(
                 content="Published semantic memory.",
-                meta_data={"source_path": "memory/2026-06-02.md", "distances": 0.2},
+                meta_data={"source_path": "memory/2026-06-02.md", DISTANCE_KEY: 0.2},
             ),
         ]
 
@@ -2527,9 +2579,9 @@ async def test_file_backend_refuses_to_rewrite_undecodable_memory_file(storage_p
 def test_semantic_memory_scores_keep_the_hybrid_rank_order() -> None:
     """A keyword-lifted hit keeps its rank: each score is the best cosine similarity at or below it."""
     hits = [
-        SearchHit(content="keyword match", meta_data={"source_path": "a.md", "distances": 0.7}),
-        SearchHit(content="close vector", meta_data={"source_path": "b.md", "distances": 0.2}),
-        SearchHit(content="far vector", meta_data={"source_path": "c.md", "distances": 0.5}),
+        SearchHit(content="keyword match", meta_data={"source_path": "a.md", DISTANCE_KEY: 0.7}),
+        SearchHit(content="close vector", meta_data={"source_path": "b.md", DISTANCE_KEY: 0.2}),
+        SearchHit(content="far vector", meta_data={"source_path": "c.md", DISTANCE_KEY: 0.5}),
     ]
 
     results = semantic_file_search._memory_results_from_hits(hits, scope_user_id="agent")

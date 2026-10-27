@@ -38,7 +38,6 @@ from mindroom.constants import (
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
 from mindroom.history import summary_rows
-from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState, replayed_summary_text
 from mindroom.legacy_revision_replay import summary_depends_on_source
@@ -499,22 +498,6 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
 def first_scope_session(scope: HistoryScope, session_id: str) -> ConversationSession:
     """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
     return new_scope_session(session_id=session_id, scope_id=scope.scope_id, is_team=scope.kind == "team")
-
-
-def strip_kept_replay_fields(storage: ConversationStore, *, session: ConversationSession, scope: HistoryScope) -> None:
-    """Store compaction's strip of stale replay fields from the runs of ``scope`` it kept, a load's runs edited in place.
-
-    Only messages change, under the write lock, so what another writer stored meanwhile, such as a completed approval
-    or a linked reply event, stays; a strip that finds no stale field stores nothing. ``session`` then holds what a
-    load returns.
-    """
-
-    def strip(runs: list[AnyRunRecord]) -> list[AnyRunRecord]:
-        kept = [run for run in runs if replays_in_scope(run, scope)]
-        stripped = strip_stale_anthropic_replay_fields([message for run in kept for message in run.messages])
-        return kept if stripped else []
-
-    storage.rewrite_run_messages(session.session_id, session.kind, strip, session=session)
 
 
 def _read_preserved_scope_seen_event_ids(metadata: dict[str, Any] | None, scope: HistoryScope) -> set[str]:

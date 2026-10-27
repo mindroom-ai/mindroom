@@ -20,7 +20,6 @@ from mindroom.history.storage import (
     append_fold,
     read_chunk_basis,
     record_summary_usage,
-    strip_kept_replay_fields,
     update_scope_state_on_latest,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
@@ -414,10 +413,6 @@ async def compact_scope_history(
         return None
 
     compacted_at = _iso_utc_now()
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(strip_kept_replay_fields, session=session, scope=scope),
-    )
     await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
@@ -683,7 +678,7 @@ async def _report_committed(
 def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
     """Resolve one estimator together with the kind describing its arithmetic."""
     model_id = summary_model.identity.id
-    conservative_fallback = summary_model.capabilities.claude_family
+    conservative_fallback = summary_model.capabilities.conservative_token_estimates
     estimator = partial(
         estimate_compaction_input_tokens,
         model_id=model_id,

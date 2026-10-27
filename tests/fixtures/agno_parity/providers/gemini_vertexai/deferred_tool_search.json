@@ -32,9 +32,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -56,13 +54,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
-        "external_execution": false,
         "name": "tool_search",
         "parameters": {
           "properties": {
@@ -78,13 +73,10 @@
           "required": [],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
-        "external_execution": false,
         "name": "call_tool",
         "parameters": {
           "properties": {
@@ -102,13 +94,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Look up one order by id.",
-        "external_execution": false,
         "name": "lookup_order",
         "parameters": {
           "properties": {
@@ -121,13 +110,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Email the invoice for one order.",
-        "external_execution": false,
         "name": "send_invoice",
         "parameters": {
           "properties": {
@@ -140,7 +126,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -148,6 +133,11 @@
   "parsed": {
     "message": {
       "provider_data": {
+        "gemini_parts": [
+          {
+            "function_call_id": "parity_order"
+          }
+        ],
         "mindroom_model": {
           "id": "gemini-3.8-flash",
           "provider": "Google"
@@ -199,31 +189,31 @@
             {
               "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
               "name": "call_tool",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "arguments": {
                     "description": "The function's arguments as a JSON object.",
-                    "type": "OBJECT"
+                    "type": "object"
                   },
                   "name": {
                     "description": "Exact function name from tool_search.",
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
                   "name"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             },
             {
               "description": "Return the forecast for one city.",
               "name": "get_weather",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "city": {
                     "description": "City name.",
-                    "type": "STRING"
+                    "type": "string"
                   },
                   "unit": {
                     "description": "Temperature unit.",
@@ -231,31 +221,31 @@
                       "celsius",
                       "fahrenheit"
                     ],
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
                   "city"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             },
             {
               "description": "Search deferred functions by name or keywords and return their full definitions, or list them.\nCall a returned function with call_tool(name, arguments).",
               "name": "tool_search",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "max_results": {
                     "description": "Maximum number of function definitions to return, at most 20.",
-                    "type": "INTEGER"
+                    "type": "integer"
                   },
                   "query": {
                     "description": "Function name, toolkit name, or keywords describing the needed capability.\nLeave it empty to list the deferred functions without their definitions.",
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [],
-                "type": "OBJECT"
+                "type": "object"
               }
             }
           ]

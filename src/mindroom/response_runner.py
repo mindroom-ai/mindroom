@@ -216,7 +216,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.llm.runs import RunRequirement
-    from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
@@ -988,7 +987,7 @@ class _TeamResponseRequest:
     """Typed carrier for one team response request plus team-specific inputs."""
 
     request: ResponseRequest
-    team_agents: tuple[MatrixID, ...]
+    member_names: tuple[str, ...]
     team_mode: str
     reason_prefix: str = "Team request"
     resolution_reason: str | None = None
@@ -3520,12 +3519,7 @@ class ResponseRunner:
         if team is None:
             await self.generate_response(request)
             return
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-        await self.generate_team_response_helper(
-            request,
-            team_agents=[registry.current_id(name) for name in team.agents],
-            team_mode=team.mode,
-        )
+        await self.generate_team_response_helper(request, member_names=team.agents, team_mode=team.mode)
 
     def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Wake response-local CLI owners and return sources still owned by the journal."""
@@ -4462,15 +4456,15 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        team_agents: list[MatrixID],
+        member_names: Sequence[str],
         team_mode: str,
         reason_prefix: str = "Team request",
         resolution_reason: str | None = None,
     ) -> str | None:
-        """Generate a team response with lifecycle locking and queued-message state."""
+        """Generate a team response of ``member_names`` with lifecycle locking and queued-message state."""
         team_request = _TeamResponseRequest(
             request=request,
-            team_agents=tuple(team_agents),
+            member_names=tuple(member_names),
             team_mode=team_mode,
             reason_prefix=reason_prefix,
             resolution_reason=resolution_reason,
@@ -4517,12 +4511,11 @@ class ResponseRunner:
             target=resolved_target,
             user_id=request.user_id,
         )
+        agent_names = list(team_request.member_names)
         session_scope = self.deps.state_writer.team_history_scope(
-            list(team_request.team_agents),
+            agent_names,
             requester_user_id=retry_execution_identity.requester_id,
         )
-        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
-        agent_names = [registry.entity_name_or_username(mid) for mid in team_request.team_agents]
         request = replace(request, participating_agent_names=tuple(agent_names))
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(
@@ -4635,7 +4628,7 @@ class ResponseRunner:
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
-        mode = TeamMode.COORDINATE if team_request.team_mode == "coordinate" else TeamMode.COLLABORATE
+        mode = TeamMode(team_request.team_mode)
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(

@@ -15,3 +15,19 @@ spec:
   maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
   {{- end }}
 {{- end }}
+{{- if and .Values.approvedEgress.enabled .Values.approvedEgress.podDisruptionBudget.create }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mindroom-runtime.approvedEgressName" . }}
+  labels:
+    {{- include "mindroom-runtime.approvedEgressLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 6 }}
+  maxUnavailable: 0
+  {{- /* With one replica, the default policy would also refuse to evict an unready proxy, so a drain would wait on a pod that serves nothing. */}}
+  unhealthyPodEvictionPolicy: AlwaysAllow
+{{- end }}

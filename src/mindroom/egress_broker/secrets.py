@@ -19,11 +19,14 @@ if TYPE_CHECKING:
 __all__ = [
     "PERSONAL_WORKER_SCOPES",
     "EgressServiceStatus",
+    "OAuthAccess",
     "OAuthStatus",
     "OAuthStatusReader",
     "Secret",
     "SecretMissing",
     "SecretNeedsReconnect",
+    "SecretReadOnly",
+    "SecretRequest",
     "SecretResult",
     "SecretServiceChanged",
     "SecretUnavailable",
@@ -40,6 +43,10 @@ __all__ = [
 _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
 # Worker scopes whose sandbox and egress store belong to one requester.
 PERSONAL_WORKER_SCOPES: frozenset[str] = frozenset({"user", "user_agent"})
+
+# What Agent Keys may do with an allowed account: only read (the service's `read_only` says how its API reads), or
+# read and write.
+type OAuthAccess = Literal["read", "read_write"]
 
 
 def is_personal_target(target: ResolvedWorkerTarget | None) -> bool:
@@ -194,6 +201,20 @@ def delete_secret(
 
 
 @dataclass(frozen=True)
+class SecretRequest:
+    """What the broker knows about the request it resolves a secret for, which an access level can depend on.
+
+    `method` is the request's method as sent, `path` its path without the query, `websocket` whether it asks to switch
+    to a WebSocket, and `method_override` whether it carries a header that asks the server to read another method.
+    """
+
+    method: str
+    path: str
+    websocket: bool = False
+    method_override: bool = False
+
+
+@dataclass(frozen=True)
 class Secret:
     """The secret the broker injects for one request; its value never appears in a repr."""
 
@@ -236,6 +257,17 @@ class SecretUnavailable:
 
 
 @dataclass(frozen=True)
+class SecretReadOnly:
+    """The `provider` account may only read for this service, and the request may write; the connection was not read.
+
+    `requester_owned` says the account is the requester's own, which only they can allow to write.
+    """
+
+    provider: str
+    requester_owned: bool = False
+
+
+@dataclass(frozen=True)
 class SecretServiceChanged:
     """The service no longer has the definition whose rule routed the request, so its credential may be for other hosts.
 
@@ -243,7 +275,9 @@ class SecretServiceChanged:
     """
 
 
-type SecretResult = Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretServiceChanged
+type SecretResult = (
+    Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretReadOnly | SecretServiceChanged
+)
 
 
 @dataclass(frozen=True)
@@ -256,7 +290,7 @@ class OAuthStatus:
     accounts in the scope (`shared_sandbox`: a requester's own account in a sandbox that several requesters share).
     `shared_worker_opt_in` marks such a sandbox where the service allows it anyway, so every user of the agent can
     act with the connected account. `reuse_enabled` says whether Agent Keys may use the connection for this service;
-    without it a connected account serves only its tools.
+    without it a connected account serves only its tools. `reuse_access` is the level it may use it at, None while off.
     """
 
     provider: str
@@ -269,6 +303,7 @@ class OAuthStatus:
     unavailable_reason: Literal["shared_sandbox"] | None = None
     shared_worker_opt_in: bool = False
     reuse_enabled: bool = False
+    reuse_access: OAuthAccess | None = None
 
 
 type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]

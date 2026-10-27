@@ -433,7 +433,7 @@ async def test_team_answer_completes_its_reply(tmp_path: Path) -> None:
     ):
         event_id = await runner.generate_team_response_helper(
             _plain_request(_target()),
-            team_agents=[bot.matrix_id],
+            member_names=[bot.agent_name],
             team_mode="coordinate",
         )
 
@@ -463,7 +463,7 @@ async def test_streamed_team_answer_completes_its_reply(tmp_path: Path) -> None:
     ):
         await runner.generate_team_response_helper(
             _plain_request(_target()),
-            team_agents=[bot.matrix_id],
+            member_names=[bot.agent_name],
             team_mode="coordinate",
         )
 

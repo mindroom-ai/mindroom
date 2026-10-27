@@ -423,9 +423,6 @@ async def test_complete_drains_the_stream_and_returns_the_turn() -> None:
                 description="d",
                 parameters={"type": "object"},
                 strict=None,
-                requires_confirmation=None,
-                external_execution=None,
-                approval_type=None,
             ),
         ],
     )
@@ -456,14 +453,16 @@ def test_model_request_defaults_are_immutable_and_empty() -> None:
 
     assert (request.tools, request.tool_choice, request.output_schema) == ((), None, None)
     assert request.overrides == RequestOverrides()
-    assert RequestOverrides().disable_thinking is False
+    assert RequestOverrides().omit_thinking_setting is False
     with pytest.raises(FrozenInstanceError):
         request.tool_choice = "none"  # type: ignore[misc]
 
 
 def test_capabilities_default_to_the_least_capable_route() -> None:
     assert Capabilities() == Capabilities(structured_output="json_mode", omitted_media=frozenset())
-    assert Capabilities(claude_family=True, omitted_media=frozenset({"video"})).omitted_media == {"video"}
+    assert Capabilities(conservative_token_estimates=True, omitted_media=frozenset({"video"})).omitted_media == {
+        "video",
+    }
 
 
 # --- errors ----------------------------------------------------------------------------------------------------

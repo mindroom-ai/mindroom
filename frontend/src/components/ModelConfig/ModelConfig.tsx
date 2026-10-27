@@ -40,6 +40,10 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/toaster";
 import { Badge } from "@/components/ui/badge";
+import {
+  SERVICE_NAME_CHARACTERS,
+  SERVICE_NAME_PATTERN,
+} from "@/lib/serviceNames";
 import { cn } from "@/lib/utils";
 import { ProviderLogo } from "./ProviderLogos";
 import { getProviderInfo, getProviderList } from "@/lib/providers";
@@ -186,6 +190,18 @@ function isValidHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateModelName(modelName: string): boolean {
+  if (SERVICE_NAME_PATTERN.test(modelName)) {
+    return true;
+  }
+  toast({
+    title: "Error",
+    description: `Model name can only include ${SERVICE_NAME_CHARACTERS}`,
+    variant: "destructive",
+  });
+  return false;
 }
 
 function parseOptionalPositiveInteger(value: string): number | null {
@@ -755,6 +771,10 @@ export function ModelConfig() {
       return;
     }
 
+    if (!validateModelName(targetModelName)) {
+      return;
+    }
+
     if (originalModelName === "default" && targetModelName !== "default") {
       toast({
         title: "Error",
@@ -917,6 +937,10 @@ export function ModelConfig() {
         description: "Model name and model ID are required",
         variant: "destructive",
       });
+      return;
+    }
+
+    if (!validateModelName(modelName)) {
       return;
     }
 

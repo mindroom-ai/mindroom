@@ -111,9 +111,6 @@ async def test_standard_minimal_standard_requests_keep_paired_history(
             description="available",
             parameters={"type": "object", "properties": {}},
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         )
         await complete(provider, ModelRequest(messages=history, tools=[tool]))
         assert history == before

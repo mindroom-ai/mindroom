@@ -11,7 +11,6 @@ from mindroom.judgment.execution import run_judgment, run_judgment_thread
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers import registry as provider_registry
-from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
     from mindroom.config.judgment import LLMJudgmentConfig
@@ -66,8 +65,7 @@ async def judge_with_llm(
             Message(role="system", content=_INSTRUCTION),
             Message(role="user", content=prepared.body.decode()),
         )
-        with without_provider_tools():
-            turn = await complete(provider, ModelRequest(messages=messages, tool_choice="none"))
+        turn = await complete(provider, ModelRequest(messages=messages, tool_choice="none"))
         if turn.tool_calls or not isinstance(turn.message.content, str):
             raise JudgmentError(failure="invalid_response")
         usage = turn.usage

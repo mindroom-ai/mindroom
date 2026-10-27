@@ -29,9 +29,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -53,13 +51,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Look up one order by id.",
-        "external_execution": false,
         "name": "lookup_order",
         "parameters": {
           "properties": {
@@ -72,13 +67,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Email the invoice for one order.",
-        "external_execution": false,
         "name": "send_invoice",
         "parameters": {
           "properties": {
@@ -91,7 +83,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -166,7 +157,15 @@
       "input": [
         {
           "role": "developer",
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          "content": [
+            {
+              "type": "input_text",
+              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+              "prompt_cache_breakpoint": {
+                "mode": "explicit"
+              }
+            }
+          ]
         },
         {
           "role": "user",
@@ -202,8 +201,6 @@
             ],
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function"
         },
         {
@@ -220,8 +217,6 @@
             ],
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function",
           "defer_loading": true
         },
@@ -239,8 +234,6 @@
             ],
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function",
           "defer_loading": true
         }

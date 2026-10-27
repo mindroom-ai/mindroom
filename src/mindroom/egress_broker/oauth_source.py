@@ -4,8 +4,9 @@ Tokens come only from `mindroom.oauth.credential_lifecycle`, which refreshes a t
 same serialized transaction the tools sharing that connection use. Credential scope follows each provider's own
 policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token. Such a
 requester's own account is used only in a sandbox that belongs to that requester; see `shared_worker_oauth`.
-The broker neither reads nor refreshes a connection for a service until someone allowed it (`oauth_reuse`); the egress
-pages show its state through the Connections portal's own status reader.
+The broker neither reads nor refreshes a connection for a service until someone allowed it (`oauth_reuse`), nor for a
+request that an account allowed only to read may not serve; the egress pages show its state through the Connections
+portal's own status reader.
 Logs carry the service, the provider id, and error types, never tokens or connect links.
 """
 
@@ -17,12 +18,14 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
+from mindroom.egress_broker.rules import read_only_allows
 from mindroom.egress_broker.secrets import (
     OAuthStatus,
     Secret,
     SecretMissing,
     SecretNeedsReconnect,
+    SecretReadOnly,
     SecretResult,
     SecretUnavailable,
     is_personal_target,
@@ -47,9 +50,11 @@ from mindroom.oauth.service import (
 from mindroom.workers.runtime import primary_worker_backend_is_dedicated
 
 if TYPE_CHECKING:
+    from mindroom.config.egress_broker import EgressReadOnly
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.egress_broker.secrets import SecretRequest
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -106,11 +111,15 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget,
+    request: SecretRequest,
+    read_only: EgressReadOnly | None,
 ) -> SecretResult:
     """Return a fresh access token from the scope's connection to `provider_id`, refreshing it when near expiry.
 
     Without an opt-in for `service` (`oauth_reuse`) the connection is never read: the result names the provider, that
     Agent Keys may not use it (`reuse_off`), and whether it is the requester's own (`requester_owned`), with no link.
+    Nor is it read for a `request` that an opt-in allowing only reads may not serve, as the service's `read_only`
+    declares (`read_only_allows`); that result is `SecretReadOnly`.
     Only a rejected grant or an unreadable credential asks the user to act (`SecretNeedsReconnect`); any other refresh
     failure is `SecretUnavailable`, as the tools treat it, and the scope then answers that without another grant
     for `_TRANSIENT_FAILURE_BACKOFF_SECONDS`. `service` names the egress service in the one warning logged for a
@@ -133,12 +142,15 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     if provider.requester_scoped_credentials and context.worker_target is None:
         # No requester to bind the connection to, so there is no stored token to use or allow.
         return SecretMissing()
-    if not oauth_reuse_enabled(context, service, provider.id):
+    level = oauth_reuse_access(context, service, provider.id)
+    if level is None:
         return SecretMissing(
             provider=provider.id,
             reuse_off=True,
             requester_owned=provider.requester_scoped_credentials,
         )
+    if level == "read" and not read_only_allows(read_only, request):
+        return SecretReadOnly(provider=provider.id, requester_owned=provider.requester_scoped_credentials)
     credentials = _refreshed_credentials(service, context)
     if isinstance(credentials, SecretNeedsReconnect | SecretUnavailable):
         return credentials
@@ -160,8 +172,8 @@ def oauth_status(
     """Return the scope's connection state for `provider_id` without refreshing; None for an unknown provider.
 
     A stored connection whose access token expired still counts as connected while it can be refreshed.
-    `reuse_enabled` says whether Agent Keys may use it for `service`; without that the connection is not read, so it
-    reports nothing connected. A None `worker_target` is the global store that agents without a worker scope read.
+    `reuse_enabled` says whether Agent Keys may use it for `service`, and `reuse_access` at which level; without that
+    the connection is not read, so it reports nothing connected. A None `worker_target` is the global store that agents without a worker scope read.
     Binding the keyword arguments gives `secrets.service_status` its `oauth_status` reader.
     """
     provider = _registered_provider(service, provider_id, config, runtime_paths)
@@ -176,10 +188,10 @@ def oauth_status(
     if access == "refused":
         return shared_worker_unavailable_status(provider, runtime_paths)
     context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
-    reuse_enabled = oauth_reuse_enabled(context, service, provider.id)
+    reuse_access = oauth_reuse_access(context, service, provider.id)
     credentials = None
     reset_required = False
-    if reuse_enabled:
+    if reuse_access is not None:
         try:
             credentials = load_oauth_credentials_snapshot_sync(context).credentials
         except OAuthCredentialUnreadableError:
@@ -194,7 +206,8 @@ def oauth_status(
         reset_required=reset_required,
         service_account=oauth_provider_service_account_configured(provider, runtime_paths),
         shared_worker_opt_in=access == "allowed",
-        reuse_enabled=reuse_enabled,
+        reuse_enabled=reuse_access is not None,
+        reuse_access=reuse_access,
     )
 
 

@@ -240,6 +240,27 @@ def test_opt_in_field_survives_the_authored_dump(field: str) -> None:
     assert getattr(Config(**config.authored_model_dump()).egress_broker.services["github"], field) is True
 
 
+def test_read_only_defaults_to_none() -> None:
+    """A service offers read-only access only when it says so, and an authored declaration survives the dump."""
+    rules = [{"host": "api.example.com", "auth": {"type": "bearer"}}]
+
+    assert EgressService.model_validate({"rules": rules}).read_only is None
+    declared = EgressService.model_validate({"rules": rules, "read_only": {"post_paths": ["/v1/search"]}})
+    assert declared.read_only is not None
+    assert declared.read_only.post_paths == ["/v1/search"]
+    assert declared.authored_model_dump()["read_only"] == {"post_paths": ["/v1/search"]}
+    assert EgressService.model_validate({"rules": rules, "read_only": {}}).read_only.post_paths == []  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("read_only", [{"post_paths": ["v1/search"]}, {"post_paths": [""]}, {"paths": ["/x"]}])
+def test_read_only_post_paths_must_start_with_slash(read_only: dict[str, object]) -> None:
+    """Each read path is a path prefix like a rule's, and the declaration takes no other field."""
+    with pytest.raises(ValidationError, match=r"must start with /|Extra inputs are not permitted"):
+        EgressService.model_validate(
+            {"rules": [{"host": "api.example.com", "auth": {"type": "bearer"}}], "read_only": read_only},
+        )
+
+
 def test_restrict_only_needs_no_auth_on_its_rules() -> None:
     """A restrict-only service has no credential, so its rules need no auth; how it limits paths is in test_rules."""
     service = EgressService.model_validate(
@@ -273,6 +294,7 @@ def test_a_service_that_sends_a_credential_needs_auth_on_every_rule() -> None:
         ("oauth_provider", "github"),
         ("placeholder_env", {"GH_TOKEN": "mindroom-brokered"}),
         ("oauth_on_shared_workers", True),
+        ("read_only", {"post_paths": []}),
     ],
 )
 def test_restrict_only_refuses_credential_settings(field: str, value: object) -> None:
@@ -307,6 +329,8 @@ def test_restrict_only_keeps_a_presets_rules_and_names_but_not_its_login_or_plac
     # An authored login is still refused: only the preset's own is dropped.
     with pytest.raises(ValidationError, match="cannot set oauth_provider"):
         EgressService.model_validate({"preset": "github", "restrict_only": True, "oauth_provider": "github"})
+    # A preset's read-only declaration is about its credential, so a limit drops it too.
+    assert EgressService.model_validate({"preset": "google_calendar", "restrict_only": True}).read_only is None
 
 
 def test_a_config_service_cannot_be_restrict_only() -> None:

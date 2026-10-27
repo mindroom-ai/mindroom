@@ -70,6 +70,18 @@ _REUSE_OFF_OWN_ACCOUNT = (
     "No {service} key is set for this shared agent, and Agent Keys may not use the user's own {provider} account. "
     "Ask the user to allow it at manage_url, then retry."
 )
+# A request that an account Agent Keys may use only to read may not serve, said to whoever can allow writes, as above.
+_READ_ONLY = (
+    "Agent Keys may use the {provider} account for {service} only to read, so this request was refused. "
+    "Ask the user to allow read and write at manage_url if the agent needs it, then retry."
+)
+_READ_ONLY_SHARED_ACCOUNT = "Agent Keys may use this shared agent's {provider} account for {service} only to read, so this request was refused. "
+_READ_ONLY_SHARED = (
+    _READ_ONLY_SHARED_ACCOUNT + "Only its credential managers ({managers}) can allow read and write, at manage_url."
+)
+_READ_ONLY_SHARED_WITHOUT_MANAGERS = (
+    _READ_ONLY_SHARED_ACCOUNT + "Only an administrator can allow read and write, at manage_url."
+)
 _PATH_SHARED = _PATH_OUTSIDE + "Only its credential managers ({managers}) can change this, at manage_url."
 _PATH_ADMINISTRATOR = _PATH_OUTSIDE + "Only an administrator can change this, at manage_url."
 # The spec words `bad_request` for the ambiguous-path refusal; a request the broker cannot read at all has no path.
@@ -95,6 +107,10 @@ _WITHOUT_PAGE = {
 }
 _REUSE_OFF_WITHOUT_PAGE = (
     "No {service} key or allowed {provider} account: each user sets these " + CONNECTIONS_PAGE_NOT_SERVED
+)
+_READ_ONLY_WITHOUT_PAGE = (
+    "Agent Keys may use the {provider} account for {service} only to read: each user allows writes "
+    + CONNECTIONS_PAGE_NOT_SERVED
 )
 _WITHOUT_PAGE_LINKED = {
     **_WITHOUT_PAGE,
@@ -136,6 +152,8 @@ def _template(  # noqa: PLR0911 - one text per case, checked in order
     without_page = not (shared or personal_page)
     if code == "credential_not_configured" and reuse_off:
         return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
+    if code == "read_only":
+        return _read_only_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "credential_not_configured" and connectable and not without_page:
         return _CONNECTABLE
     if code == "credential_not_configured" and shared:
@@ -166,6 +184,14 @@ def _reuse_off_template(managers: Sequence[str], *, shared: bool, without_page: 
     return _REUSE_OFF_SHARED if managers else _REUSE_OFF_SHARED_WITHOUT_MANAGERS
 
 
+def _read_only_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
+    if without_page:
+        return _READ_ONLY_WITHOUT_PAGE
+    if not shared or requester_owned:
+        return _READ_ONLY
+    return _READ_ONLY_SHARED if managers else _READ_ONLY_SHARED_WITHOUT_MANAGERS
+
+
 def refusal_body(
     code: str,
     *,
@@ -193,7 +219,8 @@ def refusal_body(
     the operator's service (`by_operator`) names an administrator whatever the scope, since only an administrator
     edits it. A `credential_not_configured` with `reuse_off` (nobody allowed Agent Keys to use the `provider` account)
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
-    requester's own (`requester_owned`).
+    requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
+    writes the same way.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.

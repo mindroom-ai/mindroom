@@ -62,8 +62,10 @@ class FakeMem0ScopedMemory:
         *,
         filters: dict[str, object] | None = None,
         top_k: int = 100,
+        threshold: float = 0.1,
     ) -> dict[str, list[MemoryResult]]:
-        """Return entries with a simple substring-based score."""
+        """Return entries with a simple substring-based score; real scores are not modeled, so no threshold applies."""
+        del threshold
         user_id = filters.get("user_id") if filters is not None else None
         lowered = query.lower()
         entries: list[MemoryResult] = []

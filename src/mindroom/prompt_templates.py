@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import re
 from string import Formatter
+from typing import TYPE_CHECKING
 
 from mindroom.prompts import PROMPT_TEMPLATE_FIELDS
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__ = [
     "PromptTemplateError",
     "build_agent_identity_context",
+    "openai_compat_identity",
     "render_prompt_template",
     "validate_prompt_template_fields",
 ]
@@ -109,6 +114,25 @@ def build_agent_identity_context(
         model_id=model_id,
         openai_compat_history_guidance=(openai_compat_history_guidance if include_openai_compat_guidance else ""),
     )
+
+
+def openai_compat_identity(
+    prompts: Mapping[str, str],
+    *,
+    openai_identity: str,
+    matrix_identity: str,
+    openai_prompt_name: str,
+    matrix_prompt_name: str,
+) -> str:
+    """Return an agent's or team leader's identity in the OpenAI-compatible API, from its two rendered identities.
+
+    It is ``openai_identity``, opened by ``matrix_identity`` and one blank line when the operator overrides the Matrix
+    template ``matrix_prompt_name`` in ``prompts`` but not the API template ``openai_prompt_name``, so their authored
+    identity still applies in the API, whatever whitespace it ends with.
+    """
+    if matrix_prompt_name in prompts and openai_prompt_name not in prompts:
+        return f"{matrix_identity.rstrip()}\n\n{openai_identity}"
+    return openai_identity
 
 
 def validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:

@@ -102,21 +102,28 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
     return min(_MAX_INPUT_TOKENS, int(context_window * _INPUT_CONTEXT_FRACTION))
 
 
-def _tool_awaits_decision(definition: ToolSpec) -> bool:
-    """Return whether a call of this tool waits for a decision: it pauses its run, asks as its job, or runs elsewhere."""
+def _awaits_decision(function: ToolFunction) -> bool:
+    """Return whether a call of this function waits for a decision.
+
+    It does when it pauses its run, asks as its job, or runs elsewhere.
+    """
     return bool(
-        definition.requires_confirmation
-        or definition.external_execution
-        or definition.approval_type == JOB_APPROVAL_TYPE,
+        function.requires_confirmation or function.external_execution or function.approval_type == JOB_APPROVAL_TYPE,
     )
 
 
-def _review_tools(definitions: Sequence[ToolSpec], tools: SkillTools) -> tuple[PreparedTools, list[str]]:
+def _review_tools(
+    definitions: Sequence[ToolSpec],
+    tools: SkillTools,
+    *,
+    awaiting_decision: frozenset[str] = frozenset(),
+) -> tuple[PreparedTools, list[str]]:
     """Answer the calls of every tool the request defines, but run only the skill tools, as the review's.
 
     Like Hermes' denial message, every other tool answers with the skill tools the review can use. A tool whose call
-    waits for a decision gets no function, so the loop answers that it does not exist or is not available instead of
-    pausing the review. Returns the functions and the skill tools that run, in the order the review prompt lists them.
+    waits for a decision (``awaiting_decision``) gets no function, so the loop answers that it does not exist or is not
+    available instead of pausing the review. Returns the functions and the skill tools that run, in the order the review
+    prompt lists them.
     """
     # The functions run the review's own methods, which validate their arguments as the agent's coercing functions
     # would, such as refusing an action outside the enum.
@@ -126,7 +133,7 @@ def _review_tools(definitions: Sequence[ToolSpec], tools: SkillTools) -> tuple[P
         "get_skill_reference": validate_call(tools.get_skill_reference),
         "get_skill_script": validate_call(tools.get_skill_script),
     }
-    answered = {definition.name: definition for definition in definitions if not _tool_awaits_decision(definition)}
+    answered = {definition.name: definition for definition in definitions if definition.name not in awaiting_decision}
     runnable = [name for name in _SKILL_TOOL_LINES if name in answered]
 
     async def deny(**_arguments: object) -> str:
@@ -182,7 +189,8 @@ def _fork(
     sent = _context_tokens(config, captured.model, captured.model_name, final.metrics)
     if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
         return None
-    functions, runnable = _review_tools(request.tools, tools)
+    awaiting_decision = frozenset(function.name for function in captured.functions if _awaits_decision(function))
+    functions, runnable = _review_tools(request.tools, tools, awaiting_decision=awaiting_decision)
     if "skill_manage" not in runnable:
         return None
     return _ReviewRequest(

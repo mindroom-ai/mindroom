@@ -80,13 +80,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="add_instructions",
-            label="Add Instructions",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
             name="all",
             label="All",
             type="boolean",

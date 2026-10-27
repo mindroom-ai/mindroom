@@ -1225,7 +1225,6 @@ visibility = [
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
@@ -1640,7 +1639,9 @@ depends_on = ["mindroom.config.agent"]
 path = "mindroom.custom_tools.memory"
 depends_on = [
     "mindroom.embeddings.errors",
+    "mindroom.failure_text",
     "mindroom.memory",
+    "mindroom.redaction",
 ]
 
 [[modules]]
@@ -2756,7 +2757,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.prompt_tokens"
-depends_on = ["mindroom.token_budget"]
+depends_on = ["mindroom.llm", "mindroom.token_budget"]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -2832,7 +2833,7 @@ visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
 path = "mindroom.providers.cache_ladder"
-depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks", "mindroom.system_prompt"]
+depends_on = ["mindroom.hooks.enrichment", "mindroom.providers.claude_wire_blocks"]
 visibility = [
     "mindroom.providers.anthropic.prompt_cache",
     "mindroom.providers.openai",
@@ -2898,7 +2899,6 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.summary_rows",
     "mindroom.background_tasks",
     "mindroom.constants",
@@ -3439,6 +3439,7 @@ depends_on = [
     "mindroom.matrix.message_builder",
     "mindroom.media_inputs",
     "mindroom.metadata_merge",
+    "mindroom.prompt_templates",
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
@@ -3522,6 +3523,7 @@ depends_on = [
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
+    "mindroom.credentials.manager",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
@@ -3689,17 +3691,11 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
-    "mindroom.memory._mem0_openai",
     "mindroom.memory._mem0_usage",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.memory._backend"]
-
-[[modules]]
-path = "mindroom.memory._mem0_openai"
-depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -3776,6 +3772,7 @@ visibility = [
     "mindroom.config.main",
     "mindroom.memory._prompting",
     "mindroom.memory.functions",
+    "mindroom.teams",
 ]
 
 [[modules]]
@@ -4781,14 +4778,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
     "mindroom.constants",
-    "mindroom.entity_resolution",
     "mindroom.history.session_context",
     "mindroom.history.types",
-    "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
-    "mindroom.history.team_scope",
     "mindroom.session_storage.lanes",
 ]
 
@@ -6521,7 +6514,7 @@ expose = [
     "members.materialize_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
-    "presentation.format_team_response",
+    "presentation.finished_run_text",
     "presentation.strip_team_display",
     "resume.continue_paused_team_run",
     "runtime.MemberEvent",
@@ -7966,11 +7959,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.claude_replay_compat"
-depends_on = ["mindroom.history.run_visibility"]
-visibility = ["mindroom.history.storage", "mindroom.history.summary_input"]
-
-[[modules]]
 path = "mindroom.history.message_content"
 depends_on = [
     "mindroom.token_budget",
@@ -8059,7 +8047,6 @@ visibility = [
 path = "mindroom.history.summary_input"
 depends_on = [
     "mindroom.constants",
-    "mindroom.history.claude_replay_compat",
     "mindroom.history.message_content",
     "mindroom.timing",
     "mindroom.token_budget",
@@ -8538,6 +8525,19 @@ from = ["mindroom.tools.agno_compat_visualization"]
 expose = ["WorkspaceVisualizationTools"]
 
 [[modules]]
+path = "mindroom.tools.mem0"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_mem0"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_mem0"
+depends_on = ["mindroom.failure_text", "mindroom.redaction"]
+visibility = ["mindroom.tools.mem0"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_mem0"]
+expose = ["UserFilterMem0Tools"]
+
+[[modules]]
 path = "mindroom.tools.newspaper4k"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
 
@@ -8927,6 +8927,7 @@ visibility = [
 path = "mindroom.agent_cli.minimal_agent"
 depends_on = [
     "mindroom.agent_cli.bash",
+    "mindroom.agent_loop.prompt",
     "mindroom.agent_cli.context",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",

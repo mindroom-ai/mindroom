@@ -310,7 +310,7 @@ async def test_git_error_line_names_the_manage_link_but_never_the_connect_link(
     json_message: str,
 ) -> None:
     """Git shows only the ERR line, so it carries the manage link itself; the token-bearing connect link never."""
-    await broker(_CONFIG, resolve_secret=lambda _claims, _service, _routed: lookup, manage_url=MANAGE_URL)
+    await broker(_CONFIG, resolve_secret=lambda _claims, _service, _routed, _request: lookup, manage_url=MANAGE_URL)
     client = proxy_client(broker.token())
     url = tls_upstream.url("/repo.git/info/refs?service=git-upload-pack")
 

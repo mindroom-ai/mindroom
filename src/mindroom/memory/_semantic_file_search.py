@@ -11,7 +11,7 @@ from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import list_knowledge_files
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import DISTANCE_KEY, SOURCE_PATH_KEY
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
@@ -95,7 +95,7 @@ def _memory_results_from_hits(
     # Hits arrive in hybrid rank order, which word matches can lift above closer vectors. Each score is the best cosine
     # similarity at or below its rank, so scores stay on the cosine scale merged keyword matches rank against, and
     # sorting by them keeps the hybrid order.
-    scores = list(accumulate((1.0 - hit.meta_data["distances"] for hit in reversed(hits)), max))[::-1]
+    scores = list(accumulate((1.0 - hit.meta_data[DISTANCE_KEY] for hit in reversed(hits)), max))[::-1]
     results: list[MemoryResult] = []
     for rank, (hit, score) in enumerate(zip(hits, scores, strict=True), start=1):
         source_file = hit.meta_data.get(SOURCE_PATH_KEY)

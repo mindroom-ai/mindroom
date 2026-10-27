@@ -85,7 +85,7 @@ async def suggest_responder(
         result = await complete_prompt(
             provider,
             prompt,
-            role="Route messages to appropriate agents or teams",
+            instructions=["Route messages to appropriate agents or teams"],
             schema=_RoutingSuggestion,
         )
         await record_system_usage(result.record, runtime_paths=runtime_paths, kind="routing")

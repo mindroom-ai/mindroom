@@ -498,9 +498,6 @@ async def test_vertex_strips_provider_level_strict_but_keeps_a_schema_property_n
         description="Update profile",
         parameters=parameters,
         strict=True,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
 
