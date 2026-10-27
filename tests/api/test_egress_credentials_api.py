@@ -2262,6 +2262,52 @@ def test_deleting_a_service_with_its_own_account_removes_that_account_and_its_op
     assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"])[0] is True
 
 
+def test_unticking_its_own_account_removes_that_account(oauth_egress_portal: dict[str, Any]) -> None:
+    """The account goes with the checkbox, so deleting and adding the service again finds nothing to resurrect."""
+    portal = oauth_egress_portal
+    alice = "@alice:example.org"
+    own = oauth_source.separate_account_provider(portal["providers"]["google_drive"], "mine")
+    _put_own_account_service(portal)
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_and_allow(portal, "alice", "personal", "mine", "google_drive")
+
+    unticked = _put_service(portal, "alice", "personal", "mine", {"preset": "google_drive"})
+    after_untick = _stored_connection(portal, alice, "personal", own)
+    deleted = _delete_service(portal, "alice", "personal", "mine")
+    _put_own_account_service(portal)
+
+    assert (unticked.status_code, deleted.status_code) == (204, 204)
+    assert after_untick == (False, None)
+    row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
+    assert (row["connected"], row["reuse_enabled"]) == (False, False)
+    assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"])[0] is True
+
+
+def test_changing_the_provider_of_a_service_with_its_own_account_removes_the_old_account(
+    oauth_egress_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The old provider's account of the service goes, and the service starts unconnected on the new provider."""
+    portal = oauth_egress_portal
+    alice = "@alice:example.org"
+    calendar = _fake_provider(
+        provider_id="google_calendar",
+        credential_service="google_calendar_oauth",
+        client_config_services=("test_calendar_oauth_client",),
+    )
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (*portal["providers"].values(), calendar))
+    _republish(portal)
+    _put_own_account_service(portal)
+    _connect_and_allow(portal, "alice", "personal", "mine", "google_drive")
+
+    _put_own_account_service(portal, "google_calendar")
+    drive_own = oauth_source.separate_account_provider(portal["providers"]["google_drive"], "mine")
+
+    assert _stored_connection(portal, alice, "personal", drive_own) == (False, None)
+    row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
+    assert (row["provider"], row["connected"], row["reuse_enabled"]) == ("google_calendar", False, False)
+
+
 @pytest.mark.parametrize("separate_first", [True, False], ids=["own-to-tools", "tools-to-own"])
 def test_switching_between_its_own_and_the_tools_account_stops_the_opt_in(
     oauth_egress_portal: dict[str, Any],

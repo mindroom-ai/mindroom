@@ -433,7 +433,7 @@ When a config service sets the same variable, the config value wins, and the edi
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
 Its row then connects, allows, and disconnects an account of its own, and the agent's tools and every other service keep the account they use.
 Until its own account is connected the service has none: it never uses the tools' account instead.
-Deleting the service also removes its account and its opt-in.
+Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
 
 Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
 

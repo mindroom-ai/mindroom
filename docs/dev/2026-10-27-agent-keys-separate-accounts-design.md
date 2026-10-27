@@ -22,7 +22,7 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
 - **The existing service row manages it.** The Agent Keys connect, disconnect and opt-in routes for that service, and its status, resolve the separate connection instead of the provider's own; there are no new routes or dashboard sections.
   The opt-in entry stays keyed by the service name, with the same fields (`provider`, `access`, `enabled_by`, `enabled_at`) plus `credential_service`, the connection it unlocks.
   An entry counts as off while it names another connection than the one the service uses now, and an entry without `credential_service` names the provider's own, so ticking or unticking the box never carries an opt-in to the other account, not even for a request routed while the save lands.
-  Deleting the service removes its connection and its opt-in.
+  Deleting the service, unticking the box, or changing its `oauth_provider` removes its own connection and its opt-in, so no refresh token stays behind and ticking the box again starts unconnected.
 - **A request picks such a service with a header.** Routing is unchanged without it, so a user service that ties with an operator's service on host and path is never chosen by accident.
   A request may add `X-Agent-Keys-Service: <name>`; routing then matches only that service's rules, after the same restriction checks as today, and a request no rule of that service matches is refused with 403 `service_not_matched`.
   A missing, empty or repeated header value is a 400 `bad_request`. The broker removes the header before forwarding.
@@ -47,5 +47,5 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
 - Config: `oauth_separate_account` needs `oauth_provider`, is refused on config services and shared scopes, and names `f"{base}__{service}_oauth"`.
 - Connect and disconnect through the service's Agent Keys routes store and remove only the separate connection; the provider's own connection and the tools are untouched; status shows the separate account's label.
 - Broker: no header routes as today; `X-Agent-Keys-Service` picks the named service and its separate connection's token, under the opt-in's access level; a name whose rules do not match is 403 `service_not_matched`; a bad header is 400; the header is never forwarded.
-- Deleting the service removes its connection and opt-in.
+- Deleting the service, unticking the box, or changing its provider removes its own connection and opt-in.
 - Tool and editor: the flag and header appear in `list_egress_credentials`, and the checkbox saves `oauth_separate_account`.

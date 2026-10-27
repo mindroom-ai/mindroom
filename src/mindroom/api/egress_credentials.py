@@ -553,6 +553,7 @@ def put_user_service(
         raise HTTPException(409, str(UserServiceConflictError(name)), headers=CONNECTIONS_HEADERS)
     service = _parse_user_service(body)
     _require_hosts_within_operator_policy(operator, service)
+    stored = load_user_services(agent.manager, agent.target).get(name)
     try:
         save_user_service(
             agent.manager,
@@ -564,6 +565,12 @@ def put_user_service(
         )
     except ValueError as exc:
         raise _unprocessable(str(exc)) from exc
+    if (
+        stored is not None
+        and stored.oauth_separate_account
+        and (not service.oauth_separate_account or service.oauth_provider != stored.oauth_provider)
+    ):
+        _remove_account(request, agent, name, stored, by=requester_id)
 
 
 @router.delete("/agents/{agent_name}/services/{name}", status_code=204)
@@ -585,19 +592,8 @@ def delete_user_service_route(
     operator = agent.config.egress_broker
     own = None if name in operator.services else load_user_services(agent.manager, agent.target).get(name)
     if delete_user_service(agent.manager, agent.target, name, config_services=operator.services):
-        provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), own, name)
-        if provider is not None:
-            _set_account_reuse(agent, provider, name, enabled=False, by=requester_id)
-            if own is not None and own.oauth_separate_account:
-                # Only this service uses its own account, so the account goes with it.
-                context = broker_credential_context(
-                    provider,
-                    agent.config,
-                    agent.runtime_paths,
-                    agent.manager,
-                    agent.target,
-                )
-                reset_oauth_credentials_blocking(context)
+        if own is not None:
+            _remove_account(request, agent, name, own, by=requester_id)
         return
     if name in operator.services:
         detail = f"Service '{name}' is configured by your administrator and cannot be deleted here"
@@ -639,6 +635,20 @@ async def _account_provider(
         headers=CONNECTIONS_HEADERS,
     )
     return agent, egress_service, provider
+
+
+def _remove_account(request: Request, agent: _ResolvedAgent, name: str, stored: EgressService, *, by: str) -> None:
+    """Stop Agent Keys using the account service `name` used as `stored`, and remove it if it was the service's own.
+
+    Only that service used its own account, so the account goes when the service does or stops having one.
+    """
+    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), stored, name)
+    if provider is None:
+        return
+    _set_account_reuse(agent, provider, name, enabled=False, by=by)
+    if stored.oauth_separate_account:
+        context = broker_credential_context(provider, agent.config, agent.runtime_paths, agent.manager, agent.target)
+        reset_oauth_credentials_blocking(context)
 
 
 def _set_account_reuse(
