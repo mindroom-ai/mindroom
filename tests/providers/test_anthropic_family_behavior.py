@@ -789,6 +789,14 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
             True,
             id="bedrock-authored-binding",
         ),
+        pytest.param(
+            "bedrock_claude",
+            "anthropic.claude-sonnet-5-5",
+            {"thinking": {"type": "adaptive", "block_binding": None}},
+            False,
+            False,
+            id="bedrock-null-binding",
+        ),
         pytest.param("bedrock_claude", "anthropic.claude-sonnet-5", {}, False, True, id="bedrock-unchecked-model"),
     ],
 )
@@ -821,6 +829,7 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
         [_LOOP_THINKING, _LOOP_REDACTED, _LOOP_CALL],
     ]
     assert (wire.requests[0].headers.get("anthropic-beta") == _THINKING_BINDING_BETA) is bound
+    assert ("block_binding" in (wire.body().get("thinking") or {})) is bound
 
 
 @pytest.mark.asyncio
@@ -873,6 +882,13 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             RequestOverrides(),
             {"type": "adaptive", "block_binding": _DROP_STALE},
             id="authored-null-binding",
+        ),
+        pytest.param(
+            "claude-opus-5",
+            {"thinking": {"type": "adaptive", "block_binding": None}},
+            RequestOverrides(),
+            {"type": "adaptive"},
+            id="unchecked-null-binding",
         ),
         pytest.param(
             "anthropic/claude-sonnet-5-5",

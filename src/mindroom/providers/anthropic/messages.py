@@ -342,7 +342,8 @@ class ClaudeProvider:
         if settings.max_tokens:
             params["max_tokens"] = settings.max_tokens
         if settings.thinking and not overrides.disable_thinking:
-            params["thinking"] = dict(settings.thinking)
+            # A null field is unset, so an authored null ``block_binding`` is no binding on every route.
+            params["thinking"] = {key: value for key, value in settings.thinking.items() if value is not None}
         if settings.output_config:
             params["output_config"] = dict(settings.output_config)
         if settings.stop_sequences:

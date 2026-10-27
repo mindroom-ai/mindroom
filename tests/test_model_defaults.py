@@ -10,6 +10,7 @@ import yaml
 
 from mindroom import model_defaults
 from mindroom.config.main import Config
+from mindroom.providers.anthropic.wire import checks_thinking_prefix
 
 
 def test_default_model_strings_are_not_redeclared_in_source() -> None:
@@ -175,6 +176,23 @@ def test_native_compaction_covers_current_claude_models() -> None:
     """Every current Claude default must take the native compaction path."""
     for model_id in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"):
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
+
+
+def test_thinking_prefix_check_covers_current_claude_models() -> None:
+    """Every Claude preset on a Claude wire must get the thinking binding, so a default bump cannot leave one out."""
+    presets = [
+        *model_defaults.CONFIG_INIT_MODEL_PRESETS.values(),
+        *(
+            preset
+            for alternatives in model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES.values()
+            for _, preset in alternatives
+        ),
+    ]
+    claude_ids = {
+        preset.id for preset in presets if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
+    }
+    assert len(claude_ids) >= 6
+    assert [model_id for model_id in sorted(claude_ids) if not checks_thinking_prefix(model_id)] == []
 
 
 def test_current_google_and_openrouter_specialist_models() -> None:

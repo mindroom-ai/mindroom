@@ -177,7 +177,8 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
 
 # The Claude models whose API checks each replayed thinking block against the system prompt, tools, and messages sent
 # before it (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join them.
-CLAUDE_PREFIX_CHECKED_THINKING_MODELS = (_ANTHROPIC_FABLE, _ANTHROPIC_OPUS, _ANTHROPIC_SONNET, _ANTHROPIC_HAIKU)
+# Literal ids, because a model keeps the check after the preferred defaults move on from it.
+CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:
