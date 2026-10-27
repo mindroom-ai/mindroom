@@ -21,7 +21,9 @@ from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.bot import AgentBot
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
@@ -39,6 +41,7 @@ from mindroom.history.storage import (
 from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -47,7 +50,10 @@ from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
+from mindroom.teams.spec import TeamMode
 from mindroom.text_ingress_dispatch import _run_claimed_response
+from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionReplay,
@@ -97,6 +103,59 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
     )
     await store.warm()
     return store
+
+
+def test_a_team_reply_records_the_history_scope_of_the_members_it_formed_with(tmp_path: Path) -> None:
+    """The pending record of an ad hoc team's reply names the history scope that all its formed members share."""
+    config = bind_runtime_paths(
+        Config(
+            agents={name: AgentConfig(display_name=name.title()) for name in ("calculator", "general", "research")},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    members = [
+        TeamResolutionMember(agent=MatrixID.parse(f"@mindroom_{name}:localhost"), name=name, status=status)
+        for name, status in (
+            ("research", TeamMemberStatus.ELIGIBLE),
+            ("general", TeamMemberStatus.HIDDEN_FROM_SENDER),
+            ("calculator", TeamMemberStatus.ELIGIBLE),
+        )
+    ]
+    form_team = TeamResolution.team(
+        intent=TeamIntent.IMPLICIT_THREAD_TEAM,
+        requested_members=[member.agent for member in members],
+        member_statuses=members,
+        eligible_members=[member.agent for member in members if member.status is TeamMemberStatus.ELIGIBLE],
+        mode=TeamMode.COLLABORATE,
+    )
+    state_writer = ConversationStateWriter(
+        ConversationStateWriterDeps(
+            runtime=SimpleNamespace(config=config),
+            logger=MagicMock(),
+            runtime_paths=runtime_paths_for(config),
+            agent_name="research",
+        ),
+    )
+    store = TurnStore(
+        TurnStoreDeps(
+            agent_name="research",
+            turn_records=MagicMock(),
+            redacted_event_ids=AsyncMock(),
+            relations=MagicMock(),
+            legacy_responses_file=None,
+            state_writer=state_writer,
+            resolver=MagicMock(),
+            tool_runtime=MagicMock(),
+        ),
+    )
+
+    scope = store.response_history_scope(
+        ResponseAction(kind="team", form_team=form_team),
+        requester_user_id="@alice:localhost",
+    )
+
+    assert scope == HistoryScope(kind="team", scope_id="team_calculator+research")
 
 
 @pytest.mark.asyncio

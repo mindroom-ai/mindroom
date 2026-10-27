@@ -22,10 +22,9 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
-from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import EventJournalStore, PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history.team_scope import ad_hoc_team_scope_id
+from mindroom.history.session_context import resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     HookContextSupport,
@@ -59,11 +58,10 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
     from mindroom.knowledge.search import AgentKnowledge
-    from mindroom.matrix.identity import MatrixID
     from mindroom.media_inputs import MediaInputs
     from mindroom.reply_scope import SpanSlot
 
@@ -88,11 +86,6 @@ def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> Runtim
         config_path=config_path or tmp_path / "config.yaml",
         storage_path=tmp_path,
     )
-
-
-def _entity_alias_for_test(config: Config, runtime_paths: RuntimePaths, matrix_id: MatrixID) -> str:
-    registry = entity_identity_registry(config, runtime_paths)
-    return registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
 
 
 def _config() -> Config:
@@ -308,24 +301,15 @@ def _build_response_runner(
     )
 
     def _team_history_scope_for_test(
-        team_agents: Iterable[MatrixID],
+        member_names: Sequence[str],
         *,
         requester_user_id: str | None = None,
     ) -> HistoryScope:
-        if bot.agent_name in config.teams:
-            return HistoryScope(kind="team", scope_id=bot.agent_name)
-        member_names = [_entity_alias_for_test(config, runtime_paths, mid) for mid in team_agents]
-        scope_id = (
-            ad_hoc_team_scope_id(
-                member_names,
-                config.agents,
-                requester_user_id=requester_user_id,
-            )
-            or "team_"
-        )
-        return HistoryScope(
-            kind="team",
-            scope_id=scope_id,
+        return resolve_bound_team_scope(
+            member_names=member_names,
+            config=config,
+            team_name=bot.agent_name,
+            requester_user_id=requester_user_id,
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)

@@ -4517,12 +4517,12 @@ class ResponseRunner:
             target=resolved_target,
             user_id=request.user_id,
         )
-        session_scope = self.deps.state_writer.team_history_scope(
-            list(team_request.team_agents),
-            requester_user_id=retry_execution_identity.requester_id,
-        )
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         agent_names = [registry.entity_name_or_username(mid) for mid in team_request.team_agents]
+        session_scope = self.deps.state_writer.team_history_scope(
+            agent_names,
+            requester_user_id=retry_execution_identity.requester_id,
+        )
         request = replace(request, participating_agent_names=tuple(agent_names))
         if not request.prompt.strip():
             return await self._finalize_empty_prompt_locked(

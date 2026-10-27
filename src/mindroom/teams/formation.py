@@ -87,6 +87,11 @@ class TeamResolution:
     reason: str | None = None
     mode: TeamMode | None = None
 
+    @property
+    def eligible_member_names(self) -> tuple[str, ...]:
+        """Return the entity names of ``eligible_members``, in their order, as member evaluation named them."""
+        return tuple(member.name for member in self.member_statuses if member.status is TeamMemberStatus.ELIGIBLE)
+
     @classmethod
     def none(cls) -> TeamResolution:
         """Return the no-team outcome."""

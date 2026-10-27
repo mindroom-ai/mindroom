@@ -456,10 +456,7 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
 
     assert seen_agent_names == [["private_worker", "calculator"]]
     bot._conversation_state_writer.team_history_scope.assert_called_once_with(
-        [
-            fixture_entity_matrix_id("private_worker", "localhost", runtime_paths),
-            fixture_entity_matrix_id("calculator", "localhost", runtime_paths),
-        ],
+        ["private_worker", "calculator"],
         requester_user_id="@alice:localhost",
     )
 

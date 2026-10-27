@@ -69,20 +69,17 @@ def resolve_bound_team_scope(
     member_names: Sequence[str],
     config: Config,
     team_name: str | None,
-    execution_identity: ToolExecutionIdentity | None = None,
+    requester_user_id: str | None = None,
 ) -> HistoryScope:
     """Resolve the history scope backing one live team run: the configured team's, else its members' ad hoc scope.
 
-    ``team_name`` is the configured team's name, or None for an ad hoc team. Every team run names a member, as a
-    configured team lists one and an ad hoc team forms from them, so an ad hoc team that names none is refused.
+    ``team_name`` is the configured team's name; None, or a name no configured team has, means an ad hoc team. Every
+    team run names a member, as a configured team lists one and an ad hoc team forms from them, so an ad hoc team that
+    names none is refused.
     """
     if team_name is not None and team_name in config.teams:
         return HistoryScope(kind="team", scope_id=team_name)
-    team_scope_id = ad_hoc_team_scope_id(
-        member_names,
-        config.agents,
-        requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
-    )
+    team_scope_id = ad_hoc_team_scope_id(member_names, config.agents, requester_user_id=requester_user_id)
     if team_scope_id is None:
         msg = "An ad hoc team that names no member has no history scope"
         raise ValueError(msg)
@@ -132,7 +129,7 @@ def load_bound_scope_session(
             member_names=member_names,
             config=config,
             team_name=team_name,
-            execution_identity=execution_identity,
+            requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
         ),
         session_id=session_id,
         runtime_paths=runtime_paths,

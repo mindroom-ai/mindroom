@@ -1845,7 +1845,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
                 user_id="@user:localhost",
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
             ),
-            team_agents=[],
+            team_agents=[bot.matrix_id],
             team_mode="coordinate",
         )
 
@@ -1931,7 +1931,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
                 response_envelope=_envelope(source_event_id="$event", target=stable_target),
                 payload_preparation=_payload_preparation(stable_target),
             ),
-            team_agents=[],
+            team_agents=[bot.matrix_id],
             team_mode="coordinate",
         )
 
