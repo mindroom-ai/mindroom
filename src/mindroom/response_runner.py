@@ -4635,7 +4635,7 @@ class ResponseRunner:
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
-        mode = TeamMode.COORDINATE if team_request.team_mode == "coordinate" else TeamMode.COLLABORATE
+        mode = TeamMode(team_request.team_mode)
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(
