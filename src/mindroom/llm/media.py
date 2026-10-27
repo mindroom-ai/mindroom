@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Media attached to messages, with the dict codecs of their stored shapes.
 
-Field names are the keys stored runs, summary-row segments, tool-job payloads, and the worker media envelope hold, so
-they decode without migration. ``content`` travels as base64 text in dicts, except that ``File`` writes UTF-8
+Field names are the keys stored message rows, tool-job payloads, and the worker media envelope hold, and those of the
+Agno-layout runs only the storage v2 conversion still reads. ``content`` travels as base64 text in dicts, except that ``File`` writes UTF-8
 ``text/*`` content as text and marks a ``text/*`` file's base64 content with ``content_encoding``.
 """
 

@@ -1,8 +1,9 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Run records, tool executions, and pause requirements, with the dict shapes stored in run rows.
+"""Run records, tool executions, and pause requirements, with their stored dict shapes.
 
-Keys and ``RunStatus`` strings are those existing run rows, summary-row segments, and delegation state hold, so they
-decode without migration; keys the records do not model are ignored on read.
+The conversation store splits a record's dict across its run, message, and tool rows (``session_storage/codec.py``).
+Keys and ``RunStatus`` strings are also those delegation state holds and those of the Agno-layout run rows, which only
+the storage v2 conversion still reads; keys the records do not model are ignored on read.
 """
 
 from __future__ import annotations
@@ -373,7 +374,7 @@ class RunRecord(_RunRecordCommon):
     agent_display_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored ``run_data`` dict, keys in stored order."""
+        """Return the stored dict, keys in stored order, which the store splits across its run, message, and tool rows."""
         return {
             **self._scalars_dict({"agent_id": self.agent_id, "agent_name": self.agent_display_name}),
             "status": self.status.value,
@@ -385,7 +386,7 @@ class RunRecord(_RunRecordCommon):
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RunRecord:
-        """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
+        """Rebuild from a stored dict, or an Agno-layout ``run_data`` the conversion reads, ignoring unmodeled keys."""
         return cls(agent_id=data.get("agent_id"), agent_display_name=data.get("agent_name"), **_common_from_dict(data))
 
 
@@ -404,7 +405,7 @@ class TeamRunRecord(_RunRecordCommon):
     ended_member_runs: list[RunRecord] = field(default_factory=list, compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored ``run_data`` dict, keys in stored order; ``member_responses`` is always present."""
+        """Return the stored dict, keys in stored order, split as a run's is; ``member_responses`` is always present."""
         return {
             **self._scalars_dict({"team_id": self.team_id}),
             **self._metrics_dict(),
@@ -417,7 +418,7 @@ class TeamRunRecord(_RunRecordCommon):
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TeamRunRecord:
-        """Rebuild from a stored ``run_data`` dict, ignoring keys this record does not model."""
+        """Rebuild from a stored dict, or an Agno-layout ``run_data`` the conversion reads, ignoring unmodeled keys."""
         # LEGACY_COMPAT: Team run dicts carry the ``team_name`` label of their members.
         # Legacy format: team ``run_data`` rows hold ``team_name``, ``Team-`` followed by the requested member names
         # joined by ``-``; no MindRoom code read it.

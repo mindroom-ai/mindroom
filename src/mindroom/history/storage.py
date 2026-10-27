@@ -1,8 +1,9 @@
 """Runtime owner of durable compaction state.
 
 This module owns the durable compaction-state locations of a stored session;
-outside it, only the session loader and run-insertion rules in
-``session_storage/store.py`` and the open-time conversion in
+outside it, only the session loader and the run-metadata patch in
+``session_storage/store.py``, which adds the event ids a patch links to the summary
+row covering the run, and the open-time conversion in
 ``session_storage/legacy_agno3_conversion.py`` read or write summary rows directly:
 
 - the summary rows of the conversation log (``history/summary_rows.py``), positioned
