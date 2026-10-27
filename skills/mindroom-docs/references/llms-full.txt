@@ -14925,7 +14925,7 @@ The agent gets that denial as the call's result and can recover on its own: ever
 Once the router has joined, the agent retries the call, and the card appears as usual.
 The router accepts that invite only when its [`router.accept_invites`](https://docs.mindroom.chat/configuration/router/) allows the inviting agent's Matrix account; for a team, that is the team's account rather than the member agent's.
 Otherwise enable that setting or add the router to the room manually, then retry.
-An [adopted personal room](https://docs.mindroom.chat/personal-rooms/#adopting-an-existing-room) keeps the router out unless its record sets `router_user_id`, so `invite_router` refuses there instead of inviting a router the room would remove again.
+An [adopted personal room](https://docs.mindroom.chat/personal-rooms/#adopting-an-existing-room) keeps the router out unless its record lists it in `router_user_id` or `additional_user_ids`, so `invite_router` refuses there instead of inviting a router the room would remove again.
 
 # OAuth Integration Framework
 
