@@ -28,7 +28,7 @@ Runtime paths on `chat.example.com`, each needed only for its feature:
 - `/api/computers/*`, with WebSocket upgrades, for the [worker computer](../tools/worker-computer.md#reverse-proxy-and-host-routing)
 - `/api/triggers/*` for [external triggers](../external-triggers.md)
 - `/api/usage/export` and `/api/budgets/service` for the [usage export](../usage.md#usage-export-service) and [budget](../budgets.md#budget-service) services, each under its own Access application
-- `/reports/public/*` for [published reports](../tools/agent-orchestration.md)
+- `/reports/public/*` and `/reports/private/*` for [published and private run reports](../tools/agent-orchestration.md)
 
 `admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](trusted-upstream-auth.md#dashboard-on-its-own-host), behind the same first rule.
 
@@ -58,6 +58,8 @@ ingress:
     service: http://mindroom-runtime:8765
   - service: http_status:404
 ```
+
+The example routes only the Connections paths; add a runtime rule like those for each other feature you use.
 
 MindRoom Chat's service worker answers browser navigations on its origin with its cached app, so list the other paths users open in the browser on this host in the client chart:
 
