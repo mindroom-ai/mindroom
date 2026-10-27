@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -10,12 +11,12 @@ import pytest
 from anthropic.types import Message as AnthropicMessage
 from mem0.memory.storage import SQLiteManager
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.memory import add_agent_memory, list_all_agent_memories, search_agent_memories
+from mindroom.memory import add_agent_memory, list_all_agent_memories, search_agent_memories, store_conversation_memory
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -24,17 +25,31 @@ if TYPE_CHECKING:
 
     from mindroom.embeddings.base import EmbeddingPurpose
 
-# The query embeds exactly like the first memory. Chroma's default space is squared L2, and Mem0 scores a hit as
-# 1 / (1 + distance), so the memories score 1, 1 / 1.4, and 1 / 3, and the opposite one, at distance 16, falls below
-# the 0.1 threshold Mem0 searches with.
+
+def _unit(cosine: float, axis: int = 1) -> list[float]:
+    """Return a unit vector with ``cosine`` similarity to the query vector, leaning towards ``axis``."""
+    vector = [cosine, 0.0, 0.0, 0.0]
+    vector[axis] = math.sqrt(1 - cosine**2)
+    return vector
+
+
+# The query embeds as [1, 0, 0, 0]. Chroma measures squared L2 distance, which is 2 - 2 * cosine for unit vectors.
 _QUERY = "PR review"
 _VECTORS = {
-    "PR review": [1.0, 0.0, 0.0],
-    "Hardware notes": [0.8, 0.6, 0.0],
-    "Grocery list": [0.0, 0.0, 1.0],
-    "Opposite of everything": [-3.0, 0.0, 0.0],
+    "PR review": _unit(1.0),
+    "Hardware notes": _unit(0.8),
+    "Barely related": _unit(0.15),
+    "Hardly related": _unit(0.05),
+    "Grocery list": _unit(0.0),
+    # Not unit length: squared L2 distance 16 from the query.
+    "Opposite of everything": [-3.0, 0.0, 0.0, 0.0],
 }
-_OTHER_TEXT_VECTOR = [0.0, 1.0, 0.0]
+_UNRELATED_AGENT_MEMORIES = ["Recipe one", "Recipe two", "Recipe three", "Recipe four", "Recipe five"]
+for _axis, _text in enumerate(_UNRELATED_AGENT_MEMORIES):
+    _VECTORS[_text] = _unit(0.0, axis=1 + _axis % 3)
+_TEAM_MEMORY = "Team PR review checklist"
+_VECTORS[_TEAM_MEMORY] = _unit(1.0)
+_OTHER_TEXT_VECTOR = _unit(0.0, axis=2)
 
 
 class _TableEmbedder:
@@ -95,10 +110,12 @@ def config(tmp_path: Path) -> Config:
         ),
         llm=_MemoryLLMConfig(provider="anthropic", config={"model": "claude-sonnet-5-5", "api_key": "sk-ant-test"}),
     )
-    return bind_runtime_paths(
-        Config(agents={"general": AgentConfig(display_name="General", role="General assistant")}, memory=memory),
-        runtime_paths,
-    )
+    agents = {
+        "general": AgentConfig(display_name="General", role="General assistant"),
+        "calculator": AgentConfig(display_name="Calculator", role="Calculator assistant"),
+    }
+    teams = {"pair": TeamConfig(display_name="Pair", role="Pair of agents", agents=["general", "calculator"])}
+    return bind_runtime_paths(Config(agents=agents, teams=teams, memory=memory), runtime_paths)
 
 
 @pytest.fixture
@@ -118,33 +135,61 @@ def offline_mem0(tmp_path: Path, claude_reply: list[AnthropicMessage]) -> Iterat
         yield
 
 
-async def _remember(config: Config, claude_reply: list[AnthropicMessage], *, thinking_first: bool) -> None:
-    claude_reply[0] = _claude_reply(facts=list(_VECTORS), thinking_first=thinking_first)
+async def _remember(
+    config: Config,
+    claude_reply: list[AnthropicMessage],
+    facts: list[str],
+    *,
+    thinking_first: bool = False,
+) -> None:
+    claude_reply[0] = _claude_reply(facts=facts, thinking_first=thinking_first)
     runtime_paths = runtime_paths_for(config)
     await add_agent_memory("Remember my notes.", "general", runtime_paths.storage_root, config, runtime_paths)
 
 
+async def _search(config: Config) -> list[tuple[str, float]]:
+    runtime_paths = runtime_paths_for(config)
+    outcome = await search_agent_memories(_QUERY, "general", runtime_paths.storage_root, config, runtime_paths, limit=5)
+    assert outcome.degraded_reason is None
+    return [(result["memory"], result["score"]) for result in outcome.results]
+
+
 @pytest.mark.asyncio
-async def test_memory_search_ranks_the_closest_memory_first_and_drops_scores_below_the_threshold(
+async def test_memory_search_ranks_the_closest_memory_first_and_drops_cosine_below_one_tenth(
     config: Config,
     claude_reply: list[AnthropicMessage],
 ) -> None:
-    """Mem0 already reports Chroma hits as similarities, so MindRoom must keep their direction."""
-    await _remember(config, claude_reply, thinking_first=False)
-    runtime_paths = runtime_paths_for(config)
+    """Mem0 reports Chroma hits as 1 / (1 + distance); search keeps their order and the cosine-0.1 cutoff."""
+    await _remember(config, claude_reply, ["PR review", "Hardware notes", "Barely related", "Hardly related"])
+    await _remember(config, claude_reply, ["Grocery list", "Opposite of everything"])
 
-    outcome = await search_agent_memories(
-        _QUERY,
-        "general",
+    results = await _search(config)
+
+    assert [memory for memory, _ in results] == ["PR review", "Hardware notes", "Barely related"]
+    assert [score for _, score in results] == pytest.approx([1.0, 1 / 1.4, 1 / 2.7])
+
+
+@pytest.mark.asyncio
+async def test_unrelated_agent_memories_do_not_crowd_out_an_exact_team_memory(
+    config: Config,
+    claude_reply: list[AnthropicMessage],
+) -> None:
+    """Agent memories fill the result limit before team memories, so unrelated ones must not reach it."""
+    await _remember(config, claude_reply, _UNRELATED_AGENT_MEMORIES)
+    claude_reply[0] = _claude_reply(facts=[_TEAM_MEMORY], thinking_first=False)
+    runtime_paths = runtime_paths_for(config)
+    await store_conversation_memory(
+        "Our checklist for PR review.",
+        ["general", "calculator"],
         runtime_paths.storage_root,
+        "session-pair",
         config,
         runtime_paths,
-        limit=5,
     )
 
-    assert outcome.degraded_reason is None
-    assert [result["memory"] for result in outcome.results] == ["PR review", "Hardware notes", "Grocery list"]
-    assert [result["score"] for result in outcome.results] == pytest.approx([1.0, 1 / 1.4, 1 / 3])
+    results = await _search(config)
+
+    assert [memory for memory, _ in results] == [_TEAM_MEMORY]
 
 
 @pytest.mark.asyncio
@@ -153,9 +198,10 @@ async def test_claude_reply_that_starts_with_thinking_stores_its_extracted_memor
     claude_reply: list[AnthropicMessage],
 ) -> None:
     """A Claude extraction reply that opens with a thinking block still stores the facts in its text block."""
-    await _remember(config, claude_reply, thinking_first=True)
+    facts = ["PR review", "Hardware notes", "Grocery list"]
+    await _remember(config, claude_reply, facts, thinking_first=True)
     runtime_paths = runtime_paths_for(config)
 
     stored = await list_all_agent_memories("general", runtime_paths.storage_root, config, runtime_paths)
 
-    assert sorted(memory["memory"] for memory in stored) == sorted(_VECTORS)
+    assert sorted(memory["memory"] for memory in stored) == sorted(facts)

@@ -460,7 +460,9 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
             *,
             filters: dict[str, object],
             top_k: int = 3,
+            threshold: float = 0.1,
         ) -> dict[str, list[dict[str, object]]]:
+            del threshold
             user_id = filters["user_id"]
             matches = [
                 dict(entry)

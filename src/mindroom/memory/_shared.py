@@ -66,8 +66,9 @@ class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
         *,
         filters: dict[str, object] | None = None,
         top_k: int = 100,
+        threshold: float = 0.1,
     ) -> dict[str, list[MemoryResult]] | list[MemoryResult]:
-        """Search memories for one scoped user ID."""
+        """Search memories for one scoped user ID, dropping hits that score below ``threshold``."""
 
 
 @dataclass(frozen=True)

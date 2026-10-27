@@ -54,6 +54,12 @@ _T = TypeVar("_T")
 
 logger = get_logger(__name__)
 
+# Mem0 scores a Chroma hit 1 / (1 + d), where d is the squared L2 distance its collections use, and drops hits below
+# the threshold. A search keeps the memories with d <= 1.8, which for unit-length embeddings (d = 2 - 2 * cosine) are
+# those with cosine similarity of at least 0.1; Mem0's default threshold of 0.1 would keep every unit-length hit.
+_MIN_COSINE_SIMILARITY = 0.1
+_MEM0_SEARCH_THRESHOLD = 1 / (1 + 2 * (1 - _MIN_COSINE_SIMILARITY))
+
 
 @runtime_checkable
 class _OperationTrackedEmbedder(Protocol):
@@ -146,6 +152,22 @@ async def _create_mem0_memory_instance(
     return await create_memory(resolved_storage_path, config)
 
 
+async def _search_mem0_scope(
+    memory: ScopedMemoryCrud,
+    query: str,
+    scope_user_id: str,
+    limit: int,
+) -> list[MemoryResult]:
+    return _mem0_results(
+        await memory.search(
+            query,
+            filters=_scope_filter(scope_user_id),
+            top_k=limit,
+            threshold=_MEM0_SEARCH_THRESHOLD,
+        ),
+    )
+
+
 @timed("system_prompt_assembly.memory_search.mem0.agent_search")
 async def _search_mem0_agent_scope(
     memory: ScopedMemoryCrud,
@@ -153,13 +175,7 @@ async def _search_mem0_agent_scope(
     agent_name: str,
     limit: int,
 ) -> list[MemoryResult]:
-    return _mem0_results(
-        await memory.search(
-            query,
-            filters=_scope_filter(agent_scope_user_id(agent_name)),
-            top_k=limit,
-        ),
-    )
+    return await _search_mem0_scope(memory, query, agent_scope_user_id(agent_name), limit)
 
 
 @timed("system_prompt_assembly.memory_search.mem0.team_search")
@@ -169,7 +185,7 @@ async def _search_mem0_team_scope(
     team_id: str,
     limit: int,
 ) -> list[MemoryResult]:
-    return _mem0_results(await memory.search(query, filters=_scope_filter(team_id), top_k=limit))
+    return await _search_mem0_scope(memory, query, team_id, limit)
 
 
 async def _get_scoped_memory_by_id(
