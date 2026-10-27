@@ -94,7 +94,9 @@ class Message:
 
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
     marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks context sent
-    to the model that, like a prompt, only a paused run stores, so its resume sends it again where it was.
+    to the model that history never replays: a run that pauses stores it, so its resume sends it again where it was,
+    and a run that ends drops it. Rows rewritten outside that ending, minimal mode's checkpoint and a paused delegated
+    child that recovery stopped, keep it but never replay.
     """
 
     role: Literal["system", "user", "assistant", "tool"]

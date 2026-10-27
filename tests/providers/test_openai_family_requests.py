@@ -27,7 +27,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, scope_history_messages
 from mindroom.history.types import HistoryScope
-from mindroom.llm.media import File
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.llm.runs import RunRecord
@@ -771,6 +771,75 @@ async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continui
     ]
     assert "Alice prefers short answers." not in json.dumps(later)
     assert "TOOL APPROVAL RECEIPT" not in json.dumps(later)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image", "continues"),
+    [
+        (Image(id="att_car", url="https://example.org/car.png"), False),
+        (Image(id=f"{VIEWED_IMAGE_ID_PREFIX}car", content=b"car pixels", mime_type="image/png"), True),
+    ],
+    ids=["attachment", "viewed-image"],
+)
+async def test_a_follow_up_to_a_photo_continues_the_chain_only_while_history_replays_the_photo(
+    tmp_path: Path,
+    image: Image,
+    *,
+    continues: bool,
+) -> None:
+    """A stored chain holds the photo its turn sent, so a follow-up continues it only while history replays the photo.
+
+    History replays an earlier turn's attachment as its text alone, so the follow-up sends its history explicitly and
+    the photo leaves the conversation; a viewed image that history keeps replays as it was sent, so the chain goes on.
+    """
+    adapter, sent = _stored_reply_route(tmp_path)
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=adapter,
+        system_message=Message(role="system", content="You are Code."),
+        toolkits=(),
+    )
+    photo_turn = TurnMessages(prompt=Message(role="user", content="What is this?"))
+    _, answered = await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=[], turn=photo_turn, media=MediaInputs(images=[image])),
+            ctx=context(),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+    history = scope_history_messages(
+        [RunRecord.from_dict(json.loads(json.dumps(answered.to_dict())))],
+        scope=HistoryScope(kind="agent", scope_id="code"),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    follow_up = TurnMessages(prompt=Message(role="user", content="What color is the car?"))
+    await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=history, turn=follow_up, media=MediaInputs()),
+            ctx=context(run_id="run-2"),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+
+    photo, later = sent
+    assert "input_image" in json.dumps(photo["input"])
+    if continues:
+        assert (later["previous_response_id"], later["input"]) == (
+            "resp_1",
+            [{"role": "user", "content": "What color is the car?"}],
+        )
+    else:
+        assert "previous_response_id" not in later
+        assert [item["role"] for item in later["input"]] == ["developer", "user", "assistant", "user"]
+        assert "input_image" not in json.dumps(later["input"])
 
 
 @pytest.mark.asyncio

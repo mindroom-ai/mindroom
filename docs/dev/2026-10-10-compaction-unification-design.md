@@ -55,7 +55,7 @@ Behavior on `main` when this design was written:
 
 - A compacted request keeps the leading system and developer messages, the current prompt, transient messages, and queued-message notices in their original order, with the summary right after the prompt, and folds everything else, including every current-turn assistant and tool message.
 - Folding every model and tool message of the turn and keeping only the user's input is what Codex CLI's inline auto-compaction and Claude Code's auto-compaction do, and it leaves no tool-call pairs, signed reasoning, or provider response chains for the rewritten request to keep valid.
-- Transient messages, such as the per-turn transient context and the approval receipt, stay because they are never stored, so they are never summarized either.
+- Transient messages, such as the per-turn transient context and the approval receipt, stay because compaction reads only the runs history replays, which never store them (a paused run stores them for its resume but never replays), so they are never summarized either.
 - The rest of the turn's input, such as unseen thread messages, is folded, so a large unseen thread context with a short prompt does not survive the fold.
 - The summarizer sees every folded current-turn tool call and result, because `max_tool_calls_from_history` limits replayed history only.
 - The run's tool trace is untouched, so the visible reply still lists every tool call.
