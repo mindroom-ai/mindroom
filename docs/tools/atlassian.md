@@ -146,7 +146,7 @@ A plugin can use one module for both registrations:
 
 ```python
 # sites.py
-from mindroom.tool_system.atlassian_connections import (
+from mindroom.plugin_api import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
     register_atlassian_connection_tools,

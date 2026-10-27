@@ -259,6 +259,9 @@ def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callab
     if parsed.decrypted and (isinstance(parsed, nio.RedactionEvent) or "state_key" in parsed.source):
         # Redactions and state are never encrypted, so a decrypted one is a sender's claim the homeserver never checked.
         return None
+    if isinstance(parsed, nio.RedactionEvent) and not parsed.redacts:
+        # Nio's schema accepts an empty target, which deletes nothing and which batch validation would reject.
+        return None
     kind = _event_kind(parsed)
     if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
         return None

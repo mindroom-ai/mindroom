@@ -476,6 +476,42 @@ class TestAdmissionAdapter:
         assert views is None
         assert any("ValidationError" in record.getMessage() for record in caplog.records)
 
+    @pytest.mark.parametrize("msgtype", [[], {}, 5], ids=["list", "dict", "number"])
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_a_msgtype_that_is_not_text_settles_as_malformed(
+        self,
+        msgtype: object,
+        encrypted: bool,
+    ) -> None:
+        """Any room member writes the msgtype, so a value that is not text settles instead of raising."""
+        source = image_event("$invalid", encrypted=encrypted).source
+        source["content"]["msgtype"] = msgtype
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+
+        assert views is None
+
+    @pytest.mark.parametrize("in_content", [False, True], ids=["top-level", "content"])
+    async def test_a_redaction_naming_no_event_settles_as_malformed(self, in_content: bool) -> None:
+        """Nio accepts an empty redaction target, which names nothing to delete."""
+        source = redaction_event("$redaction", "").source
+        if in_content:
+            source["content"]["redacts"] = source.pop("redacts")
+
+        views = ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=BOT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+        )
+
+        assert views is None
+
     async def test_a_threaded_message_lands_in_its_thread(self) -> None:
         """A threaded message lands in its thread."""
         inbound = _inbound_event(

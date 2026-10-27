@@ -24,6 +24,7 @@ __all__ = [
     "missing_model_api_key_provider",
     "model_api_key",
     "model_uses_own_credential",
+    "own_api_key",
     "uses_alternative_auth",
 ]
 
@@ -38,6 +39,16 @@ def dashboard_api_key(model_name: str, runtime_paths: RuntimePaths) -> str | Non
     """Return the key the dashboard saved for one model config (``model:<name>``), if any."""
     model_creds = get_runtime_shared_credentials_manager(runtime_paths).load_credentials(f"model:{model_name}")
     return model_creds.get("api_key") if model_creds else None
+
+
+def own_api_key(model_config: ModelConfig) -> str | None:
+    """Return the key a model's config sets, if any.
+
+    ``extra_kwargs.client_params.api_key`` wins over ``api_key`` and ``extra_kwargs.api_key``, because the provider
+    clients take ``client_params`` over every other client option.
+    """
+    client_params = (model_config.extra_kwargs or {}).get("client_params") or {}
+    return client_params.get("api_key") or model_config.configured_api_key()
 
 
 def gemini_uses_vertexai(model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
@@ -73,7 +84,7 @@ def model_api_key(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str
 
     A model that authenticates another way (``uses_alternative_auth``) never receives the shared key.
     """
-    configured = model_config.configured_api_key()
+    configured = own_api_key(model_config)
     if configured is not None or uses_alternative_auth(model_config, runtime_paths):
         return configured
     return get_api_key_for_provider(model_config.provider, runtime_paths=runtime_paths)
@@ -82,13 +93,13 @@ def model_api_key(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str
 def model_uses_own_credential(model_name: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> bool:
     """Return whether a model authenticates without the provider's shared key.
 
-    Its own credential is a key in config (``api_key`` or ``extra_kwargs.api_key``), a
-    provider's alternative credential such as Anthropic's ``auth_token``, or the key saved
-    for the model in the dashboard (``model:<name>``). Reading the dashboard key raises
-    ``OSError`` or ``ValueError`` when the credential store cannot be opened.
+    Its own credential is a key in config (``own_api_key``), a provider's alternative credential
+    such as Anthropic's ``auth_token``, or the key saved for the model in the dashboard
+    (``model:<name>``). Reading the dashboard key raises ``OSError`` or ``ValueError`` when the
+    credential store cannot be opened.
     """
     return bool(
-        model_config.configured_api_key()
+        own_api_key(model_config)
         or uses_alternative_auth(model_config, runtime_paths)
         or dashboard_api_key(model_name, runtime_paths),
     )

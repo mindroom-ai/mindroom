@@ -53,15 +53,21 @@ The purge reclaims storage from MindRoom's own streaming edit churn, which is al
 ### `recursion_depth` is not comparable between servers
 
 Tuwunel and the MindRoom Synapse fork both cap recursive relation traversal at depth three in source, and neither advertises that cap.
-Synapse reports `recursion_depth` as that constant cap while Tuwunel reports the depth it actually returned, so the only portable check is that a non-empty page reports the field at all, which still catches a server that ignores `recurse` and returns only direct children.
-An empty relation page reports no depth on Tuwunel and is not a failure, and the Matrix version advertised by `/versions` is not proof of recursion depth.
+Synapse reports `recursion_depth` as that constant cap.
+The Tuwunel fork from v1.9.4-mindroom.17 reports the depth its walk reached, the same on every page: three normally, and fewer whole levels, down to zero, once a thread passes 32,768 related events or 262,144 relation rows.
+Older and upstream Tuwunel report the depth of the deepest event on each page, so a page holding only replies reports zero.
+nio refuses a walk at the first non-empty page below a required depth, and a refused walk fails the read and leaves the thread for the next read to fail the same way, so the only requirement that holds on every server is that a non-empty page reports the field at all, which still catches a server that ignores `recurse` and returns only direct children.
+Requiring depth one, where the edits of replies sit, was rejected because it would make every thread past the fork's limits, and every older-Tuwunel thread with a reply-only page, permanently unreadable.
+Instead a walk holding an edit of a reply has shown it reached that depth, a walk holding none asks the server once with depth one as the requirement, and a walk that stopped above the edits gets the direct edit lookup of every reply, up to the request ceiling.
+An empty relation page reports no depth on older Tuwunel and is not a failure, and the Matrix version advertised by `/versions` is not proof of recursion depth.
 
 ### Tuwunel's recursive relation paging drops and reorders edits
 
 Tuwunel's recursive `/relations` paging leaves out some edits of a reply whose parent fell on an earlier page and returns others after the reply instead of before it, while its direct `/relations/{event}/m.replace` lookup for that reply is complete.
+The Tuwunel fork serves every relation once and in order from v1.9.4-mindroom.17, and upstream Tuwunel had the same bug at that point.
 On one production thread a backwards walk returned 356 of 419 events and missed 26 of 99 edits, and every affected streamed reply was stored at its placeholder under a marker that called the thread whole.
 Thread hydration therefore looks up the direct edits of each message whose newest walked revision still says its reply is unfinished, point refetches read a message's direct edits instead of its relation tree, and markers carry a walk version so threads an older walk marked are walked again.
-User edits of ordinary messages are not looked up, because nothing in a message says an edit is missing, so one this paging drops keeps its earlier text.
+User edits of ordinary messages are looked up only after a walk that stopped above the edits of replies, because otherwise nothing in a message says an edit is missing, so one this paging drops keeps its earlier text.
 
 ### Transaction deduplication is per sending device
 

@@ -25,7 +25,7 @@ plugins/location-context/
 
 ```python
 # plugin.py
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("message:enrich", priority=20)
@@ -73,7 +73,7 @@ If a name under `hooks:` matches no hook in that plugin, MindRoom logs a warning
 ## The `@hook` decorator
 
 ```python
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook(
@@ -114,7 +114,7 @@ A failing hook is skipped and the next hook still runs; side effects it already 
 Custom events and most built-in events are observers.
 
 ```python
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("message:received")
@@ -143,7 +143,7 @@ When a `message:before_response` hook fails, changes it made to the draft before
 When a `message:final_response_transform` hook fails, its changes are discarded and the next hook receives the previous draft.
 
 ```python
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("message:before_response", priority=10)
@@ -169,7 +169,7 @@ The tool does not run, and the model receives the reason in the tool result.
 A gate hook that fails or times out does not block the tool call.
 
 ```python
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("tool:before_call", priority=10)
@@ -244,7 +244,7 @@ async def enrich_with_profile(ctx):
 Hooks can also return an `EnrichmentItem` or a list of them:
 
 ```python
-from mindroom.hooks import EnrichmentItem, hook
+from mindroom.plugin_api import EnrichmentItem, hook
 
 
 @hook("message:enrich")
@@ -273,7 +273,7 @@ For teams, the same instructions go to the team and to each member agent.
 Add items with `ctx.add_instruction()`, or return `EnrichmentItem` objects as with `message:enrich`:
 
 ```python
-from mindroom.hooks import SystemEnrichContext, hook
+from mindroom.plugin_api import SystemEnrichContext, hook
 
 
 @hook("system:enrich", priority=40)
@@ -313,7 +313,7 @@ async def required_instruction(ctx):
 Plugins can define their own namespaced events and emit them from tool code:
 
 ```python
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("todo:item_completed")
@@ -322,7 +322,7 @@ async def audit_completion(ctx):
 ```
 
 ```python
-from mindroom.tool_system.runtime_context import emit_custom_event
+from mindroom.plugin_api import emit_custom_event
 
 # Inside a tool method:
 await emit_custom_event("my-plugin", "todo:item_completed", {"item_id": "123"})
@@ -351,7 +351,7 @@ Organizing it per room or per user is up to the plugin.
 ```python
 import json
 
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("reaction:received")
@@ -461,11 +461,11 @@ ResponseResult(
 )
 ```
 
-`TurnIntent` is one of `"user_message"`, `"managed_message"`, `"router_handoff"`, `"router_notice"`, `"scheduled_fire"`, `"external_trigger"`, `"hook_message"`, `"hook_dispatch"`, or `"trusted_internal_relay"`.
+`TurnIntent` is one of `"user_message"`, `"managed_message"`, `"router_handoff"`, `"router_notice"`, `"scheduled_fire"`, `"external_trigger"`, `"hook_message"`, `"hook_dispatch"`, `"trusted_internal_relay"`, or `"job_follow_up"`.
 `origin.may_dispatch_without_mention` is true for `hook_dispatch`, `external_trigger`, `router_handoff`, and `scheduled_fire` turns.
 `origin.may_answer_interactive_prompt` is true only for human-requested `user_message`, `router_handoff`, and `trusted_internal_relay` turns.
 `dispatch_policy_source_kind` is usually `None`; when it is `"active_thread_follow_up"`, `source_kind` still holds the original modality such as `"message"` or `"voice"`.
-`TurnOrigin`, `TurnIntent`, `SenderKind`, `TurnTrust`, `ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND`, and `TRUSTED_INTERNAL_RELAY_SOURCE_KIND` are exported from `mindroom.hooks` for comparisons.
+`TurnOrigin`, `TurnIntent`, `SenderKind`, `TurnTrust`, `ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND`, and `TRUSTED_INTERNAL_RELAY_SOURCE_KIND` are exported from `mindroom.plugin_api` for comparisons.
 
 ### Sending messages
 
@@ -529,7 +529,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mindroom.hooks import hook
+from mindroom.plugin_api import hook
 
 
 @hook("message:received")

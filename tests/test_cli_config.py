@@ -4211,8 +4211,8 @@ class TestDoctor:
         assert result.exit_code == exit_code
         assert message in normalize_console_output(result.output)
 
-    def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor validates against custom base_url when configured."""
+    def test_custom_base_url_is_not_sent_the_shared_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A model with a custom base_url gets no shared-key check, at that endpoint or at the provider's API."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
@@ -4243,9 +4243,12 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "API key valid" in result.output
-        # Should validate against the custom base_url, not api.openai.com
-        assert any("localhost:9292" in u for u in called_urls)
+        output = " ".join(result.output.split())
+        assert (
+            "OPENAI_API_KEY not checked: models.default.extra_kwargs.base_url may send it elsewhere or send another key in its place"
+            in output
+        )
+        assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(
         self,
@@ -4346,12 +4349,12 @@ class TestDoctor:
         assert "Memory LLM: openai/m API key valid" in result.output
         assert ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
 
-    def test_memory_llm_host_is_not_the_endpoint_for_non_ollama_providers(
+    def test_memory_llm_host_keeps_the_shared_key_from_every_server(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The runtime drops host for non-Ollama memory LLMs, so doctor validates their default endpoint."""
+        """A memory LLM ``host`` counts as an endpoint setting, so the shared key is not checked, though Mem0 drops it."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             _VALID_CONFIG
@@ -4364,48 +4367,27 @@ class TestDoctor:
         _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
 
         shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
-        assert shared_key_urls == ["https://api.openai.com/v1/models"]
+        assert shared_key_urls == []
 
-    def test_memory_llm_openai_base_url_used_when_host_absent(
+    def test_memory_llm_explicit_key_at_an_openai_base_url_is_not_checked(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
+        """An ``openai_base_url`` skips the memory LLM key check, even for ``memory.llm.config.api_key``."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-oss-low\n"
-            "      openai_base_url: http://localllm:9292/v1\n",
+            _VALID_CONFIG + "memory:\n  llm:\n    provider: openai\n    config:\n      model: gpt-oss-low\n"
+            "      openai_base_url: http://localllm:9292/v1\n      api_key: sk-mem\n",
         )
-        storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        _patch_homeserver_ok(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
 
-        called_urls: list[str] = []
-
-        def _mock_check(url: str, _headers: dict[str, str] | None = None) -> tuple[bool, str]:
-            called_urls.append(url)
-            return True, ""
-
-        monkeypatch.setattr("mindroom.cli.doctor._http_check", _mock_check)
-        monkeypatch.setattr(
-            "mindroom.cli.doctor._validate_provider_key",
-            lambda _prov, _key, base_url=None: called_urls.append(base_url or "NO_BASE_URL") or (True, ""),
-        )
-
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 0
-        assert "http://localllm:9292/v1" in called_urls, (
-            f"Expected openai_base_url to be passed as base_url, got: {called_urls}"
-        )
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        output = " ".join(result.output.split())
+        assert "memory.llm.config.api_key not checked: memory.llm.config.openai_base_url may send it" in output
+        assert not any(headers.get("Authorization") == "Bearer sk-mem" for _url, headers in requests)
 
     def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
         self,

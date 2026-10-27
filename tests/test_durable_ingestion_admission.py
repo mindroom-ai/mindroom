@@ -236,6 +236,72 @@ async def test_redelivery_after_post_hook_failure_retries_hook_without_semantics
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("msgtype", [[], {}, 5], ids=["list", "dict", "number"])
+@pytest.mark.parametrize("encrypted", [False, True])
+async def test_msgtype_that_is_not_text_settles_and_later_input_is_delivered(
+    journal_database: Callable[[], EventJournalStore],
+    msgtype: object,
+    encrypted: bool,
+) -> None:
+    """Any room member writes the msgtype, so a malformed one must not stall the whole sync."""
+    malformed = message("$malformed")
+    malformed.source["content"]["msgtype"] = msgtype
+    if encrypted:
+        malformed = replace(
+            malformed,
+            source={"type": "m.room.encrypted"},
+            clear=malformed.source,
+            crypto=CryptoEvidence(True, "curve", "session"),
+        )
+    batch = SyncBatch(uuid4(), 1, (malformed, message("$valid")))
+    principal = await principal_for(journal_database(), batch.stream_id)
+    session = Session(batch)
+
+    converted = validate_ingestion_batch(batch, account_id=ACCOUNT)
+    facts = await consume_one_ingestion_batch(session, principal, account_id=ACCOUNT)
+
+    assert [record.disposition for record in converted.records] == [
+        IngestionRecordDisposition.COMPATIBILITY_ONLY,
+        IngestionRecordDisposition.SEMANTIC_EVENT,
+    ]
+    assert facts is not None
+    assert facts.receipt_new
+    assert session.acked == [batch]
+    assert session.dispatched == [malformed]
+    assert isinstance(session.dispatched_events[0], nio.BadEvent)
+    assert [event.event_id for event in await principal.pending()] == ["$valid"]
+
+
+@pytest.mark.asyncio
+async def test_redaction_naming_no_event_settles_and_later_input_is_delivered(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """A room member's redaction with an empty target must not stall the whole sync."""
+    redaction = replace(
+        message("$redaction"),
+        source={
+            "type": "m.room.redaction",
+            "sender": "@alice:example.org",
+            "event_id": "$redaction",
+            "origin_server_ts": 10,
+            "redacts": "",
+            "content": {},
+        },
+    )
+    batch = SyncBatch(uuid4(), 1, (redaction, message("$valid")))
+    principal = await principal_for(journal_database(), batch.stream_id)
+    session = Session(batch)
+
+    facts = await consume_one_ingestion_batch(session, principal, account_id=ACCOUNT)
+
+    assert facts is not None
+    assert facts.receipt_new
+    assert session.acked == [batch]
+    assert session.dispatched == [redaction]
+    assert [event.event_id for event in await principal.pending()] == ["$valid"]
+
+
+@pytest.mark.asyncio
 async def test_empty_completion_retries_until_after_sync_succeeds(tmp_path: Path) -> None:
     store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
     batch = SyncBatch(uuid4(), 1, (), completes_sync=True)

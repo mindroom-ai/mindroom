@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -15,7 +16,7 @@ import typer
 from rich.markup import escape
 
 from mindroom import constants
-from mindroom.constants import RuntimePaths, env_key_for_provider
+from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
 from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
@@ -187,27 +188,55 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
     return config, 1, 0, 0
 
 
-def _models_using_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> list[ModelConfig] | None:
-    """Return the models the runtime sends the shared ``env_key`` to, or None when the credential store is unreadable."""
+def _models_reading_shared_key(config: Config, env_key: str, runtime_paths: RuntimePaths) -> dict[str, ModelConfig]:
+    """Return the models, by name, that may read the shared ``env_key``: all of its models if the store is unreadable."""
+    models = {name: model for name, model in config.models.items() if env_key_for_provider(model.provider) == env_key}
     try:
-        return [
-            model
-            for name, model in config.models.items()
-            if env_key_for_provider(model.provider) == env_key
-            and not model_uses_own_credential(name, model, runtime_paths)
-        ]
+        return {
+            name: model for name, model in models.items() if not model_uses_own_credential(name, model, runtime_paths)
+        }
     except (OSError, ValueError):
-        return None
+        return models
 
 
-def _get_custom_base_url(models: list[ModelConfig], provider: str) -> str | None:
-    """Get custom base_url for a provider from model extra_kwargs, if any."""
-    for model in models:
-        if model.provider == provider and model.extra_kwargs:
-            base_url = model.extra_kwargs.get("base_url")
-            if base_url:
-                return base_url
-    return None
+def _endpoint_settings(value: object, path: str) -> list[str]:
+    """Return the path of each setting under ``value`` that can point a client at another server or credential.
+
+    Any set key whose name contains ``base``, ``host``, ``endpoint``, or ``header`` counts, at any depth, so doctor
+    never has to know which of them a provider's client reads.
+    """
+    if not isinstance(value, Mapping):
+        return []
+    found: list[str] = []
+    for key, item in value.items():
+        if item and any(part in str(key).lower() for part in ("base", "host", "endpoint", "header")):
+            found.append(f"{path}.{key}")
+        else:
+            found.extend(_endpoint_settings(item, f"{path}.{key}"))
+    return found
+
+
+def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``."""
+    family = env_key.removesuffix("API_KEY")
+    return sorted(
+        name
+        for name, value in runtime_env_values(runtime_paths).items()
+        if name.startswith(family) and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE")) and value.strip()
+    )
+
+
+def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons: Sequence[str]) -> bool:
+    """Print that ``key_name`` is not checked, and return True, when ``reasons`` may redirect or replace it.
+
+    A provider without a key check is never probed, so it reports nothing here and gets the probe's "no key check".
+    """
+    if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
+        return False
+    listed = ", ".join(reasons)
+    effect = "may send it elsewhere or send another key in its place"
+    console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} {effect}")
+    return True
 
 
 def _http_check(url: str, headers: dict[str, str] | None = None) -> tuple[bool | None, str]:
@@ -260,15 +289,11 @@ def _with_local_network_hint(detail: str, base_url: str | None) -> str:
     )
 
 
-def _validate_provider_key(
-    provider: str,
-    api_key: str,
-    base_url: str | None = None,
-) -> tuple[bool | None, str]:
-    """Validate an API key with the provider's key check, sent to a custom endpoint's model list when one is set.
+def _validate_provider_key(provider: str, api_key: str) -> tuple[bool | None, str]:
+    """Validate an API key with the provider's key check, which goes to the provider's own API.
 
-    A provider without a key check is never probed, at a custom endpoint either: its key style and a model list
-    are unknown, so a probe could report a valid key as invalid.
+    A provider without a key check is never probed: its key style and a model list are unknown, so a probe could
+    report a valid key as invalid.
 
     Returns (True, "") if valid, (False, reason) if invalid,
     (None, reason) if inconclusive (e.g. connection error, or a provider without a key check).
@@ -276,7 +301,7 @@ def _validate_provider_key(
     check = PROVIDER_KEY_CHECKS.get(provider_route(provider))
     if check is None:
         return None, "no key check for this provider"
-    url, headers = check.request(api_key, url=base_url.rstrip("/") + "/models" if base_url else None)
+    url, headers = check.request(api_key)
     return _http_check(url, headers)
 
 
@@ -358,16 +383,16 @@ def _validate_vertexai_claude_connection(
 def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
     """Get the Ollama host from config or environment."""
     for model in config.models.values():
-        if model.provider == "ollama" and model.host:
+        if provider_route(model.provider) == "ollama" and model.host:
             return model.host
     return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
-    """Print provider summary and validate API keys. Returns (passed, failed, warnings)."""
+    """Print the providers by route and validate their API keys. Returns (passed, failed, warnings)."""
     provider_models: dict[str, list[str]] = {}
     for name, model in config.models.items():
-        provider_models.setdefault(model.provider, []).append(name)
+        provider_models.setdefault(provider_route(model.provider), []).append(name)
 
     if not provider_models:
         return 0, 0, 0
@@ -382,10 +407,9 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     passed = 0
     failed = 0
     warnings = 0
-    validated_keys: set[str] = set()
 
     for provider in sorted(provider_models):
-        p, f, w = _check_single_provider(provider, config, validated_keys, runtime_paths)
+        p, f, w = _check_single_provider(provider, config, runtime_paths)
         passed += p
         failed += f
         warnings += w
@@ -411,19 +435,14 @@ def _print_validation(
     return 0, 0, 1
 
 
-def _check_single_provider(
-    provider: str,
-    config: Config,
-    validated_keys: set[str],
-    runtime_paths: RuntimePaths,
-) -> tuple[int, int, int]:
-    """Validate a single provider. Returns (passed, failed, warnings)."""
+def _check_single_provider(provider: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Validate the models of one route, as ``provider_route`` names it. Returns (passed, failed, warnings)."""
     if provider == "vertexai_claude":
         passed = 0
         failed = 0
         warnings = 0
         for model_config in config.models.values():
-            if model_config.provider != provider:
+            if provider_route(model_config.provider) != provider:
                 continue
             valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths)
             p, f, w = _print_validation(
@@ -454,30 +473,42 @@ def _check_single_provider(
     if not env_key:
         return 0, 0, 0
 
-    # google and gemini share GOOGLE_API_KEY — validate once
-    if env_key in validated_keys:
-        return 0, 0, 0
-    validated_keys.add(env_key)
+    return _check_shared_key(provider, env_key, config, runtime_paths)
 
-    # Models with their own credential never read the shared key. When the credential store is
-    # unreadable that is unknown, so the key counts as needed and only the default endpoint is probed.
-    shared_key_models = _models_using_shared_key(config, env_key, runtime_paths)
+
+def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check one route's shared ``env_key`` at the provider's own API. Returns (passed, failed, warnings).
+
+    Doctor never works out where the runtime sends a key, which a header, a stored credential, or an SDK variable can
+    change. So it skips the check while the provider's endpoint variable is set, reports each model that reads the key
+    and sets an endpoint-like setting as not checked, and checks the key unless every model that reads it was skipped.
+    A provider without a key check is never probed, so it gets one "no key check" warning whatever its settings.
+    """
+    # Models with their own credential never read the shared key.
+    shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
     if not api_key:
-        needs_shared_key = shared_key_models is None or bool(shared_key_models)
-        if needs_shared_key:
+        if shared_key_models:
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, int(needs_shared_key)
-
-    base_url = _get_custom_base_url(shared_key_models or [], provider)
-    valid, detail = _validate_provider_key(provider, api_key, base_url)
-    return _print_validation(
+        return 0, 0, int(bool(shared_key_models))
+    if _report_key_not_checked(provider, provider, env_key, _endpoint_variables(env_key, runtime_paths)):
+        return 0, 0, 1
+    skipped: list[str] = []
+    for name, model in shared_key_models.items():
+        settings = _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}")
+        if _report_key_not_checked(provider, provider, env_key, settings):
+            skipped.append(name)
+    if shared_key_models and len(skipped) == len(shared_key_models):
+        return 0, 0, len(skipped)
+    valid, detail = _validate_provider_key(provider, api_key)
+    passed, failed, warnings = _print_validation(
         valid,
         detail,
         f"{provider} API key valid",
         f"{provider} API key invalid",
         f"{provider}: could not validate key",
     )
+    return passed, failed, warnings + len(skipped)
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -545,16 +576,27 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     llm_model = config.memory.llm.config.get("model", "default")
     env_key = env_key_for_provider(llm_provider)
     # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
-    api_key = config.memory.llm.config.get("api_key") or (
-        get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
-    )
+    if configured_key := config.memory.llm.config.get("api_key"):
+        api_key, key_name = configured_key, "memory.llm.config.api_key"
+    else:
+        api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
+        key_name = env_key or ""
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    # The runtime drops host for memory LLMs other than Ollama.
-    valid, detail = _validate_provider_key(llm_provider, api_key or "", llm_base_url)
+    # Any endpoint setting or variable skips the check, whichever key it is, and so does an exported OPENROUTER_API_KEY,
+    # which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of any other key.
+    if env_key:
+        reasons = _endpoint_settings(config.memory.llm.config, "memory.llm.config")
+        reasons += _endpoint_variables(env_key, runtime_paths)
+        replaced = provider_route(llm_provider) in {"openai", "openrouter"} and key_name != "OPENROUTER_API_KEY"
+        if replaced and runtime_paths.env_value("OPENROUTER_API_KEY"):
+            reasons.append("OPENROUTER_API_KEY")
+        if _report_key_not_checked("Memory LLM", llm_provider, key_name, reasons):
+            return 0, 0, 1
+    valid, detail = _validate_provider_key(llm_provider, api_key or "")
     return _print_validation(
         valid,
         detail,
@@ -612,6 +654,9 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
         console.print(
             f"[yellow]![/yellow] Memory embedder ({emb.provider}): {env_key} not set",
         )
+        return 0, 0, 1
+    variables = _endpoint_variables(env_key, runtime_paths) if env_key else []
+    if _report_key_not_checked("Memory embedder", emb.provider, env_key or "", variables):
         return 0, 0, 1
 
     valid, detail = _validate_provider_key(emb.provider, api_key or "")

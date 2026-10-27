@@ -315,9 +315,10 @@ async def test_a_cold_thread_hydrates_once_and_then_costs_no_history_calls(
     cold = await export(reader)
 
     assert bodies(cold) == ["root", "first", "second"]
-    # One fetch of the root and one walk of its relation tree: no `/messages`
-    # scan of the room, and no per-message refetch.
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    # One fetch of the root, one walk of its relation tree, and one request
+    # asking how deep a walk holding no edit went: no `/messages` scan of the
+    # room, and no per-message refetch.
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
     assert (homeserver.messages_calls, homeserver.download_calls) == (0, 0)
 
     homeserver.reset_counts()
@@ -365,7 +366,7 @@ async def test_live_sync_rows_alone_do_not_count_as_a_built_conversation(
 
     await export(reader)
 
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
 
     homeserver.reset_counts()
     await export(reader)
@@ -395,7 +396,7 @@ async def test_a_thread_longer_than_one_page_exports_in_order_with_one_root(
     assert event_ids(messages)[0] == ROOT
     # Paging must not re-hydrate: the walk happens once for the conversation,
     # not once per page.
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
 
 
 async def test_an_edited_message_exports_its_current_revision(router: PrincipalStore) -> None:
@@ -782,7 +783,7 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
     ]
     messages = await export(reader)
 
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
     assert bodies(messages) == ["root", "first", "second"]
 
 
@@ -814,7 +815,7 @@ async def test_one_principals_warm_projection_does_not_serve_another(
     other = journal_store.principal("general@@mindroom_general:example.org")
     await export(reader_for(other, homeserver))
 
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
 
 
 async def test_a_thread_hydration_could_not_finish_fails_rather_than_exporting_a_suffix(
