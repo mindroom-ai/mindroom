@@ -206,8 +206,8 @@ export function EgressServiceEditor({
   // running may already have written this name into the page's own list.
   const [openedWithNames] = useState(takenNames);
   const addingLimit = initialRestrictOnly && !editing;
-  // A new service is named after its preset or host until the user types a
-  // name; a new limit's name counts as typed.
+  // A new service is named after its display name, preset or host until the
+  // user types a name; a new limit's name counts as typed.
   const [nameTyped, setNameTyped] = useState(addingLimit);
   const [form, setForm] = useState(() => {
     if (addingLimit)
