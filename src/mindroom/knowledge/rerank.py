@@ -1,8 +1,9 @@
-"""Rerank knowledge search hits with a Cohere-compatible rerank API or a local cross-encoder."""
+"""Rerank knowledge search hits with a Cohere-compatible rerank API, Vertex AI ranking, or a local cross-encoder."""
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,6 +23,12 @@ if TYPE_CHECKING:
 
 _COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
 _RERANK_TIMEOUT_SECONDS = 30.0
+_VERTEX_AI_RANK_URL = (
+    "https://discoveryengine.googleapis.com/v1/projects/{project}/locations/global"
+    "/rankingConfigs/default_ranking_config:rank"
+)
+#: Most records one Vertex AI ranking request accepts.
+_VERTEX_AI_MAX_RECORDS = 200
 
 
 class Reranker(Protocol):
@@ -53,6 +60,62 @@ class _CohereReranker:
         for result in response.json()["results"]:
             scores[int(result["index"])] = float(result["relevance_score"])
         return scores
+
+
+@dataclass(frozen=True)
+class _VertexAIReranker:
+    """Calls Google's Vertex AI ranking API with Application Default Credentials."""
+
+    model: str
+    credentials: Any
+    project: str
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        token = await asyncio.to_thread(_google_access_token, self.credentials)
+        records = [{"id": str(index), "content": document} for index, document in enumerate(documents)]
+        async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client, asyncio.TaskGroup() as group:
+            requests = [
+                group.create_task(
+                    client.post(
+                        _VERTEX_AI_RANK_URL.format(project=self.project),
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "model": self.model,
+                            "query": query,
+                            "records": records[start : start + _VERTEX_AI_MAX_RECORDS],
+                            "ignoreRecordDetailsInResponse": True,
+                        },
+                    ),
+                )
+                for start in range(0, len(records), _VERTEX_AI_MAX_RECORDS)
+            ]
+        scores = [float("-inf")] * len(documents)
+        for request in requests:
+            response = request.result()
+            response.raise_for_status()
+            for record in response.json()["records"]:
+                # A zero score is left out of the response.
+                scores[int(record["id"])] = float(record.get("score", 0.0))
+        return scores
+
+
+@functools.cache
+def _google_default_credentials() -> tuple[Any, str | None]:
+    import google.auth  # noqa: PLC0415
+
+    return google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+
+
+_google_credentials_lock = threading.Lock()
+
+
+def _google_access_token(credentials: Any) -> str:  # noqa: ANN401
+    with _google_credentials_lock:
+        if not credentials.valid:
+            import google.auth.transport.requests  # noqa: PLC0415
+
+            credentials.refresh(google.auth.transport.requests.Request())
+        return credentials.token
 
 
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
@@ -87,5 +150,11 @@ def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths
     if config.provider == "sentence_transformers":
         ensure_sentence_transformers_dependencies(runtime_paths)
         return _CrossEncoderReranker(model=config.model)
+    if config.provider == "vertex_ai":
+        credentials, project = _google_default_credentials()
+        if not project:
+            msg = "The vertex_ai reranker needs a Google Cloud project in Application Default Credentials"
+            raise ValueError(msg)
+        return _VertexAIReranker(model=config.model, credentials=credentials, project=project)
     api_key = config.api_key or get_api_key_for_service(config.credentials_service or "cohere", runtime_paths)
     return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)

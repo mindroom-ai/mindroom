@@ -145,6 +145,68 @@ def test_cohere_reranker_reads_its_credential_service(tmp_path: Path, monkeypatc
     assert services == ["cohere", "jina"]
 
 
+class _GoogleCredentials:
+    """Application Default Credentials that hand out token ``t`` once refreshed."""
+
+    valid = False
+    token: str | None = None
+
+    def refresh(self, request: object) -> None:
+        del request
+        self.token, self.valid = "t", True
+
+
+@pytest.mark.asyncio
+async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex AI ranks at most 200 records per request, so larger candidate sets span requests scored together."""
+    bodies: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == (
+            "https://discoveryengine.googleapis.com/v1/projects/proj/locations/global"
+            "/rankingConfigs/default_ranking_config:rank"
+        )
+        assert request.headers["Authorization"] == "Bearer t"
+        body = json.loads(request.content)
+        bodies.append(body)
+        # A zero score is left out of the JSON response, like other proto3 defaults.
+        records = [
+            {"id": record["id"], **({"score": int(record["id"]) / 1000} if record["id"] != "0" else {})}
+            for record in body["records"]
+        ]
+        return httpx.Response(200, json={"records": records})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        rerank_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (_GoogleCredentials(), "proj"))
+    reranker = create_reranker(
+        KnowledgeRerankerConfig(provider="vertex_ai", model="semantic-ranker-default@latest"),
+        test_runtime_paths(tmp_path),
+    )
+
+    documents = [f"doc {index}" for index in range(250)]
+    assert await reranker.ascore("query", documents) == [index / 1000 for index in range(250)]
+    assert [len(body["records"]) for body in bodies] == [200, 50]
+    assert bodies[1]["records"][0] == {"id": "200", "content": "doc 200"}
+    assert {body["model"] for body in bodies} == {"semantic-ranker-default@latest"}
+    assert {body["query"] for body in bodies} == {"query"}
+
+
+def test_vertex_ai_reranker_needs_a_google_cloud_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a project in Application Default Credentials there is no ranking endpoint to call."""
+    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (_GoogleCredentials(), None))
+
+    with pytest.raises(ValueError, match="Google Cloud project"):
+        create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
+
+
 @pytest.mark.asyncio
 async def test_cross_encoder_reranker_scores_query_document_pairs(
     tmp_path: Path,

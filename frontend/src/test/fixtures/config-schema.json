@@ -2602,16 +2602,17 @@
       "description": "Reranker that reorders ``search_knowledge_base`` results by how well each chunk answers the query.",
       "properties": {
         "provider": {
-          "description": "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); 'sentence_transformers' runs a cross-encoder locally",
+          "description": "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); 'sentence_transformers' runs a cross-encoder locally; 'vertex_ai' calls Google's Vertex AI ranking API with Application Default Credentials",
           "enum": [
             "cohere",
-            "sentence_transformers"
+            "sentence_transformers",
+            "vertex_ai"
           ],
           "title": "Provider",
           "type": "string"
         },
         "model": {
-          "description": "Rerank model, such as 'rerank-v3.5' or 'BAAI/bge-reranker-v2-m3'",
+          "description": "Rerank model, such as 'rerank-v3.5', 'BAAI/bge-reranker-v2-m3' or 'semantic-ranker-default@latest'",
           "title": "Model",
           "type": "string"
         },
