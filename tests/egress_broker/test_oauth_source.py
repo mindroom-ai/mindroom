@@ -17,7 +17,12 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker import oauth_source
-from mindroom.egress_broker.oauth_reuse import OAUTH_REUSE_CREDENTIAL_SERVICE, set_oauth_reuse
+from mindroom.egress_broker.oauth_reuse import (
+    OAUTH_REUSE_CREDENTIAL_SERVICE,
+    oauth_reuse_access,
+    oauth_reuse_enabled,
+    set_oauth_reuse,
+)
 from mindroom.egress_broker.oauth_source import broker_credential_context, oauth_status, resolve_oauth_token
 from mindroom.egress_broker.secrets import (
     OAuthStatus,
@@ -27,6 +32,7 @@ from mindroom.egress_broker.secrets import (
     SecretResult,
     SecretUnavailable,
     load_egress_document,
+    save_egress_document,
 )
 from mindroom.egress_broker.tokens import WorkerClaims
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
@@ -979,3 +985,101 @@ def test_status_says_whether_agent_keys_may_use_the_connection_and_revoking_stop
     assert allowed[1] == Secret("alice-access")
     assert revoked == SecretMissing(provider="github", reuse_off=True, requester_owned=True)
     assert load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE) is None
+
+
+def _alice_reuse_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> OAuthCredentialContext:
+    """Return the context whose store holds the opt-ins for Alice's GitHub account."""
+    return broker_credential_context(
+        github_oauth_provider(),
+        config,
+        runtime_paths,
+        manager,
+        _broker_target("@alice:example.org"),
+    )
+
+
+def test_entry_without_access_reads_read_write(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """An opt-in stored before access levels existed keeps allowing writes; nothing needs migrating.
+
+    A level the broker does not know never allows writes.
+    """
+    entry = {"provider": "github", "enabled_by": "@alice:example.org", "enabled_at": "2026-10-01T00:00:00Z"}
+    save_egress_document(
+        manager,
+        account_store("@alice:example.org"),
+        OAUTH_REUSE_CREDENTIAL_SERVICE,
+        {"services": {"github": entry, "gists": {**entry, "access": "write"}}},
+    )
+    context = _alice_reuse_context(config, runtime_paths, manager)
+
+    assert oauth_reuse_access(context, "github", "github") == "read_write"
+    assert oauth_reuse_access(context, "gists", "github") == "read"
+    assert oauth_reuse_enabled(context, "github", "github") is True
+    assert oauth_reuse_access(context, "github", "other") is None
+    assert oauth_reuse_access(context, "pages", "github") is None
+
+
+def test_set_oauth_reuse_stores_access(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Allowing an account records its level, which defaults to read and write; stopping it leaves no level."""
+    context = _alice_reuse_context(config, runtime_paths, manager)
+
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+    read = oauth_reuse_access(context, "github", "github")
+    stored = load_egress_document(manager, account_store("@alice:example.org"), OAUTH_REUSE_CREDENTIAL_SERVICE)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org")
+    default = oauth_reuse_access(context, "github", "github")
+    set_oauth_reuse(context, "github", "github", enabled=False, by="@alice:example.org")
+
+    assert read == "read"
+    assert stored is not None
+    assert stored["services"]["github"]["access"] == "read"
+    assert default == "read_write"
+    assert oauth_reuse_access(context, "github", "github") is None
+    assert oauth_reuse_enabled(context, "github", "github") is False
+
+
+def test_changing_access_keeps_other_entries(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """Changing one service's level rewrites that entry only; every other entry stays exactly as stored."""
+    others = {
+        "gists": {"provider": "github", "enabled_by": "@bob:example.org", "enabled_at": "2026-10-01T00:00:00Z"},
+        "github-work": {
+            "provider": "github",
+            "enabled_by": None,
+            "enabled_at": "2026-10-02T00:00:00Z",
+            "access": "read",
+        },
+    }
+    store = account_store("@alice:example.org")
+    original = {"provider": "github", "enabled_by": "@alice:example.org", "enabled_at": "2026-10-03T00:00:00Z"}
+    save_egress_document(
+        manager,
+        store,
+        OAUTH_REUSE_CREDENTIAL_SERVICE,
+        {"services": {**others, "github": original}},
+    )
+    context = _alice_reuse_context(config, runtime_paths, manager)
+
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+
+    stored = load_egress_document(manager, store, OAUTH_REUSE_CREDENTIAL_SERVICE)
+    assert stored is not None
+    assert {name: entry for name, entry in stored["services"].items() if name != "github"} == others
+    assert stored["services"]["github"]["access"] == "read"
+    assert oauth_reuse_access(context, "gists", "github") == "read_write"
+    assert oauth_reuse_access(context, "github-work", "github") == "read"
