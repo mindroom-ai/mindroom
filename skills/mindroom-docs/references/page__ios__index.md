@@ -48,6 +48,7 @@ Access application paths include everything below them, so answer 404 for anythi
 Before moving an existing homeserver behind Access, delete its pushers for the app (app ID `chat.mindroom.app`) that point at the public push gateway, for example with the homeserver's admin tools.
 Registrations made before the move send full message content, and the app does not replace them.
 Accounts that were signed in before the move need to sign out and in again.
+To take a homeserver off Access later, keep answering the advert path with a 404 and `Access-Control-Allow-Origin: *`, and have iOS accounts sign out and in again; until then the app keeps waiting for an Access sign-in that can no longer finish.
 
 ## Reporting Issues
 
