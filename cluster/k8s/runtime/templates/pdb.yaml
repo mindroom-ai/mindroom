@@ -27,13 +27,7 @@ spec:
   selector:
     matchLabels:
       {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 6 }}
-  {{- $minAvailable := .Values.approvedEgress.podDisruptionBudget.minAvailable }}
-  {{- /* minAvailable: 0 is a valid budget, so only null or "" leaves it unset. */}}
-  {{- if and (not (kindIs "invalid" $minAvailable)) (ne (toString $minAvailable) "") }}
-  minAvailable: {{ $minAvailable }}
-  {{- else }}
-  maxUnavailable: {{ .Values.approvedEgress.podDisruptionBudget.maxUnavailable }}
-  {{- end }}
+  maxUnavailable: 0
   {{- /* With one replica, the default policy would also refuse to evict an unready proxy, so a drain would wait on a pod that serves nothing. */}}
   unhealthyPodEvictionPolicy: AlwaysAllow
 {{- end }}

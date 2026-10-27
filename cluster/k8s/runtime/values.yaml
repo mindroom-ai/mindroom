@@ -794,12 +794,9 @@ approvedEgress:
     create: true
     name: ""
   # Optional PodDisruptionBudget for the single proxy pod, rendered only when approvedEgress is enabled.
-  # The default maxUnavailable of 0 blocks voluntary evictions, such as node drains, while the proxy is ready;
-  # see "Worker Egress Proxy" in the README.
+  # It blocks voluntary evictions, such as node drains, while the proxy is ready; see "Worker Egress Proxy" in the README.
   podDisruptionBudget:
     create: false
-    maxUnavailable: 0
-    minAvailable: ""
 
 initContainers: []
 extraContainers: []
