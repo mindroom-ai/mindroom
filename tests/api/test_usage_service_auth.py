@@ -16,7 +16,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
@@ -179,7 +179,7 @@ def _seed_usage_database(storage_root: Path) -> None:
             ),
         )
 
-    migrate_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database))
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:

@@ -27,11 +27,10 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage import legacy_agno3_conversion
+from mindroom.session_storage import store as store_module
+from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX, ConversionSpaceError
-from mindroom.session_storage.legacy_agno3_conversion import (
-    migrate_conversation_database,
-    migrate_conversation_storage,
-)
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
 from mindroom.session_storage.store import ConversationStore
@@ -217,7 +216,7 @@ def _segment(
 
 
 def _converted(database: Path) -> ConversationStore:
-    migrate_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database))
     return ConversationStore(database)
 
 
@@ -1384,7 +1383,7 @@ def test_a_converted_database_holds_only_the_v2_layout(tmp_path: Path, dump: Pat
     """The Agno tables, the sessions table's other columns, and its unused index are gone; the meta row marks it."""
     database, names = _restore(dump, tmp_path)
 
-    migrate_conversation_database(database, names)
+    prepare_conversation_database(database, names)
 
     with closing(sqlite3.connect(database)) as connection:
         assert table_names(connection) == {
@@ -1418,9 +1417,9 @@ def test_every_input_converts_once_and_the_same_way_twice(tmp_path: Path, name: 
         original = database.read_bytes()
         backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}")
         with deterministic():
-            migrate_conversation_database(database, names)
+            prepare_conversation_database(database, names)
             converted = _dump(database)
-            migrate_conversation_database(database, names)
+            prepare_conversation_database(database, names)
         assert _dump(database) == converted
         assert backup.read_bytes() == original
         dumps.append(converted)
@@ -1442,13 +1441,13 @@ def test_a_failed_conversion_leaves_the_database_as_it_was(tmp_path: Path, monke
     with monkeypatch.context() as patched:
         patched.setattr(legacy_agno3_conversion, "_convert_summary", fail)
         with pytest.raises(RuntimeError, match="injected"):
-            migrate_conversation_database(database, names)
+            prepare_conversation_database(database, names)
     assert database.read_bytes() == original
     assert not _is_converted(database)
     backup = database.with_name(f"{database.name}{BACKUP_SUFFIX}")
     backup.write_bytes(b"stale")
 
-    migrate_conversation_database(database, names)
+    prepare_conversation_database(database, names)
 
     assert _is_converted(database)
     assert backup.read_bytes() == original
@@ -1470,34 +1469,12 @@ def test_a_failed_conversion_rolls_back_at_once(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_summary", read_then_fail)
     with pytest.raises(RuntimeError, match="injected") as interrupted:
-        migrate_conversation_database(database, names)
+        prepare_conversation_database(database, names)
 
     # The failure's traceback keeps the reading cursor alive, as it does for a caller that logs or re-raises it.
     assert interrupted.traceback
     assert not Path(f"{database}-journal").exists()
     assert _other_process_takes_write_lock(database) == "locked"
-
-
-def test_a_converted_database_costs_one_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Opening a converted database reads only its marker, beside checking which file SQLite opened."""
-    database, names = _restore(GOLDEN_DUMPS[0], tmp_path)
-    migrate_conversation_database(database, names)
-    statements: list[str] = []
-    connect = legacy_agno3_conversion.connect_conversation_database
-
-    def traced(path: Path, *, timeout: float) -> sqlite3.Connection:
-        connection = connect(path, timeout=timeout)
-        connection.set_trace_callback(statements.append)
-        return connection
-
-    monkeypatch.setattr(legacy_agno3_conversion, "connect_conversation_database", traced)
-    migrate_conversation_database(database, names)
-
-    # SQLite traces the pragma a table-valued function runs as a comment of its own.
-    run = [statement for statement in statements if not statement.startswith("--")]
-    assert len(run) == 2
-    assert "pragma_database_list" in run[0]
-    assert run[1].startswith("SELECT 1 FROM sqlite_master")
 
 
 def test_the_marker_is_read_again_under_the_write_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1509,14 +1486,14 @@ def test_the_marker_is_read_again_under_the_write_lock(tmp_path: Path, monkeypat
 
     def other_opener_converts_first(connection: sqlite3.Connection, path: Path) -> None:
         monkeypatch.setattr(legacy_agno3_conversion, "_leave_wal_mode", leave_wal_mode)
-        migrate_conversation_database(path, names)
+        prepare_conversation_database(path, names)
         leave_wal_mode(connection, path)
 
     convert = legacy_agno3_conversion._convert
     monkeypatch.setattr(legacy_agno3_conversion, "_leave_wal_mode", other_opener_converts_first)
     monkeypatch.setattr(legacy_agno3_conversion, "_convert", lambda *args: converts.append(convert(*args)))
 
-    migrate_conversation_database(database, names)
+    prepare_conversation_database(database, names)
 
     assert len(converts) == 1
     assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == original
@@ -1536,98 +1513,10 @@ def test_no_other_process_writes_between_the_backup_and_the_commit(
         return convert_runs(*args)
 
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", convert_runs_after_probe)
-    migrate_conversation_database(database, names)
+    prepare_conversation_database(database, names)
 
     assert set(seen) == {"database is locked"}
     assert _other_process_takes_write_lock(database) == "locked"
-
-
-@pytest.mark.parametrize("link", ["database", "dangling", "directory"])
-def test_a_link_at_the_database_or_its_directory_is_refused(tmp_path: Path, link: str) -> None:
-    """The conversion never opens a link's target, nor creates a dangling one's."""
-    target, names = _restore(GOLDEN_DUMPS[0], tmp_path / "target")
-    before = target.read_bytes()
-    database = names.database_path(tmp_path / "store")
-    database.parent.parent.mkdir(parents=True)
-    if link == "directory":
-        database.parent.symlink_to(target.parent, target_is_directory=True)
-    else:
-        database.parent.mkdir()
-        database.symlink_to(target if link == "database" else tmp_path / "created.db")
-
-    with pytest.raises(ValueError, match="link"):
-        migrate_conversation_database(database, names)
-
-    assert target.read_bytes() == before
-    assert not (tmp_path / "created.db").exists()
-    assert sorted(path.name for path in target.parent.iterdir()) == [target.name]
-
-
-def test_a_link_planted_after_the_check_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A link swapped in between the check and the connect is caught by the file SQLite reports it opened."""
-    target, names = _restore(GOLDEN_DUMPS[0], tmp_path / "target")
-    before = target.read_bytes()
-    database = names.database_path(tmp_path / "store")
-    database.parent.mkdir(parents=True)
-    connect = legacy_agno3_conversion.connect_conversation_database
-
-    def swapped(path: Path, *, timeout: float) -> sqlite3.Connection:
-        path.symlink_to(target)
-        return connect(path, timeout=timeout)
-
-    monkeypatch.setattr(legacy_agno3_conversion, "connect_conversation_database", swapped)
-    with pytest.raises(ValueError, match="instead"):
-        migrate_conversation_database(database, names)
-
-    assert target.read_bytes() == before
-
-
-def test_a_sessions_directory_swapped_for_a_link_after_the_check_is_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A link swapped in for the sessions directory between the check and the connect gets no v2 tables written."""
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    database = _NAMES.database_path(tmp_path / "store")
-    database.parent.mkdir(parents=True)
-    connect = legacy_agno3_conversion.connect_conversation_database
-
-    def swapped(path: Path, *, timeout: float) -> sqlite3.Connection:
-        path.parent.rename(tmp_path / "moved")
-        path.parent.symlink_to(outside, target_is_directory=True)
-        return connect(path, timeout=timeout)
-
-    monkeypatch.setattr(legacy_agno3_conversion, "connect_conversation_database", swapped)
-    with pytest.raises(ValueError, match="instead"):
-        migrate_conversation_database(database, _NAMES)
-
-    # SQLite's open may have left an empty file at the link's target, never a database with tables.
-    planted = outside / database.name
-    assert not planted.exists() or planted.stat().st_size == 0
-
-
-def test_a_sessions_directory_swapped_for_a_link_before_the_resolve_is_refused(tmp_path: Path) -> None:
-    """A link swapped in for the sessions directory while the conversion resolves its expected path is refused too."""
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sessions = _NAMES.database_path(tmp_path / "store").parent
-    sessions.mkdir(parents=True)
-
-    class SwappedOnFirstResolve(Path):
-        def resolve(self, strict: bool = False) -> Path:
-            if not sessions.is_symlink():
-                sessions.rename(tmp_path / "moved")
-                sessions.symlink_to(outside, target_is_directory=True)
-            return super().resolve(strict=strict)
-
-    database = SwappedOnFirstResolve(_NAMES.database_path(tmp_path / "store"))
-    with pytest.raises(ValueError, match="instead"):
-        migrate_conversation_database(database, _NAMES)
-
-    assert sessions.is_symlink()
-    planted = outside / database.name
-    assert not planted.exists() or planted.stat().st_size == 0
 
 
 def _wal_crash_copy(tmp_path: Path) -> tuple[Path, TableNames]:
@@ -1649,7 +1538,7 @@ def test_a_write_ahead_log_database_is_checkpointed_and_converted(tmp_path: Path
     """A commit only the log holds reaches both the converted file and its backup, and the file leaves the mode."""
     database, names = _wal_crash_copy(tmp_path)
 
-    migrate_conversation_database(database, names)
+    prepare_conversation_database(database, names)
 
     assert not Path(f"{database}-wal").exists()
     with closing(sqlite3.connect(database)) as connection:
@@ -1672,7 +1561,7 @@ def test_a_write_ahead_log_another_connection_holds_stops_the_conversion(tmp_pat
     holder.execute("SELECT 1 FROM sqlite_master").fetchall()
     try:
         with pytest.raises(RuntimeError, match=re.escape(str(database))):
-            migrate_conversation_database(database, names, timeout=0)
+            prepare_conversation_database(database, names, timeout=0)
     finally:
         holder.close()
     assert not _is_converted(database)
@@ -1686,7 +1575,7 @@ def test_a_hot_journal_is_rolled_back_before_the_backup(tmp_path: Path) -> None:
     assert Path(f"{database}-journal").exists()
     assert database.read_bytes() != committed
 
-    migrate_conversation_database(database, names)
+    prepare_conversation_database(database, names)
 
     assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").read_bytes() == committed
     assert "filler" not in _tables(database)
@@ -1704,7 +1593,7 @@ def test_a_database_without_a_sessions_table_only_gets_the_v2_tables(tmp_path: P
                 connection.execute(prepare)
 
         with capture_logs() as logs:
-            migrate_conversation_database(database, _NAMES)
+            prepare_conversation_database(database, _NAMES)
 
         assert {_NAMES.log_meta, _NAMES.log_runs, _NAMES.usage} <= _tables(database)
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").exists() == (name == "other")
@@ -1734,7 +1623,7 @@ def test_a_conversion_is_logged_and_compacts_what_the_agno_tables_left_free(tmp_
     database = _database_of_large_runs(tmp_path, 40)
 
     with capture_logs() as logs:
-        migrate_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES)
 
     [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
     assert entry["log_level"] == "info"
@@ -1759,7 +1648,7 @@ def test_a_conversion_that_frees_little_of_the_file_keeps_its_free_pages(tmp_pat
         connection.execute("INSERT INTO kept VALUES (?)", (b"x" * 400_000,))
 
     with capture_logs() as logs:
-        migrate_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES)
 
     [entry] = [entry for entry in logs if entry["event"] == "conversation_converted"]
     assert entry["compacted"] is False
@@ -1781,7 +1670,7 @@ def test_a_conversion_without_room_to_compact_keeps_its_free_pages(
 
     monkeypatch.setattr(os, "statvfs", free_space)
     with capture_logs() as logs:
-        migrate_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES)
 
     assert [entry["compacted"] for entry in logs if entry["event"] == "conversation_converted"] == [False]
     assert _free_pages(database) > 0
@@ -1812,11 +1701,11 @@ def test_an_interrupted_conversion_converts_on_retry_with_the_free_space_of_the_
     convert_runs = legacy_agno3_conversion._convert_runs
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", interrupted)
     with pytest.raises(RuntimeError, match="killed"):
-        migrate_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES)
     assert (database.read_bytes(), backup.read_bytes()) == (original, original)
 
     monkeypatch.setattr(legacy_agno3_conversion, "_convert_runs", convert_runs)
-    migrate_conversation_database(database, _NAMES)
+    prepare_conversation_database(database, _NAMES)
 
     assert _is_converted(database)
     assert backup.read_bytes() == original
@@ -1840,9 +1729,9 @@ def test_a_failed_compaction_is_logged_and_keeps_the_conversion(
     def connect(path: Path, *, timeout: float) -> sqlite3.Connection:
         return sqlite3.connect(path, timeout=timeout, isolation_level=None, factory=_RefusesVacuum)
 
-    monkeypatch.setattr(legacy_agno3_conversion, "connect_conversation_database", connect)
+    monkeypatch.setattr(store_module, "connect_conversation_database", connect)
     with capture_logs() as logs:
-        migrate_conversation_database(database, _NAMES)
+        prepare_conversation_database(database, _NAMES)
 
     assert _skipped(logs, "conversation_compaction_failed") == [str(database)]
     assert [entry["compacted"] for entry in logs if entry["event"] == "conversation_converted"] == [False]
@@ -1890,11 +1779,11 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
     locked, full = _store_at(root / "agents/locked"), _store_at(root / "agents/full")
     write_backup = legacy_agno3_conversion.write_conversion_backup
 
-    def backup_without_space(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> Path:
+    def backup_without_space(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> None:
         if database == full:
             msg = f"Converting {database} to storage v2 needs more bytes"
             raise ConversionSpaceError(msg)
-        return write_backup(database, descriptors, copied_bytes=copied_bytes)
+        write_backup(database, descriptors, copied_bytes=copied_bytes)
 
     monkeypatch.setattr(legacy_agno3_conversion, "write_conversion_backup", backup_without_space)
     before = outside.read_bytes()
@@ -1917,7 +1806,7 @@ async def test_the_startup_sweep_converts_every_store_and_skips_what_it_cannot(
         str(path) for path in (full, garbage, linked, locked)
     )
     assert garbage.read_bytes() == b"not a database"
-    migrate_conversation_database(locked, TableNames.of_database(locked))
+    prepare_conversation_database(locked, TableNames.of_database(locked))
     assert _is_converted(locked)
 
 

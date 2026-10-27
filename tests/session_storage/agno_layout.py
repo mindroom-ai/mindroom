@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.store import ConversationStore
@@ -78,7 +78,7 @@ def converted_store(
     write_agno_database(path, ConversationSession(session_id=SESSION_ID, kind=kind, owner_id=owner_id, created_at=1))
     with closing(sqlite3.connect(path)) as connection, connection:
         _insert_runs(connection, AgnoTableNames.of_database(path), SESSION_ID, runs, created_at=1)
-    migrate_conversation_database(path, TableNames.of_database(path))
+    prepare_conversation_database(path, TableNames.of_database(path))
     return ConversationStore(path)
 
 

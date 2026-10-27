@@ -1162,6 +1162,7 @@ expose = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
     "SaveOutcome",
+    "connect_by_name",
     "connect_conversation_database",
     "decoded_mapping",
     "delete_runs_in_transaction",
@@ -6479,6 +6480,7 @@ from = ["mindroom.session_storage.legacy_agno3_backup"]
 expose = [
     "create_session_storage",
     "create_state_storage",
+    "prepare_conversation_database",
     "save_compaction_usage",
 ]
 from = ["mindroom.session_storage.agent_storage"]

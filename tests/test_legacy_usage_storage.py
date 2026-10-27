@@ -16,7 +16,8 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.constants import resolve_runtime_paths
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database, migrate_conversation_storage
+from mindroom.session_storage.agent_storage import prepare_conversation_database
+from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.schema import TableNames
 from mindroom.usage import legacy_usage_storage
@@ -30,7 +31,7 @@ _NAMES = AgnoTableNames("code")
 
 
 def _convert(path: Path) -> None:
-    migrate_conversation_database(path, TableNames.of_database(path))
+    prepare_conversation_database(path, TableNames.of_database(path))
 
 
 def _usage(path: Path) -> list[tuple[str | None, object]]:

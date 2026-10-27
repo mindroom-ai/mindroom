@@ -17,9 +17,9 @@ import pytest
 
 from mindroom.history import legacy_compaction_state
 from mindroom.history.legacy_compaction_state import adopt_summary_rows
+from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno2_runs import decode_json, move_blob_runs_to_rows, number_unindexed_runs
 from mindroom.session_storage.legacy_agno3_backup import ConversionSpaceError
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.store import ConversationStore
 from tests.conftest import create_agno_2_sessions_db
@@ -53,7 +53,7 @@ def _agno_2_database(tmp_path: Path) -> Path:
 
 
 def _converted(db_file: Path) -> ConversationStore:
-    migrate_conversation_database(db_file, _NAMES)
+    prepare_conversation_database(db_file, _NAMES)
     return ConversationStore(db_file)
 
 
@@ -299,7 +299,7 @@ def test_owners_migrating_at_once_move_the_blob_runs_once(tmp_path: Path) -> Non
 
     def migrate(_index: int) -> None:
         start.wait()
-        migrate_conversation_database(db_file, _NAMES)
+        prepare_conversation_database(db_file, _NAMES)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(migrate, range(4)))
@@ -324,7 +324,7 @@ def test_a_move_that_fails_part_way_leaves_the_database_as_agno_2_left_it(
     with monkeypatch.context() as patch:
         patch.setattr(legacy_compaction_state, "move_blob_runs_to_rows", move_then_fail)
         with pytest.raises(sqlite3.OperationalError, match="disk is full"):
-            migrate_conversation_database(db_file, _NAMES)
+            prepare_conversation_database(db_file, _NAMES)
 
     with closing(sqlite3.connect(db_file)) as connection:
         assert list(connection.iterdump()) == before

@@ -59,9 +59,9 @@ def _write_backup(database: Path) -> Path:
     with ExitStack() as descriptors, closing(connect_conversation_database(database)) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-        backup = write_conversion_backup(database, descriptors, copied_bytes=0)
+        write_conversion_backup(database, descriptors, copied_bytes=0)
         connection.rollback()
-    return backup
+    return _backup_name(database)
 
 
 def _other_process_takes_write_lock(database: Path) -> str:

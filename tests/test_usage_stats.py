@@ -20,8 +20,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -897,7 +896,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
-    migrate_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database))
 
     report = collect_self_usage(
         agent_name="code",
@@ -942,7 +941,7 @@ def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) 
                 ),
             ),
         )
-    migrate_conversation_database(database, TableNames.of_database(database))
+    prepare_conversation_database(database, TableNames.of_database(database))
 
     report = collect_self_usage(
         agent_name="code",

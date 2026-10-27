@@ -16,8 +16,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
@@ -56,7 +55,7 @@ _INSERTED_COLUMNS = "session_id, session_type, agent_id, team_id, user_id, sessi
 def _source(path: Path) -> UsageStorageSource:
     # Existing-history fixtures pass through the same conversion as startup; a read of a missing file creates none.
     if path.is_file():
-        migrate_conversation_database(path, TableNames.of_database(path))
+        prepare_conversation_database(path, TableNames.of_database(path))
     return UsageStorageSource(
         path=path,
         path_label=path.name,

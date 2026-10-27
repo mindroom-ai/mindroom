@@ -1,8 +1,8 @@
 """The one-way conversion of a conversation database from the Agno layout to storage v2.
 
-Every open of a database runs ``migrate_conversation_database``, and so does the startup sweep for every database under
-the session state root. A database with ``<s>_log_meta`` is converted already and costs one read. Any other converts
-in one write transaction, after the byte-for-byte backup beside it (``legacy_agno3_backup``), so a crash or an error
+A store's open (``agent_storage.prepare_conversation_database``) hands this module a database that holds tables but not
+the current layout, and the startup sweep hands it every such database under the session state root. Each converts in
+one write transaction, after the byte-for-byte backup beside it (``legacy_agno3_backup``), so a crash or an error
 leaves the file as it was and the next open converts it again.
 
 Worker code can write session directories, so every database is untrusted input: the conversion follows no link to the
@@ -42,10 +42,16 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_schema_sql,
     run_from_row,
 )
-from mindroom.session_storage.schema import SESSION_COLUMNS, TableNames, index_name, log_schema_sql, table_names
+from mindroom.session_storage.schema import (
+    SESSION_COLUMNS,
+    TableNames,
+    index_name,
+    is_current_layout,
+    log_schema_sql,
+    table_names,
+)
 from mindroom.session_storage.store import (
-    BUSY_TIMEOUT_SECONDS,
-    connect_conversation_database,
+    connect_by_name,
     decoded_mapping,
     flag_folded,
     seen_event_ids,
@@ -72,48 +78,49 @@ _STARTUP_LOCK_TIMEOUT_SECONDS = 0.0
 _COMPACT_FREE_SHARE = 0.25
 
 
-def migrate_conversation_database(path: Path, names: TableNames, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
-    """Bring the database at ``path`` to storage v2, the one entry every open runs.
+def convert_conversation_database(
+    connection: sqlite3.Connection,
+    path: Path,
+    names: TableNames,
+    descriptors: ExitStack,
+) -> None:
+    """Convert the database ``connection`` holds open at ``path``, in an older layout, to storage v2.
 
-    A database with ``<s>_log_meta`` costs one read. Any other gets, in one ``BEGIN IMMEDIATE``: the backup when it
-    holds any table, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2 blob runs and
-    positions), the conversion, the drop of the Agno tables and dead columns, and the v2 tables and meta row. A file
-    in write-ahead-log mode returns to the rollback journal first, which checkpoints its log. A converted file is then
-    compacted when that pays off (``_compact``), and its conversion is logged.
+    In one ``BEGIN IMMEDIATE``: the backup, the Agno-era steps (usage ledger seeding, summary-row adoption with Agno 2
+    blob runs and positions), the conversion, the drop of the Agno tables and dead columns, and the v2 tables and meta
+    row. A file in write-ahead-log mode returns to the rollback journal first, which checkpoints its log. The file is
+    then compacted when that pays off (``_compact``), and its conversion is logged. ``descriptors`` takes the backup's
+    descriptor of the file, which the caller closes after ``connection``.
     """
-    with ExitStack() as descriptors, closing(_connect_by_name(path, timeout)) as connection:
-        if _is_converted(connection, names):
-            return
-        _leave_wal_mode(connection, path)
-        started = time.monotonic()
-        connection.execute("BEGIN IMMEDIATE")
-        converted: tuple[int, int] | None = None
-        try:
-            # Asked again under the lock: another opener may have converted the file while this one waited, and backing
-            # up the converted file would replace the original's backup.
-            if not _is_converted(connection, names):
-                # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
-                connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
-                if _convert(connection, AgnoTableNames(names.storage_name), path, descriptors):
-                    converted = connection.execute(
-                        f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
-                        f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
-                    ).fetchone()
-        except BaseException:
+    _leave_wal_mode(connection, path)
+    started = time.monotonic()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # Asked again under the lock: another opener may have converted the file while this one waited, and backing up
+        # the converted file would replace the original's backup.
+        if is_current_layout(connection, names):
             connection.rollback()
-            raise
-        connection.commit()
-        if converted is None:
             return
-        compacted = _compact(connection, path)
-        logger.info(
-            "conversation_converted",
-            path=str(path),
-            runs=converted[0],
-            messages=converted[1],
-            compacted=compacted,
-            duration_seconds=round(time.monotonic() - started, 3),
-        )
+        # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
+        connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
+        _convert(connection, AgnoTableNames(names.storage_name), path, descriptors)
+        runs, messages = connection.execute(
+            f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
+            f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
+        ).fetchone()
+    except BaseException:
+        connection.rollback()
+        raise
+    connection.commit()
+    compacted = _compact(connection, path)
+    logger.info(
+        "conversation_converted",
+        path=str(path),
+        runs=runs,
+        messages=messages,
+        compacted=compacted,
+        duration_seconds=round(time.monotonic() - started, 3),
+    )
 
 
 def _compact(connection: sqlite3.Connection, path: Path) -> bool:
@@ -161,11 +168,20 @@ def _migrate_databases(runtime_paths: RuntimePaths) -> None:
         try:
             # A store that never wrote has no database to convert; its first open creates one.
             if path.is_symlink() or path.exists():
-                migrate_conversation_database(path, names, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)
+                _convert_at_startup(path, names)
         except Exception as error:
             # Worker code can write session databases, so one that is linked, unreadable, locked, or malformed must not
             # stop startup. Its owner converts it with the full lock timeout when it next opens it, or fails alone.
             logger.warning("conversation_conversion_skipped_store", path=str(path), error=str(error))
+
+
+def _convert_at_startup(path: Path, names: TableNames) -> None:
+    with (
+        ExitStack() as descriptors,
+        closing(connect_by_name(path, timeout=_STARTUP_LOCK_TIMEOUT_SECONDS)) as connection,
+    ):
+        if table_names(connection) and not is_current_layout(connection, names):
+            convert_conversation_database(connection, path, names, descriptors)
 
 
 def _directories(root: Path) -> list[Path]:
@@ -179,37 +195,8 @@ def _directories(root: Path) -> list[Path]:
         return []
 
 
-def _connect_by_name(path: Path, timeout: float) -> sqlite3.Connection:
-    """Connect to the file ``path`` names itself, never to a link's target, which ``sqlite3.connect`` would open or create.
-
-    A link at the database or its sessions directory is refused before connecting. The name SQLite resolves for the
-    file, every link followed, must then be ``path`` with only the directories above the sessions directory resolved, so
-    a link swapped in at either place before SQLite resolves the path is refused before anything is written, though
-    SQLite's open can have created an empty file at the link's target. Two residuals remain: a sessions directory
-    swapped for a link inside SQLite's own resolve-then-open window opens the link's target under the expected name, and
-    a missing or empty file there gets the v2 tables (one with tables stops at the backup's no-follow walk); and links
-    above the sessions directory are followed, as the store follows them.
-    """
-    if path.parent.is_symlink() or path.is_symlink():
-        msg = f"Refusing to convert {path} to storage v2: the database or its directory is a link"
-        raise ValueError(msg)
-    expected = str(path.parent.parent.resolve() / path.parent.name / path.name)
-    connection = connect_conversation_database(path, timeout=timeout)
-    (opened,) = connection.execute("SELECT file FROM pragma_database_list WHERE name = 'main'").fetchone()
-    if opened != expected:
-        connection.close()
-        msg = f"Refusing to convert {path} to storage v2: SQLite opened {opened} instead"
-        raise ValueError(msg)
-    return connection
-
-
 # Decodes text that is not UTF-8, which worker code can store, with replacement characters instead of failing the read.
 _TEXT_WITH_REPLACEMENT_CHARACTERS = partial(str, encoding="utf-8", errors="replace")
-
-
-def _is_converted(connection: sqlite3.Connection, names: TableNames) -> bool:
-    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
-    return connection.execute(query, (names.log_meta,)).fetchone() is not None
 
 
 def _leave_wal_mode(connection: sqlite3.Connection, path: Path) -> None:
@@ -227,14 +214,10 @@ def _leave_wal_mode(connection: sqlite3.Connection, path: Path) -> None:
         raise RuntimeError(msg)
 
 
-def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, descriptors: ExitStack) -> bool:
-    """Convert the database in the caller's write transaction; one without a sessions table only gets the v2 tables.
-
-    Returns whether the file held any table, so a new or empty file, which only gets the v2 tables, reports none.
-    """
+def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, descriptors: ExitStack) -> None:
+    """Convert the database in the caller's write transaction; one without a sessions table only gets the v2 tables."""
     tables = table_names(connection)
-    if tables:
-        write_conversion_backup(path, descriptors, copied_bytes=adoption_copy_bytes(connection, names))
+    write_conversion_backup(path, descriptors, copied_bytes=adoption_copy_bytes(connection, names))
     if names.sessions in tables:
         _session_text_as_utf8(connection, names)
         _session_json_encoded_once(connection, names)
@@ -247,7 +230,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     for statement in log_schema_sql(names):
         connection.execute(statement)
     if names.sessions not in tables:
-        return bool(tables)
+        return
     seqs = count(1)
     for (session_id,) in connection.execute(
         f"SELECT session_id FROM {quote_identifier(names.sessions)} ORDER BY session_id",  # noqa: S608
@@ -260,7 +243,6 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     _drop_agno_tables(connection, names)
     _drop_dead_session_columns(connection, names)
     _write_meta(connection, names, next(seqs))
-    return True
 
 
 # LEGACY_COMPAT: Agno 2 session columns encoded twice, as the storage v2 conversion finds them.
@@ -860,6 +842,6 @@ def _write_meta(connection: sqlite3.Connection, names: TableNames, next_seq: int
 
 
 __all__ = [
-    "migrate_conversation_database",
+    "convert_conversation_database",
     "migrate_conversation_storage",
 ]

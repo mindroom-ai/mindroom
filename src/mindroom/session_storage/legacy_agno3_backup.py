@@ -33,7 +33,7 @@ class ConversionSpaceError(RuntimeError):
 # it, so a downgrade can restore it; a retry replaces an earlier attempt's backup, and MindRoom never deletes the backup
 # of a converted database.
 # Coverage: tests/session_storage/test_legacy_agno3_backup.py.
-def write_conversion_backup(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> Path:
+def write_conversion_backup(database: Path, descriptors: ExitStack, *, copied_bytes: int) -> None:
     """Copy ``database`` to ``<name>.db.pre-storage-v2`` beside it, called while the conversion holds its write lock.
 
     Free space must be at least two and a half times the file's size plus ``copied_bytes``, the older run data the
@@ -70,7 +70,6 @@ def write_conversion_backup(database: Path, descriptors: ExitStack, *, copied_by
             os.fsync(writer.fileno())
         os.replace(temporary_name, backup_name, src_dir_fd=directory, dst_dir_fd=directory)
         os.fsync(directory)
-    return database.with_name(backup_name)
 
 
 def _require_free_space(directory: int, database: Path, base: int, copied: int) -> None:

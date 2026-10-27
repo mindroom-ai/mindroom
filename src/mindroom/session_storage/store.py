@@ -79,6 +79,28 @@ def connect_conversation_database(path: Path, *, timeout: float = BUSY_TIMEOUT_S
     return connection
 
 
+def connect_by_name(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    """Connect to the file ``path`` names itself, never to a link's target, which ``sqlite3.connect`` would open or create.
+
+    Opening a store, or converting its database at startup, connects this way. A link at the database or its sessions
+    directory is refused before connecting. The name SQLite resolves for the file, every link followed, must then be
+    ``path`` with only the directories above the sessions directory resolved, so a link swapped in at either place
+    before SQLite resolves the path is refused before anything is written, though SQLite's open can have created an
+    empty file at the link's target. Links above the sessions directory are followed, as the store follows them.
+    """
+    if path.parent.is_symlink() or path.is_symlink():
+        msg = f"Refusing to open {path}: the conversation database or its directory is a link"
+        raise ValueError(msg)
+    expected = str(path.parent.parent.resolve() / path.parent.name / path.name)
+    connection = connect_conversation_database(path, timeout=timeout)
+    (opened,) = connection.execute("SELECT file FROM pragma_database_list WHERE name = 'main'").fetchone()
+    if opened != expected:
+        connection.close()
+        msg = f"Refusing to open {path}: SQLite opened {opened} instead"
+        raise ValueError(msg)
+    return connection
+
+
 @contextmanager
 def _begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
     """Run the block as one transaction on ``connection``, committing when it exits normally.
@@ -1115,6 +1137,7 @@ __all__ = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
     "SaveOutcome",
+    "connect_by_name",
     "connect_conversation_database",
     "decoded_mapping",
     "delete_runs_in_transaction",

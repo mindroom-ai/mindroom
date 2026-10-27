@@ -38,9 +38,8 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.session_ids import create_session_id
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system import tool_calls
@@ -358,7 +357,7 @@ def test_read_runs_reads_converted_goldens_and_names_unconverted_databases(tmp_p
     assert unconverted.error.count("not converted to the current storage layout") == len(databases)
 
     for store, database in zip(goldens, databases, strict=True):
-        migrate_conversation_database(database, store.names)
+        prepare_conversation_database(database, store.names)
         assert database.with_name(f"{database.name}{BACKUP_SUFFIX}").is_file()
     converted = _read_runs(tmp_path, ids)
 

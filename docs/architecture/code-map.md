@@ -271,7 +271,7 @@ Matrix sync callback
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |
 | `budgets/monitor.py` | Background spend refresh, the per-user cap store, and the per-reply decision to use the fallback model |
 | `config/budgets.py` | Opt-in budgets: default monthly cap and fallback model |
-| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store, running the preflight archive check and the conversion to the current layout first |
+| `session_storage/agent_storage.py` | Opens an agent's, a team scope's, or the system usage ledger's conversation store: the preflight archive check, the link-refusing connect, the tables of a new database, and the conversion of one in an older layout |
 | `session_storage/store.py` | The conversation store: one SQLite database of sessions, runs with a row per stored message and per tool execution, summary rows, and the usage ledger, with full run saves refused once a run is final and single facts patched onto stored rows, each operation in one transaction on its own connection |
 | `session_storage/schema.py` | File and table names, table listing, and the layout of a conversation database: the sessions table, the six `*_log_*` tables, and the usage ledger |
 | `session_storage/codec.py` | A run record to its run row, message rows, and tool-execution rows and back, with the JSON keys stored runs carry |
@@ -279,7 +279,7 @@ Matrix sync callback
 | `session_storage/lanes.py` | One FIFO lane per conversation database for storage operations started from async code |
 | `session_storage/legacy_agno2_runs.py` | Data older Agno releases stored: Agno 2 run blobs, rows without a position, and odd timestamps, which the conversion reads, and session JSON columns encoded twice, which the conversion stores once and usage reports over unconverted files read |
 | `session_storage/legacy_tool_results.py` | Tool results an earlier release stored combined in one message, split into one message per result when a database converts |
-| `session_storage/legacy_agno3_conversion.py` | The one-way conversion of an Agno-layout conversation database to storage v2, run by every store open and by the startup sweep over the session state root |
+| `session_storage/legacy_agno3_conversion.py` | The one-way conversion of an Agno-layout conversation database to storage v2, run by a store open that finds an older layout and by the startup sweep over the session state root |
 | `session_storage/legacy_agno3_backup.py` | The `<name>.db.pre-storage-v2` copy a database gets before its conversion, after a free-space check, through no-follow descriptors |
 | `session_storage/legacy_agno3_schema.py` | The Agno layout's table names, DDL, run-row decoder, and member-subtree delete, read only by the conversion and its Agno-era steps |
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |

@@ -171,6 +171,12 @@ def table_names(connection: sqlite3.Connection) -> set[str]:
     return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 
 
+def is_current_layout(connection: sqlite3.Connection, names: TableNames) -> bool:
+    """Return whether the database holds ``*_log_meta``, the marker of the current layout."""
+    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+    return connection.execute(query, (names.log_meta,)).fetchone() is not None
+
+
 def index_name(table: str, *columns: str) -> str:
     """Return the name of ``table``'s index over ``columns``, the one rule both layouts' indexes follow."""
     return f"idx_{table}_{'_'.join(columns)}"
@@ -190,6 +196,7 @@ __all__ = [
     "TableNames",
     "index_name",
     "index_sql",
+    "is_current_layout",
     "log_schema_sql",
     "owner_scope_key",
     "table_names",

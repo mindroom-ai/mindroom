@@ -14,7 +14,7 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.schema import TableNames
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
@@ -64,7 +64,7 @@ def test_conversation_converted_keeps_its_name_and_fields(tmp_path: Path) -> Non
         connection.execute("CREATE TABLE other (x)")
 
     with capture_logs() as logs:
-        migrate_conversation_database(database, names)
+        prepare_conversation_database(database, names)
 
     assert _emitted_fields(logs, "conversation_converted") == _STABLE_EVENTS["conversation_converted"]
 

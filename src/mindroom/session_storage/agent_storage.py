@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack, closing
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_database
+from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database
 from mindroom.session_storage.preflight import session_storage_preflight
-from mindroom.session_storage.schema import TableNames
-from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore
+from mindroom.session_storage.schema import TableNames, is_current_layout, log_schema_sql, table_names
+from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore, connect_by_name
 
 if TYPE_CHECKING:
+    import sqlite3
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -33,8 +35,36 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
     db_path = names.database_path(state_root)
     with session_storage_preflight(state_root, names, timeout_seconds=BUSY_TIMEOUT_SECONDS):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        migrate_conversation_database(db_path, names)
+        prepare_conversation_database(db_path, names)
         return ConversationStore(db_path)
+
+
+def prepare_conversation_database(path: Path, names: TableNames, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
+    """Bring the database at ``path`` to the current layout before a store opens it.
+
+    The connection follows no link to the file (``connect_by_name``). A database in the current layout costs one read,
+    a new or empty one gets every table, and only one that holds older tables is handed to the one-way conversion.
+    """
+    with ExitStack() as descriptors, closing(connect_by_name(path, timeout=timeout)) as connection:
+        if is_current_layout(connection, names):
+            return
+        if not table_names(connection):
+            _create_tables(connection, names)
+        if not is_current_layout(connection, names):
+            convert_conversation_database(connection, path, names, descriptors)
+
+
+def _create_tables(connection: sqlite3.Connection, names: TableNames) -> None:
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # Asked again under the lock: another opener may have created or converted the file meanwhile.
+        if not table_names(connection):
+            for statement in log_schema_sql(names):
+                connection.execute(statement)
+    except BaseException:
+        connection.rollback()
+        raise
+    connection.commit()
 
 
 def create_session_storage(
@@ -83,5 +113,6 @@ def save_compaction_usage(
 __all__ = [
     "create_session_storage",
     "create_state_storage",
+    "prepare_conversation_database",
     "save_compaction_usage",
 ]
