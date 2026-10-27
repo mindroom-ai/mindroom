@@ -183,6 +183,7 @@ Changing `probeUrl` changes only the client bootstrap target; it does not create
 The selected client image must contain `/usr/share/nginx/html/authentication-recovery.js`.
 
 If an external gateway applies authentication, expose only the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes without authentication so cached application shells can load the configuration and recovery code.
+Gateway rules that exempt a path usually exempt every path below it too, so the chart answers 404 below these scripts and below the service worker scripts at `basePath/sw.js` and `/sw.js`.
 Keep `/authentication-recovery-probe`, the configured navigation target, client routes, and API routes protected.
 Enabling this option does not change gateway authentication policies.
 

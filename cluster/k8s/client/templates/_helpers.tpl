@@ -174,6 +174,14 @@ server {
     add_header Cache-Control "no-store, max-age=0" always;
     return 200 {{ $runtimeConfig | quote }};
   }
+
+  # Browsers fetch this script, the recovery script, and the service workers
+  # without a gateway session, so a gateway may make them public, and its path
+  # rules usually cover every path below them too. Answer 404 there instead of
+  # the app shell or build files; some gateways treat a backslash as a slash.
+  location ~ ^/runtime-config\.js[/\x5c] {
+    return 404;
+  }
 {{- if .Values.authenticationRecovery.enabled }}
 
   # The client image owns the recovery implementation. This chart only loads
@@ -182,6 +190,10 @@ server {
     alias /usr/share/nginx/html/authentication-recovery.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+  }
+
+  location ~ ^/authentication-recovery\.js[/\x5c] {
+    return 404;
   }
 
   location = /authentication-recovery-probe {
@@ -274,6 +286,10 @@ server {
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
   }
+
+  location ~ ^{{ regexQuoteMeta $prefix }}/sw\.js[/\x5c] {
+    return 404;
+  }
 {{- if .Values.rootServiceWorkerCleanup.enabled }}
 
   # A Matrix client that previously controlled the origin root can leave a
@@ -284,6 +300,10 @@ server {
     alias /usr/share/nginx/html/root-cleanup-sw.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+  }
+
+  location ~ ^/sw\.js[/\x5c] {
+    return 404;
   }
 {{- end }}
 {{- if ne $base "/" }}
