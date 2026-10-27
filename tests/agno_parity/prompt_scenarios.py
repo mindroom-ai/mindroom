@@ -64,7 +64,7 @@ from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.envelope import team_response_stream
-from mindroom.teams.formation import _select_team_mode
+from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import _generate_summary, _resolve_thread_summary_model_name, _ThreadEnrichment
 from mindroom.tool_system.runtime_context import (
@@ -783,7 +783,7 @@ async def _routing(config: Config, runtime_paths: RuntimePaths) -> None:
 
 async def _team_mode(config: Config, runtime_paths: RuntimePaths) -> None:
     message = "Plan the launch and draft the announcement."
-    mode = await _select_team_mode(message, ["assistant", "researcher"], config, runtime_paths)
+    mode = await select_ad_hoc_team_mode(message, ["assistant", "researcher"], config, runtime_paths)
     assert mode == TeamMode.COORDINATE, mode
 
 

@@ -2069,7 +2069,7 @@ class TurnController:
                 if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
                     team_mode = await select_ad_hoc_team_mode(
                         event.body,
-                        action.form_team.eligible_members,
+                        action.form_team.eligible_member_names,
                         self.deps.runtime.config,
                         self.deps.runtime_paths,
                     )
@@ -2122,7 +2122,7 @@ class TurnController:
                     assert team_mode is not None
                     await self.deps.response_runner.generate_team_response_helper(
                         response_request,
-                        team_agents=action.form_team.eligible_members,
+                        member_names=action.form_team.eligible_member_names,
                         team_mode=team_mode.value,
                     )
                 else:

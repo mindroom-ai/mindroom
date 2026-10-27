@@ -2201,7 +2201,6 @@ class TestAgentBot(AgentBotTestBase):
                 member_statuses=[
                     TeamResolutionMember(agent=bot.matrix_id, name=bot.agent_name, status=TeamMemberStatus.ELIGIBLE),
                 ],
-                eligible_members=[bot.matrix_id],
                 mode=TeamMode.COORDINATE,
             ),
         )
@@ -2290,7 +2289,6 @@ class TestAgentBot(AgentBotTestBase):
                 member_statuses=[
                     TeamResolutionMember(agent=bot.matrix_id, name=bot.agent_name, status=TeamMemberStatus.ELIGIBLE),
                 ],
-                eligible_members=[bot.matrix_id],
                 mode=TeamMode.COLLABORATE,
             ),
         )
@@ -2329,13 +2327,13 @@ class TestAgentBot(AgentBotTestBase):
         assert action.form_team is not None
         mock_select_team_mode.assert_awaited_once_with(
             event.body,
-            action.form_team.eligible_members,
+            action.form_team.eligible_member_names,
             bot._turn_controller.deps.runtime.config,
             bot._turn_controller.deps.runtime_paths,
         )
         assert mock_generate_team_response.await_count == 1
         assert mock_generate_team_response.await_args.kwargs["team_mode"] == "coordinate"
-        assert mock_generate_team_response.await_args.kwargs["team_agents"] == action.form_team.eligible_members
+        assert mock_generate_team_response.await_args.kwargs["member_names"] == (bot.agent_name,)
         # Enrichment hooks see the member names team formation resolved.
         [team_request] = team_requests
         assert team_request.payload_preparation is not None
@@ -2390,7 +2388,6 @@ class TestAgentBot(AgentBotTestBase):
                 member_statuses=[
                     TeamResolutionMember(agent=bot.matrix_id, name=bot.agent_name, status=TeamMemberStatus.ELIGIBLE),
                 ],
-                eligible_members=[bot.matrix_id],
                 mode=TeamMode.COORDINATE,
             ),
         )

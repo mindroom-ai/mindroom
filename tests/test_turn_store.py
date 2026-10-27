@@ -126,7 +126,6 @@ def test_a_team_reply_records_the_history_scope_of_the_members_it_formed_with(tm
         intent=TeamIntent.IMPLICIT_THREAD_TEAM,
         requested_members=[member.agent for member in members],
         member_statuses=members,
-        eligible_members=[member.agent for member in members if member.status is TeamMemberStatus.ELIGIBLE],
         mode=TeamMode.COLLABORATE,
     )
     state_writer = ConversationStateWriter(

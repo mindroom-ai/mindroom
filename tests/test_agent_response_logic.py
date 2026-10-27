@@ -29,7 +29,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.teams.formation import TeamIntent, TeamOutcome, TeamResolution
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
@@ -190,7 +190,6 @@ class TestAgentResponseLogic:
                 intent=TeamIntent.EXPLICIT_MEMBERS,
                 requested_members=[team_id],
                 member_statuses=[],
-                eligible_members=[],
                 outcome=TeamOutcome.REJECT,
                 reason="Team request includes no available members.",
             ),
@@ -239,8 +238,14 @@ class TestAgentResponseLogic:
         team_resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[ids["private_worker"], ids["shared"]],
-            member_statuses=[],
-            eligible_members=[ids["private_worker"]],
+            member_statuses=[
+                TeamResolutionMember(
+                    agent=ids["private_worker"],
+                    name="private_worker",
+                    status=TeamMemberStatus.ELIGIBLE,
+                ),
+                TeamResolutionMember(agent=ids["shared"], name="shared", status=TeamMemberStatus.UNSUPPORTED_FOR_TEAM),
+            ],
             outcome=TeamOutcome.REJECT,
             reason="Team request includes unsupported members.",
         )
@@ -296,8 +301,10 @@ class TestAgentResponseLogic:
         team_resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[ids["private_one"], ids["private_two"]],
-            member_statuses=[],
-            eligible_members=[ids["private_one"], ids["private_two"]],
+            member_statuses=[
+                TeamResolutionMember(agent=ids["private_one"], name="private_one", status=TeamMemberStatus.ELIGIBLE),
+                TeamResolutionMember(agent=ids["private_two"], name="private_two", status=TeamMemberStatus.ELIGIBLE),
+            ],
             outcome=TeamOutcome.TEAM,
             mode=TeamMode.COORDINATE,
         )
@@ -666,7 +673,6 @@ class TestAgentResponseLogic:
                 intent=TeamIntent.EXPLICIT_MEMBERS,
                 requested_members=[team_id],
                 member_statuses=[],
-                eligible_members=[],
                 outcome=TeamOutcome.REJECT,
                 reason="Team request includes no available members.",
             ),
