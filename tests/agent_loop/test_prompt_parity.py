@@ -56,11 +56,17 @@ async def test_recorded_requests_equal_the_goldens(name: str, tmp_path: Path) ->
 
 
 def test_instructions_render_as_bullets_unless_one_is_a_block() -> None:
-    """One instruction stays verbatim, single-line ones become bullets, and a multi-line one keeps its own layout."""
+    """One instruction stays verbatim, single-line ones become bullets, and a multi-line one keeps its own layout.
+
+    Each is stripped, so a block that ends with a newline is still one blank line from the next.
+    """
     assert render_instructions(["Answer briefly.\n"]) == "Answer briefly.\n"
     assert render_instructions(["Answer briefly.", " Cite sources. "]) == "- Answer briefly.\n- Cite sources."
     assert render_instructions(["Answer briefly.", "When unsure:\n- say so\n"]) == (
-        "- Answer briefly.\n\nWhen unsure:\n- say so\n"
+        "- Answer briefly.\n\nWhen unsure:\n- say so"
+    )
+    assert render_instructions(["When unsure:\n- say so\n", "Then:\n- stop\n"]) == (
+        "When unsure:\n- say so\n\nThen:\n- stop"
     )
 
 
