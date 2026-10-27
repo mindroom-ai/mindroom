@@ -51,6 +51,7 @@ from mindroom.session_storage.schema import (
     table_names,
 )
 from mindroom.session_storage.store import (
+    begun,
     connect_by_name,
     decoded_mapping,
     flag_folded,
@@ -94,12 +95,10 @@ def convert_conversation_database(
     """
     _leave_wal_mode(connection, path)
     started = time.monotonic()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
+    with begun(connection, write=True):
         # Asked again under the lock: another opener may have converted the file while this one waited, and backing up
         # the converted file would replace the original's backup.
         if is_current_layout(connection, names):
-            connection.rollback()
             return
         # SQLite keeps whatever bytes worker code stores as text; the conversion's own connection reads them.
         connection.text_factory = _TEXT_WITH_REPLACEMENT_CHARACTERS
@@ -108,10 +107,6 @@ def convert_conversation_database(
             f"SELECT (SELECT count(*) FROM {quote_identifier(names.log_runs)}), "  # noqa: S608
             f"(SELECT count(*) FROM {quote_identifier(names.log_messages)})",
         ).fetchone()
-    except BaseException:
-        connection.rollback()
-        raise
-    connection.commit()
     compacted = _compact(connection, path)
     logger.info(
         "conversation_converted",

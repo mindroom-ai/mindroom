@@ -1159,6 +1159,7 @@ expose = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
     "SaveOutcome",
+    "begun",
     "connect_by_name",
     "connect_conversation_database",
     "decoded_mapping",

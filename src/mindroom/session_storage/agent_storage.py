@@ -11,7 +11,7 @@ from mindroom.runtime_resolution import record_private_instance_owner, resolve_a
 from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database
 from mindroom.session_storage.preflight import session_storage_preflight
 from mindroom.session_storage.schema import TableNames, is_current_layout, log_schema_sql, table_names
-from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore, connect_by_name
+from mindroom.session_storage.store import BUSY_TIMEOUT_SECONDS, ConversationStore, begun, connect_by_name
 
 if TYPE_CHECKING:
     import sqlite3
@@ -55,16 +55,11 @@ def prepare_conversation_database(path: Path, names: TableNames) -> None:
 
 
 def _create_tables(connection: sqlite3.Connection, names: TableNames) -> None:
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        # Asked again under the lock: another opener may have created or converted the file meanwhile.
+    # Asked again under the lock: another opener may have created or converted the file meanwhile.
+    with begun(connection, write=True):
         if not table_names(connection):
             for statement in log_schema_sql(names):
                 connection.execute(statement)
-    except BaseException:
-        connection.rollback()
-        raise
-    connection.commit()
 
 
 def create_session_storage(

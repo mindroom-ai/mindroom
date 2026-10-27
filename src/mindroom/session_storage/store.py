@@ -101,7 +101,7 @@ def connect_by_name(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sql
 
 
 @contextmanager
-def _begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
+def begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
     """Run the block as one transaction on ``connection``, committing when it exits normally.
 
     A write takes the write lock first. A block that fails or is interrupted rolls back at once rather than
@@ -137,7 +137,7 @@ class ConversationStore:
         A write takes the write lock first, so rules that read the log before writing see what they change. A read
         is one snapshot.
         """
-        with closing(connect_conversation_database(self.path)) as connection, _begun(connection, write=write):
+        with closing(connect_conversation_database(self.path)) as connection, begun(connection, write=write):
             yield connection
 
     def read_session_metadata(self, session_id: str) -> dict[str, Any] | None:
@@ -1136,6 +1136,7 @@ __all__ = [
     "BUSY_TIMEOUT_SECONDS",
     "ConversationStore",
     "SaveOutcome",
+    "begun",
     "connect_by_name",
     "connect_conversation_database",
     "decoded_mapping",
