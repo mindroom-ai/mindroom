@@ -70,7 +70,12 @@ from mindroom.tool_system.catalog import (
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.construction import (
+    ToolConstruction,
+    bind_toolkit_construction,
+    get_toolkit_construction,
+    tool_config_signature,
+)
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -1411,10 +1416,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
         # Instructions describe only the functions left; Agno's defaults that name a missing one are dropped.
+        construction = get_toolkit_construction(toolkit)
         adapted = with_offered_instructions(
             toolkit,
             adapted,
-            authored_instructions=bool(tool_entry.tool_config_overrides.get("instructions")),
+            authored_instructions=construction is not None and construction.authored_instructions,
         )
         entry = offered_entry(toolkit, adapted, tool_entry, authored_name) if adapted.functions else None
         if persona_tools is not None:

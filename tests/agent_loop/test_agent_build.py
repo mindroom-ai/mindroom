@@ -26,6 +26,7 @@ from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.provider import ModelRequest
@@ -536,21 +537,35 @@ def test_a_toolkit_s_instructions_show_whenever_it_offers_a_function(tmp_path: P
 
 
 @pytest.mark.parametrize(
-    ("overrides", "expected"),
+    ("overrides", "saved", "expected"),
     [
-        ({"enable_think": False}, ()),
-        ({"enable_analyze": False}, ()),
-        ({"enable_think": False, "instructions": "Analyze each tool result."}, ("Analyze each tool result.",)),
+        ({"enable_think": False}, {}, ()),
+        ({"enable_analyze": False}, {}, ()),
+        (
+            {"enable_think": False, "instructions": "Call think before each reply."},
+            {},
+            ("Call think before each reply.",),
+        ),
+        (
+            {},
+            {"enable_analyze": False, "instructions": "Use think to analyze complex requests."},
+            ("Use think to analyze complex requests.",),
+        ),
     ],
-    ids=["without_think", "without_analyze", "authored_without_think"],
+    ids=["without_think", "without_analyze", "authored_without_think", "saved_authored_without_analyze"],
 )
 def test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered(
     tmp_path: Path,
     overrides: dict[str, object],
+    saved: dict[str, object],
     expected: tuple[str, ...],
 ) -> None:
-    """The default instructions require both ``think`` and ``analyze``; authored instructions show with either one."""
+    """The default instructions require both ``think`` and ``analyze``; authored instructions show with either one.
+
+    Settings saved for the tool, as the dashboard saves them, are authored like those in ``config.yaml``.
+    """
     config, runtime_paths = _config(tmp_path, tools=[{"reasoning": overrides}])
+    get_runtime_credentials_manager(runtime_paths).save_credentials("reasoning", saved)
 
     build = _build(config, runtime_paths, persist_runtime_state=False)
 

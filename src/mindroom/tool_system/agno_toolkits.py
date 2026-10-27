@@ -133,7 +133,7 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 # Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
 # Upstream PR: No matching fix has been verified.
 # Remove when: a toolkit's default instructions name only the functions an agent is offered, so its row can go, and
-# the check in with_offered_instructions with the last row; instructions the config authors must still always show.
+# the check in with_offered_instructions with the last row; instructions set in a tool's settings must still show.
 # Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered,
 #   tests/agent_loop/test_agent_build.py::test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered.
 # Each toolkit class, by import path and including subclasses, maps to the functions its default instructions can name.
@@ -234,7 +234,8 @@ def with_offered_instructions(
 
     A toolkit whose instructions describe its functions (``FunctionScopedInstructions``) gives the ones for those
     functions. Agno's default instructions of a toolkit in ``_DEFAULT_INSTRUCTION_FUNCTIONS`` show only while every
-    function they name is offered; ``authored_instructions`` says the config set them instead, so they always show.
+    function they name is offered. ``authored_instructions`` says the toolkit was built with instructions from its
+    settings, in ``config.yaml`` or saved for the tool, instead of its defaults; those always show.
     """
     offered = [function.name for function in adapted.functions]
     if isinstance(toolkit, FunctionScopedInstructions):

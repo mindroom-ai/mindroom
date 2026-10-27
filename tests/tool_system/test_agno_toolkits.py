@@ -321,12 +321,14 @@ def test_agno_default_instructions_show_only_while_every_function_they_name_is_o
             pytest.skip(f"{tool_name} needs {missing}")
         full = support.build_toolkit(tool_name, config, runtime_paths, offering or None)
         narrowed = support.build_toolkit(tool_name, config, runtime_paths, leaving_one_out or None)
+        # Authored text naming every function, the one left out too, still shows.
+        authored_text = "Use " + ", ".join(function.name for function in adapt_toolkit(full).functions) + "."
         authored = (
             support.build_toolkit(
                 tool_name,
                 config,
                 runtime_paths,
-                {**leaving_one_out, "instructions": "Authored guidance."},
+                {**leaving_one_out, "instructions": authored_text},
             )
             if authorable
             else None
@@ -340,7 +342,7 @@ def test_agno_default_instructions_show_only_while_every_function_they_name_is_o
     assert len(hidden.functions) < len(shown.functions)
     if authored is not None:
         kept = with_offered_instructions(authored, adapt_toolkit(authored), authored_instructions=True)
-        assert kept.instructions == "Authored guidance."
+        assert kept.instructions == authored_text
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:
