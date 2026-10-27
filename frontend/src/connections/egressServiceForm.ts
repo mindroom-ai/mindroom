@@ -338,9 +338,21 @@ export function splitHostInput(value: string): { host: string; path: string } {
 
 export const MAX_NAME_LENGTH = 63;
 
+/** `text` as a service name: lowercase, spaces as `_`, and what a name cannot hold dropped. */
+function asName(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/^[-_]+/, "")
+    .slice(0, MAX_NAME_LENGTH);
+}
+
 /**
- * The name a new service gets until the user types one: the preset's id, or
- * the first label of the first rule's host (`httpbin.org` gives `httpbin`).
+ * The name a new service gets until the user types one: its display name
+ * (`Team calendar` gives `team_calendar`), else the preset's id, else the
+ * first label of the first rule's host (`httpbin.org` gives `httpbin`).
  * When `takenNames` has it, the first free `{base}-2` or `{base}-3` instead;
  * with all three taken it stays the base, so saving names the clash.
  */
@@ -348,15 +360,11 @@ export function suggestedName(
   form: EgressServiceForm,
   takenNames: readonly string[] = [],
 ): string {
-  let base = form.preset;
-  if (!base) {
-    const host = (form.rules[0]?.host ?? "").trim().toLowerCase();
-    const label = host.replace(/^\*\./, "").split(/[.:/]/)[0];
-    base = label
-      .replace(/[^a-z0-9_-]/g, "")
-      .replace(/^[-_]+/, "")
-      .slice(0, MAX_NAME_LENGTH);
-  }
+  const host = (form.rules[0]?.host ?? "").trim().toLowerCase();
+  const base =
+    asName(form.displayName) ||
+    form.preset ||
+    asName(host.replace(/^\*\./, "").split(/[.:/]/)[0]);
   if (base === "") return "";
   for (const suffix of ["", "-2", "-3"]) {
     const candidate = `${base.slice(0, MAX_NAME_LENGTH - suffix.length)}${suffix}`;

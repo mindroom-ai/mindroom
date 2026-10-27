@@ -13,6 +13,8 @@ KNOWLEDGE_GRAPH_EDIT_FUNCTIONS = (
     "merge_graph_entities",
     "update_graph_entity_summary",
 )
+# The source that labels a graph-enabled agent's graph facts among its knowledge-search results.
+KNOWLEDGE_GRAPH_SOURCE_ID = "knowledge_graph"
 
 
 class KnowledgeGraphIngestConfig(BaseModel):

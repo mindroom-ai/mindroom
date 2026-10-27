@@ -2665,7 +2665,7 @@ describe("adding another account", () => {
   // The new service as the listing sends it once saved, before its account is connected.
   const teamCalendar: EgressCredentialService = {
     ...calendar,
-    name: "google_calendar-2",
+    name: "team_calendar",
     display_name: "Team calendar",
     source: "user",
     separate_account: true,
@@ -2696,7 +2696,7 @@ describe("adding another account", () => {
       if (path === "/api/connections/me") return json(identity);
       if (path === "/api/connections/egress") return json({ agents: listing });
       if (path === PRESETS) return json(egressPresets);
-      if (method === "PUT" && path === `${SERVICES}/google_calendar-2`) {
+      if (method === "PUT" && path === `${SERVICES}/team_calendar`) {
         listing = [
           { ...agents[0], services: [calendar, github, teamCalendar] },
         ];
@@ -2723,6 +2723,7 @@ describe("adding another account", () => {
     fireEvent.change(within(form).getByLabelText("Display name"), {
       target: { value: "Team calendar" },
     });
+    expect(within(form).getByLabelText("Name")).toHaveValue("team_calendar");
     fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
 
     // The new row offers its own account's sign-in as any other row does.
@@ -2734,7 +2735,7 @@ describe("adding another account", () => {
     expect(calls.filter((call) => call.method !== "GET")).toEqual([
       {
         method: "PUT",
-        path: `${SERVICES}/google_calendar-2`,
+        path: `${SERVICES}/team_calendar`,
         body: {
           preset: "google_calendar",
           display_name: "Team calendar",
@@ -2760,5 +2761,43 @@ describe("adding another account", () => {
     await renderPage();
     await screen.findByRole("region", { name: "Shared Dev" });
     await expectNoAction("Add another account for Google Calendar");
+  });
+
+  it("is not offered where a shared service account serves the provider", async () => {
+    const drive: EgressCredentialService = {
+      ...calendar,
+      name: "google_drive",
+      display_name: "Google Drive",
+      rules: [
+        { host: "www.googleapis.com", port: null, path_prefix: "/drive/v3/" },
+      ],
+      oauth: {
+        ...calendar.oauth!,
+        provider: "google_drive",
+        display_name: "Google Drive",
+        can_connect: false,
+        account_label: null,
+        service_account: true,
+      },
+    };
+    listing = [{ ...agents[0], services: [calendar, drive] }];
+    await renderPage();
+    await rowAction("Add another account for Google Calendar");
+    await expectNoAction("Add another account for Google Drive");
+  });
+
+  it("is not offered when the presets cannot be loaded, and the rows still show", async () => {
+    const answer = vi.mocked(fetch).getMockImplementation()!;
+    let failed = false;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      if (String(input) !== PRESETS) return answer(input, options);
+      failed = true;
+      return json({ detail: "Unavailable" }, 503);
+    });
+    await renderPage();
+    await waitFor(() => expect(failed).toBe(true));
+    for (const name of ["Google Calendar", "GitHub"])
+      expect(await screen.findByRole("row", { name })).toBeVisible();
+    await expectNoAction(/^Add another account for /);
   });
 });

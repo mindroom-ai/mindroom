@@ -4087,7 +4087,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, knowledge searches through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -4134,6 +4134,7 @@ graph_entity("Project Atlas")
 ```
 
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
+A graph-enabled agent's `search_knowledge_base` also returns matching graph facts, labelled `knowledge_graph`, beside its knowledge-base results, so the agent has that tool even without knowledge bases.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
@@ -13640,7 +13641,7 @@ An agent whose own name is in `delegate_to` can write the prompt of a fresh copy
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](https://docs.mindroom.chat/knowledge/) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
-Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) through `search_knowledge_base`.
+Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) and [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) through `search_knowledge_base`.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](https://docs.mindroom.chat/configuration/history/), the summary of its earlier turns.
@@ -19923,6 +19924,7 @@ When a config service sets the same variable, the config value wins, and the edi
 
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
+A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
 Its row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
 Until its own account is connected the service has none: it never uses the tools' account instead.
 Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
@@ -19934,7 +19936,8 @@ curl -H 'X-Agent-Keys-Service: team_calendar' https://www.googleapis.com/calenda
 ```
 
 The header can name any of your own services (`source: user` in the [agent tool](#agent-tool)), on hosts that a service's rules name: only the named service's rules then match, after the same [path limits](#limiting-paths-and-repositories), and a request none of them matches, or one naming an administrator's service, is refused with 403 `service_not_matched`.
-On those hosts the broker removes the header before forwarding the request; a request to any other host goes out as it would without the header.
+On those hosts the broker removes the header before forwarding the request.
+On any other host the header selects nothing, and an HTTPS request, which the broker tunnels without reading, carries it to the host as sent.
 
 ## Services editor
 
