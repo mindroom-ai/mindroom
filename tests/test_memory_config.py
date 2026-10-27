@@ -320,21 +320,17 @@ class TestMemoryConfig:
         sampling_names = ("temperature", "top_p", "top_k")
         assert {name: request_params[name] for name in sampling_names if name in request_params} == expected_sampling
 
-    def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
+    def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(self, tmp_path: Path) -> None:
         """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""
-        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        model = {"model": "anthropic/claude-sonnet-5.5", "temperature": 0.3}
         config = Config(
-            memory={"llm": {"provider": "openrouter", "config": {"model": "anthropic/claude-sonnet-5.5"}}},
+            memory={"llm": {"provider": "openrouter", "config": model}},
             router=RouterConfig(model="default"),
         )
 
         llm_config = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))["llm"]["config"]
 
-        assert "temperature" not in llm_config
+        assert llm_config["temperature"] == 0.3
         assert "top_p" not in llm_config
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
