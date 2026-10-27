@@ -788,7 +788,7 @@ def config_validate(
     """Validate config.yaml and check for common issues.
 
     Parses the YAML config using Pydantic and reports errors in a friendly format.
-    Also checks whether required API keys are set as environment variables.
+    Also warns about provider API keys and settings a model leaves unset; a key saved in the dashboard counts as set.
     """
     runtime_paths = activate_cli_runtime(path)
     config_path = runtime_paths.config_path
