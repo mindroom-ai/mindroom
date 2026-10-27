@@ -1,6 +1,6 @@
 # Operational Log Events
 
-This page covers how to monitor a running MindRoom: the health and readiness endpoints, the structured log events that are stable enough for metrics and alerts, and the debug logging you can turn on while troubleshooting.
+This page covers how to monitor a running MindRoom: the health and readiness endpoints, the structured log events that are stable enough for metrics and alerts, the container metrics worth alerting on, and the debug logging you can turn on while troubleshooting.
 Most other log event names are internal diagnostics and can change in any release.
 
 See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/), and [Access Control](https://docs.mindroom.chat/authorization/).
@@ -47,12 +47,12 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 ```
 
 `event_loop_scheduler_lag_summary` is an `info` record, so keep `LOG_LEVEL` at `INFO` or lower, or raise only that logger with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO`.
-The other events on this page are `warning` records.
+`agent_error` and `event_loop_stall_detected` are `error` records, and the other events on this page are `warning` records.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
 ## Events
 
-The event names and fields below are stable operator signals.
+The event names and fields below are stable operator signals; a record can carry further diagnostic fields that are not listed and can change.
 Each section lists the fields, a suggested alert, and where to look when it fires.
 The thresholds are starting points to tune against your own baseline, and the queries are generic pseudo-queries to translate into your log platform's syntax.
 
@@ -82,7 +82,7 @@ alert if  median(metric) over 10 minutes > 20
           for 30 minutes
 ```
 
-When it fires, look for `event_loop_stall_detected` and `event_loop_stall_ongoing` records, which include the blocking stack when one stall exceeds `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`).
+When it fires, look for [`event_loop_stall_detected`](#event_loop_stall_detected) records, which carry the blocking stack of long stalls.
 Every stall above `MINDROOM_EVENT_LOOP_STALL_STACK_THRESHOLD_SECONDS` (default `0.25`, `0` or a negative value disables) also logs one `event_loop_stall_stack` record with the blocking stack and the stall's `lag_ms` once it ends, at most once every 10 seconds.
 Compare the frequency of `event_loop_gc_collection` records, which report garbage collections slower than 50 ms.
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
@@ -92,6 +92,34 @@ Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` 
 This keeps routine collections short on large processes at the cost of one full collection per interval.
 After the first refreeze, MindRoom also raises CPython's full-collection threshold and logs `gc_full_collection_threshold_raised`, so routine full collections run less often, by an amount that depends on the workload; unreachable reference cycles then wait longer to be freed.
 Memory held by objects that become garbage while frozen, such as agents a config reload replaced, is reclaimed only at the next refreeze, so resident memory can stay higher for up to one interval.
+
+### `event_loop_stall_detected`
+
+Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and router is frozen until it ends.
+While the stall lasts, an `event_loop_stall_ongoing` record with the same fields follows every 30 seconds.
+
+| Field | Meaning |
+|-------|---------|
+| `stalled_for_seconds` | Seconds since the last heartbeat |
+| `threshold_seconds` | The configured stall threshold |
+| `stack_capture_suppressed` | `true` when a stack was already captured in the last 30 seconds; the record then lacks the four fields below |
+| `stack` | Stack of the code blocking the event loop |
+| `process_cpu_seconds_since_heartbeat` | CPU seconds the process used since the last heartbeat |
+| `other_thread_stacks` | Stacks of up to eight other threads |
+| `omitted_thread_stack_count` | Number of other threads whose stacks were left out |
+
+Count the records and alert when stalls repeat, since each one delays every reply in the process.
+The `stack` names the blocking code; a `process_cpu_seconds_since_heartbeat` close to `stalled_for_seconds` points at CPU-bound work, and one near `0` at a blocking call such as file or network I/O.
+
+### `event_loop_stall_ended`
+
+Logged when a stall that `event_loop_stall_detected` reported ends.
+
+| Field | Meaning |
+|-------|---------|
+| `stall_duration_seconds` | Seconds the event loop went without a heartbeat |
+
+Sum `stall_duration_seconds` over a window to see how long agents were frozen in it.
 
 ### `matrix_sync_stall_diagnostics`
 
@@ -117,6 +145,26 @@ alert if  sum(metric) over 15 minutes >= 5 for any agent
 Read the `await_chain` snapshots to see where each task is waiting.
 Reports for every entity at once usually point at the homeserver or at a saturated event loop, so check `event_loop_scheduler_lag_summary` as well.
 
+### `matrix_event_decryption_failed`
+
+Logged when an agent cannot decrypt a new message, in a room it has joined, from a sender it may reply to.
+Every agent in the room that receives the message logs it, so count distinct `event_id` values to count messages.
+[Troubleshooting Undecryptable Messages](https://docs.mindroom.chat/matrix/#troubleshooting-undecryptable-messages) explains the usual cause and fix.
+
+| Field | Meaning |
+|-------|---------|
+| `room_id` | Room of the message |
+| `event_id` | Event ID of the message |
+| `sender` | Matrix user ID of the sender |
+| `sender_device_id` | Device the sender encrypted the message on |
+| `session_id` | Encryption session of the message |
+| `agent` | Agent that could not decrypt it |
+| `key_request_already_sent` | Whether a key request for that session was already pending |
+| `hint` | Fixed explanation of the usual cause |
+
+Count it grouped by `agent` and alert on a sustained rate.
+Failures from one `sender_device_id` point at that client, while failures across many senders for one agent point at that agent's device.
+
 ### `tool_call_limit_reached`
 
 Each agent or team run has a tool-call budget, normally the entity's [`max_tool_calls_per_turn`](https://docs.mindroom.chat/configuration/agents/#configuration-options).
@@ -137,6 +185,96 @@ Check whether the run was a runaway loop, such as the same tool call repeated or
 Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
+
+### `tool_call_failed`
+
+Logged each time a tool call raises an error.
+A call stopped together with its turn logs `error_type` `CancelledError`.
+
+| Field | Meaning |
+|-------|---------|
+| `tool_name` | Name of the tool function |
+| `agent_name` | Agent that made the call, or `null` |
+| `error_type` | Class name of the error the tool raised |
+| `error_message` | The error's message, with credentials redacted |
+| `duration_ms` | Milliseconds from the call's start until it failed |
+| `correlation_id` | ID shared by the tool calls that answer one message |
+| `channel` | `matrix`, `openai_compat`, `mcp`, or `null` |
+
+Count it grouped by `tool_name` and alert when one tool fails far more often than usual.
+Failures that share a `correlation_id` came from a single turn, and `error_type` and `error_message` give the cause.
+For a tool that uses an OAuth connection, also check for [`oauth_credentials_refresh_failed`](#oauth_credentials_refresh_failed) records.
+
+### `oauth_credentials_refresh_failed`
+
+Logged when MindRoom cannot refresh the access token of a stored [OAuth connection](https://docs.mindroom.chat/oauth-framework/), for a tool or an MCP server.
+
+| Field | Meaning |
+|-------|---------|
+| `provider_id` | OAuth provider ID |
+| `credential_service` | Credential service the connection is stored under |
+| `reason` | `refresh_rejected`, `token_endpoint_changed`, or `provider_refresh_failed`, described below |
+| `error_type` | `OAuthRefreshRejectedError` for the first two reasons, `OAuthProviderError` for `provider_refresh_failed` |
+| `oauth_error` | The provider's OAuth error code, such as `invalid_grant`, `unrecognized` for a nonstandard code, or `null` |
+| `has_refresh_token` | Whether the stored connection had a refresh token |
+| `expires_at` | Expiry of the stored access token as a Unix timestamp, or `null` |
+
+- `refresh_rejected`: the provider rejected the refresh grant, for example because it was revoked or expired; MindRoom removes the connection, and the account must be connected again.
+- `token_endpoint_changed`: the provider's token endpoint changed since the account was connected, as [Troubleshooting OAuth Connections](https://docs.mindroom.chat/oauth-framework/#troubleshooting-oauth-connections) describes; the connection is removed too.
+- `provider_refresh_failed`: any other failure, such as a network error or a provider outage; the connection is kept, so a later refresh can succeed.
+
+A failure caused by an HTTP or network error also carries `transport_error_category`, `transport_error_type`, and, for an HTTP error, `http_status_code`.
+Count it grouped by `provider_id` and `reason`.
+Each `refresh_rejected` record is one connection that must be connected again, while repeated `provider_refresh_failed` records for one provider point at that provider, the network, or the OAuth client settings, which `oauth_error` `invalid_client` names.
+
+### `provider_request_retried`
+
+Logged each time MindRoom sends a model request again: after a transient provider failure, such as a rate limit, an overload, a server error, or a dropped connection, or after a [stalled stream](https://docs.mindroom.chat/configuration/models/#stalled-streams).
+Each retry delays the reply, and a reply whose request fails every retry logs [`agent_error`](#agent_error).
+
+| Field | Meaning |
+|-------|---------|
+| `model_id` | Model ID the request was sent to |
+| `reason` | `transient_error` for a failure the provider or the network reported, `stream_stalled` for a stream that went silent past its idle limit |
+| `error_type` | `RateLimited` for a throttled request, otherwise `ProviderUnavailable` |
+| `status_code` | HTTP status of the failure, `504` for a stalled stream, or `null` when there is none, as for a dropped connection |
+| `error` | The failure's message, redacted and truncated |
+| `attempt` | Number of this retry for its `reason`, starting at `1` |
+| `max_retries` | Retries allowed for its `reason` |
+| `delay_seconds` | Seconds waited before this retry |
+
+Count it grouped by `model_id` and alert when one model is retried far more often than usual.
+`error_type`, `status_code`, and `error` tell throttling apart from an outage or an unresponsive endpoint.
+
+### `agent_error`
+
+Logged each time an agent's or team's reply fails and the user gets an error message instead.
+
+| Field | Meaning |
+|-------|---------|
+| `agent` | Agent or team name |
+| `error_type` | Class name of the error that ended the reply |
+| `error` | The error's text, with credentials redacted |
+
+These `error_type` values are stable; any other value is the class name of an unexpected error and can change:
+
+- `RateLimited`: the provider throttled the request after automatic retries.
+- `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after automatic retries.
+- `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
+- `ContextWindowExceeded`: the conversation no longer fits the model's context window.
+- `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
+- `ModelSafeguardRefusal`: the model's safeguards refused the request.
+- `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`.
+
+Count it grouped by `error_type` and alert when one value is far more frequent than usual.
+`RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.
+
+## Container Metrics
+
+With the [Kubernetes worker backend](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode), idle worker Deployments scale to zero replicas by design, so exclude Deployments labelled `mindroom.ai/component=worker` from alerts on Deployments without an available replica.
+Judge container memory by resident memory (RSS) or working set, not by total usage: total usage also counts the page cache that session databases, knowledge files, and logs fill, which the kernel reclaims under memory pressure.
+The [heap probe](#memory-growth) reports the primary process's own `rss_bytes`.
 
 ## Debug Logging
 

@@ -552,7 +552,7 @@ def _record_failure(
         )
         return
     logger.warning(
-        "Tool call failed",
+        "tool_call_failed",
         tool_name=tool_name,
         agent_name=resolved_context.agent_name or None,
         error_type=failure_record.error_type,
