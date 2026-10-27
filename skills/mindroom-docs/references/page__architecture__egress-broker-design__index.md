@@ -81,7 +81,7 @@ Rejected: keeping connections already in use working after the upgrade, because 
 **An opt-in carries an access level, read or read and write, and only a service that declares how its API reads offers read.**
 An opt-in otherwise hands the agent's commands the connection's full access, so a routine that only reads had to be granted writes or nothing.
 HTTP methods map onto reads and writes only for APIs that follow REST conventions, so a service offers read-only access only through its `read_only` declaration, whose `post_paths` name the endpoints that read with `POST`; `github` declares none, because git clone and fetch read with `POST` to `git-upload-pack`, which a path prefix cannot name.
-The broker checks the level right after the opt-in and before reading the connection, and refuses a WebSocket upgrade and any method-override header under read, since either can write whatever the method says; an entry stored as read on a service that later drops `read_only` still allows only `GET` and `HEAD`, so it never fails open.
+The broker checks the level right after the opt-in and before reading the connection, and refuses a WebSocket upgrade and any method-override header under read, since either can write whatever the method says; an entry stored as read on a service that later drops `read_only` gets no token at all, so it never fails open.
 An entry without a level reads as read and write, so existing opt-ins keep working unmigrated, and a stored API key is never limited, since a key is scoped where it is issued.
 The record is [Read-Only Access for Agent Keys Account Opt-Ins](https://docs.mindroom.chat/dev/2026-10-27-agent-keys-read-only-access-design/).
 

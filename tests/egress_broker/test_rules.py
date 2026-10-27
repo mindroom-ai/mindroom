@@ -1059,8 +1059,8 @@ _EVENTS = "/calendar/v3/calendars/primary/events"
         (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/../events"), False),
         (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/%2e%2e/events"), False),
         (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy//x"), False),
-        (None, SecretRequest(method="GET", path=_EVENTS), True),
-        (None, SecretRequest(method="HEAD", path=_EVENTS), True),
+        (None, SecretRequest(method="GET", path=_EVENTS), False),
+        (None, SecretRequest(method="HEAD", path=_EVENTS), False),
         (None, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), False),
         (None, SecretRequest(method="DELETE", path=_EVENTS), False),
     ],
@@ -1073,6 +1073,6 @@ def test_read_only_allows_matrix(
     """Read-only access reads with GET and HEAD, and POSTs only to a listed path; nothing else gets the account.
 
     A WebSocket upgrade or a method-override header could write whatever the method says, and a service that no longer
-    declares read-only still allows only GET and HEAD.
+    declares how its API reads gets no request at all.
     """
     assert read_only_allows(read_only, request_facts) is allowed

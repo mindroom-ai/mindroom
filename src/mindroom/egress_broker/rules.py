@@ -214,16 +214,15 @@ def read_only_allows(read_only: EgressReadOnly | None, request: SecretRequest) -
     `GET` and `HEAD` read, in any letter case, and so does a `POST` to one of `post_paths`, matched by segment like a
     rule's path prefix and never for an ambiguous path. A WebSocket upgrade or a method-override header can write
     whatever the method says, so neither reads. Without a declaration, as when a service's config dropped it after an
-    account was allowed read-only, only `GET` and `HEAD` read, so the opt-in never allows more than it did.
+    account was allowed read-only, nothing says how the API reads, so no request does.
     """
-    if request.websocket or request.method_override:
+    if read_only is None or request.websocket or request.method_override:
         return False
     method = request.method.upper()
     if method in _READ_METHODS:
         return True
     return (
         method == "POST"
-        and read_only is not None
         and not is_ambiguous_path(request.path)
         and any(path_matches(prefix, request.path) for prefix in read_only.post_paths)
     )

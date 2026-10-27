@@ -1103,27 +1103,21 @@ def test_read_only_refusal_never_reads_the_connection(
 ) -> None:
     """A write under a read-only opt-in is refused before the connection is read or refreshed; a read gets the token.
 
-    The service declares no `read_only` here, as when its config dropped it after the account was allowed read-only,
-    so only GET and HEAD read.
+    Without a `read_only` declaration, as when the service's config dropped it after the account was allowed
+    read-only, even a GET is refused.
     """
     connect_account(manager, account_store("@alice:example.org"), "alice-access")
     alice = _broker_target("@alice:example.org")
     context = _alice_reuse_context(config, runtime_paths, manager)
     set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+    reads = EgressReadOnly(post_paths=["/search"])
 
     with monkeypatch.context() as patched:
         patched.setattr(oauth_source, "refresh_oauth_credentials_blocking", _never)
         patched.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", _never)
-        refused = _resolve(config, runtime_paths, manager, alice, request=_POST)
-        listed = _resolve(
-            config,
-            runtime_paths,
-            manager,
-            alice,
-            request=_POST,
-            read_only=EgressReadOnly(post_paths=["/search"]),
-        )
-    read = _resolve(config, runtime_paths, manager, alice, request=_GET)
+        refused = _resolve(config, runtime_paths, manager, alice, request=_POST, read_only=reads)
+        undeclared = _resolve(config, runtime_paths, manager, alice, request=_GET)
+    read = _resolve(config, runtime_paths, manager, alice, request=_GET, read_only=reads)
     listed_post = _resolve(
         config,
         runtime_paths,
@@ -1133,7 +1127,7 @@ def test_read_only_refusal_never_reads_the_connection(
         read_only=EgressReadOnly(post_paths=["/repos/o/r/issues"]),
     )
 
-    assert refused == listed == SecretReadOnly(provider="github", requester_owned=True)
+    assert refused == undeclared == SecretReadOnly(provider="github", requester_owned=True)
     assert read == listed_post == Secret("alice-access")
 
 

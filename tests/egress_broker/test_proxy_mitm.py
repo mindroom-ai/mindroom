@@ -21,7 +21,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
-from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
+from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressReadOnly, EgressRule, EgressService
 from mindroom.egress_broker.ca import materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.messages import ScopeInfo
@@ -674,7 +674,7 @@ class _ReadOnlyLookup:
         request: SecretRequest,
     ) -> SecretResult:
         self.requests.append(request)
-        return Secret(SECRET) if read_only_allows(None, request) else SecretReadOnly(provider="github")
+        return Secret(SECRET) if read_only_allows(EgressReadOnly(), request) else SecretReadOnly(provider="github")
 
 
 @pytest.mark.asyncio
