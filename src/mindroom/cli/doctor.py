@@ -17,7 +17,11 @@ from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
-from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
+from mindroom.credentials.sync import (
+    get_api_key_and_origin_for_provider,
+    get_secret_from_env,
+    sync_env_to_credentials,
+)
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
@@ -198,6 +202,20 @@ def _models_reading_shared_key(config: Config, env_key: str, runtime_paths: Runt
         }
     except (OSError, ValueError):
         return models
+
+
+def _shared_key(provider: str, env_key: str, runtime_paths: RuntimePaths) -> tuple[str | None, str]:
+    """Return the shared key the runtime reads for ``provider``, if any, and the name doctor reports it by.
+
+    The runtime reads it from the credential store, which doctor's startup import fills from the environment without
+    replacing a key saved in the dashboard. A key imported from the environment is named by ``env_key``; without the
+    store, doctor reads ``env_key`` itself.
+    """
+    try:
+        api_key, from_env = get_api_key_and_origin_for_provider(provider, runtime_paths)
+    except (OSError, ValueError):
+        return get_secret_from_env(env_key, runtime_paths=runtime_paths), env_key
+    return api_key, env_key if from_env else "key saved in the dashboard"
 
 
 def _endpoint_settings(value: object, path: str) -> list[str]:
@@ -488,17 +506,17 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     """
     # Models with their own credential never read the shared key.
     shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
-    api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths)
+    api_key, key_name = _shared_key(provider, env_key, runtime_paths)
     if not api_key:
         if shared_key_models:
             console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
         return 0, 0, int(bool(shared_key_models))
-    if _report_key_not_checked(provider, provider, env_key, _endpoint_variables(env_key, runtime_paths)):
+    if _report_key_not_checked(provider, provider, key_name, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
     skipped: list[str] = []
     for name, model in shared_key_models.items():
         settings = _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}")
-        if _report_key_not_checked(provider, provider, env_key, settings):
+        if _report_key_not_checked(provider, provider, key_name, settings):
             skipped.append(name)
     if shared_key_models and len(skipped) == len(shared_key_models):
         return 0, 0, len(skipped)
@@ -506,9 +524,9 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     passed, failed, warnings = _print_validation(
         valid,
         detail,
-        f"{provider} API key valid",
-        f"{provider} API key invalid",
-        f"{provider}: could not validate key",
+        f"{provider}: {key_name} valid",
+        f"{provider}: {key_name} invalid",
+        f"{provider}: could not validate {key_name}",
     )
     return passed, failed, warnings + len(skipped)
 
@@ -580,9 +598,10 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
     if configured_key := config.memory.llm.config.get("api_key"):
         api_key, key_name = configured_key, "memory.llm.config.api_key"
+    elif env_key:
+        api_key, key_name = _shared_key(llm_provider, env_key, runtime_paths)
     else:
-        api_key = get_secret_from_env(env_key, runtime_paths=runtime_paths) if env_key else None
-        key_name = env_key or ""
+        api_key, key_name = None, "API key"
     if env_key and not api_key:
         console.print(
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
@@ -602,9 +621,9 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     return _print_validation(
         valid,
         detail,
-        f"Memory LLM: {llm_provider}/{llm_model} API key valid",
-        f"Memory LLM: {llm_provider}/{llm_model} API key invalid",
-        f"Memory LLM: {llm_provider}/{llm_model} could not validate",
+        f"Memory LLM ({llm_provider}/{llm_model}): {key_name} valid",
+        f"Memory LLM ({llm_provider}/{llm_model}): {key_name} invalid",
+        f"Memory LLM ({llm_provider}/{llm_model}): could not validate {key_name}",
     )
 
 

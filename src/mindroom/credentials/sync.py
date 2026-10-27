@@ -441,6 +441,17 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     return _get_provider_service_api_key(provider, runtime_paths)
 
 
+def get_api_key_and_origin_for_provider(provider: str, runtime_paths: RuntimePaths) -> tuple[str | None, bool]:
+    """Return a provider's shared API key as ``get_api_key_for_provider`` resolves it, and whether import supplied it.
+
+    The flag is true for a key startup imported from the environment. Any other key was saved in the dashboard, or has
+    no recorded source, and import never overwrites it.
+    """
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    service, api_key = resolve_provider_service_api_key(provider_route(provider), creds_manager.get_api_key)
+    return api_key, (creds_manager.load_credentials(service) or {}).get("_source") == "env"
+
+
 def canonical_provider_service(service: str) -> str:
     """Return the canonical provider service for an env-var-named provider service.
 

@@ -3967,7 +3967,7 @@ class TestDoctor:
         assert "1 warning" in result.output  # memory LLM not configured
         assert "Providers:" in result.output
         assert "anthropic (1 model)" in result.output
-        assert "API key valid" in result.output
+        assert "anthropic: ANTHROPIC_API_KEY valid" in result.output
 
     def test_warns_when_encryption_store_missing(
         self,
@@ -4231,7 +4231,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
-        assert "API key invalid" in result.output
+        assert "anthropic: ANTHROPIC_API_KEY invalid (HTTP 401)" in result.output
 
     def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor shows provider summary with correct model counts."""
@@ -4595,7 +4595,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "Memory LLM: openai/gpt-5.6-luna API key valid" in result.output
+        assert "Memory LLM (openai/gpt-5.6-luna): OPENAI_API_KEY valid" in result.output
         assert "Memory embedder:" in result.output
 
     def test_memory_llm_missing_key_is_warning(
@@ -4641,7 +4641,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
         assert "OPENAI_API_KEY not set" not in result.output
-        assert "Memory LLM: openai/m API key valid" in result.output
+        assert "Memory LLM (openai/m): memory.llm.config.api_key valid" in result.output
         assert ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
 
     def test_memory_llm_host_keeps_the_shared_key_from_every_server(
