@@ -1199,6 +1199,7 @@ depends_on = []
 path = "mindroom.providers.google_adc"
 depends_on = ["mindroom.constants", "mindroom.startup_errors"]
 visibility = [
+    "mindroom.knowledge.rerank",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.gemini",
 ]
@@ -6355,7 +6356,13 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.rerank"
-depends_on = ["mindroom.credentials.sync", "mindroom.embeddings.signatures", "mindroom.tool_system.dependencies"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.credentials.sync",
+    "mindroom.embeddings.signatures",
+    "mindroom.providers.google_adc",
+    "mindroom.tool_system.dependencies",
+]
 visibility = ["mindroom.knowledge.search", "mindroom.knowledge.utils"]
 
 [[modules]]

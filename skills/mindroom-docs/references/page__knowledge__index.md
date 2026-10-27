@@ -246,7 +246,7 @@ Each result still reports its cosine distance as `distances`.
 
 A reranker reads the query together with each candidate chunk and reorders them.
 A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3`, and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
-Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI answered in about 0.3 seconds, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
+Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
 knowledge_reranker:
@@ -262,7 +262,8 @@ knowledge_reranker:
 | `api_key` | string | `null` | API key for `cohere` |
 | `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
 
-`vertex_ai` signs in with Google Application Default Credentials and ranks in the project they name, such as the cluster's project on GKE or `GOOGLE_CLOUD_PROJECT`.
+`vertex_ai` signs in with the credential file `GOOGLE_APPLICATION_CREDENTIALS` names, or else Google Application Default Credentials, and ranks in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name, such as the cluster's project on GKE.
+Both variables may be set in MindRoom's `.env`, as for Gemini on Vertex AI.
 That project needs the `discoveryengine.googleapis.com` API, and the identity needs `roles/discoveryengine.viewer`, the smallest predefined role that may rank.
 The ranking API reads the first 1024 tokens of each chunk with its default models, 512 with older ones; MindRoom sends candidates in concurrent requests of 100, the unit Google bills as one query.
 

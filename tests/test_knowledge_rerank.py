@@ -159,12 +159,15 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Candidates go out in concurrent requests of 100 records, the unit Vertex AI bills, and are scored together."""
+    """Candidates go out in concurrent requests of 100 records, the unit Vertex AI bills, and are scored together.
+
+    The project and credential file come from the runtime's ``.env``, which MindRoom does not export.
+    """
     bodies: list[dict[str, object]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == (
-            "https://discoveryengine.googleapis.com/v1/projects/proj/locations/global"
+            "https://discoveryengine.googleapis.com/v1/projects/env-project/locations/global"
             "/rankingConfigs/default_ranking_config:rank"
         )
         assert request.headers["Authorization"] == "Bearer t"
@@ -184,8 +187,14 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
         "AsyncClient",
         lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
     )
-    credentials = _GoogleCredentials(token=None, quota_project_id="quota")
-    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (credentials, "proj"))
+    credential_files: list[str] = []
+    monkeypatch.setattr(
+        rerank_module,
+        "load_google_application_credentials",
+        lambda path: credential_files.append(path) or _GoogleCredentials(token=None, quota_project_id="quota"),
+    )
+    (tmp_path / ".env").write_text("GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n")
+    rerank_module._google_credentials.cache_clear()
     reranker = create_reranker(
         KnowledgeRerankerConfig(provider="vertex_ai", model="semantic-ranker-default@latest"),
         test_runtime_paths(tmp_path),
@@ -197,14 +206,25 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
     assert {"id": "200", "content": "doc 200"} in [body["records"][0] for body in bodies]
     assert {body["model"] for body in bodies} == {"semantic-ranker-default@latest"}
     assert {body["query"] for body in bodies} == {"query"}
+    assert credential_files == [str((tmp_path / "adc.json").resolve())]
 
 
-def test_vertex_ai_reranker_needs_a_google_cloud_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without a project in Application Default Credentials there is no ranking endpoint to call."""
-    monkeypatch.setattr(rerank_module, "_google_default_credentials", lambda: (_GoogleCredentials(token=None), None))
+@pytest.mark.asyncio
+async def test_vertex_ai_reranker_needs_a_google_cloud_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without GOOGLE_CLOUD_PROJECT or a project in Application Default Credentials, ranking fails."""
+    monkeypatch.setattr(
+        rerank_module,
+        "load_ambient_google_credentials",
+        lambda: (_GoogleCredentials(token=None), None),
+    )
+    rerank_module._google_credentials.cache_clear()
+    reranker = create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
 
-    with pytest.raises(ValueError, match="Google Cloud project"):
-        create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
+    with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
+        await reranker.ascore("q", ["d"])
 
 
 @pytest.mark.asyncio

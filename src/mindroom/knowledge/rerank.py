@@ -11,12 +11,15 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
+from mindroom.constants import runtime_env_path
 from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
+from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
 from mindroom.tool_system.dependencies import optional_dependency_environment
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.config.knowledge import KnowledgeRerankerConfig
     from mindroom.constants import RuntimePaths
@@ -64,20 +67,20 @@ class _CohereReranker:
 
 @dataclass(frozen=True)
 class _VertexAIReranker:
-    """Calls Google's Vertex AI ranking API with Application Default Credentials."""
+    """Calls Google's Vertex AI ranking API with Google Cloud credentials, loaded on the first search."""
 
     model: str
-    credentials: Any
-    project: str
+    credentials_path: Path | None
+    project: str | None
 
     async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
-        headers = await asyncio.to_thread(_google_auth_headers, self.credentials)
+        headers, project = await asyncio.to_thread(_google_request_auth, self.credentials_path, self.project)
         records = [{"id": str(index), "content": document} for index, document in enumerate(documents)]
         async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client, asyncio.TaskGroup() as group:
             requests = [
                 group.create_task(
                     client.post(
-                        _VERTEX_AI_RANK_URL.format(project=self.project),
+                        _VERTEX_AI_RANK_URL.format(project=project),
                         headers=headers,
                         json={
                             "model": self.model,
@@ -100,25 +103,31 @@ class _VertexAIReranker:
 
 
 @functools.cache
-def _google_default_credentials() -> tuple[Any, str | None]:
-    import google.auth  # noqa: PLC0415
-
-    return google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+def _google_credentials(credentials_path: Path | None) -> tuple[Any, str | None]:
+    """Load the runtime's Google credential file, or else Application Default Credentials, once per process."""
+    if credentials_path is None:
+        return load_ambient_google_credentials()
+    return load_google_application_credentials(str(credentials_path)), None
 
 
 _google_credentials_lock = threading.Lock()
 
 
-def _google_auth_headers(credentials: Any) -> dict[str, str]:  # noqa: ANN401
-    """Return the headers ``credentials`` sign a request with, such as its quota project, refreshing them first."""
+def _google_request_auth(credentials_path: Path | None, project: str | None) -> tuple[dict[str, str], str]:
+    """Return the headers a ranking request signs with, such as its quota project, and the project it ranks in."""
+    credentials, credentials_project = _google_credentials(credentials_path)
+    project = project or credentials_project
+    if not project:
+        msg = "The vertex_ai reranker needs GOOGLE_CLOUD_PROJECT or a project in Application Default Credentials"
+        raise ValueError(msg)
+    headers: dict[str, str] = {}
     with _google_credentials_lock:
         if not credentials.valid:
             import google.auth.transport.requests  # noqa: PLC0415
 
             credentials.refresh(google.auth.transport.requests.Request())
-        headers: dict[str, str] = {}
         credentials.apply(headers)
-        return headers
+    return headers, project
 
 
 #: Loaded ``sentence_transformers.CrossEncoder`` models by name.
@@ -154,10 +163,10 @@ def create_reranker(config: KnowledgeRerankerConfig, runtime_paths: RuntimePaths
         ensure_sentence_transformers_dependencies(runtime_paths)
         return _CrossEncoderReranker(model=config.model)
     if config.provider == "vertex_ai":
-        credentials, project = _google_default_credentials()
-        if not project:
-            msg = "The vertex_ai reranker needs a Google Cloud project in Application Default Credentials"
-            raise ValueError(msg)
-        return _VertexAIReranker(model=config.model, credentials=credentials, project=project)
+        return _VertexAIReranker(
+            model=config.model,
+            credentials_path=runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS"),
+            project=runtime_paths.env_value("GOOGLE_CLOUD_PROJECT"),
+        )
     api_key = config.api_key or get_api_key_for_service(config.credentials_service or "cohere", runtime_paths)
     return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)
