@@ -593,6 +593,29 @@ describe("the editor form", () => {
     });
   });
 
+  it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
+    const cases: [AuthoredEgressService, boolean][] = [
+      [{ preset: "github", oauth_provider: "google_drive" }, true],
+      [{ preset: "google_calendar", oauth_provider: null }, false],
+    ];
+    for (const [service, offered] of cases) {
+      const { onSave } = await renderEditor({ service, name: "svc" });
+      // A replaced login opens More options already.
+      if (!screen.queryByLabelText("Display name")) openMoreOptions();
+      type("Preset", "google_drive");
+      type("Preset", service.preset!);
+      expect(
+        screen.queryByLabelText(
+          "Use its own account, not the one the agent's tools use",
+        ) !== null,
+      ).toBe(offered);
+      save();
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onSave).toHaveBeenCalledWith("svc", service);
+      cleanup();
+    }
+  });
+
   it("offers no own account on a shared agent, on the dashboard, or for an account each user has", async () => {
     for (const props of [
       { sharedTarget: true },
