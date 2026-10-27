@@ -61,7 +61,7 @@ Set up the homeserver (examples use `chat.example.com`):
    Reject such requests in the nginx `server` block, before any `location`; the check looks only at the path, so encoded URLs in query strings still pass:
 
     ```nginx
-    if ($request_uri ~* "^[^?]*(?:%2f|%5c|%2e|/\.\.?(?:/|\?|$))") { return 404; }
+    if ($request_uri ~* "^[^?#]*(?:%2f|%5c|%2e|/\.\.?(?:[/?#]|$))") { return 404; }
     ```
 
    If `/_matrix` also passes through this nginx, the check refuses Matrix requests that encode `/` in a path parameter, such as some state keys, so send `/_matrix` to the homeserver without this nginx where you can.
