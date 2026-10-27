@@ -242,7 +242,8 @@ class EgressCredentialService(EgressSourceStatus):
     `placeholder_names` lists the variables the service sets in the sandbox (a preset's included), names only, so the
     editor can warn when a service of one's own sets the same one. `restrict_only` marks a service that only limits
     the paths of the other services on its hosts and never has a key or account of its own. `read_only_supported` says
-    whether its account can be allowed read-only.
+    whether its account can be allowed read-only, and `separate_account` that the account is the service's own, not the
+    one the agent's tools use.
     """
 
     name: str
@@ -255,6 +256,7 @@ class EgressCredentialService(EgressSourceStatus):
     placeholder_names: list[str]
     restrict_only: bool
     read_only_supported: bool
+    separate_account: bool
 
 
 class EgressCredentialAgent(BaseModel):
@@ -350,6 +352,7 @@ async def egress_services_for_agent(
             placeholder_names=list(service.placeholder_env),
             restrict_only=service.restrict_only,
             read_only_supported=service.read_only is not None,
+            separate_account=service.oauth_separate_account,
             **asdict(sources),
         )
 

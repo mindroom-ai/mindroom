@@ -2184,7 +2184,12 @@ def test_connecting_a_service_with_its_own_account_stores_only_that_account(
     _connect_account(portal, "alice", "personal", "mine", "google_drive")
 
     own = oauth_source.separate_account_provider(portal["providers"]["google_drive"], "mine")
-    row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
+    listed = _egress_row(portal, "alice", "personal", "mine")
+    row = listed["oauth"]
+    assert (listed["separate_account"], _egress_row(portal, "alice", "personal", "drive")["separate_account"]) == (
+        True,
+        False,
+    )
     assert (row["connected"], row["account_label"]) == (True, "alice@example.com")
     assert _stored_connection(portal, alice, "personal", own) == (True, "alice@example.com")
     assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"]) == (False, None)

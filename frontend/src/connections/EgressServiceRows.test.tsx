@@ -855,6 +855,16 @@ describe("connected accounts", () => {
       );
     });
 
+    it("says a service's own account is not used yet, never that the tools use it", () => {
+      renderRows([{ ...toolsOnly, separate_account: true }]);
+      expect(
+        within(row("GitHub")).getByText(
+          "Connected, not used for Agent Keys yet",
+        ),
+      ).toBeVisible();
+      expect(screen.queryByText("Connected for tools only")).toBeNull();
+    });
+
     it("leaves the account alone when the confirmation is cancelled", async () => {
       renderRows([toolsOnly]);
       fireEvent.click(

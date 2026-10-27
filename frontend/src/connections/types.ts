@@ -147,6 +147,8 @@ export interface EgressCredentialService {
   restrict_only: boolean;
   /** The service's account can be allowed read-only as well as read and write. */
   read_only_supported: boolean;
+  /** The account is the service's own, not the one the agent's tools use. Sent in the personal listing only. */
+  separate_account?: boolean;
   /**
    * The names of the variables the service sets in the sandbox, a preset's
    * included, so a service of one's own that sets the same one can be warned
