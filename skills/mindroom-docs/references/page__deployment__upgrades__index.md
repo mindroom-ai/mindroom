@@ -33,7 +33,7 @@ Without that space the file keeps it until later writes reuse it; with MindRoom 
 The only way back is to stop MindRoom, replace each `<name>.db` with its `<name>.db.pre-storage-v2` backup, delete any `<name>.db-journal` beside it, and start the older release.
 Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
 The older release drops messages redacted since the upgrade from the restored history before it next replies in that conversation, but edits made since the upgrade are not applied again, so the earlier reply to an edited message can return to the agent's history.
-An older release started on converted databases without restoring the backups moves each agent's or team's `sessions/` directory aside to `sessions.incompatible-<id>/`, backups included, and starts it with empty history; move the backups back out of that archive and restore them as above.
+An older release started on converted databases without restoring the backups archives each agent's or team's `sessions/` directory, backups included, as [Incompatible session databases](https://docs.mindroom.chat/deployment/storage/#incompatible-session-databases) describes; move the backups back out of that archive and restore them as above.
 Upgrading again converts each restored database again and writes a new backup.
 
 Once you are sure you will not downgrade, delete the `.pre-storage-v2` backups.
