@@ -142,14 +142,14 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
     if provider.requester_scoped_credentials and context.worker_target is None:
         # No requester to bind the connection to, so there is no stored token to use or allow.
         return SecretMissing()
-    access = oauth_reuse_access(context, service, provider.id)
-    if access is None:
+    level = oauth_reuse_access(context, service, provider.id)
+    if level is None:
         return SecretMissing(
             provider=provider.id,
             reuse_off=True,
             requester_owned=provider.requester_scoped_credentials,
         )
-    if access == "read" and not read_only_allows(read_only, request):
+    if level == "read" and not read_only_allows(read_only, request):
         return SecretReadOnly(provider=provider.id, requester_owned=provider.requester_scoped_credentials)
     credentials = _refreshed_credentials(service, context)
     if isinstance(credentials, SecretNeedsReconnect | SecretUnavailable):
