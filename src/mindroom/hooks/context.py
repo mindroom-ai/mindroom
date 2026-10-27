@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
@@ -889,6 +891,18 @@ class ToolEnvironmentContext(_HookLifecycleContext):
         """Give the call's shell commands MindRoom's own variables that ``name``, a name or glob pattern, matches."""
         _check_env_name(name)
         self._environment = self._environment.then(ToolEnvironment(pass_through=(name,)))
+
+    def prepend_path(self, directory: str) -> None:
+        """Put ``directory`` first on the call's shell commands' ``PATH``, ahead of the shell tool's own entries."""
+        if (
+            not isinstance(directory, str)
+            or not PurePath(directory).is_absolute()
+            or os.pathsep in directory
+            or "\0" in directory
+        ):
+            msg = f"A PATH entry must be one absolute directory: {directory!r}"
+            raise ValueError(msg)
+        self._environment = self._environment.then(ToolEnvironment(path_prepend=(directory,)))
 
     def decline(self, reason: str) -> None:
         """Refuse the tool call with one model-facing reason, so it does not run."""
