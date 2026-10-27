@@ -48,7 +48,6 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_call, usage
-from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
@@ -58,7 +57,6 @@ if TYPE_CHECKING:
     import pytest
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.identity import MatrixID
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
@@ -187,11 +185,6 @@ class TeamTurn:
             runtime_paths=self.runtime_paths,
             execution_identity=self.identity,
         )
-
-    def member_ids(self) -> list[MatrixID]:
-        """Return the members' Matrix ids, as a team request names them."""
-        ids = entity_ids(self.config, self.runtime_paths)
-        return [ids[name] for name in self.member_names]
 
     def ctx(self, **overrides: Any) -> ResponseTurnContext:  # noqa: ANN401
         """Return the turn context the runner passes for a reply to ``EVENT_ID`` in the thread."""
