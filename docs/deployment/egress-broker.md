@@ -435,7 +435,7 @@ A user service that signs in with a connected account on a `user` or `user_agent
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
 That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
-It uses only that account, so its row offers no key: until the account is connected the service has none, and it never uses the tools' account or a key stored under its name instead.
+It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account or a key stored under its name instead.
 Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
 
 Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
