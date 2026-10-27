@@ -498,19 +498,33 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
 
 
 @pytest.mark.asyncio
-async def test_default_sampling_models_lose_sampling_controls_everywhere(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("route", "model_id"),
+    [
+        ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-haiku-5-5"),
+        ("bedrock_claude", "anthropic.claude-haiku-5-5"),
+        ("vertexai_claude", "claude-haiku-5-5"),
+    ],
+)
+async def test_default_sampling_models_lose_sampling_controls_everywhere(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+) -> None:
     """The newest Claude generations reject non-default sampling, so authored and overriding values are dropped."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     provider = route_provider(
-        "anthropic",
+        route,
         tmp_path,
         wire,
+        id=model_id,
         extra_kwargs={"temperature": 0.7, "top_p": 0.9, "request_params": {"extra_body": {"top_k": 3}}},
     )
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
     assert not {"temperature", "top_p", "top_k"} & body.keys()
-    # The conversation ends with a user turn already, and thinking is off, yet Sonnet 5.5 rejects prefill.
+    # The request ends with the conversation's own user turn and adds none: these models reject prefill.
     assert body["messages"][-1]["content"][0]["text"] == "Hello"
 
 

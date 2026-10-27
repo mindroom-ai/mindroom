@@ -80,19 +80,19 @@ async def test_facade_closed_without_owner_and_filtered_source(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "message"),
     [
-        {},
-        {"command": ""},
-        {"command": "   "},
+        ({}, r"command\n  Missing required argument"),
+        ({"command": ""}, r"^Bash requires a command$"),
+        ({"command": "   "}, r"^Bash requires a command$"),
     ],
 )
-async def test_invalid_facade_shapes_fail_before_owner(kwargs: dict[str, Any]) -> None:
+async def test_invalid_facade_shapes_fail_before_owner(kwargs: dict[str, Any], message: str) -> None:
     async def execute(*_args: object) -> None:
         pytest.fail("invalid operation reached owner")
 
     [facade] = minimal_bash_toolkit(execute=execute).functions
-    with pytest.raises(ValueError, match=r"^Bash requires a command$"):
+    with pytest.raises(ValueError, match=message):
         await facade.entrypoint(**kwargs)
 
 

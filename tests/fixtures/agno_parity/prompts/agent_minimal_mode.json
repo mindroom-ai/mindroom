@@ -71,14 +71,7 @@
             "type": "object",
             "properties": {
               "command": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "The Bash command to run."
               },
               "timeout": {
@@ -97,7 +90,9 @@
                 "description": "The number of output lines to return."
               }
             },
-            "required": [],
+            "required": [
+              "command"
+            ],
             "additionalProperties": false
           }
         }
