@@ -417,21 +417,20 @@ export function EgressServiceEditor({
 
   // Another preset has its own defaults, so what the loaded service emptied on
   // purpose no longer applies to it. Back on the loaded preset, its own login
-  // applies again, as the save writes it.
+  // applies again, as the save writes it, even after another was picked under Custom.
   const choosePreset = (value: string) => {
     // The rules the helper wrote are gone with the preset's own, so typed
     // repositories are to be applied again when the form is saved.
     appliedHelper.current = null;
+    const loaded = value !== "" && value === service?.preset;
     set({
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
+      ...(loaded && { oauthProvider: service.oauth_provider ?? "" }),
       explicitlyEmpty: {
         ...NOT_EXPLICITLY_EMPTY,
-        presetLogin:
-          value !== "" &&
-          value === service?.preset &&
-          service.oauth_provider !== undefined,
+        presetLogin: loaded && service.oauth_provider !== undefined,
       },
     });
   };

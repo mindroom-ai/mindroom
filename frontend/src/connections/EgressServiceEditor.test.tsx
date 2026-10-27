@@ -648,6 +648,26 @@ describe("the editor form", () => {
     }
   });
 
+  it("restores the loaded login back from Custom, so a login picked there changes neither the box nor the save", async () => {
+    const service = {
+      preset: "google_calendar",
+      oauth_provider: "google_drive",
+    };
+    const { onSave } = await renderEditor({ service, name: "svc" });
+    type("Preset", "");
+    // GitHub accounts belong to each user, so it would hide the box.
+    type("Account login (optional)", "github");
+    type("Preset", "google_calendar");
+    expect(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    ).not.toBeChecked();
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("svc", service);
+  });
+
   it("offers no own account on a shared agent, on the dashboard, or for an account each user has", async () => {
     for (const props of [
       { sharedTarget: true },
