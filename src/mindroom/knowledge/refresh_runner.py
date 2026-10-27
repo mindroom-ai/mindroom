@@ -1038,7 +1038,7 @@ async def _publish_unchanged_index(
     if _revision_proves_source_unchanged(state, published_revision):
         current_source_signature = state.source_signature
     else:
-        current_source_signature = await manager.source_signature()
+        current_source_signature = await manager.source_signature(await manager.published_file_signatures(state))
     if current_source_signature != state.source_signature:
         if mark_stale_on_source_change:
             await mark_knowledge_source_changed_async(

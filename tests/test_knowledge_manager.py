@@ -119,7 +119,7 @@ from tests.knowledge_test_support import (
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
@@ -1863,6 +1863,57 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
     assert list_knowledge_files(config, "docs", docs_path) == []
+
+
+def test_a_file_signed_right_after_a_write_is_read_again_by_the_next_scan(tmp_path: Path) -> None:
+    """A signature taken within the racy window records an mtime no stat matches.
+
+    A rewrite within the same timestamp tick keeps size and mtime, so trusting that stat would keep the old content.
+    """
+    docs_path = (tmp_path / "docs").resolve()
+    docs_path.mkdir()
+    note = docs_path / "note.md"
+    note.write_text("one", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    first: dict[str, tuple[tuple[int, int, str], Path]] = {}
+    _knowledge_source_signature(config, "docs", docs_path, git_dir=docs_path / ".git", scanned=first)
+    [(signature, _path)] = first.values()
+    written = note.stat()
+    note.write_text("two", encoding="utf-8")
+    os.utime(note, ns=(written.st_atime_ns, written.st_mtime_ns))
+
+    second: dict[str, tuple[tuple[int, int, str], Path]] = {}
+    _knowledge_source_signature(
+        config,
+        "docs",
+        docs_path,
+        git_dir=docs_path / ".git",
+        known={"note.md": signature},
+        scanned=second,
+    )
+
+    assert second["note.md"][0][2] != signature[2]
+
+
+def test_listing_pins_each_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Files of one directory share one pinned parent, instead of a no-follow walk from the root per file."""
+    docs_path = (tmp_path / "docs").resolve()
+    for directory in ("a", "b"):
+        (docs_path / directory).mkdir(parents=True)
+        for index in range(3):
+            (docs_path / directory / f"{index}.md").write_text(directory, encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    pinned: list[str] = []
+    real_open = knowledge_file_listing_module.open_directory_within_root
+
+    def _open(root: object, relative_path: object = Path(), **kwargs: object) -> object:
+        pinned.append(str(relative_path))
+        return real_open(root, relative_path, **kwargs)
+
+    monkeypatch.setattr(knowledge_file_listing_module, "open_directory_within_root", _open)
+
+    assert len(list_knowledge_files(config, "docs", docs_path)) == 6
+    assert sorted(pinned.count(directory) for directory in ("a", "b")) == [1, 1]
 
 
 def test_tracked_path_listing_skips_per_file_strict_resolution(
@@ -8654,6 +8705,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
         git_dir: Path,
         tracked_relative_paths: Iterable[str] | None = None,
         scanned: dict[str, tuple[FileSignature, Path]] | None = None,
+        known: Mapping[str, FileSignature] | None = None,
     ) -> str:
         counter.calls += 1
         return original_signature(
@@ -8663,6 +8715,7 @@ def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleT
             git_dir=git_dir,
             tracked_relative_paths=tracked_relative_paths,
             scanned=scanned,
+            known=known,
         )
 
     monkeypatch.setattr(module, "_knowledge_source_signature", _counting_signature)
@@ -8844,9 +8897,10 @@ async def test_git_update_uses_reliable_delta_for_file_signature_scan(
     async def _record_scanned_files(
         self: KnowledgeManager,
         files: Sequence[Path],
+        known: Mapping[str, tuple[int, int, str]] | None = None,
     ) -> dict[str, tuple[tuple[int, int, str], Path]]:
         scanned.append(tuple(sorted(path.name for path in files)))
-        return await original_file_signatures_for(self, files)
+        return await original_file_signatures_for(self, files, known)
 
     monkeypatch.setattr(KnowledgeManager, "_file_signatures_for", _record_scanned_files)
 
@@ -9036,16 +9090,16 @@ async def test_reindex_does_not_publish_a_corpus_truncated_by_a_transient_error(
     )
     _install_git_revisions(monkeypatch, ["rev-a"])
 
-    original_file_signature = knowledge_manager_module._file_signature
+    original_signature = knowledge_manager_module._descriptor_signature
     remaining_failures = {"flaky.md": 1}
 
-    def _flaky_signature(file_path: Path, snapshot: Path | None = None) -> tuple[int, int, str]:
-        if remaining_failures.get(file_path.name):
+    def _flaky_signature(descriptor: int, file_path: Path, output: object = None) -> tuple[int, int, str]:
+        if output is None and remaining_failures.get(file_path.name):
             remaining_failures[file_path.name] -= 1
             raise OSError(116, "Stale file handle")
-        return original_file_signature(file_path, snapshot)
+        return original_signature(descriptor, file_path, output)
 
-    monkeypatch.setattr(knowledge_manager_module, "_file_signature", _flaky_signature)
+    monkeypatch.setattr(knowledge_manager_module, "_descriptor_signature", _flaky_signature)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 

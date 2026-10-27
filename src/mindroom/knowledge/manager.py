@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -67,6 +68,7 @@ from mindroom.knowledge.file_listing import (
     knowledge_files_from_relative_paths,
     list_knowledge_files,
     open_knowledge_file,
+    pinned_directories,
 )
 from mindroom.knowledge.git_source import GitKnowledgeSource
 from mindroom.knowledge.index_metadata import (
@@ -92,7 +94,7 @@ from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Rea
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import MAX_READ_BYTES
+from mindroom.path_confinement import MAX_READ_BYTES, open_regular_file_at
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
@@ -155,6 +157,9 @@ _MAX_BATCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
+#: A file written this recently may be rewritten within one timestamp tick, keeping its mtime and size, so its
+#: signature records an mtime no stat matches, and the next scan reads it again instead of trusting its stat.
+_RACY_WINDOW_NS = 2_000_000_000
 #: Reconciliation passes before a refresh gives up for now. A source that keeps
 #: changing keeps its candidate and converges over successive refreshes instead
 #: of thrashing inside one.
@@ -373,19 +378,59 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
     return config.get_knowledge_base_config(base_id).mode == "semantic"
 
 
+def _descriptor_signature(descriptor: int, file_path: Path, output: IO[bytes] | None = None) -> FileSignature:
+    """Stat and hash one open knowledge file, copying its bytes to ``output`` when given."""
+    status = os.fstat(descriptor)
+    if status.st_size > MAX_READ_BYTES:
+        msg = f"Knowledge file exceeds its size limit: {file_path}"
+        raise ValueError(msg)
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, 1024 * 1024):
+        digest.update(chunk)
+        if output is not None:
+            output.write(chunk)
+    racy = time.time_ns() - status.st_mtime_ns < _RACY_WINDOW_NS
+    return 0 if racy else status.st_mtime_ns, status.st_size, digest.hexdigest()
+
+
 def _file_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
     """Stat and hash one listed file through one no-follow descriptor, copying it to ``snapshot`` when given."""
-    digest = hashlib.sha256()
     with open_knowledge_file(file_path) as descriptor, snapshot.open("xb") if snapshot else nullcontext() as output:
-        status = os.fstat(descriptor)
-        if status.st_size > MAX_READ_BYTES:
-            msg = f"Knowledge file exceeds its size limit: {file_path}"
-            raise ValueError(msg)
-        while chunk := os.read(descriptor, 1024 * 1024):
-            digest.update(chunk)
-            if output is not None:
-                output.write(chunk)
-    return status.st_mtime_ns, status.st_size, digest.hexdigest()
+        return _descriptor_signature(descriptor, file_path, output)
+
+
+def _scan_file_signatures(
+    files: Iterable[tuple[str, Path]],
+    known: Mapping[str, FileSignature],
+) -> Iterator[tuple[str, FileSignature, Path]]:
+    """Sign listed files, reusing a ``known`` signature while the file's mtime and size still match it.
+
+    As rsync and git do, an unchanged stat counts as unchanged bytes, so most files of a large corpus are not read
+    again; ``_RACY_WINDOW_NS`` keeps a rewrite within one timestamp tick from passing for unchanged. Each parent is
+    pinned once by the no-follow walk from the filesystem root that ``open_knowledge_file`` repeats per file, and
+    its entries are stat-ed and opened without following links. Files that vanished or are not regular are skipped.
+    """
+    with pinned_directories(Path("/")) as pin:
+        for relative_path, path in files:
+            try:
+                parent_fd = pin(path.parent.relative_to(path.anchor))
+                status = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                recorded = known.get(relative_path)
+                if (
+                    recorded is not None
+                    and stat.S_ISREG(status.st_mode)
+                    and recorded[:2] == (status.st_mtime_ns, status.st_size)
+                ):
+                    yield relative_path, recorded, path
+                    continue
+                descriptor = open_regular_file_at(parent_fd, path.name)
+                try:
+                    signature = _descriptor_signature(descriptor, path)
+                finally:
+                    os.close(descriptor)
+            except (OSError, ValueError):
+                continue
+            yield relative_path, signature, path
 
 
 @contextmanager
@@ -457,8 +502,12 @@ def _knowledge_source_signature(
     git_dir: Path,
     tracked_relative_paths: Iterable[str] | None = None,
     scanned: dict[str, tuple[FileSignature, Path]] | None = None,
+    known: Mapping[str, FileSignature] | None = None,
 ) -> str:
-    """Return a robust signature for the currently managed local file corpus; ``scanned`` collects each signed file."""
+    """Return a robust signature for the currently managed local file corpus; ``scanned`` collects each signed file.
+
+    A file whose stat still matches its ``known`` signature keeps it without being read.
+    """
     root = knowledge_root
     digest = hashlib.sha256()
     base_config = config.get_knowledge_base_config(base_id)
@@ -471,12 +520,8 @@ def _knowledge_source_signature(
             else git_tracked_relative_paths_from_checkout(config, base_id, root, git_dir)
         )
         files = knowledge_files_from_relative_paths(config, base_id, root, tracked_paths)
-    files_with_relative_paths = ((path.relative_to(root).as_posix(), path) for path in files)
-    for relative_path, path in sorted(files_with_relative_paths):
-        try:
-            signature = _file_signature(path)
-        except (OSError, ValueError):
-            continue
+    files_with_relative_paths = sorted((path.relative_to(root).as_posix(), path) for path in files)
+    for relative_path, signature, path in _scan_file_signatures(files_with_relative_paths, known or {}):
         if scanned is not None:
             scanned[relative_path] = (signature, path)
         mtime_ns, size, source_digest = signature
@@ -677,8 +722,10 @@ class KnowledgeManager:
             )
         return list_knowledge_files(self.config, self.base_id, knowledge_root)
 
-    async def source_signature(self) -> str:
+    async def source_signature(self, known: Mapping[str, FileSignature] | None = None) -> str:
         """Return the signature of the corpus this base currently manages.
+
+        A file whose mtime and size still match its ``known`` signature is not read again.
 
         Git-backed bases hand over the tracked paths this process already
         listed, so an unchanged checkout is not re-listed just to hash it.
@@ -696,9 +743,34 @@ class KnowledgeManager:
             git_dir=self.git_source.git_dir,
             tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
             scanned=scanned,
+            known=known,
         )
         self._source_scan = scanned
         return signature
+
+    async def published_file_signatures(self, state: PublishedIndexState) -> dict[str, FileSignature]:
+        """Return the signature the published index recorded for each file, for a stat-first scan to reuse."""
+        if state.collection is None:
+            return {}
+        collection = open_collection(self._collections, state.collection)
+
+        def _read() -> dict[str, FileSignature]:
+            if not collection.exists():
+                return {}
+            return {
+                source_path: signature
+                for source_path, metadata in collection.source_metadata().items()
+                if (
+                    signature := file_signature_from_fields(
+                        metadata.get(SOURCE_MTIME_NS_KEY),
+                        metadata.get(SOURCE_SIZE_KEY),
+                        metadata.get(SOURCE_DIGEST_KEY),
+                    )
+                )
+                is not None
+            }
+
+        return await asyncio.to_thread(_read)
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()
@@ -1701,19 +1773,15 @@ class KnowledgeManager:
             completed=len(checkpoint.completed),
         )
 
-    async def _file_signatures_for(self, files: Sequence[Path]) -> dict[str, tuple[FileSignature, Path]]:
-        """Return current signatures for the listed files, skipping vanished ones."""
+    async def _file_signatures_for(
+        self,
+        files: Sequence[Path],
+        known: Mapping[str, FileSignature] | None = None,
+    ) -> dict[str, tuple[FileSignature, Path]]:
+        """Return current signatures for the listed files, skipping vanished ones and reusing still-matching ``known``."""
 
         def _scan(batch: Sequence[Path]) -> list[tuple[str, FileSignature, Path]]:
-            scanned: list[tuple[str, FileSignature, Path]] = []
-            for file_path in batch:
-                relative_path = self._relative_path(file_path)
-                try:
-                    signature = _file_signature(file_path)
-                except (OSError, ValueError):
-                    continue
-                scanned.append((relative_path, signature, file_path))
-            return scanned
+            return list(_scan_file_signatures(((self._relative_path(path), path) for path in batch), known or {}))
 
         signatures: dict[str, tuple[FileSignature, Path]] = {}
         for start in range(0, len(files), _SIGNATURE_SCAN_CHUNK):
@@ -1774,7 +1842,7 @@ class KnowledgeManager:
         if changed_files is None and scanned is not None:
             signatures = scanned
         elif changed_files is None:
-            signatures = await self._file_signatures_for(await asyncio.to_thread(self.list_files))
+            signatures = await self._file_signatures_for(await asyncio.to_thread(self.list_files), run.completed)
         else:
             files = await asyncio.to_thread(self.list_files)
             files_by_relative_path = {self._relative_path(file_path): file_path for file_path in files}
@@ -1996,7 +2064,7 @@ class KnowledgeManager:
         coverage. Neither reads file contents.
         """
         if round_revision is None:
-            return await self.source_signature() == candidate_source_signature
+            return await self.source_signature(candidate_signatures) == candidate_source_signature
 
         if await self.git_source.head() != round_revision:
             return False
