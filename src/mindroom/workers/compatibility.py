@@ -33,8 +33,17 @@ def worker_health_payload(*, mindroom_version: str) -> _WorkerHealthPayload:
     )
 
 
-def worker_health_compatibility_error(response: httpx.Response, *, backend_label: str, image: str) -> str | None:
-    """Return an actionable error when a ready worker's health check reports another protocol."""
+def worker_health_compatibility_error(
+    response: httpx.Response,
+    *,
+    backend_label: str,
+    image: str,
+    older_worker_hint: str | None = None,
+) -> str | None:
+    """Return an actionable error when a ready worker's health check reports another protocol.
+
+    ``older_worker_hint`` is appended only when the worker reports an older or no protocol.
+    """
     try:
         payload = response.json()
     except ValueError:
@@ -47,15 +56,20 @@ def worker_health_compatibility_error(response: httpx.Response, *, backend_label
         reported_protocol = payload.get("worker_protocol", "missing")
         reported_version = payload.get("mindroom_version", "unknown")
 
-    if (
-        isinstance(reported_protocol, int)
-        and not isinstance(reported_protocol, bool)
-        and reported_protocol == _WORKER_PROTOCOL_VERSION
-    ):
-        return None
-    return (
+    newer_worker = False
+    if isinstance(reported_protocol, int) and not isinstance(reported_protocol, bool):
+        if reported_protocol == _WORKER_PROTOCOL_VERSION:
+            return None
+        newer_worker = reported_protocol > _WORKER_PROTOCOL_VERSION
+    mismatch = (
         f"{backend_label} worker image '{image}' is incompatible with this MindRoom runtime: "
         f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
-        f"(worker MindRoom version {reported_version}). "
-        "Use a worker image built for this MindRoom release."
+        f"(worker MindRoom version {reported_version})."
     )
+    if newer_worker:
+        return (
+            f"{mismatch} The worker image comes from a newer MindRoom release: run this runtime on the same release, "
+            "for example by restarting it so it pulls the same mutable tag, or pin both to one release tag."
+        )
+    advice = f"{mismatch} Use a worker image built for this MindRoom release."
+    return advice if older_worker_hint is None else f"{advice} {older_worker_hint}"

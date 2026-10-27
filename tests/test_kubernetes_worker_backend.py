@@ -708,6 +708,7 @@ def _backend(
     tmp_size_limit: str | None = None,
     user_resources: dict[str, dict[str, dict[str, str]]] | None = None,
     image_pull_secrets: tuple[str, ...] = (),
+    image_pull_policy: str = "IfNotPresent",
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -718,7 +719,7 @@ def _backend(
     config = KubernetesWorkerBackendConfig(
         namespace="chat",
         image="ghcr.io/mindroom-ai/mindroom:latest",
-        image_pull_policy="IfNotPresent",
+        image_pull_policy=image_pull_policy,
         worker_port=worker_port,
         service_account_name="mindroom-worker",
         storage_pvc_name="mindroom-storage",
@@ -4574,7 +4575,10 @@ def test_kubernetes_stale_worker_replacement_is_not_retried() -> None:
         backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     assert str(exc.value).startswith("Kubernetes worker image 'ghcr.io/mindroom-ai/mindroom:latest' is incompatible")
-    assert str(exc.value).endswith("set the worker image pull policy to Always.")
+    assert "Use a worker image built for this MindRoom release." in str(exc.value)
+    assert str(exc.value).endswith(
+        "set the worker image pull policy to Always (https://docs.mindroom.chat/deployment/kubernetes/#worker-settings).",
+    )
     worker_id = next(iter(apps_api.deployments))
     assert apps_api.deleted_names == [worker_id]
     assert len(apps_api.created_bodies) == 2
@@ -4582,6 +4586,36 @@ def test_kubernetes_stale_worker_replacement_is_not_retried() -> None:
     assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
     assert deployment.spec.replicas == 0
     assert worker_id not in core_api.services
+
+
+def test_kubernetes_stale_worker_refusal_under_always_blames_no_cached_copy() -> None:
+    """Under pull policy Always a replacement pulls the tag again, so a stale replacement means the tag itself is old."""
+    backend, apps_api, _core_api = _backend(image_pull_policy="Always")
+    _answer_worker_health(backend, lambda: 3)
+
+    with pytest.raises(WorkerBackendError, match="got 3") as exc:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert str(exc.value).endswith("Use a worker image built for this MindRoom release.")
+    assert len(apps_api.created_bodies) == 2
+
+
+@pytest.mark.parametrize("image_pull_policy", ["IfNotPresent", "Always"])
+def test_kubernetes_newer_worker_refusal_says_to_run_the_primary_on_its_release(image_pull_policy: str) -> None:
+    """A worker that started from a newer tag than the primary is refused with the fix on the primary's side."""
+    backend, apps_api, _core_api = _backend(image_pull_policy=image_pull_policy)
+    newer_protocol = _WORKER_PROTOCOL_VERSION + 1
+    _answer_worker_health(backend, lambda: newer_protocol)
+
+    with pytest.raises(WorkerBackendError, match=f"got {newer_protocol} ") as exc:
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert str(exc.value).endswith(
+        "The worker image comes from a newer MindRoom release: run this runtime on the same release, "
+        "for example by restarting it so it pulls the same mutable tag, or pin both to one release tag.",
+    )
+    assert "pull policy" not in str(exc.value)
+    assert len(apps_api.created_bodies) == 2
 
 
 def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch: pytest.MonkeyPatch) -> None:

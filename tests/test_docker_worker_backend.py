@@ -3530,6 +3530,42 @@ def test_docker_worker_health_rejects_incompatible_protocol(payload: dict[str, o
     assert "Use a worker image built for this MindRoom release" in error
 
 
+def test_worker_health_sends_a_newer_worker_to_the_primary_release() -> None:
+    """A worker from a newer release is fixed on the primary's side, so no older-worker hint applies."""
+    response = httpx.Response(
+        200,
+        json={"status": "ok", "mindroom_version": "2026.11.1", "worker_protocol": _WORKER_PROTOCOL_VERSION + 1},
+    )
+
+    error = worker_health_compatibility_error(
+        response,
+        backend_label="Docker",
+        image="mindroom:latest",
+        older_worker_hint="older-worker hint",
+    )
+
+    assert error is not None
+    assert f"got {_WORKER_PROTOCOL_VERSION + 1} (worker MindRoom version 2026.11.1)" in error
+    assert "newer MindRoom release: run this runtime on the same release" in error
+    assert "Use a worker image built for this MindRoom release" not in error
+    assert "older-worker hint" not in error
+
+
+def test_worker_health_appends_the_older_worker_hint_to_an_older_worker() -> None:
+    """The caller's hint follows the advice for a worker from an older release."""
+    response = httpx.Response(200, json={"status": "ok", "mindroom_version": "2026.10.580", "worker_protocol": 3})
+
+    error = worker_health_compatibility_error(
+        response,
+        backend_label="Docker",
+        image="mindroom:latest",
+        older_worker_hint="older-worker hint",
+    )
+
+    assert error is not None
+    assert error.endswith("Use a worker image built for this MindRoom release. older-worker hint")
+
+
 @pytest.mark.parametrize(
     "response",
     [

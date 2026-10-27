@@ -67,9 +67,10 @@ _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
-_STALE_REPLACEMENT_HINT = (
+_PULL_POLICY_DOCS_URL = "https://docs.mindroom.chat/deployment/kubernetes/#worker-settings"
+_CACHED_IMAGE_HINT = (
     "A replacement pod reported the same protocol, so with a mutable tag such as ':latest' its node may still "
-    "hold an older copy: use this release's tag or set the worker image pull policy to Always."
+    f"hold an older copy: use this release's tag or set the worker image pull policy to Always ({_PULL_POLICY_DOCS_URL})."
 )
 
 logger = logging.getLogger(__name__)
@@ -635,10 +636,11 @@ class KubernetesWorkerBackend:
             self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
             backend_label="Kubernetes",
             image=self.config.image,
+            # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
+            older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
         )
         if compatibility_error is not None and is_replacement:
-            msg = f"{compatibility_error} {_STALE_REPLACEMENT_HINT}"
-            raise WorkerBackendError(msg)
+            raise WorkerBackendError(compatibility_error)
         return compatibility_error is not None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:

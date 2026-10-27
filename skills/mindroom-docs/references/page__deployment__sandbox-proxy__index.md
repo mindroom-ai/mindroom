@@ -221,9 +221,10 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 ### Keeping worker versions matched
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
-MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running from an older release under a mutable tag such as `:latest` is replaced on its next use.
-A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under image pull policy `Always`, the runtime chart's default.
+MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running under a mutable tag such as `:latest` from a release with another worker protocol is replaced on its next use.
+A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
+A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary has not restarted into; run the primary on the same release by restarting it so it pulls the same tag, or pin one release tag for both.
 Plain `uvx mindroom run` runs the published PyPI release, so when testing unreleased code, run MindRoom from the checkout you build the image from (`uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`).
 When upgrading from older releases, see [Workspace-only worker mounts](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts), [Config-free runners and workers](https://docs.mindroom.chat/deployment/upgrades/#config-free-runners-and-workers), and [Requester-scoped worker keys](https://docs.mindroom.chat/deployment/upgrades/#requester-scoped-worker-keys).
 
