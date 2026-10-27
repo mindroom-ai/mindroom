@@ -2173,29 +2173,41 @@ def _put_own_account_service(portal: dict[str, Any], preset: str = "google_drive
     assert response.status_code == 204, response.text
 
 
-@pytest.mark.parametrize(
-    ("preset", "provider", "tools_service"),
-    [("google_drive", "google_drive", "drive"), ("github", "github", "gh")],
-)
 def test_connecting_a_service_with_its_own_account_stores_only_that_account(
     oauth_egress_portal: dict[str, Any],
-    preset: str,
-    provider: str,
-    tools_service: str,
 ) -> None:
     """The service's row connects and shows its own account, and the connection the tools use stays unconnected."""
     portal = oauth_egress_portal
     alice = "@alice:example.org"
-    _put_own_account_service(portal, preset)
+    _put_own_account_service(portal)
 
-    _connect_account(portal, "alice", "personal", "mine", provider)
+    _connect_account(portal, "alice", "personal", "mine", "google_drive")
 
-    own = oauth_source.separate_account_provider(portal["providers"][provider], "mine")
+    own = oauth_source.separate_account_provider(portal["providers"]["google_drive"], "mine")
     row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
     assert (row["connected"], row["account_label"]) == (True, "alice@example.com")
     assert _stored_connection(portal, alice, "personal", own) == (True, "alice@example.com")
-    assert _stored_connection(portal, alice, "personal", portal["providers"][provider]) == (False, None)
-    assert _egress_row(portal, "alice", "personal", tools_service)["oauth"]["connected"] is False
+    assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"]) == (False, None)
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["connected"] is False
+
+
+@pytest.mark.parametrize("body", [{"preset": "github"}, _MY_GITHUB], ids=["preset", "custom"])
+def test_a_per_user_account_cannot_be_a_services_own_account(
+    oauth_egress_portal: dict[str, Any],
+    body: dict[str, Any],
+) -> None:
+    """A GitHub or Atlassian account follows the user to every agent, so one agent's service cannot own one."""
+    portal = oauth_egress_portal
+
+    response = _put_service(portal, "alice", "personal", "mine", {**body, "oauth_separate_account": True})
+
+    assert response.status_code == 422, response.text
+    name = portal["providers"]["github"].display_name
+    assert response.json()["detail"] == (
+        f"A service of your own cannot have its own {name} account yet, because {name} accounts belong to each user, "
+        "not to one agent; leave oauth_separate_account off"
+    )
+    assert "mine" not in _listed_names(portal, "alice", "personal")
 
 
 def test_disconnecting_a_service_with_its_own_account_leaves_the_tools_connection(

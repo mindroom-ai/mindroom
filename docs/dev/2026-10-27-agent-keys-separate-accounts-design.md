@@ -15,7 +15,7 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
 ## Decisions
 
 - **A service of the user's own can have its own login.** `EgressService` gains `oauth_separate_account: StrictBool = False`.
-  It is valid only together with `oauth_provider`, and only on user services of personal (`user`, `user_agent`) scopes, the same places a user service may name a provider today; a config service or a shared scope refuses it.
+  It is valid only together with `oauth_provider`, and only on user services of personal (`user`, `user_agent`) scopes, the same places a user service may name a provider today; a config service or a shared scope refuses it, and so does a requester-scoped provider (GitHub, Atlassian) for now.
   Such a service's connection is stored in the scope's store under its own credential service, `f"{base}__{service}_oauth"`, where `base` is the provider's `credential_service` without its `_oauth` suffix (for example `google_calendar__team_calendar_oauth` for a service `team_calendar`).
   The provider with that one field replaced (`dataclasses.replace`) is the connection everywhere: the connect flow, the callback, refresh and the credential lifecycle already work per credential service.
   The agent's tools keep using the provider's own connection and never see a separate one.
@@ -34,6 +34,7 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
 ## Later, not now
 
 - Separate accounts for config services and shared agents.
+- Separate accounts of requester-scoped providers (GitHub, Atlassian): their connections follow the requester across agents while a `user_agent` scope's services are per agent, so two agents' services of one name would share one account.
 - Permissions the provider does not request (for example a Google admin API), which still need a provider of their own.
 - Choosing a service by path instead of a header, for tools that cannot set headers.
 

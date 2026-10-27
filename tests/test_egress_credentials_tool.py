@@ -831,9 +831,9 @@ def test_a_service_with_its_own_account_is_marked_and_the_note_names_the_header(
         manager,
         worker_target(),
         "mine",
-        EgressService.model_validate({"preset": "github", "oauth_separate_account": True}),
+        EgressService.model_validate({"preset": "google_drive", "oauth_separate_account": True}),
         config_services=context.config.egress_broker.services,
-        oauth_providers={"github"},
+        oauth_providers={"google_drive"},
     )
 
     payload = _list(_tool(runtime_paths), context)

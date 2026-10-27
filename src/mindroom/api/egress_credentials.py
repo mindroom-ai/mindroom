@@ -543,8 +543,8 @@ def put_user_service(
     The body has the fields of a config service except `oauth_on_shared_workers`. Returns 413 for a body over 16 KiB,
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
-    one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, or rules on hosts that
-    `unmatched_hosts: deny` keeps closed.
+    one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, a service's own account of a
+    requester-scoped provider (GitHub, Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -553,6 +553,15 @@ def put_user_service(
         raise HTTPException(409, str(UserServiceConflictError(name)), headers=CONNECTIONS_HEADERS)
     service = _parse_user_service(body)
     _require_hosts_within_operator_policy(operator, service)
+    providers = load_oauth_providers(agent.config, agent.runtime_paths)
+    provider = providers.get(service.oauth_provider or "")
+    if service.oauth_separate_account and provider is not None and provider.requester_scoped_credentials:
+        # One requester's account of such a provider serves all their agents, and so would a service's own.
+        msg = (
+            f"A service of your own cannot have its own {provider.display_name} account yet, because "
+            f"{provider.display_name} accounts belong to each user, not to one agent; leave oauth_separate_account off"
+        )
+        raise _unprocessable(msg)
     stored = load_user_services(agent.manager, agent.target).get(name)
     try:
         save_user_service(
@@ -561,7 +570,7 @@ def put_user_service(
             name,
             service,
             config_services=operator.services,
-            oauth_providers=load_oauth_providers(agent.config, agent.runtime_paths).keys(),
+            oauth_providers=providers.keys(),
         )
     except ValueError as exc:
         raise _unprocessable(str(exc)) from exc

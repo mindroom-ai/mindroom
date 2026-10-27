@@ -128,7 +128,7 @@ egress_broker:
 | `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account in shared sandboxes too; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes). Only `config.yaml` may set it, and presets never do |
 | `restrict_to_rules` | No | Default `false`. Set `true` to refuse, with 403 `path_not_allowed`, a request to this service's hosts whose path matches none of its party's rules there, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 | `restrict_only` | No | Default `false`. Only for user services; see [Limiting in place](#limiting-in-place) |
-| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
+| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` other than `github` or `atlassian` on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
 
 **Rule fields:**
 
@@ -431,6 +431,7 @@ When a config service sets the same variable, the config value wins, and the edi
 ### A service's own account
 
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
+A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 Its row then connects, allows, and disconnects an account of its own, and the agent's tools and every other service keep the account they use.
 Until its own account is connected the service has none: it never uses the tools' account instead.
 Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
