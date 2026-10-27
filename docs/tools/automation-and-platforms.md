@@ -144,7 +144,7 @@ With `persistent: true`, the same sandbox is reused across calls within one repl
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
-The agent's prompt always includes the toolkit's instructions, which tell the model to run any code it writes and show the output.
+The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
 
 `verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.

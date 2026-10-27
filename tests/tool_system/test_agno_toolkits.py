@@ -15,7 +15,12 @@ from agno.utils.schema import AGNO_INJECTED_PARAMS, FRAMEWORK_INJECTED_PARAMS
 
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, injected_parameters
+from mindroom.tool_system.agno_toolkits import (
+    adapt_function,
+    adapt_toolkit,
+    injected_parameters,
+    with_offered_instructions,
+)
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agno_parity import tool_argument_probes as probes
 from tests.agno_parity.golden_files import render
@@ -283,11 +288,59 @@ def test_async_variants_replace_sync_functions_in_place() -> None:
 def test_every_toolkit_s_instructions_reach_the_prompt_whatever_its_add_instructions() -> None:
     """A toolkit authored on ``Toolkit`` and one of Agno's own both show their instructions; ``add_instructions`` is unread."""
     authored = Toolkit(name="authored", tools=[probes.probe_no_arguments], instructions="Shown.")
-    vendor = ReasoningTools(enable_think=True, enable_analyze=False)
+    vendor = ReasoningTools()
 
     assert (authored.add_instructions, vendor.add_instructions) == (False, False)
     assert (adapt_toolkit(authored).instructions, adapt_toolkit(authored).guidance) == ("Shown.", "Shown.")
     assert adapt_toolkit(vendor).instructions == adapt_toolkit(vendor).guidance == vendor.instructions
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "offering", "leaving_one_out"),
+    [
+        ("daytona", {}, {"exclude_tools": ["delete_file"]}),
+        ("gmail", {}, {"send_email": False}),
+        ("google_calendar", {}, {"allow_update": False}),
+        ("reasoning", {}, {"enable_think": False}),
+        # Slack's guide names list_users, which the default configuration leaves out.
+        ("slack", {"enable_list_users": True}, {}),
+        ("zep", {}, {"enable_add_zep_message": False}),
+    ],
+)
+def test_agno_default_instructions_show_only_while_every_function_they_name_is_offered(
+    tool_name: str,
+    offering: dict[str, object],
+    leaving_one_out: dict[str, object],
+    golden_runtime: tuple[Path, Config, RuntimePaths],
+) -> None:
+    """Agno's default instructions show while the agent offers every function they name; authored ones always show."""
+    root, config, runtime_paths = golden_runtime
+    authorable = any(field.name == "instructions" for field in BUILTIN_TOOL_METADATA[tool_name].config_fields or ())
+    with support.isolated_process(root):
+        if (missing := support.missing_dependencies(tool_name)) is not None:
+            pytest.skip(f"{tool_name} needs {missing}")
+        full = support.build_toolkit(tool_name, config, runtime_paths, offering or None)
+        narrowed = support.build_toolkit(tool_name, config, runtime_paths, leaving_one_out or None)
+        authored = (
+            support.build_toolkit(
+                tool_name,
+                config,
+                runtime_paths,
+                {**leaving_one_out, "instructions": "Authored guidance."},
+            )
+            if authorable
+            else None
+        )
+
+    shown = with_offered_instructions(full, adapt_toolkit(full), authored_instructions=False)
+    assert shown.instructions == shown.guidance == full.instructions
+    assert adapt_toolkit(narrowed).instructions == full.instructions
+    hidden = with_offered_instructions(narrowed, adapt_toolkit(narrowed), authored_instructions=False)
+    assert (hidden.instructions, hidden.guidance) == (None, None)
+    assert len(hidden.functions) < len(shown.functions)
+    if authored is not None:
+        kept = with_offered_instructions(authored, adapt_toolkit(authored), authored_instructions=True)
+        assert kept.instructions == "Authored guidance."
 
 
 def test_definition_is_the_provider_facing_tool_spec() -> None:

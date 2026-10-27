@@ -10,6 +10,7 @@ MindRoom modules outside the tool and toolkit packages import Agno's tool types 
 from __future__ import annotations
 
 import inspect
+import re
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -124,6 +125,59 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
 }
 
 
+# AGNO_COMPAT: Agno toolkits' default instructions name functions the agent may not be offered.
+# Reason: Agno 3.0.9's ReasoningTools, ZepTools, DaytonaTools, GoogleCalendarTools, and GmailTools build default
+# instructions that name functions their enable switches can leave out, SlackTools names list_users whenever it offers
+# a messaging function, and the function filters MindRoom applies after construction can remove any named function, so
+# the prompt would tell the model to call a function it does not have.
+# Upstream issue: Tracking gap; searches of Agno's issues and PRs for these toolkits' instructions found no match.
+# Upstream PR: No matching fix has been verified.
+# Remove when: a toolkit's default instructions name only the functions an agent is offered, so its row can go, and
+# the check in with_offered_instructions with the last row; instructions the config authors must still always show.
+# Coverage: tests/tool_system/test_agno_toolkits.py::test_agno_default_instructions_show_only_while_every_function_they_name_is_offered,
+#   tests/agent_loop/test_agent_build.py::test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered.
+# Each toolkit class, by import path and including subclasses, maps to the functions its default instructions can name.
+_DEFAULT_INSTRUCTION_FUNCTIONS: dict[str, frozenset[str]] = {
+    "agno.tools.daytona.DaytonaTools": frozenset(
+        {
+            "change_directory",
+            "create_file",
+            "delete_file",
+            "list_files",
+            "read_file",
+            "run_code",
+            "run_shell_command",
+        },
+    ),
+    "agno.tools.google.calendar.GoogleCalendarTools": frozenset(
+        {
+            "check_availability",
+            "delete_event",
+            "get_event",
+            "list_events",
+            "quick_add_event",
+            "search_events",
+            "update_event",
+        },
+    ),
+    "agno.tools.google.gmail.GmailTools": frozenset({"create_draft_email", "send_email", "send_email_reply"}),
+    "agno.tools.reasoning.ReasoningTools": frozenset({"analyze", "think"}),
+    "agno.tools.slack.SlackTools": frozenset(
+        {
+            "get_channel_history",
+            "get_channel_info",
+            "get_thread",
+            "list_users",
+            "search_messages",
+            "search_workspace",
+            "send_message",
+            "send_message_thread",
+        },
+    ),
+    "agno.tools.zep.ZepTools": frozenset({"add_zep_message", "get_zep_memory", "search_zep_memory"}),
+}
+
+
 @runtime_checkable
 class FunctionScopedInstructions(Protocol):
     """A toolkit whose instructions describe its functions, so they name only the ones an agent is offered."""
@@ -170,15 +224,33 @@ def adapt_toolkit(toolkit: Toolkit, *, key: str | None = None, registered: str |
     )
 
 
-def with_offered_instructions(toolkit: Toolkit, adapted: AdaptedToolkit) -> AdaptedToolkit:
+def with_offered_instructions(
+    toolkit: Toolkit,
+    adapted: AdaptedToolkit,
+    *,
+    authored_instructions: bool,
+) -> AdaptedToolkit:
     """Return ``adapted``, the functions an agent offers of ``toolkit``, with the instructions ``toolkit`` gives for them.
 
-    Only a toolkit whose instructions describe its functions (``FunctionScopedInstructions``) gives other ones.
+    A toolkit whose instructions describe its functions (``FunctionScopedInstructions``) gives the ones for those
+    functions. Agno's default instructions of a toolkit in ``_DEFAULT_INSTRUCTION_FUNCTIONS`` show only while every
+    function they name is offered; ``authored_instructions`` says the config set them instead, so they always show.
     """
-    if not isinstance(toolkit, FunctionScopedInstructions):
+    offered = [function.name for function in adapted.functions]
+    if isinstance(toolkit, FunctionScopedInstructions):
+        instructions = toolkit.instructions_for(offered) or None
+        return replace(adapted, instructions=instructions, guidance=instructions)
+    if authored_instructions or not adapted.instructions or _default_named(toolkit, adapted.instructions) <= {*offered}:
         return adapted
-    instructions = toolkit.instructions_for([function.name for function in adapted.functions]) or None
-    return replace(adapted, instructions=instructions, guidance=instructions)
+    return replace(adapted, instructions=None, guidance=None)
+
+
+def _default_named(toolkit: Toolkit, instructions: str) -> frozenset[str]:
+    """Return the functions ``instructions``, the default ones of ``toolkit``, name of those its table row lists."""
+    for cls in type(toolkit).__mro__:
+        if (names := _DEFAULT_INSTRUCTION_FUNCTIONS.get(f"{cls.__module__}.{cls.__qualname__}")) is not None:
+            return names.intersection(re.findall(r"\w+", instructions))
+    return frozenset()
 
 
 def offered_refusal(toolkit: AdaptedToolkit) -> str | None:

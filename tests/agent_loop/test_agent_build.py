@@ -559,6 +559,51 @@ def test_reasoning_s_default_instructions_show_only_while_both_its_functions_are
     assert build.prompt.tool_instructions == expected
 
 
+@pytest.mark.parametrize(
+    ("tools", "room_id", "guided"),
+    [
+        ([], "!room:localhost", False),
+        (["matrix_message"], "!room:localhost", True),
+        (["matrix_message"], None, False),
+    ],
+    ids=["without_matrix_message", "with_matrix_message", "outside_a_room"],
+)
+def test_the_delegate_instructions_name_matrix_message_only_while_the_agent_offers_it(
+    tmp_path: Path,
+    tools: list[str],
+    room_id: str | None,
+    *,
+    guided: bool,
+) -> None:
+    """Delegation guidance for ongoing conversations names matrix_message, a tool of its own the agent may not have."""
+    config, runtime_paths = _config(tmp_path, tools=tools, delegate_to=["assistant"])
+    identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name="assistant",
+        runtime_paths=runtime_paths,
+        requester_id="@user:localhost",
+        room_id=room_id,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+
+    build = create_agent(
+        "assistant",
+        config,
+        runtime_paths,
+        identity,
+        knowledge=None,
+        active_model_name=None,
+        persist_runtime_state=False,
+    )
+
+    offered = {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}
+    [delegate] = [text for text in build.prompt.tool_instructions if "run_subagent" in text]
+    assert ("matrix_message" in offered) is guided
+    assert ("matrix_message(" in delegate) is guided
+
+
 def test_a_toolkit_whose_functions_are_all_left_out_shows_no_instructions(tmp_path: Path) -> None:
     """A toolkit shows its instructions only while it offers a function, not after a filter leaves them all out."""
     config, runtime_paths = _config(tmp_path, tools=["reasoning", "calculator"])

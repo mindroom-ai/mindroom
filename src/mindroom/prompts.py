@@ -20,6 +20,7 @@ __all__ = [
     "CURRENT_MESSAGE_PROMPT_INTRO",
     "DATETIME_CONTEXT_TEMPLATE",
     "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS",
+    "DELEGATE_MATRIX_MESSAGE_INSTRUCTIONS",
     "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
     "DREAMING_PROMPT_TEMPLATE",
     "DREAMING_VERIFY_TEMPLATE",
@@ -689,12 +690,15 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured
 
 Use run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.
 Delegation is limited to three nested child levels; a follow-up does not add nesting depth.
-For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
-It uses the current conversation; set new_thread=True to start a separate thread.
 In Matrix, child tools that require approval pause both runs until the user approves or denies them.
 Other runtimes retain their approval restrictions.
 Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
+
+
+# Added to the delegate instructions only for an agent offered matrix_message, a separate tool.
+DELEGATE_MATRIX_MESSAGE_INSTRUCTIONS = """For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
+It uses the current conversation; set new_thread=True to start a separate thread."""
 
 
 DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.

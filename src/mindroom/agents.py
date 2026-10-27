@@ -1410,8 +1410,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             approvals_as_jobs=approvals_as_jobs
             and not toolkit_is_background_excluded(tool_name, config, runtime_paths),
         )
-        # A toolkit whose instructions describe its functions describes only the ones left.
-        adapted = with_offered_instructions(toolkit, adapted)
+        # Instructions describe only the functions left; Agno's defaults that name a missing one are dropped.
+        adapted = with_offered_instructions(
+            toolkit,
+            adapted,
+            authored_instructions=bool(tool_entry.tool_config_overrides.get("instructions")),
+        )
         entry = offered_entry(toolkit, adapted, tool_entry, authored_name) if adapted.functions else None
         if persona_tools is not None:
             persona_built[tool_name] = filtered

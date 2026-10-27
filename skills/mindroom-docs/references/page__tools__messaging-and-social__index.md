@@ -73,6 +73,7 @@ Use channel IDs rather than names, especially for threaded replies and history r
 To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
 A user token stored as the primary `token` also works for search.
 `search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
+Slack's tool-selection guide reaches the agent's prompt only while every function it names is enabled, and with messaging enabled it names `list_users()`, so set `enable_list_users: true` to include it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

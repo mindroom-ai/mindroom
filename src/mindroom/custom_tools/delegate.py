@@ -22,6 +22,7 @@ from mindroom.delegation.personas import (
     caller_toolkit_names,
     follow_up_refusal,
     list_profiles,
+    persona_allows,
     render_profile_listing,
     resolve_persona_request,
 )
@@ -108,9 +109,21 @@ class DelegateTools(Toolkit):
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
         )
+        if self._matrix_message_offered():
+            instructions += "\n" + self._config.get_prompt("DELEGATE_MATRIX_MESSAGE_INSTRUCTIONS")
         if self._background_jobs_available():
             instructions += "\n" + self._config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS")
         return instructions
+
+    def _matrix_message_offered(self) -> bool:
+        """Return whether this agent has the separate matrix_message tool, which its persona may leave out."""
+        if "matrix_message" not in self._config.resolve_entity(self._agent_name).available_tools:
+            return False
+        # A turn outside a Matrix room offers no tool that needs one.
+        if self._execution_identity is not None and self._execution_identity.room_id is None:
+            return False
+        tools = None if self._persona is None else self._persona.tools
+        return tools is None or persona_allows(tools, "matrix_message", "matrix_message")
 
     def _background_jobs_available(self) -> bool:
         # A nested subagent's calls run inline inside its parent's job, so only a top-level caller can wait on one.

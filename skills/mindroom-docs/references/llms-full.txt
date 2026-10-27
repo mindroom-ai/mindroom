@@ -7373,6 +7373,7 @@ agents:
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
+The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, `slack`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
 
 ## Browse By Topic
 
@@ -11940,6 +11941,7 @@ Use channel IDs rather than names, especially for threaded replies and history r
 To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
 A user token stored as the primary `token` also works for search.
 `search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
+Slack's tool-selection guide reaches the agent's prompt only while every function it names is enabled, and with messaging enabled it names `list_users()`, so set `enable_list_users: true` to include it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13488,7 +13490,7 @@ It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agen
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
 A `user_id` that does not exist yet in Zep is created automatically.
-The agent's prompt always includes the Zep usage instructions.
+The agent's prompt includes the default Zep usage instructions only while all three functions are enabled; instructions you set with `instructions` are always included.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -14335,7 +14337,7 @@ With `persistent: true`, the same sandbox is reused across calls within one repl
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
-The agent's prompt always includes the toolkit's instructions, which tell the model to run any code it writes and show the output.
+The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
 
 `verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
