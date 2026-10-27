@@ -503,8 +503,8 @@ class ClaudeProvider:
         if settings.timeout is not None:
             kwargs["timeout"] = settings.timeout
         kwargs.update(settings.client_params or {})
-        if settings.default_headers is not None:
-            kwargs["default_headers"] = dict(settings.default_headers)
+        if (default_headers := self._authored_default_headers()) is not None:
+            kwargs["default_headers"] = dict(default_headers)
         kwargs["http_client"] = self.http_client
         if caller_retries:
             kwargs["max_retries"] = 0
