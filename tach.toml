@@ -3626,17 +3626,11 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
-    "mindroom.memory._mem0_openai",
     "mindroom.memory._mem0_usage",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.memory._backend"]
-
-[[modules]]
-path = "mindroom.memory._mem0_openai"
-depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"

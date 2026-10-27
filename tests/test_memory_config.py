@@ -168,19 +168,18 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "legacy_request_builder"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens"),
         [
-            ("gpt-6-astra", None, None, False, False),
-            (OPENAI_GPT_LUNA, None, None, False, False),
-            (OPENAI_GPT_SOL, None, None, False, False),
-            ("gpt-5.6-luna", None, None, False, False),
-            ("gpt-5.6-terra", None, None, False, False),
-            ("gpt-5.4-mini", None, None, False, False),
-            ("gpt-5-mini", None, None, False, False),
-            ("gpt-5-2025-08-07", None, None, False, False),
+            ("gpt-6-astra", None, None, False),
+            (OPENAI_GPT_LUNA, None, None, False),
+            (OPENAI_GPT_SOL, None, None, False),
+            ("gpt-5.6-luna", None, None, False),
+            ("gpt-5.6-terra", None, None, False),
+            ("gpt-5.4-mini", None, None, False),
+            ("gpt-5-mini", None, None, False),
+            ("gpt-5-2025-08-07", None, None, False),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, True, False),
-            (OPENAI_GPT_SOL, None, None, False, True),
+            ("gpt-4", 0.1, 0.8, True),
         ],
         ids=[
             "astra",
@@ -192,7 +191,6 @@ class TestMemoryConfig:
             "gpt-5-mini",
             "gpt-5-snapshot",
             "gpt-4",
-            "sol-legacy-mem0",
         ],
     )
     async def test_mem0_openai_request_parameters_are_model_specific(
@@ -202,7 +200,6 @@ class TestMemoryConfig:
         expected_temperature: float | None,
         expected_top_p: float | None,
         sends_max_tokens: bool,
-        legacy_request_builder: bool,
     ) -> None:
         """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
         memory = MemoryConfig(
@@ -231,27 +228,12 @@ class TestMemoryConfig:
         with patch.object(
             AsyncMemory,
             "from_config",
-            return_value=SimpleNamespace(llm=mem0_llm, vector_store=object()),
+            return_value=SimpleNamespace(llm=mem0_llm),
         ):
             instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
         assert instance.llm is mem0_llm
-        messages = [{"role": "user", "content": "remember this"}]
-        if legacy_request_builder:
-
-            def legacy_generate_response(llm: OpenAILLM, request_messages: list[dict[str, str]]) -> object:
-                return llm.client.chat.completions.create(
-                    model=llm.config.model,
-                    messages=request_messages,
-                    temperature=llm.config.temperature,
-                    max_tokens=llm.config.max_tokens,
-                    top_p=llm.config.top_p,
-                )
-
-            with patch.object(OpenAILLM, "generate_response", legacy_generate_response):
-                instance.llm.generate_response(messages)
-        else:
-            instance.llm.generate_response(messages)
+        instance.llm.generate_response([{"role": "user", "content": "remember this"}])
 
         request_params = create_completion.call_args.kwargs
         expected_sampling = {"temperature": expected_temperature, "top_p": expected_top_p}
@@ -953,7 +935,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -982,7 +964,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object())
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm())
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -1037,7 +1019,7 @@ class TestMemoryConfig:
             client=client,
             health_recorder=capture_embedder_health_recorder(),
         )
-        memory = SimpleNamespace(llm=_fake_mem0_llm(), vector_store=object(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=object())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),

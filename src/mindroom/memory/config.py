@@ -12,7 +12,12 @@ from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
 from mindroom.memory._mem0_usage import install_mem0_usage_capture
-from mindroom.model_defaults import MEMORY_OLLAMA_LLM, OLLAMA_HOST_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.model_defaults import (
+    MEMORY_OLLAMA_LLM,
+    OLLAMA_HOST_DEFAULT,
+    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
+    OPENROUTER_BASE_URL_DEFAULT,
+)
 from mindroom.timing import timed
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
@@ -20,7 +25,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mem0 import AsyncMemory
-    from mem0.llms.openai import OpenAILLM
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -77,51 +81,6 @@ class _Mem0StrictOpenAIEmbedder:
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
-
-
-def _chroma_similarity_from_distance(distance: float | None, space: str) -> float | None:
-    """Convert one Chroma distance to the similarity score mem0 expects."""
-    if distance is None:
-        return None
-    if space == "l2":
-        # Chroma's l2 is squared L2; for unit-normalized embeddings d = 2 * (1 - cos).
-        return 1.0 - distance / 2.0
-    # Chroma's cosine distance = 1 - cos and ip distance = 1 - dot.
-    return 1.0 - distance
-
-
-def _install_chroma_similarity_scores(vector_store: object) -> None:
-    """Make mem0's Chroma adapter report similarities instead of raw distances.
-
-    mem0 2.x treats ``OutputData.score`` as a similarity everywhere (the search
-    gate drops hits with ``score < threshold``, ranking sorts descending, and
-    add-time dedup checks ``score >= 0.95``), but its Chroma adapter fills
-    ``score`` with the raw Chroma distance. That inversion silently drops the
-    closest matches, so near-verbatim memory queries return nothing.
-    Rewriting the scores at the store boundary makes mem0's threshold and
-    ranking semantics correct for Chroma-backed memory.
-    """
-    # Imported at first use to keep chromadb out of module import time.
-    from mem0.vector_stores.chroma import ChromaDB, OutputData  # noqa: PLC0415
-
-    if not isinstance(vector_store, ChromaDB):
-        return
-    original_search = vector_store.search
-    collection_metadata = vector_store.collection.metadata or {}
-    space = str(collection_metadata.get("hnsw:space", "l2"))
-
-    def search_with_similarity_scores(
-        query: str,
-        vectors: list[list[float]],
-        top_k: int = 5,
-        filters: dict[str, Any] | None = None,
-    ) -> list[OutputData]:
-        hits = original_search(query=query, vectors=vectors, top_k=top_k, filters=filters)
-        for hit in hits:
-            hit.score = _chroma_similarity_from_distance(hit.score, space)
-        return hits
-
-    vector_store.search = search_with_similarity_scores  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -279,10 +238,16 @@ async def create_memory_instance(
     else:
         memory = AsyncMemory.from_config(config_dict)
     memory_llm = config.memory.llm
-    if memory_llm is not None and memory_llm.provider == "openai":
-        from mindroom.memory._mem0_openai import install_mem0_openai_compatibility  # noqa: PLC0415
-
-        install_mem0_openai_compatibility(cast("OpenAILLM", memory.llm))
+    llm_config = memory.llm.config
+    if (
+        memory_llm is not None
+        and memory_llm.provider == "openai"
+        and str(llm_config.model).startswith(OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
+    ):
+        # Mem0 knows only a few GPT-5 IDs as reasoning models and sends every other model temperature, top_p, and a
+        # token cap. GPT-5 and GPT-6 models reject max_tokens and most of them those sampling values, and their
+        # max_completion_tokens cap would also count reasoning, so they get Mem0's reasoning-model request instead.
+        llm_config.is_reasoning_model = True
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     if config.memory.embedder.provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
@@ -291,7 +256,6 @@ async def create_memory_instance(
 
         strict_embedder = create_configured_embedder(config, runtime_paths)
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
-    _install_chroma_similarity_scores(memory.vector_store)
 
     logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
     return memory

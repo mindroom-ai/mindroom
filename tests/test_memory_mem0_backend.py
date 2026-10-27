@@ -796,7 +796,7 @@ def _mem0_memory_reporting_usage(
                 msg = "the vector store rejected the extracted facts"
                 raise RuntimeError(msg)
 
-        return SimpleNamespace(llm=mem0_llm, vector_store=object(), add=add)
+        return SimpleNamespace(llm=mem0_llm, add=add)
 
     return from_config
 

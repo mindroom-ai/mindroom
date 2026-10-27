@@ -446,7 +446,7 @@ class Mem0MemoryBackend:
         Mem0 builds its own internal embedder, so passive health recording in
         MindRoom's embedder never sees this traffic: the backend records the
         outcome itself. Mem0's search embeds the query without swallowing
-        (verified against mem0ai 2.0.1), so a completed search proves the
+        (verified against mem0ai 2.2.1), so a completed search proves the
         embedder round-tripped and a propagated provider error classifies
         into a degraded outcome instead of raising.
         """

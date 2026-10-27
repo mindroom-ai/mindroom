@@ -311,7 +311,7 @@ matrix_message = []
 matrix_room = []
 matrix_voice_message = []
 mem0 = [
-  "mem0ai>=0.1.115",
+  "mem0ai>=2.2.1",
 ]
 memory = []
 microsoft_files = []

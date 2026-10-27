@@ -654,7 +654,6 @@ elif mode == 'mem0_reader':
     from mindroom.memory import config as memory_config
 
     class Memory:
-        vector_store = object()
         llm = SimpleNamespace(config=SimpleNamespace(model='gemma4'), client=SimpleNamespace(chat=lambda **_: None))
 
         @classmethod
@@ -668,7 +667,6 @@ elif mode == 'mem0_reader':
     sys.modules['mem0'] = mem0
     memory_config.ensure_optional_deps = lambda *args, **kwargs: False
     memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
-    memory_config._install_chroma_similarity_scores = lambda store: None
     config = Config()
     config.memory.embedder.provider = 'sentence_transformers'
     config.memory.llm = None

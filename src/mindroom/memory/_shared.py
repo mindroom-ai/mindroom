@@ -54,7 +54,7 @@ class ScopedMemoryCrud(ScopedMemoryWriter, Protocol):
     ) -> dict[str, list[MemoryResult]]:
         """List memories for one scoped user ID."""
 
-    async def update(self, memory_id: str, data: str) -> object:
+    async def update(self, memory_id: str, text: str) -> object:
         """Update one memory by its backend-native ID."""
 
     async def delete(self, memory_id: str) -> object:
