@@ -2193,6 +2193,18 @@ class TestConfigValidate:
                 {"default": ModelConfig(provider="Ollama", id="gemma4", api_key="sk-own")},
                 [("ollama", "OLLAMA_HOST", ("default",))],
             ),
+            # The model's own server, as ``host`` or ``client_params.host``, needs no OLLAMA_HOST.
+            ({"default": ModelConfig(provider="Ollama", id="gemma4", host="http://gpu.example:11434")}, []),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="OLLAMA",
+                        id="gemma4",
+                        extra_kwargs={"client_params": {"host": "http://gpu.example:11434"}},
+                    ),
+                },
+                [],
+            ),
             (
                 {
                     "default": ModelConfig(
@@ -2233,6 +2245,8 @@ class TestConfigValidate:
             "vertex-project-and-region",
             "azure-base-url",
             "ollama-own-key",
+            "ollama-host",
+            "ollama-client-host",
             "mixed-azure-endpoints",
             "mixed-vertex-settings",
         ],

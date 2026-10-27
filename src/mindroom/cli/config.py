@@ -997,9 +997,8 @@ def _models_with_own_credential(config: Config, runtime_paths: RuntimePaths) -> 
 def _model_sets(model: ModelConfig, *settings: str) -> bool:
     """Return whether the model's ``extra_kwargs``, or the ``client_params`` every client merges last, set a setting."""
     extra_kwargs = model.extra_kwargs or {}
-    client_params = extra_kwargs.get("client_params")
-    client_settings = client_params if isinstance(client_params, dict) else {}
-    return any(extra_kwargs.get(setting) or client_settings.get(setting) for setting in settings)
+    client_params = extra_kwargs.get("client_params") or {}
+    return any(extra_kwargs.get(setting) or client_params.get(setting) for setting in settings)
 
 
 def _variables_a_model_reads(route: str, model: ModelConfig, *, own_credential: bool) -> list[tuple[str, ...]]:
@@ -1027,10 +1026,10 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, own_credential: 
             (env_key,) for setting, env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.items() if not _model_sets(model, setting)
         ]
     env_key = constants.env_key_for_provider(route)
-    # OLLAMA_HOST is a host, not a key, so a model's own key never replaces it.
-    if env_key and (route == "ollama" or not own_credential):
-        return [(env_key,)]
-    return []
+    # OLLAMA_HOST is the server of an Ollama model that sets none, as ``host`` or ``client_params.host``; a key never
+    # replaces it.
+    needed = not (model.host or _model_sets(model, "host")) if route == "ollama" else not own_credential
+    return [(env_key,)] if env_key and needed else []
 
 
 def _find_missing_env_keys(config: Config, runtime_paths: RuntimePaths) -> list[_MissingEnvVariable]:
