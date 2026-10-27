@@ -405,6 +405,11 @@ class AgentConfig(BaseModel):
         default=None,
         description="Allow this agent to modify its own configuration via a tool",
     )
+    created_agents_per_owner: int = Field(
+        default=0,
+        ge=0,
+        description="How many agents each person may create through this agent with create_agent; 0 turns create_agent off",
+    )
     automations: AutomationList | None = Field(
         default=None,
         description="Automations for this agent, built-in such as prompt_curation or from a plugin; omitted inherits defaults.automations",
