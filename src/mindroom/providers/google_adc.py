@@ -42,7 +42,7 @@ def load_ambient_google_credentials() -> tuple[GoogleCredentials, str | None]:
     return cast("GoogleCredentials", credentials), project_id
 
 
-def _load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
+def load_google_application_credentials(credentials_path: str) -> GoogleCredentials:
     """Load Google ADC credentials for Vertex-backed model clients."""
     if not Path(credentials_path).is_file():
         msg = (
@@ -81,5 +81,5 @@ def with_runtime_application_credentials(kwargs: dict[str, Any], runtime_paths: 
     credentials_path = runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS")
     if "credentials" in client_params or credentials_path is None:
         return kwargs
-    credentials = _load_google_application_credentials(str(credentials_path))
+    credentials = load_google_application_credentials(str(credentials_path))
     return {**kwargs, "client_params": {**client_params, "credentials": credentials}}

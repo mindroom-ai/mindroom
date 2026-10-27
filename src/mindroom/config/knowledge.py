@@ -22,13 +22,18 @@ class KnowledgeRerankerConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["cohere", "sentence_transformers"] = Field(
+    provider: Literal["cohere", "sentence_transformers", "vertex_ai"] = Field(
         description=(
             "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); "
-            "'sentence_transformers' runs a cross-encoder locally"
+            "'sentence_transformers' runs a cross-encoder locally; "
+            "'vertex_ai' calls Google's Vertex AI ranking API with Application Default Credentials"
         ),
     )
-    model: str = Field(description="Rerank model, such as 'rerank-v3.5' or 'BAAI/bge-reranker-v2-m3'")
+    model: str = Field(
+        description=(
+            "Rerank model, such as 'rerank-v3.5', 'BAAI/bge-reranker-v2-m3' or 'semantic-ranker-default@latest'"
+        ),
+    )
     url: str | None = Field(
         default=None,
         description="Rerank endpoint for the 'cohere' provider; defaults to https://api.cohere.com/v2/rerank",
