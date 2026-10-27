@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path  # noqa: TC003
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import typer
 from rich.console import Console
@@ -970,76 +970,84 @@ def config_use_local_model(
     apply_local_model(model=model, base_url=base_url, api_key=api_key, path=path)
 
 
-def _shared_key_routes(config: Config, runtime_paths: RuntimePaths) -> set[str]:
-    """Return the routes, as ``provider_route`` names them, with a model that has no credential of its own."""
+class _MissingEnvVariable(NamedTuple):
+    """An environment variable that some models of one route, as ``provider_route`` names it, read but no one sets."""
+
+    route: str
+    env_key: str
+    model_names: tuple[str, ...]
+
+
+def _models_with_own_credential(config: Config, runtime_paths: RuntimePaths) -> set[str]:
+    """Return the names of the models whose own key replaces their route's shared key."""
     # providers.credentials opens the credential store, which CLI startup must not import.
     from mindroom.providers.credentials import model_uses_own_credential  # noqa: PLC0415
 
-    try:
-        models = [
-            model for name, model in config.models.items() if not model_uses_own_credential(name, model, runtime_paths)
+    own_credential: set[str] = set()
+    for name, model in config.models.items():
+        try:
+            if model_uses_own_credential(name, model, runtime_paths):
+                own_credential.add(name)
+        except (OSError, ValueError):
+            # Without the credential store, the model's dashboard key is unknown, so it needs the shared key.
+            continue
+    return own_credential
+
+
+def _model_sets(model: ModelConfig, *settings: str) -> bool:
+    """Return whether the model's ``extra_kwargs``, or the ``client_params`` every client merges last, set a setting."""
+    extra_kwargs = model.extra_kwargs or {}
+    client_params = extra_kwargs.get("client_params")
+    client_settings = client_params if isinstance(client_params, dict) else {}
+    return any(extra_kwargs.get(setting) or client_settings.get(setting) for setting in settings)
+
+
+def _variables_a_model_reads(route: str, model: ModelConfig, *, own_credential: bool) -> list[tuple[str, ...]]:
+    """Return, for each value the model leaves to the environment, the variables any one of which supplies it.
+
+    A warning names the first variable of each group.
+    """
+    if route == "bedrock_claude":
+        if _model_sets(model, "aws_region", "aws_profile"):
+            return []
+        return [
+            (
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
+                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+            ),
         ]
-    except (OSError, ValueError):
-        # Without the credential store, dashboard keys are unknown, so every route needs its shared key.
-        models = list(config.models.values())
-    return {provider_route(model.provider) for model in models}
+    if route == "azure":
+        variables: list[tuple[str, ...]] = [] if own_credential else [(AZURE_OPENAI_ENV_BY_KEY["api_key"],)]
+        if not _model_sets(model, "azure_endpoint", "base_url"):
+            variables.append((AZURE_OPENAI_ENV_BY_KEY["endpoint"],))
+        return variables
+    if route == "vertexai_claude":
+        return [
+            (env_key,) for setting, env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.items() if not _model_sets(model, setting)
+        ]
+    env_key = constants.env_key_for_provider(route)
+    # OLLAMA_HOST is a host, not a key, so a model's own key never replaces it.
+    if env_key and (route == "ollama" or not own_credential):
+        return [(env_key,)]
+    return []
 
 
-def _bedrock_claude_region_missing(models: list[ModelConfig], runtime_paths: RuntimePaths) -> bool:
-    """Return whether no Bedrock Claude model's settings, AWS profile, or region variable gives the AWS region."""
+def _find_missing_env_keys(config: Config, runtime_paths: RuntimePaths) -> list[_MissingEnvVariable]:
+    """Return each environment variable a model reads for a value that neither the model nor the environment sets."""
     from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
 
-    if any((model.extra_kwargs or {}).get("aws_region") for model in models):
-        return False
-    if any((model.extra_kwargs or {}).get("aws_profile") for model in models) or get_secret_from_env(
-        AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
-        runtime_paths=runtime_paths,
-    ):
-        return False
-    region_keys = (AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"], AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"])
-    return not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in region_keys)
-
-
-def _find_missing_env_keys(
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> list[tuple[str, str]]:
-    """Return (route, env_key) pairs for the configured routes missing env vars, as ``provider_route`` names them."""
-    from mindroom.credentials.sync import get_secret_from_env  # noqa: PLC0415
-
-    models_by_route: dict[str, list[ModelConfig]] = {}
-    for model in config.models.values():
-        models_by_route.setdefault(provider_route(model.provider), []).append(model)
-    shared_key_routes = _shared_key_routes(config, runtime_paths)
-    missing: list[tuple[str, str]] = []
-    for route, route_models in sorted(models_by_route.items()):
-        if route == "bedrock_claude":
-            if _bedrock_claude_region_missing(route_models, runtime_paths):
-                missing.append((route, AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]))
-            continue
-        if route == "azure":
-            azure_env_keys = [AZURE_OPENAI_ENV_BY_KEY["endpoint"]]
-            if route in shared_key_routes:
-                azure_env_keys.insert(0, AZURE_OPENAI_ENV_BY_KEY["api_key"])
-            missing.extend(
-                (route, env_key)
-                for env_key in azure_env_keys
-                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
-            )
-            continue
-        if route == "vertexai_claude":
-            missing.extend(
-                (route, env_key)
-                for env_key in VERTEXAI_CLAUDE_ENV_BY_KEY.values()
-                if not get_secret_from_env(env_key, runtime_paths=runtime_paths)
-            )
-            continue
-        env_key = constants.env_key_for_provider(route)
-        # OLLAMA_HOST is a host, not a key, so a model's own key never replaces it.
-        needs_env_key = route == "ollama" or route in shared_key_routes
-        if env_key and needs_env_key and not get_secret_from_env(env_key, runtime_paths=runtime_paths):
-            missing.append((route, env_key))
-    return missing
+    own_credential = _models_with_own_credential(config, runtime_paths)
+    missing: dict[tuple[str, str], list[str]] = {}
+    for name, model in config.models.items():
+        route = provider_route(model.provider)
+        for variables in _variables_a_model_reads(route, model, own_credential=name in own_credential):
+            if not any(get_secret_from_env(env_key, runtime_paths=runtime_paths) for env_key in variables):
+                missing.setdefault((route, variables[0]), []).append(name)
+    return [
+        _MissingEnvVariable(route, env_key, tuple(model_names))
+        for (route, env_key), model_names in sorted(missing.items())
+    ]
 
 
 def _resolve_config_init_selection(
@@ -1080,8 +1088,8 @@ def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     missing = _find_missing_env_keys(config, runtime_paths)
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
-        for route, env_key in missing:
-            console.print(f"  [yellow]*[/yellow] {route}: Set {env_key}")
+        for route, env_key, model_names in missing:
+            console.print(f"  [yellow]*[/yellow] {route}: Set {env_key} (models: {escape(', '.join(model_names))})")
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 
