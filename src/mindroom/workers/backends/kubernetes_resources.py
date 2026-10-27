@@ -27,6 +27,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import httpx
+
 from mindroom import constants
 from mindroom.constants import RuntimePaths, config_relative_path, runtime_paths_with_storage_root
 from mindroom.logging_config import get_logger
@@ -195,7 +197,7 @@ def _extend_unique_named_pod_entries(
 
 
 @dataclass(frozen=True, slots=True)
-class DeploymentApplyResult:
+class _DeploymentApplyResult:
     """Describe whether applying one worker Deployment forced a recreate."""
 
     recreated: bool
@@ -814,8 +816,9 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
-    ) -> DeploymentApplyResult:
-        """Create-or-patch one worker Deployment."""
+        recreate: bool = False,
+    ) -> _DeploymentApplyResult:
+        """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked."""
         manifest = self._deployment_manifest(
             worker_key=worker_key,
             worker_id=worker_id,
@@ -831,9 +834,12 @@ class KubernetesResourceManager:
             existing_annotations = existing.metadata.annotations or {}
             desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
-            if existing_annotations.get(_ANNOTATION_TEMPLATE_HASH) != desired_annotations[_ANNOTATION_TEMPLATE_HASH]:
+            if (
+                recreate
+                or existing_annotations.get(_ANNOTATION_TEMPLATE_HASH) != desired_annotations[_ANNOTATION_TEMPLATE_HASH]
+            ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return DeploymentApplyResult(recreated=True)
+                return _DeploymentApplyResult(recreated=True)
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -841,7 +847,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return DeploymentApplyResult(recreated=False)
+        return _DeploymentApplyResult(recreated=False)
 
     def patch_deployment(
         self,
@@ -1077,7 +1083,7 @@ class KubernetesResourceManager:
         *,
         timeout_seconds: float,
     ) -> None:
-        """Replace one Deployment when pod-template drift requires a full recreate."""
+        """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
         self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
@@ -1135,6 +1141,24 @@ class KubernetesResourceManager:
             if on_poll_tick is not None:
                 on_poll_tick(time.monotonic() - started_at)
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
+
+    def read_worker_health(self, worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        """Return the first successful ``/healthz`` answer from one worker through its Service."""
+        healthz_url = f"{service_host(worker_id, self.config.namespace, self.config.worker_port)}/healthz"
+        deadline = time.time() + timeout_seconds
+        with httpx.Client(timeout=min(5.0, timeout_seconds)) as client:
+            while True:
+                # The Service can still route nowhere for a moment after its Deployment turns ready.
+                try:
+                    response = client.get(healthz_url)
+                except httpx.HTTPError:
+                    response = None
+                if response is not None and response.is_success:
+                    return response
+                if time.time() >= deadline:
+                    msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
+                    raise WorkerBackendError(msg)
+                time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
     def _apply_object(
         self,

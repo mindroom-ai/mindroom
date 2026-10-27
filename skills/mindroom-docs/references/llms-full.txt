@@ -18680,7 +18680,8 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 
 | Helm value | Environment variable | Default | Effect |
 |------------|----------------------|---------|--------|
-| `workers.kubernetes.image` | `MINDROOM_KUBERNETES_WORKER_IMAGE` | Chart: the main MindRoom image; required without Helm | Worker image |
+| `workers.kubernetes.image.repository`, `.tag`, `.digest` | `MINDROOM_KUBERNETES_WORKER_IMAGE` | Chart: the main MindRoom image (`image.repository`, `image.tag`, `image.digest`); required without Helm | Worker image; `.tag` and `.digest` take effect only with `.repository` and default to the main image's tag and digest |
+| `workers.kubernetes.image.pullPolicy` | `MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY` | Chart: `image.pullPolicy` (`Always`); otherwise `IfNotPresent` | Worker image pull policy; only `Always` pulls a mutable tag such as `:latest` again when a worker pod starts |
 | `workers.kubernetes.namespace` | `MINDROOM_KUBERNETES_WORKER_NAMESPACE` | Chart: the release namespace; otherwise the pod namespace or `default` | Namespace for worker resources |
 | _(storage claim)_ | `MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME` | Chart: the runtime storage claim; required without Helm | PVC holding agent workspaces |
 | `storage.mountPath` | `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH` | Chart: `/app/agent_data`; otherwise `/app/worker` | Where workers mount storage |
@@ -19060,8 +19061,12 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 ### Keeping worker versions matched
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
-MindRoom refuses dedicated Docker worker images whose protocol does not match the primary runtime; it pulls the configured image once and recreates the worker before failing.
+MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running under a mutable tag such as `:latest` from a release with another worker protocol is replaced on its next use.
+A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under the [worker image pull policy](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) `Always`.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
+A worker from a newer release is refused too, and its error reports a higher protocol than the expected one, for example a `:latest` worker that started after a release the primary does not run yet; upgrade the primary to that release, or pin one release tag for both.
+Restarting the primary picks up that release only when the primary runs the same mutable tag and pulls it on every start, as the runtime chart's default `latest` tag with pull policy `Always` does.
+A restarted `uvx mindroom run` keeps its cached release, while `uvx mindroom@latest run` fetches the newest one.
 Plain `uvx mindroom run` runs the published PyPI release, so when testing unreleased code, run MindRoom from the checkout you build the image from (`uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`).
 When upgrading from older releases, see [Workspace-only worker mounts](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts), [Config-free runners and workers](https://docs.mindroom.chat/deployment/upgrades/#config-free-runners-and-workers), and [Requester-scoped worker keys](https://docs.mindroom.chat/deployment/upgrades/#requester-scoped-worker-keys).
 
@@ -21110,7 +21115,7 @@ Summaries compacted by those releases record no per-run provenance, so redacting
 From v2026.9.327, dedicated Docker and Kubernetes workers mount only agent workspaces.
 Drain worker activity before upgrading, because the upgraded primary stops every older worker before serving, ending its tool calls, shells, background scripts, and CLI sessions.
 Until those workers are gone, startup fails and the primary restarts, so the Docker daemon or Kubernetes API must be reachable.
-Upgrade worker images together with the primary: Docker refuses worker images from older releases, and Kubernetes workers run the configured worker image, which must come from the same release.
+Upgrade worker images together with the primary, because Docker and Kubernetes refuse worker images from older releases.
 Rolling back to v2026.9.326 is safe when the Docker and Kubernetes worker images roll back with the primary; upgrading again stops those workers at startup.
 
 Before upgrading, check two limits:
