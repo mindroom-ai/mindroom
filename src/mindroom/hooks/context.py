@@ -876,8 +876,11 @@ class ToolEnvironmentContext(_HookLifecycleContext):
         self._environment = self._environment.then(ToolEnvironment(values={name: value}))
 
     def unset_env(self, name: str) -> None:
-        """Keep the variable ``name`` from the call's shell commands."""
+        """Keep the variable ``name`` from the call's shell commands; ``PATH`` cannot be removed, only set."""
         _check_env_name(name)
+        if name == "PATH":
+            msg = "PATH cannot be removed, since no command would run without it; set it instead"
+            raise ValueError(msg)
         self._environment = self._environment.then(ToolEnvironment(values={name: None}))
 
     def pass_through(self, name: str) -> None:

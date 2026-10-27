@@ -169,12 +169,19 @@ def _shell_subprocess_env(
     shell_path_prepend: str | None = None,
     extra_path_prepend: tuple[str, ...] = (),
     workspace_dir: Path | None = None,
+    removed: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
-    """Build the env passed to shell subprocesses."""
+    """Build the env passed to shell subprocesses.
+
+    ``removed`` names variables the call keeps from the command, which the base environment would otherwise give it;
+    the workspace variables, ``PATH`` entries, and telemetry settings MindRoom adds here still apply.
+    """
     env = {key: value for key, value in os.environ.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS}
     if base_process_env is not None:
         env.update({key: value for key, value in base_process_env.items() if key in _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS})
     env.update(runtime_env)
+    for name in removed:
+        env.pop(name, None)
     workspace_home_contract = (
         _workspace_home_contract_env_from_process_env(base_process_env) if base_process_env is not None else {}
     )
@@ -438,6 +445,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 shell_path_prepend=self._shell_path_prepend,
                 extra_path_prepend=call_environment.path_prepend,
                 workspace_dir=self.base_dir,
+                removed=call_environment.removed,
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None

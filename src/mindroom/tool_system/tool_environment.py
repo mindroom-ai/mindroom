@@ -41,6 +41,11 @@ class ToolEnvironment:
             path_prepend=(*later.path_prepend, *self.path_prepend),
         )
 
+    @property
+    def removed(self) -> frozenset[str]:
+        """Return the variables kept from the command, even where its base environment would give them."""
+        return frozenset(name for name, value in self.values.items() if value is None)
+
     def applied(self, env: Mapping[str, str], process_env: Mapping[str, str]) -> dict[str, str]:
         """Return ``env`` with the passed-through variables of ``process_env`` added, then the set and removed ones."""
         passed = shell_extra_env_values(extra_env_passthrough=",".join(self.pass_through), process_env=process_env)

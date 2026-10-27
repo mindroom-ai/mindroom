@@ -91,6 +91,7 @@ from mindroom.tool_system.output_files import (
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
+from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 from mindroom.tool_system.worker_proxy_client import EXECUTE_KEEPALIVE_SECONDS
 from mindroom.tool_system.worker_routing import (
@@ -472,6 +473,8 @@ class SandboxRunnerExecuteRequest(BaseModel):
     sandboxed ``python`` that intentionally receive runtime env during execution.
     ``config_snapshot`` holds the live config fields runners resolve; when present
     it replaces the runner's startup config for this request.
+    ``execution_env_unset`` names variables a ``shell`` call's plugin hooks removed,
+    which the command must not get from the worker's own environment either.
     """
 
     tool_name: str
@@ -488,6 +491,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
+    execution_env_unset: list[str] = Field(default_factory=list)
     extra_env_passthrough: str | None = None
     config_snapshot: dict[str, Any] | None = None
     # Lets the primary stop this call through /execute/cancel when it stops waiting for it.
@@ -524,6 +528,7 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
+    execution_env_unset: list[str] = Field(default_factory=list)
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
     run_as_job: bool = False
@@ -1091,6 +1096,8 @@ def _prepare_execute_request(
             runtime_paths,
             extra_env_passthrough=request.extra_env_passthrough,
         )
+    # A removed name the worker's own egress settings give the call stays; the rest leave the worker's base env too.
+    execution_env_unset = [name for name in request.execution_env_unset if name not in execution_env]
     config = config or _runtime_config_or_empty(runtime_paths)
     prepared = sandbox_worker_prep.resolve_prepared_worker_request(
         worker_key=request.worker_key,
@@ -1180,6 +1187,7 @@ def _prepare_execute_request(
             runtime_overrides,
         ),
         execution_env=dict(execution_env),
+        execution_env_unset=execution_env_unset,
         runtime_overrides=(
             {name: value for name, value in serialized_runtime_overrides.items() if isinstance(name, str)}
             if isinstance(serialized_runtime_overrides, dict)
@@ -1261,7 +1269,8 @@ async def _execute_prepared_request_inprocess(
             return SandboxRunnerExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
 
         try:
-            result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+            with collected_tool_environment(ToolEnvironment(values=dict.fromkeys(prepared.execution_env_unset))):
+                result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
             logger.info(

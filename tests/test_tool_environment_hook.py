@@ -11,10 +11,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import constants
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.egress_broker import service as egress_service
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_TOOL_BEFORE_CALL,
@@ -25,6 +27,7 @@ from mindroom.hooks import (
     default_timeout_ms_for_event,
     hook,
 )
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -53,8 +56,12 @@ if TYPE_CHECKING:
 
 _ALICE = _MIND_EXECUTION_IDENTITY
 _BOB = replace(_MIND_EXECUTION_IDENTITY, requester_id="@bob:example.org", session_id="session-2")
-# MindRoom's own variables: the shell tool passes PLUGIN_SECRET by configuration, PLUGIN_SHARED_KEY only when asked.
-_PROCESS_ENV = {"PLUGIN_SECRET": "primary-secret", "PLUGIN_SHARED_KEY": "primary-shared"}
+# MindRoom's own variables: the shell tool passes PLUGIN_SECRET by configuration, the others only when asked.
+_PROCESS_ENV = {
+    "PLUGIN_SECRET": "primary-secret",
+    "PLUGIN_SHARED_KEY": "primary-shared",
+    "DATABASE_URL": "postgres://primary",
+}
 _PRINT_PLUGIN_ENV = 'printf "%s|%s|%s" "$PLUGIN_VALUE" "$PLUGIN_SECRET" "$PLUGIN_SHARED_KEY"'
 _PRINT_GRANT_ENV = (
     'printf "%s|%s|%s|%s" "$MINDROOM_AGENT_CLI_URL" "$MINDROOM_AGENT_CLI_TOKEN" "$MINDROOM_AGENT_CLI_WINDOW" '
@@ -197,6 +204,89 @@ async def test_a_hook_s_variables_reach_the_call_s_command_wherever_it_runs(shel
         assert execution_env["PLUGIN_VALUE"] == "for @alice:example.org"
         assert execution_env["PLUGIN_SHARED_KEY"] == "primary-shared"
         assert "PLUGIN_SECRET" not in execution_env
+
+
+@pytest.mark.asyncio
+async def test_a_removal_also_keeps_an_inherited_variable_from_the_command(
+    shell: _Shell,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A variable the command would inherit, such as the proxy MindRoom or the worker runs with, stays removed."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://operator-proxy:3128")
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def connect_directly(ctx: ToolEnvironmentContext) -> None:
+        ctx.unset_env("HTTPS_PROXY")
+
+    command = 'printf "%s" "${HTTPS_PROXY-unset}"'
+    inherited = await shell.run(HookRegistry.empty(), command)
+    removed = await shell.run(_registry(connect_directly), command)
+
+    assert (inherited, removed) == ("http://operator-proxy:3128", "unset")
+    if shell.sent:
+        assert shell.sent[-1]["execution_env_unset"] == ["HTTPS_PROXY"]
+
+
+@pytest.mark.asyncio
+async def test_database_url_variables_reach_the_command_wherever_it_runs(shell: _Shell) -> None:
+    """Names a worker otherwise keeps from its commands, such as database URLs, reach one a hook gives them to."""
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def database(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("APP_DATABASE_URL", "postgres://app")
+        ctx.pass_through("DATABASE_URL")
+
+    output = await shell.run(_registry(database), 'printf "%s|%s" "${APP_DATABASE_URL-unset}" "${DATABASE_URL-unset}"')
+
+    assert output == "postgres://app|postgres://primary"
+
+
+def _broker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sandbox_proxy, "egress_broker_enabled", lambda _runtime_paths: True)
+    monkeypatch.setattr(sandbox_proxy, "egress_agent_scope", lambda _config, agent_name: agent_name)
+    monkeypatch.setattr(egress_service, "execution_env_for_worker", lambda *_args, **_kwargs: {"HTTPS_PROXY": "egress"})
+
+
+def _worker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(constants, "worker_proxy_execution_env", lambda _env: {"HTTPS_PROXY": "egress"})
+
+
+@pytest.mark.parametrize("egress", [_broker_sets_the_proxy, _worker_sets_the_proxy], ids=["broker", "worker-egress"])
+@pytest.mark.asyncio
+async def test_a_removal_leaves_the_egress_proxy_a_worker_call_gets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    egress: Callable[[pytest.MonkeyPatch], None],
+) -> None:
+    """MindRoom's egress proxy for the call, set by the primary's broker or by the worker, applies over a removal."""
+    shell = _worker_tool(monkeypatch, tmp_path, "shell", "run_shell_command")
+    egress(monkeypatch)
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def connect_directly(ctx: ToolEnvironmentContext) -> None:
+        ctx.unset_env("HTTPS_PROXY")
+
+    assert await shell.run(_registry(connect_directly), 'printf "%s" "${HTTPS_PROXY-unset}"') == "egress"
+
+
+@pytest.mark.asyncio
+async def test_a_removal_leaves_the_workspace_variables_of_a_worker_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker command keeps the workspace as its home even when a hook removes the workspace variables."""
+    shell = _worker_tool(monkeypatch, tmp_path, "shell", "run_shell_command")
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def remove_home(ctx: ToolEnvironmentContext) -> None:
+        ctx.unset_env("HOME")
+        ctx.unset_env("MINDROOM_AGENT_WORKSPACE")
+
+    command = 'printf "%s|%s" "${HOME-unset}" "${MINDROOM_AGENT_WORKSPACE-unset}"'
+    workspace = await shell.run(HookRegistry.empty(), command)
+
+    assert await shell.run(_registry(remove_home), command) == workspace
+    assert "unset" not in workspace
 
 
 @pytest.mark.asyncio
@@ -395,3 +485,5 @@ def test_a_hook_cannot_name_an_invalid_variable(name: str) -> None:
             change()
     with pytest.raises(ValueError, match="string value"):
         ctx.set_env("PLUGIN_VALUE", 1)
+    with pytest.raises(ValueError, match="PATH cannot be removed"):
+        ctx.unset_env("PATH")
