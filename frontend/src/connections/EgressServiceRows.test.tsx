@@ -1151,6 +1151,39 @@ describe("connected accounts", () => {
       ]);
     });
 
+    it("changes an account allowed only to read to read and write where the service no longer offers read only", async () => {
+      const onChanged = vi.fn();
+      renderRows(
+        [
+          drive(
+            { reuse_access: "read" },
+            {
+              read_only_supported: false,
+              configured: true,
+              active_source: "oauth",
+            },
+          ),
+          connectedGithub,
+        ],
+        { onChanged },
+      );
+      await expectNoAction(/^Change to /, row("GitHub"));
+      await expectNoAction("Change to read only for Drive");
+      fireEvent.click(await rowAction("Change to read and write for Drive"));
+      await pressInDialog("Use account");
+
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      expect(reuseBodies()).toEqual([
+        [
+          "PUT",
+          JSON.stringify({
+            acknowledge_approval_bypass: true,
+            access: "read_write",
+          }),
+        ],
+      ]);
+    });
+
     it("offers no level change for a disconnected account it would not apply to", async () => {
       renderRows([
         drive(

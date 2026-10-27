@@ -169,11 +169,14 @@ export function EgressServiceItem({
     (service.can_manage || oauth.can_connect);
   const reuseEnabled = oauth?.reuse_enabled === true;
   // The level the reuse question allows the account at; a service that
-  // offers read only asks, starting from it, and any other sends no level.
+  // offers read only asks, starting from it, a change of an allowed
+  // account's level sends it, and anything else sends no level.
   const readOnlyOffered = service.read_only_supported;
   const [access, setAccess] = useState<EgressAccess>("read");
   const reuseBody = (level: EgressAccess) =>
-    readOnlyOffered ? { ...REUSE_BODY, access: level } : REUSE_BODY;
+    readOnlyOffered || reuseEnabled
+      ? { ...REUSE_BODY, access: level }
+      : REUSE_BODY;
   const askReuse = (level: EgressAccess) => {
     setAccess(level);
     setConfirm("reuse");
@@ -378,7 +381,12 @@ export function EgressServiceItem({
         ]
       : []),
     // Only a connected account: connecting one already allowed keeps its level.
-    ...(oauth?.connected && reuseEnabled && canChangeReuse && readOnlyOffered
+    // One allowed only to read, where the service no longer offers read only,
+    // is refused everything until it changes to read and write.
+    ...(oauth?.connected &&
+    reuseEnabled &&
+    canChangeReuse &&
+    (readOnlyOffered || oauth.reuse_access === "read")
       ? [
           oauth.reuse_access === "read"
             ? {
