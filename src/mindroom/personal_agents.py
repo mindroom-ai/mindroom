@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from functools import partial
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.config.generated_agents import tool_ceiling
@@ -78,10 +79,17 @@ def _append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: Pers
     _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"entries": [*entries, entry]}))
 
 
-def _activate_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: _RosterEntry) -> None:
-    """Rewrite the pending entry this provisioning reserved durably as active, under the roster lock."""
+def _settle_roster_entry(runtime_paths: RuntimePaths, entry: _RosterEntry, replacement: _RosterEntry | None) -> None:
+    """Rewrite the pending entry a provisioning reserved durably as its active copy, or remove it, under the lock."""
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
-        _replace_roster_entry(runtime_paths, entry, entry.model_copy(update={"pending": False}))
+        _replace_roster_entry(runtime_paths, entry, replacement)
+
+
+def _refuse_bracketed_owner(user_id: str) -> None:
+    if "[" in user_id or "]" in user_id:
+        # access.users entries are globs, so brackets would keep the owner out of their own agent.
+        msg = f"{user_id} cannot own an agent: brackets in a Matrix ID are not supported"
+        raise GeneratedAgentError(msg)
 
 
 def _personal_agent_user_id(
@@ -202,10 +210,8 @@ def _reserve_personal_agent(
     """
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
         roster = read_personal_agent_roster_file(runtime_paths)
-        existing = next(
-            (entry for entry in roster.entries if (entry.template, entry.user_id) == (template, user_id)),
-            None,
-        )
+        key = (template, user_id)
+        existing = next((entry for entry in roster.entries if (entry.template, entry.user_id) == key), None)
         if existing is not None and not existing.pending:
             return existing, None
         entry = existing
@@ -258,10 +264,7 @@ async def provision_personal_agent(
     the registration. Calling again for a user whose entry is active returns
     that agent's name.
     """
-    if "[" in user_id or "]" in user_id:
-        # access.users entries are globs, so brackets would keep the owner out of their own agent.
-        msg = f"{user_id} cannot own a personal agent: brackets in a Matrix ID are not supported"
-        raise ValueError(msg)
+    _refuse_bracketed_owner(user_id)
     entry, display_name = await run_blocking_until_complete(
         _reserve_personal_agent,
         config,
@@ -282,21 +285,16 @@ async def provision_personal_agent(
         runtime_paths,
         username=entry.matrix_username,
     )
-    await run_blocking_until_complete(_activate_personal_agent_roster_entry, runtime_paths, entry)
+    active = entry.model_copy(update={"pending": False})
+    await run_blocking_until_complete(_settle_roster_entry, runtime_paths, entry, active)
     return entry.agent_name, True
 
 
 def _refuse_owners(owners: list[str], runtime_paths: RuntimePaths) -> None:
     """Refuse owners that would make the next load invalid, or that are agents rather than people."""
-    try:
-        validate_concrete_matrix_user_ids(owners, field_name="owners")
-    except ValueError as exc:
-        raise GeneratedAgentError(str(exc)) from exc
+    validate_concrete_matrix_user_ids(owners, field_name="owners")
     for owner in owners:
-        if "[" in owner or "]" in owner:
-            # access.users entries are globs, so brackets would keep the owner out of their own agent.
-            msg = f"{owner} cannot own an agent: brackets in a Matrix ID are not supported"
-            raise GeneratedAgentError(msg)
+        _refuse_bracketed_owner(owner)
         if is_mindroom_account_id(owner, runtime_paths):
             msg = f"{owner} is a MindRoom account and cannot own an agent"
             raise GeneratedAgentError(msg)
@@ -304,8 +302,7 @@ def _refuse_owners(owners: list[str], runtime_paths: RuntimePaths) -> None:
 
 def _refuse_tools(tools: list[str] | None, allowed: tuple[str, ...]) -> None:
     if outside := [name for name in tools or () if name not in allowed]:
-        verb = "is" if len(outside) == 1 else "are"
-        msg = f"{', '.join(outside)} {verb} not among the tools this agent may use; allowed: {', '.join(allowed)}"
+        msg = f"Not among the tools this agent may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"
         raise GeneratedAgentError(msg)
 
 
@@ -368,13 +365,13 @@ def update_generated_agent(
         data["edits"] = (data["edits"] or {}) | {field: changes[field] for field in _EDIT_FIELDS if field in changes}
         if "co_owners" in changes:
             data["co_owners"] = changes["co_owners"] or []
-        try:
-            updated = type(entry).model_validate(data)
-        except ValidationError as exc:
-            raise GeneratedAgentError(str(exc)) from exc
+        updated = type(entry).model_validate(data)
         if updated.edits is not None and "tools" in changes:
             _refuse_tools(updated.edits.tools, config.tool_ceiling(agent_name))
         if isinstance(updated, CreatedAgentEntry):
+            # A bridge alias is stored as its person, so it matches the resolved requester.
+            co_owners = [resolve_human_requester_alias(user_id, config, runtime_paths) for user_id in updated.co_owners]
+            updated = updated.model_copy(update={"co_owners": co_owners})
             _refuse_owners([updated.owner, *updated.co_owners], runtime_paths)
         _replace_roster_entry(runtime_paths, entry, updated)
 
@@ -410,11 +407,6 @@ def _reserve_created_agent(config: Config, runtime_paths: RuntimePaths, entry: C
         _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"created": [*roster.created, entry]}))
 
 
-def _remove_created_agent(runtime_paths: RuntimePaths, entry: CreatedAgentEntry) -> None:
-    with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
-        _replace_roster_entry(runtime_paths, entry, None)
-
-
 async def provision_created_agent(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -436,16 +428,18 @@ async def provision_created_agent(
     owner = resolve_human_requester_alias(requester_id, config, runtime_paths)
     edits = GeneratedAgentEdits(display_name=display_name, role=role, instructions=instructions, tools=tools)
     entry = CreatedAgentEntry(agent_name=f"{creator}_{slug}", creator=creator, owner=owner, edits=edits, pending=True)
-    await run_blocking_until_complete(_reserve_created_agent, config, runtime_paths, entry)
     homeserver = runtime_matrix_homeserver(runtime_paths)
+    # A failed or cancelled creation must hold neither the name nor a place under the cap.
+    remove = partial(_settle_roster_entry, runtime_paths, entry, None)
+    await run_blocking_or_compensate(partial(_reserve_created_agent, config, runtime_paths, entry), lambda _: remove())
     try:
         user = await create_agent_user(homeserver, entry.agent_name, display_name, runtime_paths)
     except BaseException as exc:
-        # A failed or cancelled registration must hold neither the name nor a place under the cap.
-        await run_blocking_until_complete(_remove_created_agent, runtime_paths, entry)
+        await run_blocking_until_complete(remove)
         if isinstance(exc, Exception):
             msg = f"Registering {entry.agent_name} failed: {exc}"
             raise GeneratedAgentError(msg) from exc
         raise
-    await run_blocking_until_complete(_activate_personal_agent_roster_entry, runtime_paths, entry)
+    active = entry.model_copy(update={"pending": False})
+    await run_blocking_until_complete(_settle_roster_entry, runtime_paths, entry, active)
     return user.user_id

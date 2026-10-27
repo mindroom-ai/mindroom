@@ -159,7 +159,7 @@ class CreatedAgentEntry(BaseModel):
     owner: str
     co_owners: list[str] = Field(default_factory=list)
     edits: GeneratedAgentEdits
-    # Recorded before the account is registered, so an interrupted registration resumes under this name.
+    # Recorded before the account is registered, so no load sees it without one; a failed creation removes it.
     pending: bool = False
 
 

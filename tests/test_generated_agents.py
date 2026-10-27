@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -30,8 +31,9 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.personal_agents import (
     GeneratedAgentError,
-    _activate_personal_agent_roster_entry,
     _append_personal_agent_roster_entry,
+    _reserve_created_agent,
+    _settle_roster_entry,
     _taken_agent_names,
     delete_created_agent,
     generated_agent_settings,
@@ -423,7 +425,7 @@ def test_an_edited_created_agent_stays_out_of_the_authored_dump(tmp_path: Path) 
 
 
 STRANGER = "@mallory:localhost"
-ALLOWED = "browser is not among the tools this agent may use; allowed: calculator, shell"
+ALLOWED = "Not among the tools this agent may use: browser; allowed: calculator, shell"
 
 
 def _register(seen: list[bool] | None = None) -> AsyncMock:
@@ -506,16 +508,19 @@ def test_only_owners_may_change_a_created_agent(tmp_path: Path) -> None:
 
 
 def test_co_owners_cannot_change_co_owners(tmp_path: Path) -> None:
-    """A co-owner may edit the agent, but only the owner decides who co-owns it."""
-    config = _load(tmp_path, created=[_created()])
+    """A co-owner may edit the agent, but only the owner decides who co-owns it; a bridge alias is stored as its person."""
+    data = deepcopy(BASE) | {"authorization": {"aliases": {"@carol:localhost": ["@carol_bridge:localhost"]}}}
+    config = _load(tmp_path, data, created=[_created()])
     paths = test_runtime_paths(tmp_path)
     _update(config, paths, {"role": "Scout"}, requester=CO_OWNER)
     with pytest.raises(GeneratedAgentError, match=f"Only {re.escape(OWNER)} may change co_owners"):
         _update(config, paths, {"co_owners": []}, requester=CO_OWNER)
-    _update(config, paths, {"co_owners": ["@carol:localhost"]})
+    _update(config, paths, {"co_owners": ["@carol_bridge:localhost"]})
     [entry] = read_personal_agent_roster_file(paths).created
     assert entry.edits == GeneratedAgentEdits(display_name="Research", role="Scout")
     assert entry.co_owners == ["@carol:localhost"]
+    _update(config, paths, {"role": "Helper"}, requester="@carol_bridge:localhost")
+    assert read_personal_agent_roster_file(paths).created[0].edits.role == "Helper"
     _update(config, paths, {"co_owners": None})
     assert read_personal_agent_roster_file(paths).created[0].co_owners == []
 
@@ -532,7 +537,7 @@ def test_co_owners_must_be_concrete_people(tmp_path: Path) -> None:
         (["@mindroom_helper:localhost"], "MindRoom account"),
         ("@bob:localhost", "co_owners"),
     ):
-        with pytest.raises(GeneratedAgentError, match=re.escape(refusal)):
+        with pytest.raises(ValueError, match=re.escape(refusal)):
             _update(config, paths, {"co_owners": co_owners})
     assert read_personal_agent_roster_file(paths).created == [_created()]
 
@@ -559,7 +564,7 @@ def test_update_refuses_fields_that_are_not_editable(tmp_path: Path) -> None:
         _update(config, paths, {"model": "opus"})
     with pytest.raises(GeneratedAgentError, match="co_owners cannot be changed"):
         _update(config, paths, {"co_owners": [CO_OWNER]}, agent_name="mind_alice")
-    with pytest.raises(GeneratedAgentError, match="instructions"):
+    with pytest.raises(ValueError, match="instructions"):
         _update(config, paths, {"instructions": "Be brief"})
     assert read_personal_agent_roster_file(paths) == roster
 
@@ -712,6 +717,32 @@ async def test_a_failed_registration_leaves_no_entry(tmp_path: Path) -> None:
     assert read_personal_agent_roster_file(paths).created == []
 
 
+@pytest.mark.asyncio
+async def test_a_cancelled_reservation_leaves_no_entry(tmp_path: Path) -> None:
+    """Cancelling while the pending entry is written finishes the write, then removes the entry before registering."""
+    config = _config(tmp_path)
+    paths = test_runtime_paths(tmp_path)
+    writing, release = threading.Event(), threading.Event()
+
+    def slow_reserve(*args: Any) -> None:  # noqa: ANN401
+        writing.set()
+        release.wait(5)
+        _reserve_created_agent(*args)
+
+    register = _register()
+    with patch("mindroom.personal_agents._reserve_created_agent", new=slow_reserve):
+        task = asyncio.create_task(_create(config, paths, register))
+        try:
+            assert await asyncio.to_thread(writing.wait, 5)
+            task.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    register.assert_not_awaited()
+    assert read_personal_agent_roster_file(paths).created == []
+
+
 def test_delete_removes_the_entry_for_its_owner_only(tmp_path: Path) -> None:
     """Only the owner deletes a created agent, and the other entries stay."""
     config = _load(tmp_path, created=[_created(), _created(agent_name="creator_writer")])
@@ -736,7 +767,7 @@ async def test_writes_keep_the_other_roster_list(tmp_path: Path) -> None:
     assert [entry.agent_name for entry in created] == ["creator_writer"]
     _update(config, paths, {"role": "Scout"}, agent_name="mind_alice")
     _append_personal_agent_roster_entry(paths, _personal(CO_OWNER, pending=True))
-    _activate_personal_agent_roster_entry(paths, _personal(CO_OWNER, pending=True))
+    _settle_roster_entry(paths, _personal(CO_OWNER, pending=True), _personal(CO_OWNER))
     assert read_personal_agent_roster_file(paths) == PersonalAgentRoster(
         entries=[_personal(edits=GeneratedAgentEdits(role="Scout")), _personal(CO_OWNER)],
         created=created,
