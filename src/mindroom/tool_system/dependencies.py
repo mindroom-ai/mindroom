@@ -204,8 +204,8 @@ def _extra_requirements(extra_name: str) -> tuple[Requirement, ...]:
 def _unsupported_extra_requirements(extra_name: str) -> list[str]:
     """Describe each installed requirement of an optional extra whose version the extra does not allow.
 
-    A requirement that is not installed is left to the import check, so this never asks for a package the
-    caller does not import.
+    A requirement that is not installed is left to the import check; an installed one outside the extra's range counts
+    even when the caller does not import it, since installing the extra replaces it.
     """
     resolved_extra_name = _resolve_optional_extra_name(extra_name)
     if resolved_extra_name is None:

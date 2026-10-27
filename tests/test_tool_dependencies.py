@@ -618,10 +618,12 @@ def test_an_installed_version_the_extra_does_not_allow_installs_the_extra(
 ) -> None:
     """An importable Mem0 older than the extra's floor counts as missing, so the extra installs."""
     installs: list[list[str]] = []
-    monkeypatch.setattr(
-        "mindroom.tool_system.dependencies._install_optional_extras",
-        lambda extras, *, quiet=False: installs.append(extras) is None and quiet,
-    )
+
+    def install(extras: list[str], *, quiet: bool = False) -> bool:
+        installs.append(extras)
+        return quiet
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", install)
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
 
     assert ensure_optional_deps(["mem0ai"], "mem0", runtime_paths) is True
