@@ -842,31 +842,24 @@ async def test_source_change_during_final_verification_reconciles_without_losing
     assert state.indexed_count == 4
 
 
-def _age(path: Path, seconds: float) -> None:
-    """Move a file's mtime into the past, so no scan counts it as just written."""
-    stamp = time.time() - seconds
-    os.utime(path, (stamp, stamp))
-
-
 @pytest.mark.asyncio
 async def test_a_local_refresh_reads_only_the_files_whose_stat_changed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A file whose mtime and size still match its recorded signature is not read again, before or after indexing.
+    """A file whose ctime and size still match its recorded signature is not read again, before or after indexing.
 
     The changed file is read once, by the scan that found it, and then copied for indexing; a refresh with nothing
-    changed reads no file at all.
+    changed reads no file at all. A ctime-only change (``chmod``) is read once and then trusted again, because the
+    restamped signature reaches the published seal the next refresh compares against.
     """
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 0)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
-    for name in names:
-        _age(docs_path / name, 3600)
     config = _config(tmp_path, docs_path)
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     (docs_path / names[0]).write_text("changed body", encoding="utf-8")
-    _age(docs_path / names[0], 1800)
     read: list[str] = []
     original_signature = knowledge_manager_module._descriptor_signature
 
@@ -879,6 +872,12 @@ async def test_a_local_refresh_reads_only_the_files_whose_stat_changed(
 
     assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).index_published
     assert read == [names[0]]
+    read.clear()
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert read == []
+    (docs_path / names[1]).chmod(0o600)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert read == [names[1]]
     read.clear()
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     assert read == []

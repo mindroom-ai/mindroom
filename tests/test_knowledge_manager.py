@@ -1865,34 +1865,40 @@ def test_knowledge_file_listing_rejects_symlinked_directory_escape(tmp_path: Pat
     assert list_knowledge_files(config, "docs", docs_path) == []
 
 
-def test_a_file_signed_right_after_a_write_is_read_again_by_the_next_scan(tmp_path: Path) -> None:
-    """A signature taken within the racy window records an mtime no stat matches.
+def _signed(config: Config, docs_path: Path, known: Mapping[str, FileSignature] | None = None) -> FileSignature:
+    scanned: dict[str, tuple[FileSignature, Path]] = {}
+    _knowledge_source_signature(config, "docs", docs_path, git_dir=docs_path / ".git", scanned=scanned, known=known)
+    [(signature, _path)] = scanned.values()
+    return signature
 
-    A rewrite within the same timestamp tick keeps size and mtime, so trusting that stat would keep the old content.
-    """
+
+def test_a_file_signed_right_after_a_write_records_a_stamp_no_stat_matches(tmp_path: Path) -> None:
+    """A signature taken within the racy window records stamp 0, so the next scan reads the file again."""
+    docs_path = (tmp_path / "docs").resolve()
+    docs_path.mkdir()
+    (docs_path / "note.md").write_text("one", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+
+    assert _signed(config, docs_path)[0] == 0
+
+
+def test_a_same_size_rewrite_that_restores_the_mtime_is_read_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamp is the ctime, which restoring the mtime moves, so a timestamp-preserving rewrite is not missed."""
+    monkeypatch.setattr(knowledge_manager_module, "_RACY_WINDOW_NS", 0)
     docs_path = (tmp_path / "docs").resolve()
     docs_path.mkdir()
     note = docs_path / "note.md"
     note.write_text("one", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    first: dict[str, tuple[tuple[int, int, str], Path]] = {}
-    _knowledge_source_signature(config, "docs", docs_path, git_dir=docs_path / ".git", scanned=first)
-    [(signature, _path)] = first.values()
+    signature = _signed(config, docs_path)
     written = note.stat()
     note.write_text("two", encoding="utf-8")
     os.utime(note, ns=(written.st_atime_ns, written.st_mtime_ns))
 
-    second: dict[str, tuple[tuple[int, int, str], Path]] = {}
-    _knowledge_source_signature(
-        config,
-        "docs",
-        docs_path,
-        git_dir=docs_path / ".git",
-        known={"note.md": signature},
-        scanned=second,
-    )
-
-    assert second["note.md"][0][2] != signature[2]
+    assert _signed(config, docs_path, known={"note.md": signature})[2] != signature[2]
 
 
 def test_tracked_path_listing_skips_per_file_strict_resolution(

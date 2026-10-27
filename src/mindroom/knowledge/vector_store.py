@@ -195,15 +195,6 @@ class KnowledgeCollection:
                 )
         return found
 
-    def source_metadata(self) -> dict[str, dict[str, Any]]:
-        """Return the metadata of each source path's first chunk."""
-        with closing(self._connect(read_only=True)) as connection:
-            rows = connection.execute(
-                "SELECT source_path, metadata FROM chunks"
-                " WHERE rowid IN (SELECT MIN(rowid) FROM chunks GROUP BY source_path)",
-            )
-            return {source_path: json.loads(metadata) for source_path, metadata in rows}
-
     def row_count(self) -> int:
         """Return how many rows the collection holds."""
         with closing(self._connect()) as connection:

@@ -12,7 +12,7 @@
             "row_number": 1,
             "similarity_score": 0.604523241519928,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -28,7 +28,7 @@
             "linked_to": "",
             "similarity_score": 1.1543808579444885,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -44,7 +44,7 @@
             "linked_to": "",
             "similarity_score": 1.362712413072586,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -60,7 +60,7 @@
             "linked_to": "",
             "similarity_score": 0.5828447341918945,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -76,7 +76,7 @@
             "linked_to": "",
             "similarity_score": 0.8707394003868103,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -92,7 +92,7 @@
             "linked_to": "",
             "similarity_score": 0.9601258039474487,
             "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "control.txt",
             "source_size": 26
           },
@@ -109,7 +109,7 @@
             "page": 1,
             "similarity_score": 0.9958947077393532,
             "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "records.json",
             "source_size": 99
           },
@@ -126,7 +126,7 @@
             "page": 1,
             "similarity_score": 1.0876812189817429,
             "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "settings.json",
             "source_size": 49
           },
@@ -142,7 +142,7 @@
             "linked_to": "",
             "similarity_score": 1.1320684850215912,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -157,7 +157,7 @@
             "row_number": 3,
             "similarity_score": 1.2025228589773178,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -180,7 +180,7 @@
             "page": 1,
             "similarity_score": 0.9332063496112823,
             "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "records.json",
             "source_size": 99
           },
@@ -196,7 +196,7 @@
             "linked_to": "",
             "similarity_score": 0.5304010808467865,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -212,7 +212,7 @@
             "linked_to": "",
             "similarity_score": 0.9311468601226807,
             "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "control.txt",
             "source_size": 26
           },
@@ -228,7 +228,7 @@
             "linked_to": "",
             "similarity_score": 0.6581577956676483,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -244,7 +244,7 @@
             "linked_to": "",
             "similarity_score": 1.006945788860321,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -260,7 +260,7 @@
             "linked_to": "",
             "similarity_score": 1.3080187439918518,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -275,7 +275,7 @@
             "row_number": 3,
             "similarity_score": 0.9381504952907562,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -290,7 +290,7 @@
             "row_number": 1,
             "similarity_score": 1.0494847148656845,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -306,7 +306,7 @@
             "linked_to": "",
             "similarity_score": 1.0581740736961365,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -321,7 +321,7 @@
             "row_number": 5,
             "similarity_score": 1.0838376134634018,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -342,7 +342,7 @@
             "row_number": 1,
             "similarity_score": 0.604523241519928,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -358,7 +358,7 @@
             "linked_to": "",
             "similarity_score": 1.3297736644744873,
             "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "notes.md",
             "source_size": 78
           },
@@ -374,7 +374,7 @@
             "linked_to": "",
             "similarity_score": 1.1543808579444885,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -390,7 +390,7 @@
             "linked_to": "",
             "similarity_score": 1.362712413072586,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -406,7 +406,7 @@
             "linked_to": "",
             "similarity_score": 0.5828447341918945,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -422,7 +422,7 @@
             "linked_to": "",
             "similarity_score": 0.8707394003868103,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -438,7 +438,7 @@
             "linked_to": "",
             "similarity_score": 0.9601258039474487,
             "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "control.txt",
             "source_size": 26
           },
@@ -455,7 +455,7 @@
             "page": 1,
             "similarity_score": 0.9958947077393532,
             "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "records.json",
             "source_size": 99
           },
@@ -472,7 +472,7 @@
             "page": 1,
             "similarity_score": 1.0876812189817429,
             "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "settings.json",
             "source_size": 49
           },
@@ -488,7 +488,7 @@
             "linked_to": "",
             "similarity_score": 1.1320684850215912,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -511,7 +511,7 @@
             "page": 1,
             "similarity_score": 0.9332063496112823,
             "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "records.json",
             "source_size": 99
           },
@@ -527,7 +527,7 @@
             "linked_to": "",
             "similarity_score": 0.34666454792022705,
             "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "notes.md",
             "source_size": 78
           },
@@ -543,7 +543,7 @@
             "linked_to": "",
             "similarity_score": 0.5304010808467865,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -559,7 +559,7 @@
             "linked_to": "",
             "similarity_score": 0.9311468601226807,
             "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "control.txt",
             "source_size": 26
           },
@@ -575,7 +575,7 @@
             "linked_to": "",
             "similarity_score": 0.6581577956676483,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },
@@ -591,7 +591,7 @@
             "linked_to": "",
             "similarity_score": 1.006945788860321,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -607,7 +607,7 @@
             "linked_to": "",
             "similarity_score": 1.3080187439918518,
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           },
@@ -622,7 +622,7 @@
             "row_number": 3,
             "similarity_score": 0.9381504952907562,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -637,7 +637,7 @@
             "row_number": 1,
             "similarity_score": 1.0494847148656845,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           },
@@ -653,7 +653,7 @@
             "linked_to": "",
             "similarity_score": 1.0581740736961365,
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           },

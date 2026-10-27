@@ -157,8 +157,9 @@ _MAX_BATCH_TEXT_BYTES = 8_000_000
 #: Source files whose signatures are computed per thread hop, so a huge corpus
 #: still yields to the event loop and to cancellation while it is scanned.
 _SIGNATURE_SCAN_CHUNK = 512
-#: A file written this recently may be rewritten within one timestamp tick, keeping its mtime and size, so its
-#: signature records an mtime no stat matches, and the next scan reads it again instead of trusting its stat.
+#: A file changed this recently may change again within one timestamp tick, keeping its stamp and size, so its
+#: signature records a stamp no stat matches, and the next scan reads it again instead of trusting its stat.
+#: Comparing the server-assigned ctime with this host's clock assumes synchronized clocks, as ``make`` does.
 _RACY_WINDOW_NS = 2_000_000_000
 #: Reconciliation passes before a refresh gives up for now. A source that keeps
 #: changing keeps its candidate and converges over successive refreshes instead
@@ -379,18 +380,28 @@ def _semantic_indexing_enabled(config: Config, base_id: str) -> bool:
 
 
 def _descriptor_signature(descriptor: int, file_path: Path, output: IO[bytes] | None = None) -> FileSignature:
-    """Stat and hash one open knowledge file, copying its bytes to ``output`` when given."""
+    """Stat and hash one open knowledge file, copying its bytes to ``output`` when given.
+
+    The signature's stamp is the status-change time, not the mtime: every write, mtime restore, and rename moves it,
+    and no caller can set it, so a stat-first scan cannot mistake a timestamp-preserving replacement for the file it
+    replaced. A file that changed within ``_RACY_WINDOW_NS`` of the read, or while it was read, records stamp 0.
+    """
     status = os.fstat(descriptor)
     if status.st_size > MAX_READ_BYTES:
         msg = f"Knowledge file exceeds its size limit: {file_path}"
         raise ValueError(msg)
+    started_ns = time.time_ns()
     digest = hashlib.sha256()
     while chunk := os.read(descriptor, 1024 * 1024):
         digest.update(chunk)
         if output is not None:
             output.write(chunk)
-    racy = time.time_ns() - status.st_mtime_ns < _RACY_WINDOW_NS
-    return 0 if racy else status.st_mtime_ns, status.st_size, digest.hexdigest()
+    after = os.fstat(descriptor)
+    racy = started_ns - status.st_ctime_ns < _RACY_WINDOW_NS or (after.st_ctime_ns, after.st_size) != (
+        status.st_ctime_ns,
+        status.st_size,
+    )
+    return 0 if racy else status.st_ctime_ns, status.st_size, digest.hexdigest()
 
 
 def _file_signature(file_path: Path, snapshot: Path | None = None) -> FileSignature:
@@ -403,10 +414,10 @@ def _scan_file_signatures(
     files: Iterable[tuple[str, Path]],
     known: Mapping[str, FileSignature],
 ) -> Iterator[tuple[str, FileSignature, Path]]:
-    """Sign listed files, reusing a ``known`` signature while the file's mtime and size still match it.
+    """Sign listed files, reusing a ``known`` signature while the file's ctime and size still match it.
 
-    As rsync and git do, an unchanged stat counts as unchanged bytes, so most files of a large corpus are not read
-    again; ``_RACY_WINDOW_NS`` keeps a rewrite within one timestamp tick from passing for unchanged. Each parent is
+    As git does, an unchanged stat counts as unchanged bytes, so most files of a large corpus are not read again;
+    ``_RACY_WINDOW_NS`` keeps a change within one timestamp tick from passing for unchanged. Each parent is
     pinned once by the no-follow walk from the filesystem root that ``open_knowledge_file`` repeats per file, and
     its entries are stat-ed and opened without following links. Files that vanished or are not regular are skipped.
     """
@@ -419,7 +430,7 @@ def _scan_file_signatures(
                 if (
                     recorded is not None
                     and stat.S_ISREG(status.st_mode)
-                    and recorded[:2] == (status.st_mtime_ns, status.st_size)
+                    and recorded[:2] == (status.st_ctime_ns, status.st_size)
                 ):
                     yield relative_path, recorded, path
                     continue
@@ -725,7 +736,7 @@ class KnowledgeManager:
     async def source_signature(self, known: Mapping[str, FileSignature] | None = None) -> str:
         """Return the signature of the corpus this base currently manages.
 
-        A file whose mtime and size still match its ``known`` signature is not read again.
+        A file whose ctime and size still match its ``known`` signature is not read again.
 
         Git-backed bases hand over the tracked paths this process already
         listed, so an unchanged checkout is not re-listed just to hash it.
@@ -748,29 +759,15 @@ class KnowledgeManager:
         self._source_scan = scanned
         return signature
 
-    async def published_file_signatures(self, state: PublishedIndexState) -> dict[str, FileSignature]:
-        """Return the signature the published index recorded for each file, for a stat-first scan to reuse."""
-        if state.collection is None:
-            return {}
-        collection = open_collection(self._collections, state.collection)
+    async def published_file_signatures(self, state: PublishedIndexState) -> Mapping[str, FileSignature]:
+        """Return the signatures the published source signature was built from, for a stat-first scan to reuse.
 
-        def _read() -> dict[str, FileSignature]:
-            if not collection.exists():
-                return {}
-            return {
-                source_path: signature
-                for source_path, metadata in collection.source_metadata().items()
-                if (
-                    signature := file_signature_from_fields(
-                        metadata.get(SOURCE_MTIME_NS_KEY),
-                        metadata.get(SOURCE_SIZE_KEY),
-                        metadata.get(SOURCE_DIGEST_KEY),
-                    )
-                )
-                is not None
-            }
-
-        return await asyncio.to_thread(_read)
+        The published collection's seal holds them, restamps included; without that seal every file is read.
+        """
+        for seal in (await asyncio.to_thread(load_seals, self._base_storage_path)).values():
+            if seal is not None and state.collection is not None and seal.collection == state.collection:
+                return seal.completed
+        return {}
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_source_path()).as_posix()

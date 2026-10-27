@@ -52,8 +52,9 @@ _PUBLISHED_SEAL_FILENAME = "published_index_seal.json"
 _RETIRED_SEAL_FILENAME = "retired_index_seal.json"
 
 #: ``(source_mtime_ns, source_size, source_content_digest)`` for one source file.
-#: The content digest is what makes resume safe across Git checkouts, which
-#: rewrite mtimes without changing content.
+#: The stamp is the file's status-change time (``st_ctime_ns``), or 0 for a file read while it was changing; the
+#: name stays for the stored format. The content digest is what makes resume safe across Git checkouts, which
+#: rewrite the stamp without changing content.
 FileSignature = tuple[int, int, str]
 
 _CandidateStatus = Literal["building", "failed"]
