@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import weakref
 from contextlib import asynccontextmanager, suppress
@@ -1899,8 +1900,12 @@ def test_a_same_size_rewrite_that_restores_the_mtime_is_read_again(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     signature = _signed(config, docs_path)
     written = note.stat()
+    # The rewrite must land in a later timestamp tick than the signed write, as any real later edit does.
+    while time.time_ns() < written.st_ctime_ns + 50_000_000:
+        time.sleep(0.01)
     note.write_text("two", encoding="utf-8")
     os.utime(note, ns=(written.st_atime_ns, written.st_mtime_ns))
+    assert note.stat().st_ctime_ns != written.st_ctime_ns
 
     assert _signed(config, docs_path, known={"note.md": signature})[2] != signature[2]
 

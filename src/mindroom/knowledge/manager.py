@@ -42,6 +42,7 @@ from mindroom.knowledge.candidate_checkpoint import (
     delete_candidate_checkpoint,
     file_signature_from_fields,
     load_candidate_checkpoint,
+    load_published_seal,
     load_seals,
     rotate_seals,
     save_candidate_checkpoint,
@@ -764,9 +765,9 @@ class KnowledgeManager:
 
         The published collection's seal holds them, restamps included; without that seal every file is read.
         """
-        for seal in (await asyncio.to_thread(load_seals, self._base_storage_path)).values():
-            if seal is not None and state.collection is not None and seal.collection == state.collection:
-                return seal.completed
+        seal = await asyncio.to_thread(load_published_seal, self._base_storage_path)
+        if seal is not None and state.collection is not None and seal.collection == state.collection:
+            return seal.completed
         return {}
 
     def _relative_path(self, file_path: Path) -> str:
@@ -1810,7 +1811,7 @@ class KnowledgeManager:
         run: _CandidateRun,
         restamped: Sequence[tuple[str, FileSignature]],
     ) -> None:
-        """Adopt new mtimes for files whose content is unchanged."""
+        """Adopt new stamps for files whose content is unchanged."""
         for relative_path, signature in restamped:
             run.completed[relative_path] = signature
         await asyncio.to_thread(
@@ -1872,13 +1873,13 @@ class KnowledgeManager:
         for relative_path in set(run.completed) & present:
             recorded = run.completed[relative_path]
             current = signatures[relative_path][0]
-            # Git checkouts and archive restores may change only mtime. Size and
-            # digest are the content identity that decides whether vectors survive.
+            # Git checkouts, archive restores and chmod may change only the stamp.
+            # Size and digest are the content identity that decides whether vectors survive.
             if recorded[1:] != current[1:]:
                 changed.add(relative_path)
             elif recorded != current:
-                # Same bytes, new mtime: keep the vectors and adopt the new
-                # stamp so the candidate signature can still match the source.
+                # Same bytes, new stamp: keep the vectors and adopt it, so the
+                # candidate signature can still match the source.
                 restamped.append((relative_path, current))
         removed = tuple(sorted(gone | changed))
         if removed:

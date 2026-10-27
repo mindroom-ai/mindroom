@@ -371,6 +371,11 @@ def load_seals(base_storage_path: Path) -> dict[Path, CandidateCheckpoint | None
     return {path: _load_snapshot(path) for path in paths if path.exists()}
 
 
+def load_published_seal(base_storage_path: Path) -> CandidateCheckpoint | None:
+    """Return the claims sealed with the published collection, or None when there is no readable seal."""
+    return _load_snapshot(base_storage_path / _PUBLISHED_SEAL_FILENAME)
+
+
 def take_sealed_candidate(base_storage_path: Path, seal_path: Path) -> None:
     """Make the sealed collection the candidate by renaming its seal onto the candidate snapshot.
 
