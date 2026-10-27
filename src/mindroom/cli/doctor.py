@@ -233,7 +233,8 @@ def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons:
     """
     if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
         return False
-    listed = ", ".join(reasons)
+    # A setting path holds the model's name and its settings' keys, which may contain brackets Rich reads as markup.
+    listed = escape(", ".join(reasons))
     effect = "may send it elsewhere or send another key in its place"
     console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} {effect}")
     return True
