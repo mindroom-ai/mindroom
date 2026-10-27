@@ -223,7 +223,8 @@ export function EgressServiceEditor({
   });
   // A service that only limits repositories has no key, login, or website of its own.
   const limiting = form.restrictOnly;
-  // One with its own account signs in through Connect, so the form asks for no key and saves none typed before.
+  // One with its own account signs in through Connect, so the form asks for
+  // no key and saves none typed before.
   const takesKey = !limiting && !form.separateAccount;
   const [apiKey, setApiKey] = useState("");
   const [moreOpen, setMoreOpen] = useState(() => usesMoreOptions(form));
@@ -242,7 +243,10 @@ export function EgressServiceEditor({
   // them anew only after they change and keeps rules edited by hand until then.
   const appliedHelper = useRef<string | null>(restored.applied);
   const showGithubHelper = limiting ? restored.exact : looksLikeGithub(form);
-  const settings = { editing, takenNames: openedWithNames, service };
+  // A new service that starts from another, such as another account, is still
+  // new: the save writes it from the form alone.
+  const initial = editing ? service : null;
+  const settings = { editing, takenNames: openedWithNames, service: initial };
 
   // Writes the typed repositories into the form, or shows why they cannot be.
   const applyHelper = (): EgressServiceForm | null => {
@@ -417,7 +421,7 @@ export function EgressServiceEditor({
 
   // Another preset has its own defaults, so what the loaded service emptied on
   // purpose no longer applies to it. Back on the loaded preset, its own login
-  // applies again, as the save writes it, even after another was picked under Custom.
+  // applies again, as the save writes it, whatever login was picked under Custom.
   const choosePreset = (value: string) => {
     // The rules the helper wrote are gone with the preset's own, so typed
     // repositories are to be applied again when the form is saved.
@@ -465,7 +469,7 @@ export function EgressServiceEditor({
     const authored =
       limiting && service !== null && !dirty
         ? service
-        : serializeService(current, options, service);
+        : serializeService(current, options, initial);
     const signature = JSON.stringify([current.name, authored]);
     try {
       // The service goes first, and the key only after it is written.
@@ -708,7 +712,7 @@ export function EgressServiceEditor({
               onGithub={showGithubHelper}
               configPlaceholders={configPlaceholders}
               ruleEditing={ruleEditing}
-              newService={service === null}
+              newService={!editing}
               focusDisplayName={!editing && service !== null}
             />
           )}

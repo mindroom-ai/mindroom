@@ -3226,6 +3226,28 @@ describe("the display name of a new service", () => {
     expect(over.onSave).not.toHaveBeenCalled();
   });
 
+  it("is the host for a new service that starts from another too, such as another account", async () => {
+    const { onSave } = await renderEditor({
+      service: { preset: "google_calendar", oauth_separate_account: true },
+    });
+    type("Preset", "");
+    type("Website", "cal.example.com");
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    );
+    expect(screen.getByLabelText("Display name")).toHaveAccessibleDescription(
+      "Leave empty to use cal.example.com.",
+    );
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("cal", {
+      display_name: "cal.example.com",
+      rules: [{ host: "cal.example.com", auth: { type: "bearer" } }],
+    });
+  });
+
   it("offers the host only while the service is new: an edited one keeps no display name", async () => {
     await renderEditor({ name: "web", service: { rules: [bearerRule] } });
     openMoreOptions();
