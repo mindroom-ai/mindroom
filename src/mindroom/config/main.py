@@ -43,6 +43,7 @@ from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProf
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
+from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents, tool_ceiling
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
@@ -75,7 +76,7 @@ from mindroom.config.personal_agents import (
     PersonalAgentInstance,
     PersonalAgentTemplateConfig,
     expand_personal_agents,
-    read_personal_agent_roster,
+    read_personal_agent_roster_file,
 )
 from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -428,6 +429,8 @@ class Config(BaseModel):
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
     _personal_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
+    _tool_ceilings: dict[str, tuple[str, ...]] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
 
     egress_broker: EgressBrokerConfig = Field(
@@ -1209,7 +1212,8 @@ class Config(BaseModel):
     ) -> Config:
         """Validate config data against one explicit runtime context, adding the agents of the personal agent roster."""
         try:
-            expansion = expand_personal_agents(data, read_personal_agent_roster(runtime_paths))
+            roster = read_personal_agent_roster_file(runtime_paths)
+            expansion = expand_personal_agents(data, roster.entries)
         except ValueError as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         config = cls._validate_runtime_data(
@@ -1238,12 +1242,33 @@ class Config(BaseModel):
             )
             raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
-        # An edited generated agent stays in the authored dump, so saving the edit fails as a collision.
+        # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
+        pass_one = config
+        generated_data, generated = expand_generated_agents(pass_one, cast("dict[str, Any]", expansion.data), roster)
+        if generated_data is not None:
+            try:
+                config = cls._validate_runtime_data(
+                    generated_data,
+                    runtime_paths,
+                    tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                )
+            except (ValidationError, ConfigRuntimeValidationError) as exc:
+                # Edits and created agents wait for a fix; the owners keep their agents and loading never breaks.
+                logger.warning("generated_agents_invalid", error=str(exc))
+            config._personal_agent_instances = expansion.instances
+        config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
+        config._tool_ceilings = {
+            name: tool_ceiling(pass_one, name)
+            for name, agent in pass_one.agents.items()
+            if agent.created_agents_per_owner > 0
+        } | {name: info.allowed_tools for name, info in config._generated_agents.items()}
+        # An agent edited in place stays in the authored dump, so saving the edit fails as a collision.
         config._personal_agent_dumps = {
-            agent_name: config.agents[agent_name].model_dump(exclude_unset=True) for agent_name in expansion.instances
+            agent_name: config.agents[agent_name].model_dump(exclude_unset=True)
+            for agent_name in config._generated_agents
         }
         config._personal_agents_added_agents_section = (
-            bool(expansion.instances) and isinstance(data, dict) and "agents" not in data
+            bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
         )
         return config
 
@@ -1281,7 +1306,7 @@ class Config(BaseModel):
         return config
 
     def authored_model_dump(self) -> dict[str, Any]:
-        """Serialize authored config, without the unedited agents generated from personal_agents templates."""
+        """Serialize authored config, without the personal and created agents the roster generates."""
         payload = self.runtime_model_dump()
         agents = payload.get("agents")
         if isinstance(agents, dict):
@@ -1339,6 +1364,15 @@ class Config(BaseModel):
     def personal_agent_instance(self, agent_name: str) -> PersonalAgentInstance | None:
         """Return the template and owner of one generated agent, or None for an authored agent."""
         return self._personal_agent_instances.get(agent_name)
+
+    def generated_agent(self, agent_name: str) -> GeneratedAgentInfo | None:
+        """Return the base, owners and allowed tools of one personal or created agent, or None for an authored agent."""
+        return self._generated_agents.get(agent_name)
+
+    def tool_ceiling(self, agent_name: str) -> tuple[str, ...]:
+        """Return the tools this agent's own edits, or the agents it creates, may choose from; pass one's when stored."""
+        stored = self._tool_ceilings.get(agent_name)
+        return tool_ceiling(self, agent_name) if stored is None else stored
 
     def personal_agent_name(self, template: str, user_id: str) -> str | None:
         """Return the agent generated from one template for one user, or None before that user is onboarded."""

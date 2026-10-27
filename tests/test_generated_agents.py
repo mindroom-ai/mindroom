@@ -8,13 +8,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
+from mindroom.config import generated_agents
 from mindroom.config.agent import AgentConfig
-from mindroom.config.generated_agents import generated_agent_data, tool_ceiling
+from mindroom.config.generated_agents import GeneratedAgentInfo, generated_agent_data, tool_ceiling
 from mindroom.config.main import Config
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
+    PersonalAgentRoster,
     PersonalAgentRosterEntry,
     personal_agent_roster_path,
     read_personal_agent_roster,
@@ -23,6 +26,7 @@ from mindroom.config.personal_agents import (
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 OWNER = "@alice:localhost"
@@ -195,3 +199,200 @@ def test_created_agents_per_owner_defaults_off_and_is_not_negative() -> None:
     assert AgentConfig(display_name="A").created_agents_per_owner == 0
     with pytest.raises(ValidationError):
         AgentConfig(display_name="A", created_agents_per_owner=-1)
+
+
+PERSONAL_TEMPLATE: dict[str, Any] = {
+    "agent": {
+        "display_name": "{user_display_name}'s Mind",
+        "model": "default",
+        "tools": ["calculator"],
+    },
+}
+
+
+def _personal(user_id: str = OWNER, **kwargs: object) -> PersonalAgentRosterEntry:
+    username = user_id.removeprefix("@").partition(":")[0]
+    fields: dict[str, object] = {
+        "template": "mind",
+        "user_id": user_id,
+        "username": username,
+        "agent_name": f"mind_{username}",
+        "matrix_username": None,
+        "user_display_name": username.title(),
+        "source_room_id": "!lobby:localhost",
+    }
+    return PersonalAgentRosterEntry.model_validate(fields | kwargs)
+
+
+def _load(
+    tmp_path: Path,
+    data: dict[str, Any] | None = None,
+    *,
+    entries: Sequence[PersonalAgentRosterEntry] = (),
+    created: Sequence[CreatedAgentEntry] = (),
+) -> Config:
+    paths = test_runtime_paths(tmp_path)
+    path = personal_agent_roster_path(paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        PersonalAgentRoster(entries=list(entries), created=list(created)).model_dump_json(),
+        encoding="utf-8",
+    )
+    return Config.validate_with_runtime(deepcopy(BASE) if data is None else data, paths)
+
+
+def _with_template() -> dict[str, Any]:
+    return deepcopy(BASE) | {"personal_agents": {"mind": deepcopy(PERSONAL_TEMPLATE)}}
+
+
+def _skipped(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [(log["agent_name"], log["reason"]) for log in logs if log["event"] == "created_agent_skipped"]
+
+
+def test_a_created_agent_loads_from_its_creator(tmp_path: Path) -> None:
+    """An active created entry becomes an agent with its chosen tools, owned by the requester."""
+    config = _load(tmp_path, created=[_created(edits=GeneratedAgentEdits(display_name="Research", tools=["shell"]))])
+    agent = config.agents["creator_research"]
+    assert agent.display_name == "Research"
+    assert agent.model == "default"
+    assert agent.access.users == [OWNER, CO_OWNER]
+    assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["shell"]
+    assert config.generated_agent("creator_research") == GeneratedAgentInfo(
+        base="creator",
+        owner=OWNER,
+        co_owners=(CO_OWNER,),
+        created=True,
+        allowed_tools=("calculator", "shell"),
+    )
+    assert config.generated_agent("creator") is None
+    assert config.tool_ceiling("creator_research") == ("calculator", "shell")
+    assert config.tool_ceiling("creator") == ("calculator", "shell")
+
+
+def test_personal_agent_edits_apply_at_load(tmp_path: Path) -> None:
+    """Owner edits replace the template's values, and the template stays the ceiling."""
+    edits = GeneratedAgentEdits(display_name="Scout", tools=["calculator"])
+    config = _load(tmp_path, _with_template(), entries=[_personal(edits=edits), _personal(CO_OWNER)])
+    alice = config.agents["mind_alice"]
+    assert alice.display_name == "Scout"
+    assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice")] == ["calculator"]
+    # The owner may add back shell from defaults.tools, which the edit removed.
+    assert config.tool_ceiling("mind_alice") == ("calculator", "shell")
+    assert config.generated_agent("mind_alice") == GeneratedAgentInfo(
+        base="mind_alice",
+        owner=OWNER,
+        co_owners=(),
+        created=False,
+        allowed_tools=("calculator", "shell"),
+    )
+    # Every personal agent is a generated agent, edited or not.
+    assert config.agents["mind_bob"].display_name == "Bob's Mind"
+    assert config.generated_agent("mind_bob") is not None
+    assert config.personal_agent_name("mind", OWNER) == "mind_alice"
+
+
+def test_a_created_agent_chooses_from_its_creators_granted_tools(tmp_path: Path) -> None:
+    """A personal creator that removed shell from itself can still give shell to the agent it created."""
+    data = _with_template()
+    data["personal_agents"]["mind"]["agent"]["created_agents_per_owner"] = 1
+    config = _load(
+        tmp_path,
+        data,
+        entries=[_personal(edits=GeneratedAgentEdits(tools=["calculator"]))],
+        created=[
+            _created(
+                creator="mind_alice",
+                agent_name="mind_alice_research",
+                co_owners=[],
+                edits=GeneratedAgentEdits(display_name="Research", tools=["shell"]),
+            ),
+        ],
+    )
+    assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice_research")] == ["shell"]
+    assert config.tool_ceiling("mind_alice_research") == ("calculator", "shell")
+
+
+def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:
+    """A stored tool the creator no longer has is left out, and loading stays healthy."""
+    data = deepcopy(BASE)
+    del data["defaults"]
+    data["agents"]["creator"]["tools"] = ["calculator"]
+    data["agents"]["creator"]["worker_tools"] = []
+    entry = _created(edits=GeneratedAgentEdits(display_name="Research", tools=["calculator", "shell"]))
+    with capture_logs() as logs:
+        config = _load(tmp_path, data, created=[entry])
+    assert [entry.name for entry in config._get_agent_authored_tool_configs("creator_research")] == ["calculator"]
+    dropped = [log for log in logs if log["event"] == "generated_agent_tool_dropped"]
+    assert [(log["agent_name"], log["tools"]) for log in dropped] == [("creator_research", ["shell"])]
+
+
+def test_the_creator_cap_limits_created_agents_at_load(tmp_path: Path) -> None:
+    """Only the first active entries up to the creator's current cap load, per owner, in roster order."""
+    entries = [
+        _created(agent_name="creator_draft", pending=True),
+        _created(agent_name="creator_research"),
+        _created(agent_name="creator_writer"),
+        _created(agent_name="creator_other", owner=CO_OWNER, co_owners=[]),
+    ]
+    for cap, loaded in ((1, {"creator_research", "creator_other"}), (0, set())):
+        data = deepcopy(BASE)
+        data["agents"]["creator"]["created_agents_per_owner"] = cap
+        with capture_logs() as logs:
+            config = _load(tmp_path / str(cap), data, created=entries)
+        assert set(config.agents) - {"creator"} == loaded
+        assert ("creator_draft", "pending") in _skipped(logs)
+        assert ("creator_writer", "over_cap") in _skipped(logs)
+
+
+def test_a_created_agent_whose_creator_is_gone_is_skipped(tmp_path: Path) -> None:
+    """Removing the creator removes the agents it created at the next load."""
+    with capture_logs() as logs:
+        config = _load(tmp_path, created=[_created(creator="gone", agent_name="gone_research")])
+    assert "gone_research" not in config.agents
+    assert config.generated_agent("gone_research") is None
+    assert _skipped(logs) == [("gone_research", "creator_missing")]
+
+
+def test_a_created_name_taken_by_an_authored_agent_is_skipped(tmp_path: Path) -> None:
+    """An authored agent keeps its name and config when a created entry claims it."""
+    data = deepcopy(BASE)
+    data["agents"]["creator_research"] = {"display_name": "Authored"}
+    with capture_logs() as logs:
+        config = _load(tmp_path, data, created=[_created()])
+    assert config.agents["creator_research"].display_name == "Authored"
+    assert config.generated_agent("creator_research") is None
+    assert config.authored_model_dump()["agents"]["creator_research"] == {"display_name": "Authored"}
+    assert _skipped(logs) == [("creator_research", "name_taken")]
+
+
+def test_an_invalid_pass_two_falls_back_to_pass_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A generated agent that fails validation leaves the pass-one config, so loading never breaks."""
+    monkeypatch.setattr(generated_agents, "generated_agent_data", lambda *_args, **_kwargs: ({"display_name": 5}, []))
+    with capture_logs() as logs:
+        config = _load(
+            tmp_path,
+            _with_template(),
+            entries=[_personal(edits=GeneratedAgentEdits(display_name="Scout"))],
+            created=[_created()],
+        )
+    assert "creator_research" not in config.agents
+    assert config.generated_agent("creator_research") is None
+    assert config.agents["mind_alice"].display_name == "Alice's Mind"
+    # The owner keeps the tools to fix the edit.
+    assert config.generated_agent("mind_alice") is not None
+    assert [log["event"] for log in logs].count("generated_agents_invalid") == 1
+
+
+def test_authored_dump_leaves_out_created_agents(tmp_path: Path) -> None:
+    """Saving never writes created or edited generated agents into the authored config."""
+    config = _load(
+        tmp_path,
+        _with_template(),
+        entries=[_personal(edits=GeneratedAgentEdits(display_name="Scout"))],
+        created=[_created()],
+    )
+    authored = config.authored_model_dump()
+    assert set(authored["agents"]) == {"creator"}
+    assert {"creator_research", "mind_alice"} < set(config.runtime_model_dump()["agents"])
+    revalidated = Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
+    assert revalidated.agents == config.agents
