@@ -168,18 +168,18 @@ class TestMemoryConfig:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens"),
+        ("model_id", "expected_temperature", "expected_top_p", "sends_max_tokens", "expected_reasoning_effort"),
         [
-            ("gpt-6-astra", None, None, False),
-            (OPENAI_GPT_LUNA, None, None, False),
-            (OPENAI_GPT_SOL, None, None, False),
-            ("gpt-5.6-luna", None, None, False),
-            ("gpt-5.6-terra", None, None, False),
-            ("gpt-5.4-mini", None, None, False),
-            ("gpt-5-mini", None, None, False),
-            ("gpt-5-2025-08-07", None, None, False),
+            ("gpt-6-astra", None, None, False, "low"),
+            (OPENAI_GPT_LUNA, None, None, False, "low"),
+            (OPENAI_GPT_SOL, None, None, False, "low"),
+            ("gpt-5.6-luna", None, None, False, "low"),
+            ("gpt-5.6-terra", None, None, False, "low"),
+            ("gpt-5.4-mini", None, None, False, "low"),
+            ("gpt-5-mini", None, None, False, "low"),
+            ("gpt-5-2025-08-07", None, None, False, "low"),
             # Keep a legacy non-reasoning model as the sampling-control positive case.
-            ("gpt-4", 0.1, 0.8, True),
+            ("gpt-4", 0.1, 0.8, True, None),
         ],
         ids=[
             "astra",
@@ -200,8 +200,9 @@ class TestMemoryConfig:
         expected_temperature: float | None,
         expected_top_p: float | None,
         sends_max_tokens: bool,
+        expected_reasoning_effort: str | None,
     ) -> None:
-        """Memory extraction omits for GPT-5 and later models what Mem0 omits for the reasoning models it knows."""
+        """Memory extraction sends GPT-5 and later models what Mem0 sends the reasoning models it knows."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
                 provider="ollama",
@@ -214,6 +215,7 @@ class TestMemoryConfig:
                     "model": model_id,
                     "temperature": 0.1,
                     "top_p": 0.8,
+                    "reasoning_effort": "low",
                 },
             ),
         )
@@ -243,6 +245,7 @@ class TestMemoryConfig:
         assert ("max_tokens" in request_params) is sends_max_tokens
         # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
         assert "max_completion_tokens" not in request_params
+        assert request_params.get("reasoning_effort") == expected_reasoning_effort
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
