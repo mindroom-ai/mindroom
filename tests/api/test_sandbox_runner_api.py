@@ -97,7 +97,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backends import local as local_workers_module
 from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
 from mindroom.workers.backends.kubernetes_resources import worker_auth_token
-from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
+from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.conftest import requires_linux
 from tests.process_helpers import assert_linux_pid_not_running
@@ -3786,7 +3786,7 @@ def test_sandbox_runner_healthz(runner_client: TestClient) -> None:
     assert response.json() == {
         "status": "ok",
         "mindroom_version": __version__,
-        "worker_protocol": WORKER_PROTOCOL_VERSION,
+        "worker_protocol": _WORKER_PROTOCOL_VERSION,
     }
 
 
