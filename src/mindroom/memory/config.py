@@ -233,11 +233,10 @@ async def create_memory_instance(
     # Create AsyncMemory instance with dictionary config directly
     # Mem0 expects a dict for configuration, not config objects
     if config_dict["embedder"]["provider"] == "huggingface":
-        # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
+        # Mem0's huggingface embedder, which both local providers load, imports sentence-transformers.
         # Install and wait for running installs in a worker thread so the event loop keeps serving other tasks.
         def from_config_with_local_embedder() -> AsyncMemory:
-            if config.memory.embedder.provider == "sentence_transformers":
-                ensure_sentence_transformers_dependencies(runtime_paths)
+            ensure_sentence_transformers_dependencies(runtime_paths)
             with optional_dependency_environment():
                 return AsyncMemory.from_config(config_dict)
 
