@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,7 +11,12 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import HookRegistry, get_hook_metadata
 from mindroom.oauth.registry import load_oauth_providers
-from mindroom.tool_system.catalog import TOOL_METADATA, clear_resolved_tool_state_cache, ensure_tool_registry_loaded
+from mindroom.tool_system.catalog import (
+    TOOL_METADATA,
+    clear_resolved_tool_state_cache,
+    ensure_tool_registry_loaded,
+    load_toolkit_class,
+)
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 
 
@@ -62,6 +68,11 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     msg = f"Expected one loaded plugin, got {len(loaded_plugins)}"
                     raise ValueError(msg)
                 [plugin] = loaded_plugins
+                tool_names = tuple(sorted(set(TOOL_METADATA) - original_tool_names))
+                for tool_name in tool_names:
+                    # A factory may import a package the user installs after the plugin; its build checks it then.
+                    with suppress(ImportError):
+                        load_toolkit_class(tool_name)
                 hook_names = tuple(
                     sorted(
                         metadata.hook_name
@@ -71,7 +82,7 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 )
                 return _PluginCheckResult(
                     name=plugin.name,
-                    tool_names=tuple(sorted(set(TOOL_METADATA) - original_tool_names)),
+                    tool_names=tool_names,
                     hook_names=hook_names,
                     automation_names=tuple(sorted(automations.plugin_definitions)),
                     skill_directories=tuple(

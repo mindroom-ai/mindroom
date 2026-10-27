@@ -95,7 +95,7 @@ from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
-from mindroom.tool_system.toolkit_connections import is_unconnected_mcp_toolkit, run_connection
+from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_agent_toolkit_worker_target,
@@ -715,7 +715,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     persona: SubagentPersona | None = None,
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
-    list_mcp_functions: bool = False,
 ) -> Toolkit | None:
     """Build one configured toolkit for an agent.
 
@@ -728,8 +727,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
 
     ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
     them; without it ``dynamic_tools`` is skipped.
-    ``list_mcp_functions`` registers the functions of an Agno MCP toolkit that is not connected yet, for an agent
-    whose runs connect it.
     """
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
@@ -894,7 +891,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             execution_identity=execution_identity,
             runtime_paths=runtime_paths,
         ),
-        list_mcp_functions=list_mcp_functions,
     )
 
 
@@ -1365,8 +1361,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         tool_name = tool_entry.name
         authored_name = tool_entry.authored_name or tool_name
         runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
-        # A worker builds and connects its own copy of a toolkit routed through it.
-        routed = routes_through_worker(tool_name)
         with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
             toolkit = build_agent_toolkit(
                 tool_name,
@@ -1382,14 +1376,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
                 deferred_toolkits=searched_toolkits,
-                list_mcp_functions=not routed,
-            )
-        if routed and toolkit is not None and is_unconnected_mcp_toolkit(toolkit):
-            logger.warning(
-                "Skipping MCP toolkit routed through a worker because the primary lists only the MCP toolkits it "
-                "runs; remove the tool from worker_tools or have the plugin connect the toolkit when it builds it",
-                agent=agent_name,
-                tool=tool_name,
             )
         if toolkit is None:
             return None
@@ -1457,6 +1443,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             )
             adapted = replace(adapted, functions=functions)
         if not routes_through_worker(tool_name):
+            # A worker builds and connects its own copy of a toolkit routed through it.
             adapted = replace(adapted, connect=run_connection(toolkit))
         return _ToolkitEntry(adapted=adapted, toolkit=toolkit, deferral=deferral)
 
