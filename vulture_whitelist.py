@@ -13,7 +13,6 @@ _.validate_commands  # Pydantic field validator (src/mindroom/config/personal_ro
 _.validate_cron  # Pydantic field validator (src/mindroom/config/automations.py)
 _.validate_private_networks  # Pydantic field validator (src/mindroom/config/egress_broker.py)
 _.validate_post_paths  # Pydantic field validator (src/mindroom/config/egress_broker.py)
-post_paths  # Read by the broker once it enforces read-only opt-ins (src/mindroom/config/egress_broker.py)
 _.validate_reductions  # Pydantic model validator (src/mindroom/config/automations.py)
 _.reject_builtin_name  # Pydantic field validator (src/mindroom/config/automations.py)
 _.require_cron  # Pydantic model validator (src/mindroom/config/automations.py)

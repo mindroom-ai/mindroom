@@ -48,7 +48,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.audit import AuditRecord
-    from mindroom.egress_broker.secrets import SecretResult
+    from mindroom.egress_broker.oauth_reuse import OAuthAccess
+    from mindroom.egress_broker.secrets import SecretRequest, SecretResult
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
     from tests.egress_broker.raw_http import Script, UpstreamFactory
@@ -142,11 +143,12 @@ def allow_oauth_reuse(
     service: str = "github",
     *,
     provider: OAuthProvider | None = None,
+    access: OAuthAccess = "read_write",
 ) -> None:
-    """Let Agent Keys use, for `service`, the `provider` (default GitHub) connection that `target` resolves to."""
+    """Let Agent Keys use, for `service` at `access`, the `provider` (default GitHub) connection `target` resolves to."""
     provider = provider or github_oauth_provider()
     context = broker_credential_context(provider, Config(), runtime_paths, manager, target)
-    set_oauth_reuse(context, service, provider.id, enabled=True, by="@alice:example.org")
+    set_oauth_reuse(context, service, provider.id, enabled=True, by="@alice:example.org", access=access)
 
 
 @dataclass(frozen=True)
@@ -505,7 +507,7 @@ class BrokerFactory:
         config: EgressBrokerConfig | None = None,
         *,
         secrets: dict[str, str] | None = None,
-        resolve_secret: Callable[[WorkerClaims, str, EgressService], SecretResult] | None = None,
+        resolve_secret: Callable[[WorkerClaims, str, EgressService, SecretRequest], SecretResult] | None = None,
         dial_policy: DialPolicy | None = None,
         manage_url: str | None = None,
         scope_info: Callable[[WorkerClaims], ScopeInfo] | None = None,
@@ -529,12 +531,19 @@ class BrokerFactory:
 
         stored = dict(secrets or {})
         lookup = resolve_secret or (
-            lambda _claims, service, _routed: Secret(stored[service]) if service in stored else SecretMissing()
+            lambda _claims, service, _routed, _request: (
+                Secret(stored[service]) if service in stored else SecretMissing()
+            )
         )
 
-        async def recording_lookup(claims: WorkerClaims, service: str, routed: EgressService) -> SecretResult:
+        async def recording_lookup(
+            claims: WorkerClaims,
+            service: str,
+            routed: EgressService,
+            request: SecretRequest,
+        ) -> SecretResult:
             self.resolved.append(service)
-            return lookup(claims, service, routed)
+            return lookup(claims, service, routed, request)
 
         broker = EgressBroker(
             ca=self.ca,

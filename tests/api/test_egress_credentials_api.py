@@ -1449,6 +1449,8 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
         runtime_paths=portal["paths"],
         credentials_manager=get_runtime_credentials_manager(portal["paths"]),
         worker_target=build_connection_agent_target(config, portal["paths"], "@alice:example.org", "personal"),
+        request=secrets.SecretRequest(method="GET", path="/"),
+        read_only=None,
     )
     assert isinstance(token, secrets.Secret)
 
@@ -1868,6 +1870,8 @@ def _broker_reads(portal: dict[str, Any], requester_id: str, agent: str, service
         runtime_paths=portal["paths"],
         credentials_manager=get_runtime_credentials_manager(portal["paths"]),
         worker_target=_broker_target(portal, requester_id, agent),
+        request=secrets.SecretRequest(method="GET", path="/"),
+        read_only=None,
     )
 
 

@@ -24,6 +24,8 @@ __all__ = [
     "Secret",
     "SecretMissing",
     "SecretNeedsReconnect",
+    "SecretReadOnly",
+    "SecretRequest",
     "SecretResult",
     "SecretServiceChanged",
     "SecretUnavailable",
@@ -194,6 +196,20 @@ def delete_secret(
 
 
 @dataclass(frozen=True)
+class SecretRequest:
+    """What the broker knows about the request it resolves a secret for, which an access level can depend on.
+
+    `method` is the request's method as sent, `path` its path without the query, `websocket` whether it asks to switch
+    to a WebSocket, and `method_override` whether it carries a header that asks the server to read another method.
+    """
+
+    method: str
+    path: str
+    websocket: bool = False
+    method_override: bool = False
+
+
+@dataclass(frozen=True)
 class Secret:
     """The secret the broker injects for one request; its value never appears in a repr."""
 
@@ -236,6 +252,17 @@ class SecretUnavailable:
 
 
 @dataclass(frozen=True)
+class SecretReadOnly:
+    """The `provider` account may only read for this service, and the request may write; the connection was not read.
+
+    `requester_owned` says the account is the requester's own, which only they can allow to write.
+    """
+
+    provider: str
+    requester_owned: bool = False
+
+
+@dataclass(frozen=True)
 class SecretServiceChanged:
     """The service no longer has the definition whose rule routed the request, so its credential may be for other hosts.
 
@@ -243,7 +270,9 @@ class SecretServiceChanged:
     """
 
 
-type SecretResult = Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretServiceChanged
+type SecretResult = (
+    Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretReadOnly | SecretServiceChanged
+)
 
 
 @dataclass(frozen=True)

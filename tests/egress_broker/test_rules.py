@@ -10,6 +10,7 @@ import pytest
 from mindroom.config.egress_broker import (
     EgressAuth,
     EgressBrokerConfig,
+    EgressReadOnly,
     EgressRule,
     EgressService,
 )
@@ -22,9 +23,11 @@ from mindroom.egress_broker.rules import (
     is_ambiguous_path,
     match_rule,
     path_matches,
+    read_only_allows,
     route_request,
     strip_hop_by_hop,
 )
+from mindroom.egress_broker.secrets import SecretRequest
 
 
 def _route(config: EgressBrokerConfig, host: str, port: int, path: str) -> Route:
@@ -1024,3 +1027,52 @@ def test_keep_upgrade_preserves_websocket_handshake() -> None:
     assert (b"connection", b"Upgrade") in result
     assert (b"upgrade", b"websocket") in result
     assert (b"x-keep", b"this") in result
+
+
+_CALENDAR_READS = EgressReadOnly(post_paths=["/calendar/v3/freeBusy"])
+_EVENTS = "/calendar/v3/calendars/primary/events"
+
+
+@pytest.mark.parametrize(
+    ("read_only", "request_facts", "allowed"),
+    [
+        (_CALENDAR_READS, SecretRequest(method="GET", path=_EVENTS), True),
+        (_CALENDAR_READS, SecretRequest(method="HEAD", path=_EVENTS), True),
+        (_CALENDAR_READS, SecretRequest(method="get", path=_EVENTS), True),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), True),
+        (_CALENDAR_READS, SecretRequest(method="post", path="/calendar/v3/freeBusy"), True),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/x"), True),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusyX"), False),
+        (_CALENDAR_READS, SecretRequest(method="POST", path=_EVENTS), False),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/batch"), False),
+        (_CALENDAR_READS, SecretRequest(method="PUT", path=_EVENTS), False),
+        (_CALENDAR_READS, SecretRequest(method="PATCH", path=_EVENTS), False),
+        (_CALENDAR_READS, SecretRequest(method="DELETE", path=_EVENTS), False),
+        (_CALENDAR_READS, SecretRequest(method="OPTIONS", path=_EVENTS), False),
+        (_CALENDAR_READS, SecretRequest(method="GET", path="/ws", websocket=True), False),
+        (_CALENDAR_READS, SecretRequest(method="GET", path=_EVENTS, method_override=True), False),
+        (
+            _CALENDAR_READS,
+            SecretRequest(method="POST", path="/calendar/v3/freeBusy", method_override=True),
+            False,
+        ),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/../events"), False),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy/%2e%2e/events"), False),
+        (_CALENDAR_READS, SecretRequest(method="POST", path="/calendar/v3/freeBusy//x"), False),
+        (None, SecretRequest(method="GET", path=_EVENTS), True),
+        (None, SecretRequest(method="HEAD", path=_EVENTS), True),
+        (None, SecretRequest(method="POST", path="/calendar/v3/freeBusy"), False),
+        (None, SecretRequest(method="DELETE", path=_EVENTS), False),
+    ],
+)
+def test_read_only_allows_matrix(
+    read_only: EgressReadOnly | None,
+    request_facts: SecretRequest,
+    allowed: bool,
+) -> None:
+    """Read-only access reads with GET and HEAD, and POSTs only to a listed path; nothing else gets the account.
+
+    A WebSocket upgrade or a method-override header could write whatever the method says, and a service that no longer
+    declares read-only still allows only GET and HEAD.
+    """
+    assert read_only_allows(read_only, request_facts) is allowed

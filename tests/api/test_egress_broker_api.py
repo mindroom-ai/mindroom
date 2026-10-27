@@ -742,6 +742,8 @@ def _broker_reads(requester_id: str, scope: WorkerScope | None, agent: str, serv
         runtime_paths=paths,
         credentials_manager=get_runtime_credentials_manager(paths),
         worker_target=claims.to_worker_target(),
+        request=secrets.SecretRequest(method="GET", path="/"),
+        read_only=None,
     )
 
 

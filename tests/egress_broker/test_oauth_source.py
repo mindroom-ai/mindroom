@@ -13,6 +13,7 @@ import httpx
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.egress_broker import EgressReadOnly
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -29,6 +30,8 @@ from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
     SecretNeedsReconnect,
+    SecretReadOnly,
+    SecretRequest,
     SecretResult,
     SecretUnavailable,
     load_egress_document,
@@ -173,8 +176,10 @@ def _resolve(
     *,
     provider_id: str = "github",
     service: str | None = None,
+    request: SecretRequest | None = None,
+    read_only: EgressReadOnly | None = None,
 ) -> SecretResult:
-    """Resolve the token of the service named `service`, by default after its provider."""
+    """Resolve the token of the service named `service`, by default after its provider, for a GET unless `request`."""
     return resolve_oauth_token(
         service=service or provider_id,
         provider_id=provider_id,
@@ -182,6 +187,8 @@ def _resolve(
         runtime_paths=runtime_paths,
         credentials_manager=manager,
         worker_target=target,
+        request=request or SecretRequest(method="GET", path="/"),
+        read_only=read_only,
     )
 
 
@@ -1083,3 +1090,69 @@ def test_changing_access_keeps_other_entries(
     assert stored["services"]["github"]["access"] == "read"
     assert oauth_reuse_access(context, "gists", "github") == "read_write"
     assert oauth_reuse_access(context, "github-work", "github") == "read"
+
+
+_POST = SecretRequest(method="POST", path="/repos/o/r/issues")
+_GET = SecretRequest(method="GET", path="/repos/o/r/issues")
+
+
+def test_read_only_refusal_never_reads_the_connection(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write under a read-only opt-in is refused before the connection is read or refreshed; a read gets the token.
+
+    The service declares no `read_only` here, as when its config dropped it after the account was allowed read-only,
+    so only GET and HEAD read.
+    """
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    alice = _broker_target("@alice:example.org")
+    context = _alice_reuse_context(config, runtime_paths, manager)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(oauth_source, "refresh_oauth_credentials_blocking", _never)
+        patched.setattr(oauth_source, "load_oauth_credentials_snapshot_sync", _never)
+        refused = _resolve(config, runtime_paths, manager, alice, request=_POST)
+        listed = _resolve(
+            config,
+            runtime_paths,
+            manager,
+            alice,
+            request=_POST,
+            read_only=EgressReadOnly(post_paths=["/search"]),
+        )
+    read = _resolve(config, runtime_paths, manager, alice, request=_GET)
+    listed_post = _resolve(
+        config,
+        runtime_paths,
+        manager,
+        alice,
+        request=_POST,
+        read_only=EgressReadOnly(post_paths=["/repos/o/r/issues"]),
+    )
+
+    assert refused == listed == SecretReadOnly(provider="github", requester_owned=True)
+    assert read == listed_post == Secret("alice-access")
+
+
+def test_read_write_entry_ignores_method(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """A read-and-write opt-in gets the token whatever the request does."""
+    connect_account(manager, account_store("@alice:example.org"), "alice-access")
+    alice = _broker_target("@alice:example.org")
+    context = _alice_reuse_context(config, runtime_paths, manager)
+    set_oauth_reuse(context, "github", "github", enabled=True, by="@alice:example.org", access="read_write")
+    override = SecretRequest(method="GET", path="/", method_override=True)
+    websocket = SecretRequest(method="GET", path="/", websocket=True)
+
+    results = [
+        _resolve(config, runtime_paths, manager, alice, request=request) for request in (_POST, override, websocket)
+    ]
+
+    assert results == [Secret("alice-access")] * 3
