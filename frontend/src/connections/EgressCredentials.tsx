@@ -389,13 +389,8 @@ function AgentSection({
   // Its own, so that another action never closes the sign-in under way.
   const signIn = useRef<AbortController | null>(null);
 
-  useEffect(
-    () => () => {
-      operation.current?.abort();
-      signIn.current?.abort();
-    },
-    [],
-  );
+  useEffect(() => () => operation.current?.abort(), []);
+  useEffect(() => () => signIn.current?.abort(), []);
 
   const newOperation = () => {
     operation.current?.abort();
@@ -468,9 +463,9 @@ function AgentSection({
   };
 
   // A service of the user's own with its own account, from the preset that
-  // signs in with the row's provider, and then that account's sign-in. The
-  // popup opens on the click, before the service is saved, so the browser
-  // lets it open.
+  // signs in with the row's provider, and then that account's sign-in; the
+  // page shows the new row once it ends. The popup opens on the click, before
+  // the service is saved, so the browser lets it open.
   const addAccount = (label: string, name: string) => {
     if (!addingAccount) return;
     const { preset, oauth } = addingAccount;
@@ -491,7 +486,6 @@ function AgentSection({
           { preset, display_name: label, oauth_separate_account: true },
           SERVICE_ERROR_MESSAGES,
         );
-        onChanged();
         return requestConnection<OAuthAuthorization>(
           paths.connect,
           signal,
