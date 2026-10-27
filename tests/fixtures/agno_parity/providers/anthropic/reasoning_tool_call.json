@@ -16,8 +16,7 @@
       "api_key": "parity-test-key",
       "extra_kwargs": {
         "thinking": {
-          "budget_tokens": 2048,
-          "type": "enabled"
+          "type": "adaptive"
         }
       },
       "id": "claude-sonnet-5-5",
@@ -164,6 +163,12 @@
           }
         }
       ],
+      "thinking": {
+        "type": "adaptive",
+        "block_binding": {
+          "prefix_mismatch_behavior": "drop_block"
+        }
+      },
       "tools": [
         {
           "name": "get_weather",
@@ -216,19 +221,16 @@
           }
         }
       ],
-      "thinking": {
-        "budget_tokens": 2048,
-        "type": "enabled"
-      },
       "stream": true
     },
     "headers": {
       "accept": "application/json",
+      "anthropic-beta": "thinking-binding-controls-2026-08-01",
       "anthropic-version": "2023-06-01",
       "content-type": "application/json"
     },
     "method": "POST",
-    "url": "https://api.anthropic.com/v1/messages"
+    "url": "https://api.anthropic.com/v1/messages?beta=true"
   },
   "response_raw": {
     "headers": {
