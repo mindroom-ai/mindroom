@@ -4588,6 +4588,31 @@ def test_kubernetes_stale_worker_replacement_is_not_retried() -> None:
     assert worker_id not in core_api.services
 
 
+def test_kubernetes_stale_running_worker_is_refused_when_its_replacement_is_still_stale() -> None:
+    """A ready worker from an older release whose replacement lands on a cached old image is marked failed."""
+    backend, apps_api, core_api = _backend()
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    assert first_handle.status == "ready"
+    # Manager replacement, as on a primary restart, forgets which workers were already checked.
+    backend.shutdown()
+    # Under the default `IfNotPresent` the replacement pod reuses the node's cached old image.
+    _answer_worker_health(backend, lambda: 3)
+    _install_real_elapsed_wait_for_ready(backend, ready_after_seconds=1.6)
+    events: list[WorkerReadyProgress] = []
+
+    with pytest.raises(WorkerBackendError, match=f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 3"):
+        backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0, progress_sink=events.append)
+
+    worker_id = first_handle.worker_id
+    assert apps_api.deleted_names == [worker_id]
+    assert len(apps_api.created_bodies) == 2
+    deployment = apps_api.deployments[worker_id]
+    assert deployment.metadata.annotations["mindroom.ai/worker-status"] == "failed"
+    assert deployment.spec.replicas == 0
+    assert worker_id not in core_api.services
+    assert [event.phase for event in events] == ["cold_start", "failed"]
+
+
 def test_kubernetes_stale_worker_refusal_under_always_blames_no_cached_copy() -> None:
     """Under pull policy Always a replacement pulls the tag again, so a stale replacement means the tag itself is old."""
     backend, apps_api, _core_api = _backend(image_pull_policy="Always")

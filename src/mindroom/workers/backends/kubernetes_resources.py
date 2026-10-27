@@ -1083,7 +1083,7 @@ class KubernetesResourceManager:
         *,
         timeout_seconds: float,
     ) -> None:
-        """Replace one Deployment when pod-template drift requires a full recreate."""
+        """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
         self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
