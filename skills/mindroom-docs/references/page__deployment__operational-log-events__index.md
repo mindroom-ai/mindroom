@@ -131,7 +131,7 @@ Logged once for each conversation database the first start after [upgrading to c
 | `compacted` | Whether the file was compacted to return the space its old tables used |
 | `duration_seconds` | Time the conversion and compaction took |
 
-`compacted` is `false` when compacting would return little or the directory lacked free space of about twice the converted data; a `conversation_compaction_failed` warning names the database when compacting failed, and the conversion still stands.
+`compacted` is `false` when compacting would return little or the directory lacked the space the [upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) give for it; a `conversation_compaction_failed` warning names the database when compacting failed, and the conversion still stands.
 A database that could not convert at startup logs `conversation_conversion_skipped_store` instead.
 
 ### `tool_call_limit_reached`

@@ -8,12 +8,13 @@ Always back up configuration and persistent storage before replacing the running
 
 The first start after this upgrade converts the conversation database of every agent and team, private instances included, and the internal usage database under `system/`, to a new layout before any agent comes online.
 Each converted database logs one `conversation_converted` record (see [Events](https://docs.mindroom.chat/deployment/operational-log-events/#conversation_converted)).
-Meanwhile `/api/health` answers `200` and `/api/ready` answers `503` with the detail `Converting conversation storage`; the process becomes ready only after the conversion and the rest of startup finish.
+The process stays live but becomes ready only after the conversion and the rest of startup finish; [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness) says what each endpoint answers meanwhile.
 The conversion is one-way, and downgrading afterwards is not supported.
 
 ### Before upgrading
 
-Point every startup probe at `/api/health`, not `/api/ready`, as the bundled Helm charts do: a startup probe on `/api/ready` restarts the process during a long conversion, each restart rolls back the database being converted, and a large one never finishes (see [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness)).
+Check that every startup probe asks `/api/health`, as the bundled Helm charts do and [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness) requires.
+A deploy that rolls back when readiness times out, such as `helm upgrade --atomic` with its default 5-minute timeout, can roll back mid-conversion and start the older release on converted databases (see [Downgrading](#downgrading)), so raise the timeout or drop `--atomic` for this upgrade.
 Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about two and a half times the total size of their `.db` files.
 A database that no release since v2026.10.341 has opened can still hold Agno 2 run blobs or the compaction archive, which the conversion copies first, so it needs up to about three and a half times its size.
 A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.

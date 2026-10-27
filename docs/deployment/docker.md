@@ -108,7 +108,7 @@ curl http://localhost:8765/api/health
 curl http://localhost:8765/api/ready
 ```
 
-Use `/api/health` for startup and liveness probes and `/api/ready` for readiness; responses and why a startup probe must not use readiness are described in [Health & Readiness](operational-log-events.md#health-readiness).
+[Health & Readiness](operational-log-events.md#health-readiness) says which endpoint each probe should ask and what each answers.
 A hosted container waiting for pairing approval is live but not ready; find the approval link with `docker logs mindroom`.
 
 ## Building from Source
