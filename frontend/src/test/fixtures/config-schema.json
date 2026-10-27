@@ -161,7 +161,7 @@
             }
           ],
           "default": null,
-          "description": "Whether to use markdown formatting",
+          "description": "Whether the system prompt tells the agent its replies are shown as Markdown",
           "title": "Markdown"
         },
         "knowledge_graph": {
@@ -1326,7 +1326,7 @@
         },
         "markdown": {
           "default": true,
-          "description": "Default markdown setting",
+          "description": "Default for whether system prompts tell agents and team leaders their replies are shown as Markdown",
           "title": "Markdown",
           "type": "boolean"
         },
@@ -4691,6 +4691,7 @@
       "type": "object"
     },
     "TeamConfig": {
+      "additionalProperties": false,
       "description": "Configuration for a team of agents.",
       "properties": {
         "display_name": {
@@ -4777,6 +4778,10 @@
         "mode": {
           "default": "coordinate",
           "description": "Team collaboration mode: coordinate or collaborate",
+          "enum": [
+            "coordinate",
+            "collaborate"
+          ],
           "title": "Mode",
           "type": "string"
         },

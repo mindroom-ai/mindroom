@@ -77,7 +77,7 @@ def summary_model(
     return ScriptedSummaryModel(
         turns=[_steps(reply) for reply in replies],
         identity=ModelIdentity(id=model_id, provider=provider, provider_name=provider),
-        capabilities=Capabilities(claude_family=claude),
+        capabilities=Capabilities(conservative_token_estimates=claude),
         default=summary_steps(default) if default is not None else None,
     )
 

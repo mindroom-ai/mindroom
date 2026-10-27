@@ -3225,13 +3225,12 @@ _PREPARED_TEAM_TURN = _prepared_team_execution_context(final_prompt="Build it")
 
 @dataclass(frozen=True)
 class _TeamRunCall:
-    """One ``run_team`` call the bridge made: the team, its request, the run's context, and its stream mode."""
+    """One ``run_team`` call the bridge made: the team, its request, and the run's context."""
 
     spec: TeamSpec
     messages: list[Message]
     ctx: RunContext
     request_template: ModelRequest
-    stream: bool
 
 
 @contextmanager
@@ -3246,11 +3245,10 @@ def _recorded_team_runs() -> Iterator[list[_TeamRunCall]]:
         *,
         ctx: RunContext,
         request_template: ModelRequest,
-        stream: bool,
         **kwargs: object,
     ) -> AsyncIterator[object]:
-        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template, stream))
-        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, stream=stream, **kwargs)  # type: ignore[arg-type]
+        recorded.append(_TeamRunCall(spec, list(messages), ctx, request_template))
+        return real_run_team(spec, messages, ctx=ctx, request_template=request_template, **kwargs)  # type: ignore[arg-type]
 
     with patch("mindroom.teams.leader.run_team", new=recording_run_team):
         yield recorded
@@ -3473,6 +3471,69 @@ def test_team_run_records_helper_usage_in_its_conversation(team_app_client: Test
 class TestTeamCompletion:
     """Tests for team model support (Phase 3)."""
 
+    @pytest.mark.parametrize(
+        ("prompts", "opening"),
+        [
+            ({}, ""),
+            (
+                {"TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": "Custom identity of {display_name}.\n"},
+                "Custom identity of Super Team.\n\n",
+            ),
+            (
+                {"TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": "Custom identity of {display_name}."},
+                "Custom identity of Super Team.\n\n",
+            ),
+        ],
+        ids=["default", "custom_matrix_identity", "custom_matrix_identity_without_a_trailing_newline"],
+    )
+    def test_an_api_team_leader_is_told_it_answers_through_the_api_as_its_members_are(
+        self,
+        team_config: Config,
+        prompts: dict[str, str],
+        opening: str,
+    ) -> None:
+        """The leader gets the API identity and history format, never the Matrix chatroom, history, or mention guide.
+
+        An operator's custom Matrix leader identity, without a custom API one, opens it a blank line apart, as it does
+        for an agent, whether or not the authored text ends with a newline.
+        """
+        config = team_config.model_copy(update={"prompts": prompts})
+        runtime_paths = _runtime_paths_for_config(config)
+        identity = _team_identity("super_team", runtime_paths)
+        scope_context = load_bound_scope_session(
+            member_names=[],
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=identity,
+            team_name="super_team",
+        )
+
+        built = openai_compat._build_team(
+            "super_team",
+            config,
+            runtime_paths,
+            identity,
+            scope_context,
+            {},
+            None,
+            models=openai_compat._openai_team_models("super_team", config, lambda model_name: model_name),
+        )
+
+        leader_prompt = str(built.spec.leader.system_messages[0].content)
+        assert leader_prompt.startswith(
+            f"<your_role>\n{opening}## Your Identity\nYou are Super Team, the MindRoom team exposed through the"
+            " OpenAI-compatible API: you lead its members, hand them work, and write the team's answer.\n"
+            "Team purpose: Collaborative engineering team\n"
+            "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines.",
+        )
+        for matrix_text in ("Matrix chatroom", "<conversation>", "complete Matrix ID"):
+            assert matrix_text not in leader_prompt
+        for member in built.spec.members:
+            assert "the MindRoom agent exposed through the OpenAI-compatible API" in str(
+                member.spec.system_messages[0].content,
+            )
+
     @pytest.mark.asyncio
     async def test_prepare_openai_team_execution_uses_non_matrix_team_preparation_defaults(
         self,
@@ -3585,7 +3646,6 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["message"] == "Build a feature"
         [run] = runs
         assert [message.content for message in run.messages] == ["Build a feature"]
-        assert run.stream is False
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 321
 
@@ -3627,12 +3687,13 @@ class TestTeamCompletion:
         assert response.status_code == 200
         assert scopes == [HistoryScope(kind="team", scope_id="super_team")]
 
-    def test_team_non_streaming_is_the_blocking_team_document(self, team_app_client: TestClient) -> None:
-        """The completion is the document a blocking Matrix reply delivers, rendered from the runs that ended.
+    def test_team_non_streaming_is_the_leader_s_answer_as_a_streamed_completion_sends_it(
+        self,
+        team_app_client: TestClient,
+    ) -> None:
+        """The completion is the leader's answer, the text a streamed team completion sends, whatever the members did.
 
-        The members come in the order their runs ended: one that failed before any text shows its error, and one
-        delegated twice shows twice, then the consensus follows. Agno's blocking team reply rendered the finished team
-        output this way, and API clients replay the text as history.
+        The members' results reach the client through the leader, as they do when the completion streams.
         """
 
         async def overloaded() -> None:
@@ -3666,10 +3727,7 @@ class TestTeamCompletion:
             )
 
         assert response.status_code == 200
-        assert response.json()["choices"][0]["message"]["content"] == (
-            "**Checker**: Checker overloaded\n\n**Writer**: Draft one.\n\n**Writer**: Draft two."
-            "\n\n\n**Team Consensus**:\n\nAll three done."
-        )
+        assert response.json()["choices"][0]["message"]["content"] == "All three done."
 
     def test_team_non_streaming_reports_leader_and_member_token_usage(self, team_app_client: TestClient) -> None:
         """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""
@@ -3935,7 +3993,6 @@ class TestTeamCompletion:
         assert mock_prepare.await_args.kwargs["built"] is team
         [run] = runs
         assert [message.content for message in run.messages] == ["Build it"]
-        assert run.stream is True
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
 

@@ -48,7 +48,7 @@ from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPrese
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
-from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -1166,7 +1166,7 @@ def _settle_completed_attempt(
             response_text=ai_runtime.EMPTY_RESPONSE_NOTICE,
         )
     decision = continuation_decision_from_tools(
-        (*(tool.call for tool in resolution.tool_executions), *resolution.control_calls),
+        (*stopped_calls(resolution.tool_executions), *resolution.control_calls),
         original_prompt=continuation.original_prompt,
         continuation_count=continuation_count,
     )

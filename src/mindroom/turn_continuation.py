@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
     from mindroom.llm.events import ReportedCall
+    from mindroom.llm.runs import ToolExecution
 
-__all__ = ["TURN_CONTINUATION_LIMIT", "continuation_decision_from_tools"]
+__all__ = ["TURN_CONTINUATION_LIMIT", "continuation_decision_from_tools", "stopped_calls"]
 
 TURN_CONTINUATION_LIMIT = 4
 _MODEL_SWITCH_FUNCTION_NAME = "switch_thread_model"
@@ -101,6 +102,14 @@ def _failed_model_switch_continuation_prompt(original_prompt: str) -> str:
     )
 
 
+def stopped_calls(tools: Iterable[ToolExecution]) -> list[ReportedCall]:
+    """Return the calls among a run's ``tools`` that the run stopped after, for ``continuation_decision_from_tools``.
+
+    Only such a call leaves the turn unanswered; a refused call never ran, so the model answered after it.
+    """
+    return [tool.call for tool in tools if tool.stop_after_call]
+
+
 def continuation_decision_from_tools(
     tools: Sequence[ReportedCall] | None,
     *,
@@ -109,9 +118,10 @@ def continuation_decision_from_tools(
 ) -> _TurnContinuationDecision:
     """Return the continuation decision for a completed model response.
 
-    The last successful thread-model switch in provider call order decides; a response whose every switch was
-    rejected resumes with the current model. At the continuation limit, either case ends the reply with its limit
-    message instead.
+    ``tools`` are the calls the run stopped after (``stopped_calls``), which the model has not answered; a call the run
+    refused never ran and does not belong here. The last successful thread-model switch in provider call order
+    decides; a response whose every switch was rejected resumes with the current model. At the continuation limit,
+    either case ends the reply with its limit message instead.
     """
     switch_results = [tool.result for tool in tools or () if tool.tool_name == _MODEL_SWITCH_FUNCTION_NAME]
     if not switch_results:

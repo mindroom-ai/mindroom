@@ -22,7 +22,6 @@ from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_jud
 from mindroom.judgment.typesafe import _PINNED_MODEL, SYSTEM_ONE
 from mindroom.llm.errors import ProviderError
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.providers.tool_policy import provider_tools_disabled
 from tests.conftest import install_model_providers, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.gemini_helpers import gemini_decision_response
@@ -252,7 +251,6 @@ async def test_llm_native_tool_mode_is_refused_before_network(tmp_path: Path, mo
     assert result.decision is None
     assert result.failure == "provider_error"
     assert requests == []
-    assert not provider_tools_disabled()
 
 
 @pytest.mark.asyncio
@@ -260,13 +258,8 @@ async def test_llm_decision_request_offers_no_tools_and_disables_provider_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The decision is one request with tool choice none, sent while provider tools are disabled."""
-    disabled: list[bool] = []
-
-    async def observe() -> None:
-        disabled.append(provider_tools_disabled())
-
-    judge = _judge(monkeypatch, Await(observe), *_decision('{"decision": true}', input_tokens=9, output_tokens=1))
+    """The decision is one request with tool choice none, which disables provider tools."""
+    judge = _judge(monkeypatch, *_decision('{"decision": true}', input_tokens=9, output_tokens=1))
     result = await judge_with_llm(
         _request(),
         LLMJudgmentConfig(provider="llm", model="cheap"),
@@ -281,8 +274,6 @@ async def test_llm_decision_request_offers_no_tools_and_disables_provider_tools(
         9,
         1,
     )
-    assert disabled == [True]
-    assert not provider_tools_disabled()
     [request] = judge.requests
     assert (request.tools, request.tool_choice) == ((), "none")
     assert [message.role for message in request.messages] == ["system", "user"]

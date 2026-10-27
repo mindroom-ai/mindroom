@@ -25,7 +25,7 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -105,9 +105,7 @@ def _function_names(build: AgentBuild) -> list[str]:
 
 
 def _system_prompt(build: AgentBuild) -> str:
-    content = prompt_for_turn(build).content
-    assert isinstance(content, str)
-    return content
+    return system_text(prompt_for_turn(build))
 
 
 def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "P", **options: Any) -> AgentBuild:  # noqa: ANN401
@@ -156,7 +154,7 @@ def _minimal(build: AgentBuild) -> MinimalTurn:
 
 def _bootstrap(build: AgentBuild) -> str:
     """Return the bootstrap system message of one minimal turn of ``build``."""
-    return _minimal(build).system_message.get_content_string()
+    return system_text(_minimal(build).system_messages)
 
 
 def _roster(system_message: str) -> str:
@@ -218,9 +216,9 @@ async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monke
 
     request = await _persona_request(runtime, monkeypatch, inline_persona("P", None, None, None), "task")
 
-    system, *history = request.messages
-    assert str(system.content).startswith("P\n")
-    assert "EARLIER-WORK" not in str(system.content)
+    history = [message for message in request.messages if message.role != "system"]
+    assert system_text(request.messages).startswith("P\n")
+    assert "EARLIER-WORK" not in system_text(request.messages)
     summaries = [message for message in history if is_compaction_summary(message)]
     assert len(summaries) == 1
     assert "EARLIER-WORK" in str(summaries[0].content)
@@ -741,7 +739,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         knowledge=None,
         active_model_name=None,
     )
-    assert standard.spec.system_message is None
+    assert standard.spec.system_messages == ()
     assert standard.prompt.persona is None
     assert "Configured role" in (standard.prompt.role or "")
     assert minimal.surface.mode == "minimal"

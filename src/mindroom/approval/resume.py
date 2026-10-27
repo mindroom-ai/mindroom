@@ -135,7 +135,7 @@ def resume_from_session(
 ) -> AsyncIterator[RunEvent]:
     """Resume ``paused`` where ``storage`` stores it with ``decisions``: the history ``plan`` replays, then the request.
 
-    The resume reuses the paused run's stored system message and shares the session's state with its tools; the
+    The resume reuses the paused run's stored system messages and shares the session's state with its tools; the
     stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the configured model the run uses,
     which its tool calls carry.
     """

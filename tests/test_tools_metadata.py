@@ -2193,6 +2193,44 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
             )
 
 
+@pytest.mark.parametrize("tool_name", ["reasoning", "zep", "daytona"])
+def test_add_instructions_is_rejected_because_instructions_always_show(tool_name: str) -> None:
+    """The retired switch of Agno's toolkits is named and the author told to remove it, wherever a tool is authored."""
+    for prefix in ("agents.a.tools", "defaults.tools"):
+        with pytest.raises(ToolConfigOverrideError) as exc_info:
+            validate_authored_tool_entry_overrides(tool_name, {"add_instructions": True}, config_path_prefix=prefix)
+
+        assert str(exc_info.value) == (
+            f"{prefix}.{tool_name}.add_instructions was removed; a toolkit's instructions always reach the prompt,"
+            " so remove the setting."
+        )
+    assert "add_instructions" not in {field.name for field in TOOL_METADATA[tool_name].config_fields or ()}
+
+
+def test_config_load_rejects_a_retired_add_instructions_setting(tmp_path: Path) -> None:
+    """An old ``config.yaml`` that still switches on ``reasoning``'s instructions fails to load, naming the key."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "agents": {
+                    "researcher": {
+                        "display_name": "Researcher",
+                        "tools": [{"reasoning": {"add_instructions": True, "add_few_shot": True}}],
+                    },
+                },
+            },
+            runtime_paths,
+        )
+
+    expected = (
+        "agents.researcher.tools[0].reasoning.add_instructions was removed; a toolkit's instructions always reach"
+        " the prompt, so remove the setting."
+    )
+    assert expected in str(exc_info.value)
+
+
 @pytest.mark.parametrize(
     ("tool_name", "field_name"),
     [

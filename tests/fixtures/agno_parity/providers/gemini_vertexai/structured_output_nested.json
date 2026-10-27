@@ -243,7 +243,46 @@
       },
       "generationConfig": {
         "responseMimeType": "application/json",
-        "responseSchema": {
+        "responseJsonSchema": {
+          "$defs": {
+            "CronSchedule": {
+              "description": "Standard cron-like schedule definition.",
+              "properties": {
+                "minute": {
+                  "default": "*",
+                  "description": "0-59, *, */5, or comma-separated",
+                  "title": "Minute",
+                  "type": "string"
+                },
+                "hour": {
+                  "default": "*",
+                  "description": "0-23, *, */2, or comma-separated",
+                  "title": "Hour",
+                  "type": "string"
+                },
+                "day": {
+                  "default": "*",
+                  "description": "1-31, *, or comma-separated",
+                  "title": "Day",
+                  "type": "string"
+                },
+                "month": {
+                  "default": "*",
+                  "description": "1-12, *, or comma-separated",
+                  "title": "Month",
+                  "type": "string"
+                },
+                "weekday": {
+                  "default": "*",
+                  "description": "0-6 (0=Sunday), *, or comma-separated",
+                  "title": "Weekday",
+                  "type": "string"
+                }
+              },
+              "title": "CronSchedule",
+              "type": "object"
+            }
+          },
           "description": "Structured representation of a scheduled task or workflow.",
           "properties": {
             "schedule_type": {
@@ -252,140 +291,132 @@
                 "cron"
               ],
               "title": "Schedule Type",
-              "type": "STRING"
+              "type": "string"
             },
             "is_conditional": {
               "default": false,
               "title": "Is Conditional",
-              "type": "BOOLEAN"
+              "type": "boolean"
             },
             "execute_at": {
-              "format": "date-time",
-              "nullable": true,
-              "title": "Execute At",
-              "type": "STRING"
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Execute At"
             },
             "cron_schedule": {
-              "description": "Standard cron-like schedule definition.",
-              "nullable": true,
-              "properties": {
-                "minute": {
-                  "default": "*",
-                  "description": "0-59, *, */5, or comma-separated",
-                  "title": "Minute",
-                  "type": "STRING"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CronSchedule"
                 },
-                "hour": {
-                  "default": "*",
-                  "description": "0-23, *, */2, or comma-separated",
-                  "title": "Hour",
-                  "type": "STRING"
-                },
-                "day": {
-                  "default": "*",
-                  "description": "1-31, *, or comma-separated",
-                  "title": "Day",
-                  "type": "STRING"
-                },
-                "month": {
-                  "default": "*",
-                  "description": "1-12, *, or comma-separated",
-                  "title": "Month",
-                  "type": "STRING"
-                },
-                "weekday": {
-                  "default": "*",
-                  "description": "0-6 (0=Sunday), *, or comma-separated",
-                  "title": "Weekday",
-                  "type": "STRING"
+                {
+                  "type": "null"
                 }
-              },
-              "property_ordering": [
-                "minute",
-                "hour",
-                "day",
-                "month",
-                "weekday"
               ],
-              "title": "CronSchedule",
-              "type": "OBJECT"
+              "default": null
             },
             "message": {
               "title": "Message",
-              "type": "STRING"
+              "type": "string"
             },
             "description": {
               "title": "Description",
-              "type": "STRING"
+              "type": "string"
             },
             "history_limit": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Max recent thread messages the responding agent sees when the task fires; 0 means no history",
-              "minimum": 0.0,
-              "nullable": true,
-              "title": "History Limit",
-              "type": "INTEGER"
+              "title": "History Limit"
             },
             "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
               "description": "Configured model alias for this scheduled run only",
-              "nullable": true,
-              "title": "Model",
-              "type": "STRING"
+              "title": "Model"
             },
             "created_by": {
-              "nullable": true,
-              "title": "Created By",
-              "type": "STRING"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Created By"
             },
             "thread_id": {
-              "nullable": true,
-              "title": "Thread Id",
-              "type": "STRING"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Thread Id"
             },
             "room_id": {
-              "nullable": true,
-              "title": "Room Id",
-              "type": "STRING"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Room Id"
             },
             "new_thread": {
               "default": false,
               "title": "New Thread",
-              "type": "BOOLEAN"
+              "type": "boolean"
             },
             "silent": {
               "default": false,
               "title": "Silent",
-              "type": "BOOLEAN"
+              "type": "boolean"
             },
             "pre_approved_call": {
               "default": false,
               "description": "Whether the requester approved this one-time task's tool call while scheduling it",
               "title": "Pre Approved Call",
-              "type": "BOOLEAN"
+              "type": "boolean"
             }
           },
-          "property_ordering": [
-            "schedule_type",
-            "is_conditional",
-            "execute_at",
-            "cron_schedule",
-            "message",
-            "description",
-            "history_limit",
-            "model",
-            "created_by",
-            "thread_id",
-            "room_id",
-            "new_thread",
-            "silent",
-            "pre_approved_call"
-          ],
           "required": [
             "schedule_type",
             "message",
             "description"
           ],
           "title": "ScheduledWorkflow",
-          "type": "OBJECT"
+          "type": "object"
         }
       }
     },

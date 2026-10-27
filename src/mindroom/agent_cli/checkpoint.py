@@ -122,9 +122,12 @@ class BatchCheckpoint:
                     result=result.get_content_string() if result is not None else None,
                     is_error=result.tool_call_error if result is not None else None,
                 )
-            run.tools = [tool for tool in run.tools or () if tool.tool_call_id not in observed] + list(
-                observed.values(),
-            )
+            # Each observed call takes its own entry's place, so the record keeps the batch's call order, refused
+            # calls included; a call the record does not hold yet follows.
+            recorded = {tool.tool_call_id for tool in run.tools or ()}
+            run.tools = [observed.get(tool.tool_call_id, tool) for tool in run.tools or ()] + [
+                tool for observed_id, tool in observed.items() if observed_id not in recorded
+            ]
             await self._save(run)
             batch.persisted = True
 

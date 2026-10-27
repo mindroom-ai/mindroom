@@ -892,7 +892,7 @@ async def _run_room_agent_turn(context: ToolRuntimeContext, build: AgentBuild, p
     usage_owner = get_helper_usage_owner()
     invocation_id = uuid4().hex
     events = run_agent(
-        replace(build.spec, system_message=prompt_for_turn(build)),
+        replace(build.spec, system_messages=prompt_for_turn(build)),
         [Message(role="user", content=prompt)],
         ctx=RunContext(
             run_id=invocation_id,

@@ -43,6 +43,7 @@ from mindroom.response_runner import (
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError, UnfinishedStreamedReply
+from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
@@ -164,6 +165,40 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
     message = mock_team_response.await_args.kwargs["message"]
     assert "Describe this image" in message
     assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team_mode", ["coordinate", "collaborate"])
+async def test_generate_team_response_helper_runs_the_team_in_its_mode(tmp_path: Path, team_mode: str) -> None:
+    """The team runs in the mode its request names."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_runner.team_response",
+            new=AsyncMock(return_value="Team answer"),
+        ) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Plan the launch", user_id="@alice:localhost", thread_id="$thread-root"),
+            member_names=["general"],
+            team_mode=team_mode,
+        )
+
+    assert mock_team_response.await_args.kwargs["mode"] is TeamMode(team_mode)
 
 
 @pytest.mark.asyncio

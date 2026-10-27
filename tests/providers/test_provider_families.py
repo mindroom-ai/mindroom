@@ -74,9 +74,6 @@ def _tool(name: str) -> ToolSpec:
         description=f"{name}.",
         parameters=_SCHEMA,
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
 
@@ -89,49 +86,30 @@ _TRI_STATE_TOOLS = [
         description=None,
         parameters=_SCHEMA,
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     ),
     ToolSpec(
         name="gated",
         description="Gated.",
         parameters=_SCHEMA,
         strict=True,
-        requires_confirmation=True,
-        external_execution=True,
-        approval_type="mindroom_policy",
     ),
     ToolSpec(
         name="plain",
         description="Plain.",
         parameters=_SCHEMA,
         strict=False,
-        requires_confirmation=False,
-        external_execution=False,
-        approval_type=None,
     ),
 ]
-_GEMINI_SCHEMA = {"type": "OBJECT", "properties": {"city": {"type": "STRING"}}, "required": []}
-_OPENAI_WIRE_FLAGS = {
-    "gated": {
-        "strict": True,
-        "requires_confirmation": True,
-        "external_execution": True,
-        "approval_type": "mindroom_policy",
-    },
-    "plain": {"strict": False, "requires_confirmation": False, "external_execution": False},
-}
+_STRICT = {"gated": {"strict": True}, "plain": {"strict": False}}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("family", ["openai_chat", "openai_responses", "cerebras", "gemini", "ollama"])
 async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family: str, tmp_path: Path) -> None:
-    """Each wire leaves a tool's unset fields out of its definition.
+    """An unset field is left out; each wire keeps the fields its API takes.
 
-    OpenAI's Chat and Responses wires still send ``strict`` and the approval flags when set; Cerebras and Ollama send
-    only name, description, and parameters; every wire but Gemini leaves out an unset description, which Gemini
-    sends empty.
+    OpenAI's Chat and Responses wires carry ``strict`` when set; Cerebras, Ollama, and Gemini send only name,
+    description, and parameters, Gemini's as JSON Schema.
     """
     spec = FAMILIES[family]
     wire = Wire(spec.reply())
@@ -142,13 +120,13 @@ async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family:
     sent = spec.wire_tools(wire.body())
     assert list(sent) == ["gated", "plain", "unset"]
     if family == "gemini":
-        assert sent["unset"] == {"name": "unset", "description": "", "parameters": _GEMINI_SCHEMA}
-        assert sent["gated"] == {"name": "gated", "description": "Gated.", "parameters": _GEMINI_SCHEMA}
+        assert sent["unset"] == {"name": "unset", "parameters_json_schema": _SCHEMA}
+        assert sent["gated"] == {"name": "gated", "description": "Gated.", "parameters_json_schema": _SCHEMA}
         return
     kind = {"type": "function"} if family == "openai_responses" else {}
     assert sent["unset"] == {"name": "unset", "parameters": _SCHEMA, **kind}
     expected_flags: dict[str, dict[str, Any]] = (
-        _OPENAI_WIRE_FLAGS if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
+        _STRICT if family in {"openai_chat", "openai_responses"} else {"gated": {}, "plain": {}}
     )
     for name in ("gated", "plain"):
         assert sent[name] == {

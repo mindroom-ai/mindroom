@@ -23,9 +23,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Plan a multi-stop trip.",
-        "external_execution": false,
         "name": "plan_trip",
         "parameters": {
           "properties": {
@@ -129,13 +127,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Create a calendar event and invite attendees.",
-        "external_execution": false,
         "name": "calendar_create_event",
         "parameters": {
           "$defs": {
@@ -267,7 +262,6 @@
           "title": "create_eventArguments",
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -312,7 +306,15 @@
       "input": [
         {
           "role": "developer",
-          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+          "content": [
+            {
+              "type": "input_text",
+              "text": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+              "prompt_cache_breakpoint": {
+                "mode": "explicit"
+              }
+            }
+          ]
         },
         {
           "role": "user",
@@ -455,8 +457,6 @@
             "title": "create_eventArguments",
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function"
         },
         {
@@ -564,8 +564,6 @@
             ],
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function"
         }
       ]

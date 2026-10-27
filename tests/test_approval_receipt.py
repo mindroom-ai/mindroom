@@ -238,10 +238,11 @@ def test_approval_receipt_rejects_unsettled_calls() -> None:
         pytest.fail("A receipt with a pending call was bound")
 
 
-def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None:
-    """The projection extends the prompt a resumed model sees and leaves the run's own messages untouched."""
+def test_the_receipt_is_appended_to_a_copy_of_the_last_system_message() -> None:
+    """The projection extends the turn part a resumed model sees, keeping the stable prompt and the run's messages."""
     messages = [
         Message(role="system", content="base rules"),
+        Message(role="system", content="session context"),
         Message(role="assistant", content="calling tool"),
         Message(role="tool", content="tool result"),
     ]
@@ -249,13 +250,15 @@ def test_the_receipt_is_appended_to_a_copy_of_the_first_system_message() -> None
     projected = messages_with_approval_receipt(messages, "trusted approval receipt")
 
     assert [(message.role, message.content) for message in projected] == [
-        ("system", "base rules\n\ntrusted approval receipt"),
+        ("system", "base rules"),
+        ("system", "session context\n\ntrusted approval receipt"),
         ("assistant", "calling tool"),
         ("tool", "tool result"),
     ]
-    assert projected[0] is not messages[0]
-    assert messages[0].content == "base rules"
-    assert messages[0].provider_data is None
+    assert projected[0] is messages[0]
+    assert projected[1] is not messages[1]
+    assert messages[1].content == "session context"
+    assert messages[1].provider_data is None
 
 
 def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_message() -> None:
@@ -349,7 +352,7 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
         id="code",
         name="Code",
         model=built.provider,
-        system_message=Message(role="system", content="You are Code."),
+        system_messages=(Message(role="system", content="You are Code."),),
         toolkits=(gated(echo),),
     )
     _, paused = await collect(

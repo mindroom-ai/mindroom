@@ -13,7 +13,6 @@ from uuid import uuid4
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.failure_text import failure_text
-from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
     FoldBasis,
@@ -520,9 +519,6 @@ async def _rewrite_working_session_for_compaction(
 
     if summary_text is None:
         return None
-    strip_stale_anthropic_replay_fields(
-        [message for run in scope_visible_runs(working_session, scope) for message in run.messages],
-    )
     return _CompactionRewriteResult(
         summary_text=summary_text,
         compacted_run_count=compacted_run_count,
@@ -688,7 +684,7 @@ async def _report_committed(
 def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
     """Resolve one estimator together with the kind describing its arithmetic."""
     model_id = summary_model.identity.id
-    conservative_fallback = summary_model.capabilities.claude_family
+    conservative_fallback = summary_model.capabilities.conservative_token_estimates
     estimator = partial(
         estimate_compaction_input_tokens,
         model_id=model_id,

@@ -5,7 +5,7 @@
 ``team_stream`` snapshot an approval continuation restores. Member slots are keyed by ``url_safe_member_id`` of the
 member's config name, the id stored snapshots and reply records carry. ``publish_team_presentation`` shows a resumed
 run's document live in the reply it continues. ``format_team_response`` renders a finished run from its records
-instead, as a blocking reply that never paused shows it.
+instead, as a blocking reply that never paused shows it, in the same slots.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     is_visible_tool_marker_line,
     remap_visible_tool_marker_indices,
+    strip_visible_tool_markers,
 )
 
 if TYPE_CHECKING:
@@ -117,29 +118,35 @@ def finished_run_text(record: AnyRunRecord) -> str:
     return record.handover_content or "\n\n".join(own_answers(record))
 
 
-def format_team_response(record: TeamRunRecord) -> str:
+def format_team_response(record: TeamRunRecord, presentation: TeamStreamPresentation) -> str:
     """Return a team run's text as a blocking team reply shows it, without the header.
 
-    Each member run that ended (``ended_member_runs``, in the order they ended) contributes its ``finished_run_text``,
-    so a member delegated twice contributes twice and a member whose run failed shows the reason its run recorded,
-    credentials redacted, even when it wrote text first. What the leader's run hands over (``handover_content``) is
-    the consensus, so a leader that failed shows that reason too. A run in which nobody wrote anything renders as
-    empty text. Only a completed run is a finished reply, so a stopped, failed, or paused one shows no no-consensus
-    note.
+    It has the slots a streamed reply shows (``presentation``): one per member, in configured order, each holding the
+    ``finished_run_text`` of every run of that member that ended, a blank line apart, so a member whose run failed shows
+    the reason its run recorded, credentials redacted, even when it wrote text first. What the leader's run hands over
+    (``handover_content``) is the consensus, so a leader that failed shows that reason too. A run in which nobody wrote
+    anything renders as empty text. Only a completed run is a finished reply, so a stopped, failed, or paused one shows
+    no no-consensus note.
     """
-    # TODO(simplify): A blocking reply lists member runs in the order they ended, one entry per delegation, while a
-    # streamed reply shows one slot per member in configured order. Render both from the member slots in configured
-    # order. Users, API clients, and replayed history would notice.
-    contributions = [
-        _format_member_contribution(member.agent_display_name or "Team Member", text)
-        for member in record.ended_member_runs
-        if (text := finished_run_text(member)).strip()
-    ]
-    finished = record.status is RunStatus.completed
-    return "\n\n".join(_with_consensus(contributions, record.handover_content or "", finished=finished))
+    per_member = dict.fromkeys(presentation.member_ids, "")
+    for member in record.ended_member_runs:
+        if (text := finished_run_text(member)).strip():
+            member_id = presentation.resolve_member_id(member.agent_id, member.agent_display_name)
+            per_member[member_id] = append_stream_text(per_member[member_id], text.strip(), separate=True)
+    return "\n\n".join(
+        render_team_member_slots(
+            presentation.member_ids,
+            display_names_by_id=presentation.display_names_by_id,
+            per_member=per_member,
+            consensus=record.handover_content or "",
+            finished=record.status is RunStatus.completed,
+        ),
+    )
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
+# The run a restored slot's text is attributed to: none a resumed run can have, since every run id is non-empty.
+_RUN_BEFORE_THE_PAUSE = ""
 
 
 def _is_snapshot_member(member: object) -> bool:
@@ -164,6 +171,8 @@ class TeamStreamPresentation:
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
+    # The member run whose deltas last gave each member slot text.
+    _last_text_run: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
@@ -252,6 +261,8 @@ class TeamStreamPresentation:
             tool_trace=list(deepcopy(tool_trace)),
         )
         restored.separate_next_scopes.update(scopes)
+        # A restored slot's text came from runs before the pause, so any run's next text starts a paragraph of its own.
+        restored._last_text_run = {member_id: _RUN_BEFORE_THE_PAUSE for member_id, text in per_member.items() if text}
         return restored
 
     def to_state(self) -> dict[str, object]:
@@ -288,6 +299,16 @@ class TeamStreamPresentation:
         ``separate`` starts the content in a paragraph of its own when the slot already holds text.
         """
         self._append_text(f"agent:{member_id}", content, separate=separate)
+
+    def append_member_run(self, member_id: str, run_id: str, content: str) -> None:
+        """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph.
+
+        A blocking reply separates a member's runs the same way (``format_team_response``).
+        """
+        if not content:
+            return
+        self.append_member(member_id, content, separate=self._last_text_run.get(member_id, run_id) != run_id)
+        self._last_text_run[member_id] = run_id
 
     def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
         """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
@@ -367,6 +388,27 @@ class TeamStreamPresentation:
         """Record a tool completion in the slot of ``member_id``, which ``resolve_member_id`` returned."""
         self.complete_tool(f"agent:{member_id}", call)
 
+    def text_without_tool_markers(self, *, finished: bool) -> str:
+        """Return the document's slots without its header and tool markers: the text a streamed reply records.
+
+        With tool calls hidden the slots hold no markers; with them shown, each marker line goes and the text around it
+        stays a blank line apart, as hidden tool calls leave it. Only a ``finished`` reply, one whose team run
+        completed, ends with the no-consensus note.
+        """
+        per_member, consensus = self.per_member, self.consensus
+        if self.show_tool_calls:
+            per_member = {member_id: strip_visible_tool_markers(text) for member_id, text in per_member.items()}
+            consensus = strip_visible_tool_markers(consensus)
+        return "\n\n".join(
+            render_team_member_slots(
+                self.member_ids,
+                display_names_by_id=self.display_names_by_id,
+                per_member=per_member,
+                consensus=consensus,
+                finished=finished,
+            ),
+        )
+
     def render_body(self, *, finished: bool) -> str:
         """Render the current structured document: a ``finished`` reply's, or one still running or waiting.
 
@@ -389,7 +431,7 @@ def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) 
         member_id = presentation.resolve_member_id(event.member_id, event.member_name)
         inner = event.event
         if isinstance(inner, TextDelta):
-            presentation.append_member(member_id, inner.text)
+            presentation.append_member_run(member_id, event.run_id, inner.text)
         elif isinstance(inner, ToolStarted):
             presentation.start_member_tool(member_id, inner.call)
         elif isinstance(inner, ToolCompleted):

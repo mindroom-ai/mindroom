@@ -81,7 +81,7 @@ def spec(
         id="code",
         name="Code",
         model=model,
-        system_message=Message(role="system", content="You are Code."),
+        system_messages=(Message(role="system", content="You are Code."),),
         toolkits=toolkits,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
     )

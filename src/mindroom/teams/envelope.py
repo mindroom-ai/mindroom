@@ -178,7 +178,6 @@ async def prepare_materialized_team_execution(
     spec = built.spec
     leader = spec.leader
     # ``build_team_spec`` renders the leader prompt, which sizes the static part of every leader request.
-    assert leader.system_message is not None
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -189,7 +188,7 @@ async def prepare_materialized_team_execution(
     prepared_execution = await prepare_bound_team_run_context(
         ctx,
         scope_context=scope_context,
-        leader_system_message=leader.system_message,
+        leader_system_messages=leader.system_messages,
         leader_tools=leader_tool_specs(spec),
         model=leader.model,
         prompt=message,
@@ -297,7 +296,6 @@ def run_prepared_team(
     scope_context: ScopeSessionContext,
     team_name: str,
     user_id: str | None,
-    stream: bool,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one prepared turn of a configured team outside Matrix, with the leader hooks and storage a Matrix turn has.
 
@@ -320,7 +318,6 @@ def run_prepared_team(
         user_id=user_id,
         metadata=prepared.run_metadata,
         records=None,
-        stream=stream,
     )
 
 
@@ -566,7 +563,6 @@ class _TeamTurn:
                 user_id=self.user_id,
                 metadata=prepared.run_metadata,
                 records=attempt.records,
-                stream=stream,
             )
         events = drive_team_delegations(
             events,
@@ -738,11 +734,11 @@ class _TeamTurn:
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs (``format_team_response``); a
-        # streamed one records the document its events built and its failed member runs' reasons, in the configured
-        # order. The "No team response generated." fallback is display chrome, not replayable assistant text.
+        # its trace through its chunks. A blocking reply renders the finished runs and a streamed one records the
+        # document its events built and its failed member runs' reasons, both in the configured member order.
+        # The "No team response generated." fallback is display chrome, not replayable assistant text.
         if blocking:
-            body_text = format_team_response(record)
+            body_text = format_team_response(record, attempt.presentation)
             leader_text = finished_run_text(record)
             has_visible_output = bool(body_text) or bool(leader_text.strip())
             rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)
@@ -755,7 +751,7 @@ class _TeamTurn:
             response_text = leader_text.strip() if silent else rendered
             replayable_text = response_text if has_visible_output else ""
         else:
-            body_text = attempt.reply.canonical_text(finished=True)
+            body_text = attempt.presentation.text_without_tool_markers(finished=True)
             has_visible_output = bool(body_text)
             rendered = header + (body_text or NO_TEAM_RESPONSE)
             response_text = ""

@@ -23,6 +23,7 @@ from mindroom.agent_loop.model_loop import (
     SendRequest,
     run_model_loop,
 )
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.tools import MEDIA_FOLLOW_UP_TEXT, PreparedTools
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
@@ -198,7 +199,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert started == [replace(entry.call, result=None, is_error=None) for entry in record.tools]
     assert completed == [entry.call for entry in record.tools]
     assert [(call.result, call.is_error) for call in completed] == [('{"sum": 5}', False), ("yo", False)]
-    assert record.content == "Checking. 2 + 3 = 5."
+    assert record.content == "Checking.\n\n2 + 3 = 5."
     assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
     assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
     second = model.requests[1]
@@ -207,7 +208,7 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 
 
-async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_results() -> None:
+async def test_unknown_tools_and_bad_arguments_answer_the_model_in_call_order() -> None:
     model = ScriptedModel(
         [
             calls(
@@ -229,13 +230,51 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_with_error_resul
     assert tool_messages[0].content == MISSING_TOOL_ERROR_TEXT
     assert "validation error" in str(tool_messages[1].content)
     assert tool_messages[2].content == '{"sum": 7}'
-    # Only resolved calls are announced; the unknown one was answered without running.
-    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c2", "c3"]
+    # Every call is announced and recorded in call order; the unknown one answered without running.
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2", "c3"]
     assert record.tools is not None
-    assert [tool.tool_call_id for tool in record.tools] == ["c2", "c3"]
+    assert [(tool.tool_call_id, tool.is_error) for tool in record.tools] == [("c1", True), ("c2", True), ("c3", False)]
+    assert record.tools[0].result == MISSING_TOOL_ERROR_TEXT
     assert model.requests[1].messages[-3:] == tuple(tool_messages)
     # The run's agent is named on the warning for the tool it was not offered.
     assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
+
+
+async def test_a_cut_off_response_records_and_announces_its_calls_without_running_them() -> None:
+    """Calls of a response the output limit cut off are answered, recorded as failed, and announced, in call order."""
+    cut_off = calls(tool_call("add", "c1", a=1, b=1), tool_call("echo", "c2", text="huge"))
+    cut_off[-1] = replace(cut_off[-1], stop_reason="output_limit")
+    model = ScriptedModel([cut_off, answer("Split it.")])
+    messages = _prompt()
+
+    events, record = await _run(
+        spec(model, toolkit(add, echo)),
+        messages,
+        hooks=LoopHooks(answer_tool_calls=output_limit_policy()),
+    )
+
+    tool_messages = [message for message in messages if message.role == "tool"]
+    assert [(m.tool_call_id, m.content, m.tool_call_error) for m in tool_messages] == [
+        ("c1", CUT_OFF_TOOL_CALL_RESULT, True),
+        ("c2", CUT_OFF_TOOL_CALL_RESULT, True),
+    ]
+    assert record.tools is not None
+    assert [(tool.tool_call_id, tool.tool_name, tool.is_error, tool.result) for tool in record.tools] == [
+        ("c1", "add", True, CUT_OFF_TOOL_CALL_RESULT),
+        ("c2", "echo", True, CUT_OFF_TOOL_CALL_RESULT),
+    ]
+    tool_events = [
+        (type(event).__name__, event.call.tool_call_id)
+        for event in events
+        if isinstance(event, ToolStarted | ToolCompleted)
+    ]
+    assert tool_events == [
+        ("ToolStarted", "c1"),
+        ("ToolStarted", "c2"),
+        ("ToolCompleted", "c1"),
+        ("ToolCompleted", "c2"),
+    ]
+    assert events[-1] == LoopEnded(paused=False)
 
 
 async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests() -> None:
@@ -254,17 +293,22 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
 
     limit_text = "Tool call limit reached. Tool call add not executed. Don't try to execute it again."
     tool_messages = [message for message in messages if message.role == "tool"]
-    # Within a batch the refused calls answer first, then the executed ones, as Agno appended them.
+    # Every call answers in the order the model made it, refused ones included.
     assert [(m.tool_call_id, m.content) for m in tool_messages] == [
-        ("c2", limit_text),
         ("c1", '{"sum": 2}'),
+        ("c2", limit_text),
         ("c3", limit_text),
         ("c4", limit_text),
     ]
-    # Refused calls are neither announced nor recorded as executions.
-    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1"]
+    # Refused calls are announced and recorded as failed executions too.
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2", "c3", "c4"]
     assert record.tools is not None
-    assert len(record.tools) == 1
+    assert [(tool.tool_call_id, tool.is_error) for tool in record.tools] == [
+        ("c1", False),
+        ("c2", True),
+        ("c3", True),
+        ("c4", True),
+    ]
     assert len(model.requests) == 3
     assert len(model.turns) == 1
     assert events[-1] == LoopEnded(paused=False)

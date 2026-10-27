@@ -2928,18 +2928,6 @@
           "required": false,
           "type": "text",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": "Whether to add instructions to the agent",
-          "label": "Add Instructions",
-          "name": "add_instructions",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -5846,18 +5834,6 @@
           "description": null,
           "label": "Enable Analyze",
           "name": "enable_analyze",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Add Instructions",
-          "name": "add_instructions",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -10442,18 +10418,6 @@
           "placeholder": null,
           "required": false,
           "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Add Instructions",
-          "name": "add_instructions",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         },
         {

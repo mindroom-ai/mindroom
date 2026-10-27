@@ -196,7 +196,7 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         ("openrouter", "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
         ("anthropic", "https://api.anthropic.com/v1/models", {"x-api-key": "k", "anthropic-version": "2023-06-01"}),
         ("openai", "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
-        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": "k"}),
         ("groq", "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
     ],
 )
@@ -482,7 +482,7 @@ def test_doctor_skips_the_shared_key_check_wherever_an_endpoint_setting_or_varia
         (
             "google",
             {"GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS": "example.com"},
-            "https://generativelanguage.googleapis.com/v1beta/models?key=shared",
+            "https://generativelanguage.googleapis.com/v1beta/models",
         ),
     ],
 )
@@ -820,7 +820,7 @@ def test_memory_llm_key_is_checked_at_the_provider_s_own_api_without_endpoint_se
 @pytest.mark.parametrize(
     ("env_file", "expected", "urls"),
     [
-        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models?key=shared"]),
+        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models"]),
         ({"GOOGLE_GEMINI_BASE_URL": "https://embed-gateway.example"}, (0, 0, 1), []),
     ],
 )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,11 +28,11 @@ from anthropic.types.beta import (
 )
 
 from mindroom.llm.media import canonical_mime_type, image_format
-from mindroom.llm.messages import Message, ToolResultView, tool_result_view
+from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_PREFIX_CHECKED_THINKING_MODELS
+from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE_PREFIX_CHECKED_THINKING_MODELS
 from mindroom.providers.claude_wire_blocks import as_dict
 
 if TYPE_CHECKING:
@@ -135,10 +136,17 @@ def supports_prefill(model_id: str) -> bool:
 
 
 def supports_structured_outputs(model_id: str) -> bool:
-    """Return whether the direct API offers ``output_config.format`` for this model."""
-    # TODO(simplify): Unlike supports_prefill, this reads the raw id, so a gateway id such as anthropic/claude-3-...
-    # counts as supporting structured output. Read it through _core_model_id too. Users of gateway ids would notice.
-    return model_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not model_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
+    """Return whether the direct API offers ``output_config.format`` for this model, read by its core id as prefill is."""
+    core_id = _core_model_id(model_id)
+    return core_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not core_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
+
+
+def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
+    """Return whether the model accepts a request that forces one tool call, read by its core id as prefill is.
+
+    Manual extended thinking (``thinking.type: "enabled"``) rejects forced tool use on every model.
+    """
+    return not manual_thinking and not _core_model_id(model_id).startswith(CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES)
 
 
 def checks_thinking_prefix(model_id: str) -> bool:
@@ -153,36 +161,33 @@ def stop_reason_of(raw: str | None) -> StopReason | None:
 
 @dataclass(frozen=True, slots=True)
 class FormattedConversation:
-    """The ``messages`` array and the joined system text of one request."""
+    """The ``messages`` array and the system texts of one request, one per system message in order."""
 
     messages: list[dict[str, Any]]
-    system: str
+    system: tuple[str, ...]
 
 
 def format_claude_messages(
     messages: Sequence[Message],
     *,
     append_trailing_user_message: bool,
-    citations: bool,
     earlier_thinking: bool,
 ) -> FormattedConversation:
     """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
 
-    System messages are extracted and joined with a space. Consecutive same-role turns merge into one, dropping
+    System messages are extracted, each its own system text. Consecutive same-role turns merge into one, dropping
     the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
     original response. Without ``earlier_thinking``, the turns before the current tool loop replay without their
     thinking (``_without_earlier_thinking``). A conversation that ends with an assistant turn gets a trailing
-    ``continue`` user turn when the model rejects prefill. Documents ask for citations unless ``citations`` is
-    False, as a request with structured output must be: the API rejects citations beside an output format.
+    ``continue`` user turn when the model rejects prefill. Documents ask for no citations, which no MindRoom reply
+    shows.
     """
     turns: list[dict[str, Any]] = []
-    system_texts: list[str] = []
     for message in messages:
         if message.role == "system":
-            system_texts.append(message.get_content_string())
             continue
         if message.role == "user":
-            content = _user_blocks(message, citations=citations)
+            content = _user_blocks(message)
         elif message.role == "assistant":
             content = _assistant_blocks(message)
             if not content:
@@ -198,9 +203,7 @@ def format_claude_messages(
         merged = _merged_turns(_without_earlier_thinking(merged))
     if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
         merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
-    # TODO(simplify): System messages join with one space, so a later one runs on from the end of the previous
-    # one. Join them with a blank line. Models would notice.
-    return FormattedConversation(messages=merged, system=" ".join(system_texts))
+    return FormattedConversation(messages=merged, system=system_texts(messages))
 
 
 def _block_type(block: Any) -> str | None:  # noqa: ANN401
@@ -246,11 +249,11 @@ def _answers_tool_calls(turn: dict[str, Any]) -> bool:
     return any(_block_type(block) == "tool_result" for block in turn["content"])
 
 
-def _user_blocks(message: Message, *, citations: bool) -> list[Any]:
+def _user_blocks(message: Message) -> list[Any]:
     content = message.content or ""
     blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
     media = [_image_block(image) for image in message.images or ()]
-    media += [_document_block(file, citations=citations) for file in message.files or ()]
+    media += [_document_block(file) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
     return blocks + [block for block in media if block is not None]
 
@@ -363,7 +366,7 @@ def _image_block(image: Image) -> dict[str, Any] | None:
     }
 
 
-def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
+def _document_block(file: File) -> dict[str, Any] | None:
     if file.url is not None:
         # Only a document ``inline_url_media`` left remote reaches here.
         source: dict[str, Any] = {"type": "url", "url": file.url}
@@ -385,10 +388,7 @@ def _document_block(file: File, *, citations: bool) -> dict[str, Any] | None:
             source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
         else:
             source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
-    block: dict[str, Any] = {"type": "document", "source": source}
-    if citations:
-        block["citations"] = {"enabled": True}
-    return block
+    return {"type": "document", "source": source}
 
 
 def _serialized_content_blocks(blocks: Sequence[Any]) -> list[dict[str, Any]]:
@@ -502,40 +502,34 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
     return result
 
 
+# Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support
+# oneOf, allOf, or anyOf at the top level"), as an MCP tool whose input is a union has.
+_TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS = frozenset({"anyOf", "allOf", "oneOf"})
+
+
 def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> list[dict[str, Any]]:
     """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable.
 
-    A tool without a description gets an empty one, ``strict`` is sent only when it is True and the route accepts
-    it, and the approval flags never reach the wire.
+    Each schema goes as authored, except that its root loses ``anyOf``, ``allOf``, and ``oneOf`` and is
+    ``type: object`` when it names no type, and a strict tool closes every object with ``additionalProperties: false``,
+    as strict tool use requires. A tool without a description sends none, and ``strict`` is sent only when it is True
+    and the route accepts it.
     """
     formatted: list[dict[str, Any]] = []
     for tool in sorted(tools, key=lambda item: item.name):
-        parameters = dict(tool.parameters)
-        properties = parameters.get("properties") or {}
-        input_properties: dict[str, Any] = {}
-        for name, schema in properties.items():
-            property_schema = _with_additional_properties_false(schema)
-            if isinstance(property_schema, dict) and "description" not in property_schema:
-                property_schema["description"] = ""
-            input_properties[name] = property_schema
-        input_schema: dict[str, Any] = {
-            "type": parameters.get("type", "object"),
-            "properties": input_properties,
-            "required": parameters.get("required", []),
-            "additionalProperties": False,
+        strict = bool(tool.strict) and strict_allowed
+        parameters = {
+            key: deepcopy(value)
+            for key, value in tool.parameters.items()
+            if key not in _TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS
         }
-        # Raw JSON schemas, such as MCP input schemas, may share nested types through $defs or definitions.
-        for key in ("$defs", "definitions"):
-            if key in parameters:
-                input_schema[key] = parameters[key]
-        # TODO(simplify): a tool without a description sends an empty one, as on Gemini. Leave it out, as Chat,
-        # Responses, and Ollama do (#3113). Models would notice: Claude tool definitions change for such tools.
+        parameters.setdefault("type", "object")
         definition: dict[str, Any] = {
             "name": tool.name,
-            "description": tool.description or "",
-            "input_schema": input_schema,
+            **({} if tool.description is None else {"description": tool.description}),
+            "input_schema": _with_additional_properties_false(parameters) if strict else parameters,
         }
-        if tool.strict and strict_allowed:
+        if strict:
             definition["strict"] = True
         formatted.append(definition)
     return formatted
@@ -652,6 +646,7 @@ __all__ = [
     "inline_url_media",
     "parse_claude_usage",
     "stop_reason_of",
+    "supports_forced_tool_use",
     "supports_prefill",
     "supports_structured_outputs",
     "tool_call_from_block",
