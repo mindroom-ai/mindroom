@@ -766,8 +766,16 @@ elif mode == 'mem0_reader':
                 assert importlib.metadata.version(name) == '1'
             return cls()
 
+    def import_async_memory(name):
+        # Importing Mem0 must also wait for the install to finish.
+        if name != 'AsyncMemory':
+            raise AttributeError(name)
+        for dist_name in importlib.metadata.packages_distributions()['transient_embedding']:
+            assert importlib.metadata.version(dist_name) == '1'
+        return Memory
+
     mem0 = ModuleType('mem0')
-    mem0.AsyncMemory = Memory
+    mem0.__getattr__ = import_async_memory
     sys.modules['mem0'] = mem0
     memory_config.ensure_optional_deps = lambda *args, **kwargs: False
     memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
