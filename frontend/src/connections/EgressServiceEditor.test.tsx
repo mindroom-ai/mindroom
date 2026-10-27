@@ -607,18 +607,24 @@ describe("the editor form", () => {
       ],
     });
     await renderEditor({
-      service: { preset: "google_calendar", oauth_separate_account: true },
+      service: { preset: "google_calendar" },
       name: "team_calendar",
       agentServices: [
         calendar,
         { ...calendar, name: "events", display_name: "Events" },
       ],
     });
-    expect(
-      screen.getByText(
-        "Users can connect an account (Google Calendar) instead of an API key.",
+    openMoreOptions();
+    const instead =
+      "Users can connect an account (Google Calendar) instead of an API key.";
+    expect(screen.getByText(instead)).toBeVisible();
+    // Its own account is all it uses, so there is no key to connect one instead of.
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
       ),
-    ).toBeVisible();
+    );
+    expect(screen.queryByText(instead)).toBeNull();
     expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
     expect(
       screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
@@ -2143,6 +2149,29 @@ describe("the note on whose service this is", () => {
       screen.getByText(
         "All your agents that share your personal workspace use this service and its key: Code Helper, Research.",
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("speaks of its account, not a key, for a service with its own account", async () => {
+    await renderEditor({
+      scope: "user_agent",
+      agentName: "Code Helper",
+      scopeAgents: [],
+      service: { preset: "google_calendar", oauth_separate_account: true },
+      name: "team_calendar",
+    });
+    expect(
+      screen.getByText(
+        "Only your Code Helper uses this service and its account.",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    );
+    expect(
+      screen.getByText("Only your Code Helper uses this service and its key."),
     ).toBeInTheDocument();
   });
 

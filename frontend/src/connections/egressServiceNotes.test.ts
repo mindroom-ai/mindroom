@@ -80,6 +80,15 @@ describe("the note on whose service this is", () => {
     );
   });
 
+  it("names the account instead of a key for a service with its own account", () => {
+    expect(scopeNote("user_agent", "Code", ["Code"], true)).toBe(
+      "Only your Code uses this service and its account.",
+    );
+    expect(scopeNote("user", "Code", ["Code", "Research"], true)).toBe(
+      "All your agents that share your personal workspace use this service and its account: Code, Research.",
+    );
+  });
+
   it("says nothing for shared, unscoped, or unknown scopes", () => {
     expect(scopeNote("shared", "Team", [])).toBeNull();
     expect(scopeNote("unscoped", "Team", [])).toBeNull();

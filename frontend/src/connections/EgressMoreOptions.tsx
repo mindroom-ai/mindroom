@@ -205,50 +205,53 @@ export function MoreOptions({
         i === index ? placeholder : existing,
       ),
     });
-  const loginField = preset?.oauth_provider ? (
-    <p className="text-xs text-muted-foreground">
-      {sharedTarget
-        ? "Accounts cannot be connected on a shared agent, so this service uses an API key."
-        : `Users can connect an account (${providers.find((provider) => provider.id === preset.oauth_provider)?.display_name ?? preset.oauth_provider}) instead of an API key.`}
-    </p>
-  ) : (
-    !preset && (
-      <Field
-        label="Account login (optional)"
-        id={`${id}-oauth`}
-        hint={
-          sharedTarget
-            ? "Accounts cannot be connected on a shared agent. Use an API key."
-            : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
-        }
-        error={problemAt("oauthProvider")}
-      >
-        {(control) => (
-          <select
-            {...control}
-            className={`${selectClass} max-w-xs`}
-            value={sharedTarget ? "" : form.oauthProvider}
-            disabled={sharedTarget || disabled}
-            onChange={(event) => set({ oauthProvider: event.target.value })}
-          >
-            <option value="">No account login</option>
-            {providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.display_name}
-              </option>
-            ))}
-            {/* A login the service already has that the server does not list stays selectable. */}
-            {form.oauthProvider !== "" &&
-              !providers.some(
-                (provider) => provider.id === form.oauthProvider,
-              ) && (
-                <option value={form.oauthProvider}>{form.oauthProvider}</option>
-              )}
-          </select>
-        )}
-      </Field>
-    )
-  );
+  // A service with its own account uses only that account, so no key is there to connect one instead of.
+  const loginField = preset?.oauth_provider
+    ? !form.separateAccount && (
+        <p className="text-xs text-muted-foreground">
+          {sharedTarget
+            ? "Accounts cannot be connected on a shared agent, so this service uses an API key."
+            : `Users can connect an account (${providers.find((provider) => provider.id === preset.oauth_provider)?.display_name ?? preset.oauth_provider}) instead of an API key.`}
+        </p>
+      )
+    : !preset && (
+        <Field
+          label="Account login (optional)"
+          id={`${id}-oauth`}
+          hint={
+            sharedTarget
+              ? "Accounts cannot be connected on a shared agent. Use an API key."
+              : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
+          }
+          error={problemAt("oauthProvider")}
+        >
+          {(control) => (
+            <select
+              {...control}
+              className={`${selectClass} max-w-xs`}
+              value={sharedTarget ? "" : form.oauthProvider}
+              disabled={sharedTarget || disabled}
+              onChange={(event) => set({ oauthProvider: event.target.value })}
+            >
+              <option value="">No account login</option>
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.display_name}
+                </option>
+              ))}
+              {/* A login the service already has that the server does not list stays selectable. */}
+              {form.oauthProvider !== "" &&
+                !providers.some(
+                  (provider) => provider.id === form.oauthProvider,
+                ) && (
+                  <option value={form.oauthProvider}>
+                    {form.oauthProvider}
+                  </option>
+                )}
+            </select>
+          )}
+        </Field>
+      );
 
   return (
     <div id={id} className="space-y-4">
