@@ -377,7 +377,8 @@ export function EgressServiceItem({
           },
         ]
       : []),
-    ...(oauth && reuseEnabled && canChangeReuse && readOnlyOffered
+    // Only a connected account: connecting one already allowed keeps its level.
+    ...(oauth?.connected && reuseEnabled && canChangeReuse && readOnlyOffered
       ? [
           oauth.reuse_access === "read"
             ? {

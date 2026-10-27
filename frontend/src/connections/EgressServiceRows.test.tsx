@@ -1151,6 +1151,21 @@ describe("connected accounts", () => {
       ]);
     });
 
+    it("offers no level change for a disconnected account it would not apply to", async () => {
+      renderRows([
+        drive(
+          { connected: false, account_label: null, reuse_access: "read" },
+          { configured: false, active_source: null },
+        ),
+      ]);
+      expect(
+        screen.getByRole("button", {
+          name: "Connect Google Drive for Agent Keys for Drive",
+        }),
+      ).toBeVisible();
+      await expectNoAction(/^Change to /);
+    });
+
     it("shows a read-and-write account's level and changes it to read only at once", async () => {
       const onChanged = vi.fn();
       renderRows(
