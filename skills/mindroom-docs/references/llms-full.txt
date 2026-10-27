@@ -15703,7 +15703,7 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
   For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
 - Opening a conversation store checks for links only once, because Python's `sqlite3` cannot open a database without following links.
-  A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name, and a missing or empty file there gets the storage v2 tables; a file with tables there stops at the conversion's backup, which follows no link.
+  A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name: a file there already in the current layout opens as the store, a file in an older layout stops at the conversion's backup, which follows no link, and a missing or empty one gets the storage v2 tables.
   An open store then reconnects by path for each operation for the rest of the turn, so a swap made after the open is followed: that operation fails on the missing tables, and it can leave an empty `<name>.db` at the link's target.
   Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
 
