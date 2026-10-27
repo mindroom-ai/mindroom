@@ -197,7 +197,7 @@ def build_resume_request(
     # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
     # Legacy format: a paused ``run_data`` row whose messages hold no ``add_to_agent_memory: false`` message, because
     # the run ended without storing its memory results, transient enrichment, job notes, and approval receipt.
-    # Last legacy release: v2026.10.578, whose runs stored no such message; replacement: the first release after it,
+    # Last legacy release: v2026.10.580, whose runs stored no such message; replacement: the first release after it,
     # whose paused runs store them in place.
     # Handling: such a run resumes from the messages it stored, without that context, as it did before; nothing
     # else changes, and the run it resumes into stores the current shape when it pauses again.

@@ -879,8 +879,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 ) -> None:
     """An approved saved call keeps its exact owner, and its old Bash stays interrupted.
 
-    The follow-up turn sends the approval receipt the runner binds with its first request only. A shell that
-    ``openclaw_compat`` brings in is approved under the preset and still runs as the agent's shell.
+    The follow-up turn reads the approval receipt the runner binds after its input and keeps it for its later
+    requests. A shell that ``openclaw_compat`` brings in is approved under the preset and still runs as the agent's
+    shell.
     """
     runtime = _helper_runtime(tmp_path, tools=["openclaw_compat"] if preset else ["shell"])
     registry = TurnToolRegistry()

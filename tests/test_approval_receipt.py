@@ -1,4 +1,4 @@
-"""Trusted approval-receipt rendering and its projection into a resumed run's first request."""
+"""Trusted approval-receipt rendering, and where a reader run gets it: after its decided results or its input, to stay."""
 
 from __future__ import annotations
 

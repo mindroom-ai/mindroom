@@ -46,8 +46,8 @@ def capture_final_request(
 
     Each attempt names its own configured ``model_name``, because a same-turn continuation can switch models within one
     response. The request keeps the run's own messages and tool definitions, as its functions declare them: what a
-    pre-request hook projected for that request alone, such as the approval receipt or the wait budget job admission
-    accepts, belongs to the run's own calls, and the review answers its calls with other functions.
+    pre-request hook projected for that request alone, such as the wait budget job admission accepts, belongs to the
+    run's own calls, and the review answers its calls with other functions.
     """
 
     def record(state: LoopState, request: ModelRequest) -> None:
