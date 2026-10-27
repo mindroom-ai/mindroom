@@ -65,14 +65,28 @@ MASKS: dict[str, str] = {
     "undecodable_run_left_out": "spec v4 4.5 and decision 9: a row that does not decode is left out, as if never stored",
     "force_request_moves_into_metadata": "spec v4 4.5 and decision 5 (W9): a manual compaction request queued in the "
     "session state becomes its scope's metadata flag",
+    "session_columns_encoded_once": "spec v4 4.5: session columns Agno 2 encoded twice are stored encoded once",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
     "goldens/agent_code": {"stored_copy_hides_folded_messages"},
+    "goldens/agno2_migrated": {"session_columns_encoded_once"},
+    "goldens/agno_2_6_12_code_sessions": {"session_columns_encoded_once"},
+    "legacy/captured__legacy_agno2_runs__an_unreadable_blob_is_cleared_without_rows": {"session_columns_encoded_once"},
     "legacy/captured__legacy_agno2_runs__blob_entries_a_read_could_not_address_are_dropped": {
         "row_ids_fill_the_record",
+        "session_columns_encoded_once",
     },
-    "legacy/captured__legacy_agno2_runs__blob_runs_keep_the_order_agno_read_them_in": {"row_ids_fill_the_record"},
+    "legacy/captured__legacy_agno2_runs__blob_runs_become_rows_when_the_summary_rows_migrate": {
+        "session_columns_encoded_once",
+    },
+    "legacy/captured__legacy_agno2_runs__blob_runs_keep_the_order_agno_read_them_in": {
+        "row_ids_fill_the_record",
+        "session_columns_encoded_once",
+    },
+    "legacy/captured__legacy_compaction_state__an_agno_2_database_migrates_before_the_owned_store_opens_it": {
+        "session_columns_encoded_once",
+    },
     "legacy/captured__legacy_compaction_state__an_agent_named_agno_migrates_the_agno_runs_table": {
         "row_ids_fill_the_record",
     },
@@ -325,6 +339,17 @@ def _force_requests_in_metadata(recorded: dict[str, Any], observed: dict[str, An
     used.add("force_request_moves_into_metadata")
 
 
+def _session_columns_encoded_once(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
+    """Show session data Agno 2 encoded twice, which a read of the row decodes to text, as the object stored once."""
+    row, old = observed["row"], recorded["row"]
+    if not (isinstance(row, dict) and isinstance(old, dict)):
+        return
+    assert not isinstance(row.get("session_data"), str)
+    if isinstance(old.get("session_data"), str):
+        old["session_data"] = json.loads(old["session_data"])
+        used.add("session_columns_encoded_once")
+
+
 def _mask_session(
     recorded: dict[str, Any],
     observed: dict[str, Any],
@@ -334,6 +359,7 @@ def _mask_session(
 ) -> set[str]:
     """Show one session's recorded and observed observables as one store would; return the runs the fold mask hid."""
     _rows_fill_records(recorded, observed, session_id, used)
+    _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _drop_history_copies(recorded, observed, used)
     _hide_folded(recorded, facts, used)

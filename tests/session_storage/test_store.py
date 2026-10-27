@@ -1545,27 +1545,6 @@ def test_clearing_metadata_stores_it_as_json_null(store: ConversationStore) -> N
     assert _loaded(store).metadata is None
 
 
-def test_double_encoded_session_columns_load_and_are_rewritten_once(store: ConversationStore) -> None:
-    """Agno 2 columns encoded twice load, and the field writes store them encoded once."""
-    seed_session_row(store, _session())
-    _execute(
-        store,
-        "UPDATE code_sessions SET session_data = ?, metadata = ? WHERE session_id = 's1'",
-        json.dumps(json.dumps({"session_state": {"a": 1}})),
-        json.dumps(json.dumps({"k": "v"})),
-    )
-    session = _loaded(store)
-    assert (session.session_state, session.metadata) == ({"a": 1}, {"k": "v"})
-
-    session.session_state["a"] = 2
-    store.save_run(session, _run("r1"), record_usage=False, state=session_state_snapshot(session.session_state))
-    store.update_metadata(session, lambda metadata: {**(metadata or {}), "k2": "v2"})
-
-    assert _query(store, "SELECT session_data, metadata FROM code_sessions") == [
-        ('{"session_state": {"a": 2}}', '{"k": "v", "k2": "v2"}'),
-    ]
-
-
 def test_unreadable_session_columns_load_as_empty_and_usage_leaves_their_bytes(store: ConversationStore) -> None:
     """One odd session row never fails a load; a usage save keeps its bytes but moves its update time."""
     seed_session_row(store, _session())

@@ -237,6 +237,7 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
         write_conversion_backup(path, descriptors, copied_bytes=adoption_copy_bytes(connection, names))
     if names.sessions in tables:
         _session_text_as_utf8(connection, names)
+        _session_json_encoded_once(connection, names)
         seed_usage_ledger(connection, names)
         adopt_summary_rows(connection, names)
         _fold_force_requests(connection, names)
@@ -260,6 +261,37 @@ def _convert(connection: sqlite3.Connection, names: AgnoTableNames, path: Path, 
     _drop_dead_session_columns(connection, names)
     _write_meta(connection, names, next(seqs))
     return True
+
+
+# LEGACY_COMPAT: Agno 2 session columns encoded twice, as the storage v2 conversion finds them.
+# Legacy format: `session_data`, `metadata`, or `summary` holding the JSON text of their JSON (a JSON string holding
+# the value), which Agno 2 wrote and a row kept until a later release rewrote the column.
+# Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote each column's JSON once.
+# Handling: Before any other step reads them, each such column is stored encoded once, so the conversion's steps and
+# every later load decode it once; a column that does not decode stays as stored, which a load reads as unreadable.
+# Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_session_columns_encoded_twice_are_stored_once
+# and tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata.
+def _session_json_encoded_once(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
+    sessions = quote_identifier(names.sessions)
+    present = {row[1] for row in connection.execute(f"PRAGMA table_info({sessions})")}
+    columns = [column for column in ("session_data", "metadata", "summary") if column in present]
+    rows = connection.execute(f"SELECT session_id, {', '.join(columns)} FROM {sessions}").fetchall()  # noqa: S608
+    for session_id, *values in rows:
+        for column, raw in zip(columns, values, strict=True):
+            if (encoded := _encoded_once(raw)) is not None:
+                connection.execute(
+                    f"UPDATE {sessions} SET {column} = ? WHERE session_id = ?",  # noqa: S608
+                    (encoded, session_id),
+                )
+
+
+def _encoded_once(raw: object) -> str | None:
+    """Return the value a column encoded twice holds, encoded once, or None for any other column value."""
+    try:
+        inner = decode_json(raw) if isinstance(raw, str) else None
+        return json.dumps(decode_json(inner)) if isinstance(inner, str) else None
+    except (RecursionError, ValueError):
+        return None
 
 
 def _session_text_as_utf8(connection: sqlite3.Connection, names: AgnoTableNames) -> None:

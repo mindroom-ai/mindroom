@@ -946,6 +946,33 @@ def test_a_repeated_message_id_gets_a_derived_one(tmp_path: Path) -> None:
     assert _dump(tmp_path / "first" / "sessions" / "code.db") == _dump(tmp_path / "second" / "sessions" / "code.db")
 
 
+def test_session_columns_encoded_twice_are_stored_once(tmp_path: Path) -> None:
+    """Agno 2 session columns encoded twice are stored encoded once, so a load decodes them once."""
+    database = _agno_database(tmp_path, (_SESSION, "agent", "code"), ("odd", "agent", "code"))
+    _store_raw(
+        database,
+        "code_sessions",
+        "session_data",
+        json.dumps(json.dumps({"session_state": {"a": 1}})),
+        session_id=_SESSION,
+    )
+    _store_raw(database, "code_sessions", "metadata", json.dumps(json.dumps({"k": "v"})), session_id=_SESSION)
+    # Encoded twice around text that is not JSON: it stays as stored and loads as unreadable.
+    _store_raw(database, "code_sessions", "metadata", json.dumps("not json"), session_id="odd")
+
+    store = _converted(database)
+
+    session_data, metadata, _ = _session_columns(database, _SESSION)
+    assert (json.loads(session_data), json.loads(metadata)) == ({"session_state": {"a": 1}}, {"k": "v"})
+    session = store.load_session(_SESSION, "agent")
+    assert session is not None
+    assert (session.session_state, session.metadata) == ({"a": 1}, {"k": "v"})
+    assert _session_columns(database, "odd")[1] == json.dumps("not json")
+    odd = store.load_session("odd", "agent")
+    assert odd is not None
+    assert odd.metadata is None
+
+
 def test_summary_rows_keep_their_order_against_the_runs(tmp_path: Path) -> None:
     """``through`` is the largest ``seq`` sorted at or before a row's position, so coverage and every order stay."""
     database = _agno_database(tmp_path)

@@ -36,7 +36,7 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import RunColumns, run_columns, run_kind, run_record
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.legacy_agno2_runs import decode_session_json
+from mindroom.session_storage.legacy_agno2_runs import decode_json
 from mindroom.session_storage.schema import (
     NON_VISIBLE_RUN_STATUS_SQL,
     NON_VISIBLE_RUN_STATUS_VALUES,
@@ -565,9 +565,13 @@ def decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) ->
 
     An odd row therefore never fails a load or a conversion; JSON nested too deep to decode is unreadable too.
     """
+    if raw_value is None:
+        return null
+    if not isinstance(raw_value, (str, bytes, bytearray)):
+        return None
     try:
-        value = decode_session_json(raw_value)
-    except (RecursionError, TypeError, ValueError):
+        value = decode_json(raw_value)
+    except (RecursionError, ValueError):
         return None
     if value is None:
         return null

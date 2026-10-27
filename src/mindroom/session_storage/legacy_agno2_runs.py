@@ -20,12 +20,11 @@ if TYPE_CHECKING:
 # Legacy format: Agno 2 wrote `session_data`, `metadata`, and the `runs` blob as the JSON text of their JSON
 # (a JSON string holding the value); a row keeps that form until a later release rewrites the column.
 # Last legacy release: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) wrote each column's JSON once.
-# Handling: Readers decode a column once and again when the first decode yields a string; owned writers
-# encode once, so a column the owned store rewrites is single-encoded from then on.
-# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_summary_rows_migrate,
-# tests/session_storage/test_store.py::test_double_encoded_session_columns_load_and_are_rewritten_once,
-# tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata, and
-# tests/test_usage_stats.py::test_daily_models_read_real_agno_2_history.
+# Handling: The readers of files the conversion has not rewritten, the `runs` blob reader and usage reports over
+# unconverted files, decode a column once and again when the first decode yields a string; the conversion stores the
+# session columns encoded once (`legacy_agno3_conversion._session_json_encoded_once`), so loads decode once.
+# Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_blob_runs_become_rows_when_the_summary_rows_migrate
+# and tests/test_usage_stats.py::test_daily_models_read_real_agno_2_history.
 def decode_session_json(raw_value: object) -> object:
     """Decode a single- or double-encoded JSON column value with ``decode_json``."""
     if raw_value is None:
