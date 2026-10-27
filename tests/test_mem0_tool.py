@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from mem0.exceptions import LLMError
 from mem0.memory.main import _reject_top_level_entity_params
 
 from mindroom.tools.mem0 import mem0_tools
@@ -66,3 +67,39 @@ def test_mem0_tool_search_and_listing_pass_the_user_as_a_filter(
     assert client.filters == {"search tea": {"user_id": "alice"}, "get_all": {"user_id": "alice"}}
     # Mem0 2 still takes the user of an add or a delete-all as a top-level argument.
     assert client.top_level == {"add": {"user_id": "alice", "infer": True}, "delete_all": {"user_id": "alice"}}
+
+
+class _FailingMem0Client(_Mem0Client):
+    """Fail like Mem0 2.2 when the provider rejects the key: its error carries the provider's error body."""
+
+    def __init__(self, rejected_key: str) -> None:
+        super().__init__()
+        self._rejected_key = rejected_key
+
+    def add(self, messages: list[dict[str, str]], **kwargs: object) -> dict[str, list[dict[str, str]]]:
+        del messages, kwargs
+        msg = f"LLM extraction failed: Error code: 401 - invalid x-api-key {self._rejected_key}"
+        raise LLMError(msg)
+
+    def search(self, query: str, **kwargs: object) -> dict[str, list[dict[str, str]]]:
+        del query, kwargs
+        msg = f"Invalid query for key {self._rejected_key}"
+        raise ValueError(msg)
+
+
+def test_mem0_tool_failures_reach_the_model_without_the_rejected_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed provider call's text reaches the model with credentials redacted and Agno's usual framing."""
+    monkeypatch.delenv("MEM0_API_KEY", raising=False)
+    rejected_key = "sk-ant-" + "api03-" + "Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8Ba7"
+    with patch("agno.tools.mem0.Memory", return_value=_FailingMem0Client(rejected_key)):
+        toolkit = mem0_tools()(user_id="alice")
+    run_context: Any = None
+
+    added = toolkit.add_memory(run_context, "Likes green tea")
+    found = toolkit.search_memory(run_context, "tea")
+
+    assert added.startswith("Error adding memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
+    # Agno returns a ValueError's text without its error prefix, which stays so.
+    assert found.startswith("Invalid query for key ")
+    assert rejected_key not in added
+    assert rejected_key not in found

@@ -7,28 +7,46 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools.mem0 import Mem0Tools
 
+from mindroom.failure_text import failure_text
+from mindroom.redaction import redact_sensitive_text
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mem0.client.main import MemoryClient
     from mem0.memory.main import Memory
 
 
 @dataclass(frozen=True)
 class _UserFilterClient:
-    """Forward the toolkit's Mem0 calls, passing the user of a search or listing as ``filters``."""
+    """Forward the toolkit's Mem0 calls, passing the user of a search or listing as ``filters``.
+
+    Mem0 2.1 and later raise a failed provider call with the provider's error body, which can quote a rejected key,
+    and the toolkit returns a failure's text to the model, so each failure is raised again with credentials redacted.
+    Agno renders a ``ValueError``'s text alone and any other failure after a prefix, so a ``ValueError`` stays one.
+    """
 
     client: Memory | MemoryClient
 
     def add(self, messages: list[dict[str, str]], **kwargs: Any) -> object:  # noqa: ANN401 - Mem0's add options
-        return self.client.add(messages, **kwargs)
+        return _redacting_failures(self.client.add, messages, **kwargs)
 
     def search(self, query: str, *, user_id: str) -> object:
-        return self.client.search(query, filters={"user_id": user_id})
+        return _redacting_failures(self.client.search, query, filters={"user_id": user_id})
 
     def get_all(self, *, user_id: str) -> object:
-        return self.client.get_all(filters={"user_id": user_id})
+        return _redacting_failures(self.client.get_all, filters={"user_id": user_id})
 
     def delete_all(self, *, user_id: str) -> object:
-        return self.client.delete_all(user_id=user_id)
+        return _redacting_failures(self.client.delete_all, user_id=user_id)
+
+
+def _redacting_failures(call: Callable[..., object], *args: object, **kwargs: object) -> object:
+    try:
+        return call(*args, **kwargs)
+    except Exception as exc:
+        error_type = ValueError if isinstance(exc, ValueError) else RuntimeError
+        raise error_type(redact_sensitive_text(failure_text(exc))) from None
 
 
 class UserFilterMem0Tools(Mem0Tools):
@@ -71,6 +89,7 @@ class UserFilterMem0Tools(Mem0Tools):
         # Upstream issue: Tracking gap; no matching agno-agi/agno issue found on October 27, 2026.
         # Upstream PR: None identified; the open async Mem0Tools PR, https://github.com/agno-agi/agno/pull/5886,
         # keeps the top-level user_id.
-        # Remove when: Agno's Mem0Tools passes filters={"user_id": ...} to search and get_all.
+        # Remove when: Agno's Mem0Tools passes filters={"user_id": ...} to search and get_all; keep redacting
+        # the credentials in the Mem0 failures the toolkit returns to the model.
         # Coverage: tests/test_mem0_tool.py::test_mem0_tool_search_and_listing_pass_the_user_as_a_filter
         self.client = _UserFilterClient(self.client)  # ty: ignore[invalid-assignment]
