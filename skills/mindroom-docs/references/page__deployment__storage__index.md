@@ -8,7 +8,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
-- `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories
+- `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories and the recent conversation messages Mem0 reads when it extracts memories
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
