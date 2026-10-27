@@ -98,6 +98,7 @@ class _Cards:
 
     cards: list[_Card] = field(default_factory=list)
     send_delivery: object = field(default_factory=object)
+    router_missing: None = None
 
     async def request_background_approval(
         self,

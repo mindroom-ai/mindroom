@@ -293,6 +293,7 @@ class _JobApprovalCards:
     settled: list[str] = field(default_factory=list)
     cards: object = field(default_factory=object)
     send_delivery: object = field(default_factory=object)
+    router_missing: None = None
 
     async def request_background_approval(
         self,

@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+import google.oauth2.credentials
 import httpx
 import pytest
 
@@ -143,6 +144,89 @@ def test_cohere_reranker_reads_its_credential_service(tmp_path: Path, monkeypatc
     create_reranker(KnowledgeRerankerConfig(provider="cohere", model="m", credentials_service="jina"), runtime_paths)
 
     assert services == ["cohere", "jina"]
+
+
+class _GoogleCredentials(google.oauth2.credentials.Credentials):
+    """User Application Default Credentials that hold token ``t`` once refreshed."""
+
+    def refresh(self, request: object) -> None:
+        del request
+        self.token = "t"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidates go out in concurrent requests of 100 records, the unit Vertex AI bills, and are scored together.
+
+    The credential file comes from the runtime's ``.env``, which MindRoom does not export, and names the project.
+    """
+    bodies: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == (
+            "https://discoveryengine.googleapis.com/v1/projects/key-project/locations/global"
+            "/rankingConfigs/default_ranking_config:rank"
+        )
+        assert request.headers["Authorization"] == "Bearer t"
+        assert request.headers["x-goog-user-project"] == "quota"
+        body = json.loads(request.content)
+        bodies.append(body)
+        # A zero score is left out of the JSON response, like other proto3 defaults.
+        records = [
+            {"id": record["id"], **({"score": int(record["id"]) / 1000} if record["id"] != "0" else {})}
+            for record in body["records"]
+        ]
+        return httpx.Response(200, json={"records": records[::-1]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        rerank_module.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    credentials = _GoogleCredentials(token=None, quota_project_id="quota")
+    credentials.project_id = "key-project"  # as a service account key carries it
+    credential_files: list[str] = []
+    monkeypatch.setattr(
+        rerank_module,
+        "load_google_application_credentials",
+        lambda path: credential_files.append(path) or credentials,
+    )
+    (tmp_path / ".env").write_text("GOOGLE_APPLICATION_CREDENTIALS=adc.json\n")
+    rerank_module._google_credentials.cache_clear()
+    reranker = create_reranker(
+        KnowledgeRerankerConfig(provider="vertex_ai", model="semantic-ranker-default@latest"),
+        test_runtime_paths(tmp_path),
+    )
+
+    documents = [f"doc {index}" for index in range(250)]
+    assert await reranker.ascore("query", documents) == [index / 1000 for index in range(250)]
+    assert sorted(len(body["records"]) for body in bodies) == [50, 100, 100]
+    assert {"id": "200", "content": "doc 200"} in [body["records"][0] for body in bodies]
+    assert {body["model"] for body in bodies} == {"semantic-ranker-default@latest"}
+    assert {body["query"] for body in bodies} == {"query"}
+    assert credential_files == [str((tmp_path / "adc.json").resolve())]
+
+
+@pytest.mark.asyncio
+async def test_vertex_ai_reranker_needs_a_google_cloud_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without GOOGLE_CLOUD_PROJECT or a project in Application Default Credentials, ranking fails."""
+    monkeypatch.setattr(
+        rerank_module,
+        "load_ambient_google_credentials",
+        lambda: (_GoogleCredentials(token=None), None),
+    )
+    rerank_module._google_credentials.cache_clear()
+    reranker = create_reranker(KnowledgeRerankerConfig(provider="vertex_ai", model="m"), test_runtime_paths(tmp_path))
+
+    with pytest.raises(ValueError, match="GOOGLE_CLOUD_PROJECT"):
+        await reranker.ascore("q", ["d"])
 
 
 @pytest.mark.asyncio
