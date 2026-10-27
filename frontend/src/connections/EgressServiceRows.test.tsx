@@ -1013,6 +1013,10 @@ describe("connected accounts", () => {
         screen.getByRole("button", { name: "Use account for Drive" }),
       );
       const dialog = await screen.findByRole("dialog");
+      // A compact control at the start, not stretched across the dialog's grid.
+      expect(within(dialog).getByRole("group", { name: "Access" })).toHaveClass(
+        "justify-self-start",
+      );
       expect(
         within(dialog).getByRole("radio", { name: "Read only" }),
       ).toBeChecked();

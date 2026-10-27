@@ -103,7 +103,7 @@ function AccountReuseDialog({
         <ToggleGroup
           type="single"
           aria-label="Access"
-          className="self-start"
+          className="justify-self-start"
           value={access}
           // Pressing the chosen level again would clear it; one stays chosen.
           onValueChange={(value) =>
