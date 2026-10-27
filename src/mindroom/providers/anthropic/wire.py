@@ -243,7 +243,7 @@ def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any
 
 def _answers_tool_calls(turn: dict[str, Any]) -> bool:
     """Return whether a user turn carries tool results, which continue the tool loop instead of starting a turn."""
-    return any(isinstance(block, dict) and block.get("type") == "tool_result" for block in turn["content"])
+    return any(_block_type(block) == "tool_result" for block in turn["content"])
 
 
 def _user_blocks(message: Message, *, citations: bool) -> list[Any]:

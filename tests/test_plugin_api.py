@@ -34,6 +34,7 @@ _EXPORTS = [
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
+    "EVENT_TOOL_ENVIRONMENT",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "VOICE_PREFIX",
@@ -73,6 +74,7 @@ _EXPORTS = [
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "ToolCategory",
+    "ToolEnvironmentContext",
     "ToolExecutionTarget",
     "ToolFileAccess",
     "ToolManagedInitArg",
@@ -109,7 +111,7 @@ _EXPORTS = [
     "write_file_within_root",
 ]
 
-# Every hook context has the base parameters; all but the two tool contexts put them first and end with the helpers.
+# Every hook context has the base parameters; all but the three tool contexts put them first and end with the helpers.
 _HOOK = "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id"
 _HOOK_HELPERS = (
     "runtime_started_at, message_sender, agent_message_snapshot_reader, matrix_admin, room_state_querier, "
@@ -199,6 +201,9 @@ _SIGNATURES = {
     "ToolBeforeCallContext": (
         "(tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, declined, decline_reason, "
         f"{_TOOL_HOOK})"
+    ),
+    "ToolEnvironmentContext": (
+        f"(function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, {_HOOK})"
     ),
     "ToolRuntimeContext": (
         "(agent_name, target, requester_id, client, config, runtime_paths, conversation_reader, relations, "

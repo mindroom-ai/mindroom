@@ -192,7 +192,7 @@ def _current_presets() -> list[model_defaults.ModelPreset]:
 
 
 def test_thinking_prefix_check_covers_current_claude_models() -> None:
-    """Every Claude preset on a Claude wire must get the thinking binding, so a default bump cannot leave one out."""
+    """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
     claude_ids = {
         preset.id
         for preset in _current_presets()

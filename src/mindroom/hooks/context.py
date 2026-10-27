@@ -10,6 +10,7 @@ from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
 from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.tool_environment import ToolEnvironment
 
 from .state import (
     build_hook_room_state_putter,
@@ -20,6 +21,7 @@ from .state import (
 from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     EnrichmentCachePolicy,
     EnrichmentItem,
     format_hook_source,
@@ -844,6 +846,53 @@ class ToolAfterCallContext(_HookLifecycleContext):
             state_key,
             content,
         )
+
+
+@dataclass(slots=True)
+class ToolEnvironmentContext(_HookLifecycleContext):
+    """Context passed to tool:environment hook callbacks, which change the environment of the call's shell commands."""
+
+    function_name: str
+    registered_toolkit: str | None
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    requester_id: str | None
+    event_name: str = EVENT_TOOL_ENVIRONMENT
+    plugin_name: str = ""
+    settings: dict[str, Any] = field(default_factory=dict)
+    config: Config | None = None
+    runtime_paths: RuntimePaths | None = None
+    logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
+    correlation_id: str = ""
+    _environment: ToolEnvironment = field(default_factory=ToolEnvironment, repr=False)
+
+    def set_env(self, name: str, value: str) -> None:
+        """Give the call's shell commands the variable ``name`` with ``value``."""
+        _check_env_name(name)
+        if not isinstance(value, str) or "\0" in value:
+            msg = f"Environment variable {name} needs a string value without NUL characters"
+            raise ValueError(msg)
+        self._environment = self._environment.then(ToolEnvironment(values={name: value}))
+
+    def unset_env(self, name: str) -> None:
+        """Keep the variable ``name`` from the call's shell commands; ``PATH`` cannot be removed, only set."""
+        _check_env_name(name)
+        if name == "PATH":
+            msg = "PATH cannot be removed, since no command would run without it; set it instead"
+            raise ValueError(msg)
+        self._environment = self._environment.then(ToolEnvironment(values={name: None}))
+
+    def pass_through(self, name: str) -> None:
+        """Give the call's shell commands MindRoom's own variables that ``name``, a name or glob pattern, matches."""
+        _check_env_name(name)
+        self._environment = self._environment.then(ToolEnvironment(pass_through=(name,)))
+
+
+def _check_env_name(name: str) -> None:
+    if not name or any(char.isspace() or char in "=,\0" for char in name):
+        msg = f"Invalid environment variable name: {name!r}"
+        raise ValueError(msg)
 
 
 def _requester_id_for_hook_send(

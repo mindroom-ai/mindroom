@@ -6,7 +6,9 @@ from dataclasses import dataclass
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
 # 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
-WORKER_PROTOCOL_VERSION = 3
+# 4: a shell call's set and removed variables (execution_env_set, execution_env_unset) apply over the worker's own
+#    environment and workspace script, so a worker that ignored them would hand commands what a plugin removed.
+WORKER_PROTOCOL_VERSION = 4
 
 
 @dataclass(frozen=True)
