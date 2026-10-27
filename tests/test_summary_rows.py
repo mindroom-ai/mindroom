@@ -18,6 +18,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.store import watch_session_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session_row
 
@@ -541,6 +542,20 @@ def test_a_first_turn_fold_creates_the_session_row_of_its_scope(store: Conversat
     assert loaded.summary is not None
     assert loaded.summary.text == "S"
     assert _log(store, _TEAM if kind == "team" else _AGENT) == ["row:S", "run:live"]
+
+
+@pytest.mark.parametrize("kind", ["agent", "team"])
+def test_a_first_turn_fold_reports_the_session_row_it_created(store: ConversationStore, kind: SessionKind) -> None:
+    """The fold that creates its session's row tells the block watching that session; a later fold tells none."""
+    running: AnyRunRecord = _team_run("live", RunStatus.running) if kind == "team" else _run("live", RunStatus.running)
+    scope = HistoryScope(kind=kind, scope_id="crew" if kind == "team" else "code")
+
+    with watch_session_row(scope, "s1") as first:
+        assert _fold(store, running, "S") is not None
+    with watch_session_row(scope, "s1") as later:
+        assert _fold(store, running, "T") is not None
+
+    assert (first.created, later.created) == (True, False)
 
 
 def test_a_stored_paused_run_moves_after_its_fold_and_stays_there_once_completed(store: ConversationStore) -> None:

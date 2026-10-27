@@ -18,6 +18,7 @@ import json
 import sqlite3
 from collections import defaultdict
 from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from dataclasses import astuple, dataclass, fields, replace
 from datetime import UTC, datetime
 from time import time
@@ -31,7 +32,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.history.types import ScopeSummary
+from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
@@ -148,11 +149,6 @@ class ConversationStore:
                 (session_id,),
             ).fetchone()
         return None if row is None else decoded_mapping(row[0])
-
-    def has_session(self, session_id: str, kind: SessionKind) -> bool:
-        """Return whether a ``kind`` session ``session_id`` is stored, the condition under which a load finds it."""
-        with self.transaction(write=False) as connection:
-            return self._session_row(connection, session_id, kind) is not None
 
     def load_session(self, session_id: str, kind: SessionKind) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing or of another kind.
@@ -293,6 +289,8 @@ class ConversationStore:
             stored = self._write_state(connection, session, created, state)
         _record_stored_state(session, stored)
         _mirror(session, saved)
+        if created is not None:
+            report_created_row(session)
         return saved.outcome
 
     def patch_run_metadata(
@@ -434,6 +432,8 @@ class ConversationStore:
                 )
         _record_stored_state(session, created)
         session.metadata = updated
+        if created is not None:
+            report_created_row(session)
 
     def list_updated_sessions(self, agent_id: str, *, since: int) -> list[tuple[str, int]]:
         """Return ``(session_id, updated_at)`` of agent ``agent_id``'s sessions updated after ``since``, oldest first.
@@ -475,10 +475,13 @@ class ConversationStore:
             },
         )
         snapshot["kind"] = kind
+        created = None
         with self.transaction(write=True) as connection:
-            if initial_session is not None:
-                ensure_session_row(connection, self.names, initial_session)
+            if initial_session is not None and ensure_session_row(connection, self.names, initial_session) is not None:
+                created = initial_session
             connection.execute(usage_upsert_sql(self.names.sessions), (session_id, usage_id, json.dumps(snapshot)))
+        if created is not None:
+            report_created_row(created)
 
 
 @dataclass(frozen=True, slots=True)
@@ -613,7 +616,8 @@ def ensure_session_row(
     """Create ``session``'s row in the caller's write transaction unless one exists, keeping one another writer made.
 
     Returns the copy of ``session.session_state`` a created row holds, for the caller to record as
-    ``session.stored_session_state`` once its transaction commits, or None when the row existed.
+    ``session.stored_session_state`` once its transaction commits, or None when the row existed. A caller whose
+    write created the row reports it once the write commits (``report_created_row``).
     """
     owner_column = "team_id" if session.kind == "team" else "agent_id"
     # One encode reads the live state, as ``session_state_snapshot`` does, and the created row's copy decodes from it.
@@ -634,6 +638,44 @@ def ensure_session_row(
         ),
     )
     return json.loads(session_data)["session_state"] if cursor.rowcount else None
+
+
+@dataclass(slots=True)
+class _SessionRowWatch:
+    """Whether a write ``watch_session_row`` watched created the row of session ``session_id`` in ``scope``."""
+
+    scope: HistoryScope
+    session_id: str
+    created: bool = False
+
+
+_SESSION_ROW_WATCH: ContextVar[_SessionRowWatch | None] = ContextVar("session_row_watch", default=None)
+
+
+@contextmanager
+def watch_session_row(scope: HistoryScope, session_id: str) -> Iterator[_SessionRowWatch]:
+    """Watch the writes made in this block, and in the tasks and threads it starts, for one creating a session's row.
+
+    The watch's ``created`` turns true once a write that created session ``session_id``'s row in ``scope`` commits.
+    A write to a row that exists, one that rolls back, and one for another session or scope leave it alone.
+    """
+    watch = _SessionRowWatch(scope, session_id)
+    token = _SESSION_ROW_WATCH.set(watch)
+    try:
+        yield watch
+    finally:
+        _SESSION_ROW_WATCH.reset(token)
+
+
+def report_created_row(session: ConversationSession) -> None:
+    """Tell the block watching this write that the write, now committed, created ``session``'s row."""
+    watch = _SESSION_ROW_WATCH.get()
+    if watch is not None and (watch.session_id, watch.scope.kind, watch.scope.scope_id) == (
+        session.session_id,
+        session.kind,
+        session.owner_id,
+    ):
+        watch.created = True
 
 
 def _adopt_requester(
@@ -1147,6 +1189,7 @@ __all__ = [
     "flag_folded",
     "is_removed",
     "persist_to",
+    "report_created_row",
     "runs_without",
     "seen_event_ids",
     "set_visible_messages",
@@ -1154,5 +1197,6 @@ __all__ = [
     "store_fold",
     "summary_event_sets",
     "upsert_run",
+    "watch_session_row",
     "write_with_session_state",
 ]

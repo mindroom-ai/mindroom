@@ -189,7 +189,7 @@ async def block_secret_reads(ctx):
 | `agent:started` | Observer | `AgentLifecycleContext` | After the bot logs in, sets presence, and registers callbacks | None | 5000 |
 | `bot:ready` | Observer | `AgentLifecycleContext` | After the bot finishes room joins and initial sync | None | 5000 |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
-| `session:started` | Observer | `SessionHookContext` | Once when a response creates a new persisted session | None | 5000 |
+| `session:started` | Observer | `SessionHookContext` | Once per new persisted session, when the reply that created it ends, even a failed or stopped one, and before that reply's `message:after_response` or `message:cancelled` | None | 5000 |
 | `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
