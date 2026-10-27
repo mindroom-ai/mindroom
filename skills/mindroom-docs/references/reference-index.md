@@ -95,6 +95,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Deployment | Agent Keys | `deployment/egress-broker.md` | `deployment/egress-broker/index.md` | `page__deployment__egress-broker__index.md` |
 | Deployment | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Deployment | Trusted Upstream Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
+| Deployment | Cloudflare Access & Tunnel | `deployment/cloudflare-access.md` | `deployment/cloudflare-access/index.md` | `page__deployment__cloudflare-access__index.md` |
 | Deployment | Data Storage & Journal | `deployment/storage.md` | `deployment/storage/index.md` | `page__deployment__storage__index.md` |
 | Deployment | Config Bundles | `deployment/config-bundles.md` | `deployment/config-bundles/index.md` | `page__deployment__config-bundles__index.md` |
 | Deployment | Logs & Monitoring | `deployment/operational-log-events.md` | `deployment/operational-log-events/index.md` | `page__deployment__operational-log-events__index.md` |

@@ -48,6 +48,10 @@ _MESSAGES = {
     "broker_error": "The credential broker hit an internal error. Retry; if it keeps failing, tell an administrator.",
     "proxy_authentication_required": "The sandbox's proxy credentials are missing or expired. Start a new tool call.",
 }
+# A reconnect whose body carries no connect link: a service's own account, a shared connection, or one to reset first.
+_RECONNECT_WITHOUT_LINK = (
+    "The {provider} account for {service} must be connected again. Ask the user to reconnect it at manage_url."
+)
 # A service's own account, which only the service's row on the egress page connects, so there is no connect link.
 _OWN_ACCOUNT_MISSING = (
     "No {service} account is connected for this agent. "
@@ -182,6 +186,8 @@ def _template(  # noqa: C901, PLR0911 - one text per case, checked in order
         return _BAD_SERVICE_HEADER
     if code == "bad_request" and path is None:
         return _MALFORMED
+    if code == "oauth_connection_required" and not connectable and not without_page:
+        return _RECONNECT_WITHOUT_LINK
     texts = _MESSAGES
     if without_page:
         texts = _WITHOUT_PAGE_LINKED if connectable else _WITHOUT_PAGE
@@ -241,7 +247,7 @@ def refusal_body(
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
     writes the same way. `own_account` (the service's own account is not connected) asks the user to connect it at
-    `manage_url`.
+    `manage_url`, and an `oauth_connection_required` without a connect link names only `manage_url`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
     says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.

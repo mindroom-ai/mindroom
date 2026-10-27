@@ -88,6 +88,7 @@
 - [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/)
 - [Approved Egress](https://docs.mindroom.chat/deployment/approved-egress/)
 - [Trusted Upstream Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/)
+- [Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/)
 - [Data Storage & Journal](https://docs.mindroom.chat/deployment/storage/)
 - [Config Bundles](https://docs.mindroom.chat/deployment/config-bundles/)
 - [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/)

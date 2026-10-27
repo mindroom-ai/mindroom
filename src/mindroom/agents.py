@@ -1853,7 +1853,8 @@ def create_agent(
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
         knowledge: The shared knowledge of a RAG-enabled agent, or None; for a persona, callers resolve
-            it narrowed to the persona's kept knowledge bases.
+            it narrowed to the persona's kept knowledge bases. A graph-enabled agent's graph is added to it,
+            unless a persona names the bases it keeps.
         active_model_name: The runtime-selected model name overriding the configured model, or None.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
@@ -1958,6 +1959,12 @@ def create_agent(
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
+    # The graph is one more source of the knowledge search, which agents call far more than search_graph.
+    # A persona that names its knowledge bases searches only those, as it skips file memory.
+    if config.agent_uses_knowledge_graph(agent_name) and (persona is None or persona.kept_knowledge is None):
+        from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415
+
+        knowledge = with_knowledge_graph(knowledge, agent_name, config, runtime_paths, execution_identity)
     enabled_knowledge = (
         knowledge
         if not disable_runtime_capabilities

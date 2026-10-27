@@ -40,7 +40,8 @@ Moving grants from Agent Vault, whose logins often had read-only Google scopes, 
 ## Later, not now
 
 - **Several accounts per provider** is designed separately (`2026-10-27-agent-keys-multiple-accounts-design.md`); its opt-in entries carry the same `access` field.
-- **Write-only access** (for example sending mail without reading it). The same check could allow only non-read methods, but no routine needs it yet.
+- **Write-only access** (for example sending mail without reading it).
+  The same check could allow only non-read methods, but no routine needs it yet.
 - **Read-only for `github`**, which needs a way to name `…/git-upload-pack` paths.
 
 ## Assumptions
@@ -48,10 +49,3 @@ Moving grants from Agent Vault, whose logins often had read-only Google scopes, 
 - The APIs behind the declared presets do their reads with `GET` (or `HEAD`), apart from the `post_paths` they list.
 - Atlassian's GraphQL gateway refuses mutations sent with `GET`, which the `atlassian` preset relies on, since its one rule covers all of `api.atlassian.com`.
 - Squid hands the broker every credentialed request, so the broker sees each request's method and headers before any credential is added.
-
-## Testing
-
-- Config tests: `read_only` defaults to `None`, validates `post_paths` like `path_prefix`, and the declared presets carry it.
-- Broker tests: an entry without `access` reads as `"read_write"`; under `"read"`, `GET` and `HEAD` pass, `POST` passes only on a listed path, and `POST` elsewhere, `PUT`, `PATCH`, `DELETE`, a WebSocket upgrade and a method-override header are refused with `read_only` without resolving the token, and the refusal is audited.
-- API tests: both opt-in endpoints store the requested level, default to `"read_write"`, refuse `"read"` with 409 for a service without `read_only`, report the level, and keep every other entry when the level changes.
-- Tool and dashboard tests: the level shows in `list_egress_credentials` and on the service row, and the dashboard sends `"read"` by default where read-only is offered.
