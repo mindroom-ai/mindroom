@@ -79,15 +79,7 @@ export function overlapWarnings(
     "name" | "display_name" | "rules" | "restrict_only"
   >[],
   editingName: string | undefined,
-  /** The form gives the service its own account, which a request can also pick by the header. */
-  pickedByHeader = false,
 ): string[] {
-  // The order still decides without the header, for example against another service of the user's own.
-  const order =
-    "An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically." +
-    (pickedByHeader
-      ? ` A request uses this service instead when it sends the header X-Agent-Keys-Service: ${form.name || "<name>"}.`
-      : "");
   const covered = new Set(
     (usesOwnRules(form) ? form.rules : (preset?.rules ?? []))
       .map((rule) => rule.host.trim().toLowerCase())
@@ -106,7 +98,7 @@ export function overlapWarnings(
     ];
     return shared.length > 0
       ? [
-          `${other.display_name} already sends a key to ${formatList(shared)} for this agent. ${order}`,
+          `${other.display_name} already sends a key to ${formatList(shared)} for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.`,
         ]
       : [];
   });

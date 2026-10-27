@@ -593,6 +593,38 @@ describe("the editor form", () => {
     });
   });
 
+  it("names the preset's login by its display name, and the header once beside its own account", async () => {
+    const calendar = credentialService({
+      name: "google_calendar",
+      display_name: "Google Calendar",
+      rules: [
+        {
+          host: "www.googleapis.com",
+          port: null,
+          path_prefix: "/calendar/v3/",
+          auth_type: "bearer",
+        },
+      ],
+    });
+    await renderEditor({
+      service: { preset: "google_calendar", oauth_separate_account: true },
+      name: "team_calendar",
+      agentServices: [
+        calendar,
+        { ...calendar, name: "events", display_name: "Events" },
+      ],
+    });
+    expect(
+      screen.getByText(
+        "Users can connect an account (Google Calendar) instead of an API key.",
+      ),
+    ).toBeVisible();
+    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
+    expect(
+      screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
+    ).toHaveLength(1);
+  });
+
   it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
     const cases: [AuthoredEgressService, boolean][] = [
       [{ preset: "github", oauth_provider: "google_drive" }, true],

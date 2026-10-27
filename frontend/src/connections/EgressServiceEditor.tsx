@@ -390,7 +390,7 @@ export function EgressServiceEditor({
   // The services this form would send a key to the same website as, for this agent.
   const overlaps = limiting
     ? []
-    : overlapWarnings(form, preset, agentServices, name, form.separateAccount);
+    : overlapWarnings(form, preset, agentServices, name);
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting

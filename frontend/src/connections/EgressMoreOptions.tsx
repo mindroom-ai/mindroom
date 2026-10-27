@@ -206,7 +206,7 @@ export function MoreOptions({
     <p className="text-xs text-muted-foreground">
       {sharedTarget
         ? "Accounts cannot be connected on a shared agent, so this service uses an API key."
-        : `Users can connect an account (${preset.oauth_provider}) instead of an API key.`}
+        : `Users can connect an account (${providers.find((provider) => provider.id === preset.oauth_provider)?.display_name ?? preset.oauth_provider}) instead of an API key.`}
     </p>
   ) : (
     !preset && (
