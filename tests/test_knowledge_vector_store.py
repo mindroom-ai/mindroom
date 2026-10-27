@@ -477,15 +477,21 @@ def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: py
     collection = KnowledgeCollection(path=tmp_path, name="docs")
     collection.reset()
     collection.write_source_rows("a.md", [_row("a", "a.md", "alpha", [1.0, 0.0])])
-    reads: list[str] = []
+    calls: list[str] = []
     real_read_ahead = vector_store_module._read_ahead
+    real_load = vector_store_module._load_vector_index
     monkeypatch.setattr(
         vector_store_module,
         "_read_ahead",
-        lambda file: reads.append(file.name) or real_read_ahead(file),
+        lambda file: calls.append(f"read {file.name}") or real_read_ahead(file),
+    )
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection: calls.append("load") or real_load(connection),
     )
 
     for _search in range(2):
         assert collection.search([1.0, 0.0], limit=1)[0].content == "alpha"
 
-    assert reads == ["docs.sqlite3"]
+    assert calls == ["read docs.sqlite3", "load"]
