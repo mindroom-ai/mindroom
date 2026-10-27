@@ -172,7 +172,8 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
-        console.print(f"[red]✗[/red] Config invalid: {issues}")
+        # A message can quote a config key, which may contain brackets Rich reads as markup.
+        console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
         return None, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)
