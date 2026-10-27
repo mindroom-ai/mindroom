@@ -322,9 +322,9 @@ class TestMemoryConfig:
 
     def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(self, tmp_path: Path) -> None:
         """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""
-        model = {"model": "anthropic/claude-sonnet-5.5", "temperature": 0.3}
+        authored_config = {"model": "anthropic/claude-sonnet-5.5", "temperature": 0.3}
         config = Config(
-            memory={"llm": {"provider": "openrouter", "config": model}},
+            memory={"llm": {"provider": "openrouter", "config": authored_config}},
             router=RouterConfig(model="default"),
         )
 
