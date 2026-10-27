@@ -221,7 +221,8 @@ Worker pods can reach the primary API over the pod network, so the runtime chart
 ### Keeping worker versions matched
 
 Run the same MindRoom release in the primary runtime and in every runner and worker image.
-MindRoom refuses dedicated Docker worker images whose protocol does not match the primary runtime; it pulls the configured image once and recreates the worker before failing.
+MindRoom refuses dedicated Docker and Kubernetes worker images whose protocol does not match the primary runtime, and replaces the worker once before failing, so a worker left running from an older release under a mutable tag such as `:latest` is replaced on its next use.
+A Docker worker is recreated from a fresh pull of the configured image, while a Kubernetes worker gets a new pod, which pulls the tag again only under image pull policy `Always`, the runtime chart's default.
 If the pull fails, as it does for a locally built tag such as `mindroom:dev`, or the image is still incompatible, rebuild the image from the checkout the primary runs from or select the published tag that matches your MindRoom version.
 Plain `uvx mindroom run` runs the published PyPI release, so when testing unreleased code, run MindRoom from the checkout you build the image from (`uv run mindroom run` from the repo root, or `uvx --from /path/to/mindroom mindroom run`).
 When upgrading from older releases, see [Workspace-only worker mounts](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts), [Config-free runners and workers](https://docs.mindroom.chat/deployment/upgrades/#config-free-runners-and-workers), and [Requester-scoped worker keys](https://docs.mindroom.chat/deployment/upgrades/#requester-scoped-worker-keys).

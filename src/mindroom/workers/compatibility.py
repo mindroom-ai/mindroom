@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import httpx
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
 # 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
 # 4: a shell call's set and removed variables (execution_env_set, execution_env_unset) apply over the worker's own
 #    environment and workspace script, so a worker that ignored them would hand commands what a plugin removed.
-WORKER_PROTOCOL_VERSION = 4
+_WORKER_PROTOCOL_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -25,5 +29,33 @@ def worker_health_payload(*, mindroom_version: str) -> _WorkerHealthPayload:
     return _WorkerHealthPayload(
         status="ok",
         mindroom_version=mindroom_version,
-        worker_protocol=WORKER_PROTOCOL_VERSION,
+        worker_protocol=_WORKER_PROTOCOL_VERSION,
+    )
+
+
+def worker_health_compatibility_error(response: httpx.Response, *, backend_label: str, image: str) -> str | None:
+    """Return an actionable error when a ready worker's health check reports another protocol."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if not isinstance(payload, dict):
+        reported_protocol: object = "missing"
+        reported_version: object = "unknown"
+    else:
+        reported_protocol = payload.get("worker_protocol", "missing")
+        reported_version = payload.get("mindroom_version", "unknown")
+
+    if (
+        isinstance(reported_protocol, int)
+        and not isinstance(reported_protocol, bool)
+        and reported_protocol == _WORKER_PROTOCOL_VERSION
+    ):
+        return None
+    return (
+        f"{backend_label} worker image '{image}' is incompatible with this MindRoom runtime: "
+        f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
+        f"(worker MindRoom version {reported_version}). "
+        "Use a worker image built for this MindRoom release."
     )
