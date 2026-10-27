@@ -73,7 +73,8 @@ class EgressCredentialsTools(Toolkit):
         nothing configured also says whether the user can connect an account instead of adding a key
         (`can_connect_account`), with the account's
         `provider` when it can or when the account still needs allowing. `separate_account: true` marks a service
-        with an account of its own, which a request uses by naming the service in an `X-Agent-Keys-Service` header.
+        of the user's own with an account of its own, which a request uses by naming it in an `X-Agent-Keys-Service`
+        header.
         The result carries the link
         where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
         into the chat; send them to the link instead.
@@ -205,9 +206,9 @@ class EgressCredentialsTools(Toolkit):
             f"{fix}"
             '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '
             "until whoever allows the account allows read and write there. "
-            "A request uses one listed service by sending the header `X-Agent-Keys-Service: <name>`; without it the "
-            "most specific rule decides, so a `separate_account: true` service, which logs in with an account of its "
-            "own instead of the one this agent's tools use, may need it. "
+            "A request uses one of the user's own services (`source: user`) by sending the header "
+            "`X-Agent-Keys-Service: <name>`; without it the most specific rule decides, so a `separate_account: true` "
+            "service, which logs in with an account of its own instead of the one this agent's tools use, may need it. "
             "Never ask the user to paste a key into the chat."
         )
 

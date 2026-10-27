@@ -442,7 +442,7 @@ Such a service usually covers the same hosts and paths as a service of your admi
 curl -H 'X-Agent-Keys-Service: team_calendar' https://www.googleapis.com/calendar/v3/users/me/calendarList
 ```
 
-The header works for any service the [agent tool](#agent-tool) lists, on hosts that a service's rules name: only the named service's rules then match, after the same [path limits](#limiting-paths-and-repositories), and a request none of them matches is refused with 403 `service_not_matched`.
+The header can name any of your own services (`source: user` in the [agent tool](#agent-tool)), on hosts that a service's rules name: only the named service's rules then match, after the same [path limits](#limiting-paths-and-repositories), and a request none of them matches, or one naming an administrator's service, is refused with 403 `service_not_matched`.
 On those hosts the broker removes the header before forwarding the request; a request to any other host goes out as it would without the header.
 
 ## Services editor
@@ -535,7 +535,7 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 - `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
   When it is `false`, `provider` names the account to allow, and the note tells the agent that allowing it lets its commands act as the account without the approval prompts the account's tools ask for, and who may allow it.
 - `oauth_access` is `read` or `read_write` for an account Agent Keys may use, and `null` otherwise; under `read`, writes fail with `read_only` until the account is allowed read and write (see [Read-only accounts](#read-only-accounts)).
-- `separate_account: true` marks a service with [its own account](#a-services-own-account), and the note tells the agent to name a service with the `X-Agent-Keys-Service` header.
+- `separate_account: true` marks a service with [its own account](#a-services-own-account), and the note tells the agent to name one of the user's own services with the `X-Agent-Keys-Service` header.
 - A service with nothing configured also reports `can_connect_account`.
   When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.
   It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
@@ -638,7 +638,7 @@ The broker returns these errors to worker code:
 | Request the broker cannot read unambiguously, such as an invalid CONNECT target, an HTTP protocol error, or an empty or repeated `X-Agent-Keys-Service` header | 400 JSON `{"error": "bad_request", "message": "..."}`; 431 with the same body when the request head is over 64 KiB, usually a huge `Cookie` or custom header |
 | Ambiguous path on a host with rules (see [Limiting paths and repositories](#limiting-paths-and-repositories)) | 400 JSON `{"error": "bad_request", "message": "..."}` with the ambiguous-path text |
 | `TRACE` or `TRACK` request to a host with rules | 405 JSON `{"error": "method_not_allowed", "message": "..."}`; the upstream would echo the injected credential back |
-| `X-Agent-Keys-Service` naming a service none of whose rules matches the request (see [A service's own account](#a-services-own-account)) | 403 JSON `{"error": "service_not_matched", "service": "<name>", "message": "..."}` |
+| `X-Agent-Keys-Service` naming no service of the user's own whose rules match the request (see [A service's own account](#a-services-own-account)) | 403 JSON `{"error": "service_not_matched", "service": "<name>", "message": "..."}` |
 | Path that fails a restriction (see [Limiting paths and repositories](#limiting-paths-and-repositories)) | 403 JSON `{"error": "path_not_allowed", "service": "<restricting service>", "manage_url": "<link>", "message": "..."}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked", "message": "..."}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed", "services": [...], "message": "..."}` with the operator's service names as a hint |

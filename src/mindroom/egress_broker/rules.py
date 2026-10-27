@@ -396,7 +396,7 @@ def route_request(  # noqa: PLR0911 - one return per row of the table
     | 2   | The path is ambiguous (`is_ambiguous_path`).                      | `refusal="bad_request"` (400)         |
     | 3   | An operator service restricts the host; no operator rule matches. | `refusal="path_not_allowed"` (403)    |
     | 4   | A user service restricts the host; no user rule matches.          | `refusal="path_not_allowed"` (403)    |
-    | 5   | The request names a service; no rule of it matches.               | `refusal="service_not_matched"` (403) |
+    | 5   | The request names a user service; no rule of it matches.          | `refusal="service_not_matched"` (403) |
     | 6   | Otherwise.                                                        | `match=match_rule(...)`, or None      |
 
     Row 1 leaves the request to the caller's `unmatched_hosts`, whatever the path. `EgressRules.intercepts` decides
@@ -407,9 +407,10 @@ def route_request(  # noqa: PLR0911 - one return per row of the table
     `restrict_only` ones included. So a user's limit narrows the operator's services on that host for that requester
     alone, and never opens a path the operator's limit refuses. The refusal names the party's restricting service
     whose name sorts first and sets `restricted_by_operator` in row 3.
-    Row 5 applies to a request naming a service (`requested`, its `X-Agent-Keys-Service` header): only that service's
-    rules can match it, whoever defined the service, and a `restrict_only` service or a name the effective config does
-    not have matches nothing. So a request picks a user service that ties with an operator service on purpose only.
+    Row 5 applies to a request naming a service (`requested`, its `X-Agent-Keys-Service` header): only the rules of that
+    service of the scope's own can match it, and an operator service, a `restrict_only` service, or a name the scope
+    does not have matches nothing. So a request picks a user service that ties with an operator service on purpose
+    only, and never changes which operator credential the most specific operator rule picks.
     Without a name, row 6 chooses the credential: the most specific applicable rule, operator's or user's, outside `restrict_only`
     services; an operator rule wins a tie with a user rule. So a user's limit in place keeps the operator's service,
     with the user's connection or key, for the paths it allows. With no matching rule the request goes out without
@@ -431,7 +432,7 @@ def route_request(  # noqa: PLR0911 - one return per row of the table
         return user_refusal
     if requested is None:
         return Route(host_has_rules=True, match=match_rule(rules.effective, host, port, path, preferred=operator))
-    named = rules.effective.services.get(requested)
+    named = user.get(requested)
     match = None if named is None or named.restrict_only else _best_match({requested: named}, host, port, path)
     if match is None:
         return Route(host_has_rules=True, refusal="service_not_matched")

@@ -890,14 +890,14 @@ _REQUESTED_ROUTE_CASES = [
         id="6-the-named-user-service-wins-a-tie-with-an-operator-service",
     ),
     pytest.param(
-        6,
+        5,
         {"op": EgressService(rules=[_rule(_HOST)])},
         {"mine": EgressService(rules=[_rule(_HOST, "/x")])},
         _HOST,
         "/x/y",
         "op",
-        (True, None, None, False, "op"),
-        id="6-an-operator-service-can-be-named-over-a-more-specific-user-rule",
+        (True, "service_not_matched", None, False, None),
+        id="5-an-operator-service-cannot-be-named",
     ),
 ]
 

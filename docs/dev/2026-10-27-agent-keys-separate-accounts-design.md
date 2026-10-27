@@ -27,7 +27,8 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
   A request may add `X-Agent-Keys-Service: <name>`; routing then matches only that service's rules, after the same restriction checks as today, and a request no rule of that service matches is refused with 403 `service_not_matched`.
   A missing, empty or repeated header value is a 400 `bad_request`. The broker removes the header before forwarding.
   This holds on hosts with rules, the only ones whose HTTPS the broker reads: a request to another host is tunneled blind, so the header selects nothing there and reaches the host as sent, which exposes only a service name the agent itself chose.
-  The header works for any service in the requester's effective config, not only separate-account ones, so an agent can also pick a user service with its own API key the same way.
+  The header names one of the requester's own (user) services, separate-account or not, so an agent can also pick a user service with its own API key the same way.
+  An operator's service cannot be named: the most specific operator rule keeps choosing among the operator's credentials, and an agent cannot override it.
 - **The agent learns which services exist.** `list_egress_credentials` marks services with `separate_account: true`, and its guidance names the header.
 - **The editor offers it.** When a user's own service names an OAuth provider, the service editor shows one checkbox, "Use its own account, not the one the agent's tools use", with a line saying requests choose it with `X-Agent-Keys-Service: <name>`.
 

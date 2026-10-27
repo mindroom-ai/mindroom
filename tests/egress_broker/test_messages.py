@@ -65,8 +65,8 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
         (
             "service_not_matched",
             {"host": "www.googleapis.com", "path": "/calendar/v3?page=2", "service": "team_calendar"},
-            "The X-Agent-Keys-Service header names team_calendar, but no rule of an agent service by that name covers "
-            "www.googleapis.com/calendar/v3. Name a service that covers it, or leave the header out.",
+            "The X-Agent-Keys-Service header names team_calendar, but no service of your own by that name has a rule "
+            "for www.googleapis.com/calendar/v3. Name one of your own services that covers it, or leave the header out.",
         ),
         (
             "bad_request",

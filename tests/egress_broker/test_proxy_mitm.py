@@ -1580,7 +1580,7 @@ async def test_the_agent_keys_service_header_picks_the_named_service_and_is_neve
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["unknown", "narrow"])
+@pytest.mark.parametrize("name", ["unknown", "narrow", "svc"])
 async def test_a_named_service_without_a_rule_for_the_request_is_refused(
     broker: BrokerFactory,
     tls_upstream: Upstream,
@@ -1588,7 +1588,10 @@ async def test_a_named_service_without_a_rule_for_the_request_is_refused(
     audit: AuditLog,
     name: str,
 ) -> None:
-    """A name the requester has no service for, or one whose rules do not cover the path, gets an audited 403."""
+    """A name the requester has no service of their own for, or one whose rules do not cover the path, gets a 403.
+
+    An administrator's service (`svc`) cannot be named, so the administrator's order among their own services holds.
+    """
     narrow = EgressService(rules=[EgressRule(host="localhost", path_prefix="/other", auth=EgressAuth(type="bearer"))])
     rules = with_user_services(single_rule_config(), narrow=narrow)
     await broker(rules_provider=lambda _claims: rules, secrets={"svc": SECRET, "narrow": "user-key"})
@@ -1600,8 +1603,8 @@ async def test_a_named_service_without_a_rule_for_the_request_is_refused(
     assert response.json() == {
         "error": "service_not_matched",
         "service": name,
-        "message": f"The X-Agent-Keys-Service header names {name}, but no rule of an agent service by that name "
-        "covers localhost/echo. Name a service that covers it, or leave the header out.",
+        "message": f"The X-Agent-Keys-Service header names {name}, but no service of your own by that name has a "
+        "rule for localhost/echo. Name one of your own services that covers it, or leave the header out.",
     }
     assert tls_upstream.hits == []
     assert broker.resolved == []
@@ -1655,11 +1658,15 @@ async def test_a_named_service_still_reads_only_with_an_account_allowed_to_read(
 ) -> None:
     """Naming the service changes which service routes, not what an account allowed only to read may do."""
     lookup = _ReadOnlyLookup()
-    await broker(single_rule_config(), resolve_secret=lookup, manage_url=MANAGE_URL)
+    rules = with_user_services(
+        EgressBrokerConfig(),
+        mine=EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))]),
+    )
+    await broker(rules_provider=lambda _claims: rules, resolve_secret=lookup, manage_url=MANAGE_URL)
     client = proxy_client(broker.token())
 
-    write = await client.post(tls_upstream.url("/echo"), content=b"{}", headers={_SERVICE_HEADER: "svc"})
-    read = await client.get(tls_upstream.url("/echo"), headers={_SERVICE_HEADER: "svc"})
+    write = await client.post(tls_upstream.url("/echo"), content=b"{}", headers={_SERVICE_HEADER: "mine"})
+    read = await client.get(tls_upstream.url("/echo"), headers={_SERVICE_HEADER: "mine"})
 
     assert (write.status_code, write.json()["error"]) == (403, "read_only")
     assert read.status_code == 200
