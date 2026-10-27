@@ -352,7 +352,7 @@ is_prime(97)
 `think()` records an intermediate thought and an optional next action.
 `analyze()` records the result of a step and a `next_action` of `continue`, `validate`, or `final_answer`.
 Steps are kept for the current run, so later steps see earlier ones.
-The agent's prompt always includes the toolkit's reasoning instructions, which tell the model to call `think()` before every tool call or reply.
+The agent's prompt includes the default reasoning instructions, which tell the model to call `think()` before every tool call or reply, only while both `think()` and `analyze()` are enabled; instructions you set with `instructions` are always included.
 
 ### Configuration
 

@@ -54,7 +54,6 @@ IGNORED_AGNO_PARAMS = {
     # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
     "newspaper": {"include_summary"},
     # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
-    "reasoning": {"add_instructions"},
     "zep": {"add_instructions"},
 }
 # Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default

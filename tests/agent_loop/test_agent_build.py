@@ -535,6 +535,30 @@ def test_a_toolkit_s_instructions_show_whenever_it_offers_a_function(tmp_path: P
     assert build.prompt.tool_instructions == (ReasoningTools().instructions,)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"enable_think": False}, ()),
+        ({"enable_analyze": False}, ()),
+        ({"enable_think": False, "instructions": "Analyze each tool result."}, ("Analyze each tool result.",)),
+    ],
+    ids=["without_think", "without_analyze", "authored_without_think"],
+)
+def test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    expected: tuple[str, ...],
+) -> None:
+    """The default instructions require both ``think`` and ``analyze``; authored instructions show with either one."""
+    config, runtime_paths = _config(tmp_path, tools=[{"reasoning": overrides}])
+
+    build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    [reasoning] = [toolkit for toolkit in build.spec.toolkits if toolkit.name == "reasoning_tools"]
+    assert len(reasoning.functions) == 1
+    assert build.prompt.tool_instructions == expected
+
+
 def test_a_toolkit_whose_functions_are_all_left_out_shows_no_instructions(tmp_path: Path) -> None:
     """A toolkit shows its instructions only while it offers a function, not after a filter leaves them all out."""
     config, runtime_paths = _config(tmp_path, tools=["reasoning", "calculator"])
