@@ -30,7 +30,7 @@ from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.tool_access import validate_tool_arguments
-from mindroom.tool_system.tool_function import InjectedValue, ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -155,12 +155,7 @@ def _resolve_live_function(
         return f"`{tool_name}` is not one of this agent's tools in this conversation"
     if toolkit_name is not None and function.toolkit != toolkit_name:
         return f"`{tool_name}` now comes from another toolkit than the one the call was stored for"
-    # A tool that takes the run's media gets None for it in a live call too, but scheduling it stays refused, as it
-    # was when live runs carried media that a stored call lacked.
-    # TODO(simplify): Scheduling refuses a tool that takes media although its live calls get none either. Drop the
-    # media check. Models could schedule calls of those tools.
-    takes_media = InjectedValue.MEDIA in function.injected_params.values()
-    if function.external_execution or function.stop_after_call or takes_media:
+    if function.external_execution or function.stop_after_call:
         return f"`{tool_name}` needs live input or conversation control, so it cannot run as a scheduled call"
     return LiveFunction(
         function=function,

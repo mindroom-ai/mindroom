@@ -308,7 +308,7 @@ async def continue_paused_team_run(
             member_names=member_names,
             config=config,
             team_name=team_name,
-            execution_identity=execution_identity,
+            requester_user_id=execution_identity.requester_id,
         ),
     )
     try:

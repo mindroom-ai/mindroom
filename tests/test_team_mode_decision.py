@@ -58,9 +58,7 @@ def _matrix_room(config: Config, room_id: str = "!room:localhost", user_ids: lis
 
 
 async def _select_team_mode_for_test(message: str, agent_names: list[str], config: Config) -> TeamMode:
-    runtime_paths = runtime_paths_for(config)
-    ids = entity_ids(config, runtime_paths)
-    return await select_ad_hoc_team_mode(message, [ids[name] for name in agent_names], config, runtime_paths)
+    return await select_ad_hoc_team_mode(message, agent_names, config, runtime_paths_for(config))
 
 
 def decide_team_formation_for_test(*, config: Config, room: nio.MatrixRoom, **kwargs: object) -> TeamResolution:
@@ -248,7 +246,7 @@ class TestShouldFormTeam:
     def test_decide_team_formation_never_calls_ai(self, mock_config):
         """Formation is pure: it must never reach for the AI mode selector."""
         with patch(
-            "mindroom.teams.formation._select_team_mode",
+            "mindroom.teams.formation.select_ad_hoc_team_mode",
             side_effect=AssertionError("formation must not call AI"),
         ):
             result = decide_team_formation_for_test(
@@ -356,7 +354,7 @@ class TestIntegrationScenarios:
         install_model_providers(monkeypatch, {"default": model})
         mode = await select_ad_hoc_team_mode(
             "Email me the details, then call me to discuss",
-            result.eligible_members,
+            result.eligible_member_names,
             mock_config,
             runtime_paths_for(mock_config),
         )
@@ -383,7 +381,7 @@ class TestIntegrationScenarios:
         install_model_providers(monkeypatch, {"default": model})
         mode = await select_ad_hoc_team_mode(
             "What are your thoughts on this approach?",
-            result.eligible_members,
+            result.eligible_member_names,
             mock_config,
             runtime_paths_for(mock_config),
         )

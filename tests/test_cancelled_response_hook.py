@@ -66,7 +66,6 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
-from tests.identity_helpers import entity_ids
 from tests.reply_span_helpers import reply_span, seed_finished_reply
 
 if TYPE_CHECKING:
@@ -440,7 +439,7 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
                     agent_name=bot.agent_name,
                 ),
             ),
-            team_agents=[entity_ids(bot.config, runtime_paths_for(bot.config))["code"]],
+            member_names=["code"],
             team_mode="coordinate",
         )
 

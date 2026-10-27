@@ -4715,14 +4715,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
     "mindroom.constants",
-    "mindroom.entity_resolution",
     "mindroom.history.session_context",
     "mindroom.history.types",
-    "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
-    "mindroom.history.team_scope",
     "mindroom.session_storage.lanes",
 ]
 

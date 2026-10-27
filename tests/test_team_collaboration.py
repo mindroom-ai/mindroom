@@ -1213,3 +1213,22 @@ def test_an_implicit_thread_team_whose_members_all_left_the_room_forms_no_team()
         "calculator": TeamMemberStatus.HIDDEN_FROM_SENDER,
         "general": TeamMemberStatus.HIDDEN_FROM_SENDER,
     }
+
+
+def test_an_implicit_thread_team_names_only_its_members_still_in_the_room() -> None:
+    """A team formed without a member who left the room names its members by agent name, in their order."""
+    config = _formation_config(
+        calculator=AgentConfig(display_name="Calculator", role="Math"),
+        general=AgentConfig(display_name="General", role="General"),
+        research=AgentConfig(display_name="Research", role="Research"),
+    )
+
+    result = _decide(
+        config,
+        room_members=["research", "calculator"],
+        mentioned_in_thread=["research", "general", "calculator"],
+    )
+
+    assert result.outcome is TeamOutcome.TEAM
+    assert result.eligible_member_names == ("research", "calculator")
+    assert list(result.eligible_member_names) == _agent_names(result.eligible_members, config)

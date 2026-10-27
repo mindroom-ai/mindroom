@@ -451,8 +451,7 @@ async def test_a_teams_follow_up_runs_as_the_team(tmp_path: Path) -> None:
         await runner._generate_job_follow_up(request)
     team_response.assert_awaited_once()
     assert team_response.await_args.args == (request,)
-    members = team_response.await_args.kwargs["team_agents"]
-    assert [member.full_id for member in members] == ["@mindroom_general:localhost"]
+    assert team_response.await_args.kwargs["member_names"] == ["general"]
     assert team_response.await_args.kwargs["team_mode"] == "collaborate"
 
 
