@@ -102,12 +102,15 @@ models:
       project_id: your-gcp-project
       region: global
 
-  # Local via Ollama
+  # Local via Ollama (see Ollama Context Size)
   local:
     provider: ollama
     id: qwen3.8:27b
-    context_window: 256000
+    context_window: 32768
     host: http://localhost:11434
+    extra_kwargs:
+      options:
+        num_ctx: 32768
 
   # OpenRouter (access to many model providers)
   openrouter:
@@ -431,6 +434,13 @@ models:
 
 Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
 The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so confirm access, or switch to its `fable` alternative or `id: anthropic.claude-sonnet-5`.
+
+## Ollama Context Size
+
+MindRoom does not send Ollama a context size, so Ollama runs each model with its own default, which depends on the Ollama version and server and is often only a few thousand tokens.
+When a conversation is longer, Ollama drops its oldest messages to fit, without an error, so the model answers without seeing them.
+Set `extra_kwargs.options.num_ctx` to the context size Ollama should use, and `context_window` to the same value so MindRoom fits history into it (see [Context Window](history.md#context-window)), as the `local` model in [Configuration Examples](#configuration-examples) does.
+A larger `num_ctx` needs more memory on the Ollama server.
 
 ## Built-In Synthetic Model
 
