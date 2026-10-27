@@ -7,7 +7,7 @@ The [usage export service](https://docs.mindroom.chat/usage/#usage-export-servic
 The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use it, and users signed in to MindRoom Chat can open it without a gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway that publishes a JWKS endpoint and adds a short-lived signed JWT to each authenticated browser request, such as an identity-aware proxy or an OAuth2 proxy.
-[Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) lists the values for Cloudflare Access.
+[Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) puts Chat, Matrix, calls, and the runtime on one host behind Cloudflare Access.
 MindRoom takes the user only from the verified JWT claims and ignores identity headers, so a request that bypasses the gateway cannot pose as a user.
 While trusted upstream auth is enabled, it replaces Supabase platform auth and `MINDROOM_API_KEY` auth for the dashboard and its API.
 
