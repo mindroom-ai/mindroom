@@ -31,6 +31,7 @@ from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
+from mindroom.cli.doctor import _validate_vertexai_claude_connection
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
     _load_active_config_or_exit,
@@ -4256,6 +4257,35 @@ class TestDoctor:
             1,
             [{"role": "user", "content": [{"type": "text", "text": "Reply with OK."}]}],
         )
+
+    @pytest.mark.parametrize(
+        "extra_kwargs",
+        [
+            {"client_params": {"project_id": "own-project", "region": "us-east5"}},
+            {"project_id": "own-project", "client_params": {"region": "us-east5"}},
+        ],
+        ids=["client-params", "mixed-levels"],
+    )
+    def test_vertexai_claude_connection_check_uses_the_model_s_own_project_and_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        extra_kwargs: dict[str, object],
+    ) -> None:
+        """A model that sets its project and region, at either level of its settings, is checked where it sends."""
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5", extra_kwargs=extra_kwargs)
+
+        assert _validate_vertexai_claude_connection(model, runtime_paths) == (True, "")
+        assert [request.url.path for request in requests] == [
+            "/v1/projects/own-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5:streamRawPredict",
+        ]
 
     def test_vertexai_claude_connection_uses_runtime_adc_credentials(
         self,
