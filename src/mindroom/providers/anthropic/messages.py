@@ -93,7 +93,7 @@ from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     import httpx2
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
@@ -419,8 +419,16 @@ class ClaudeProvider:
         params = self._with_thinking_binding(self._with_sampling_in_extra_body(self._authored_params(request)), request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
-        # Betas authored in ``request_params`` stay beside the ones MindRoom adds.
-        betas = [*(params.get("betas") or []), *(self.settings.betas or [])]
+        extra_headers, header_betas = _split_beta_header(params.pop("extra_headers", None))
+        if extra_headers:
+            params["extra_headers"] = extra_headers
+        # Betas authored in ``request_params`` or in a header map stay beside the ones MindRoom adds, in one header.
+        betas = [
+            *(params.get("betas") or []),
+            *(self.settings.betas or []),
+            *header_betas,
+            *_split_beta_header(self._authored_default_headers())[1],
+        ]
         if output_format is not None or (strict_tools and self.route == "anthropic"):
             betas.append(_STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or compaction_edit:
@@ -476,6 +484,12 @@ class ClaudeProvider:
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
             checkpoint_prefix=replays_checkpoint,
         )
+
+    def _authored_default_headers(self) -> Mapping[str, str] | None:
+        """Return the client's authored default headers: ``default_headers``, else the ones in ``client_params``."""
+        if self.settings.default_headers is not None:
+            return self.settings.default_headers
+        return (self.settings.client_params or {}).get("default_headers")
 
     def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:
         """Build this request's SDK client over the shared HTTP client.
@@ -586,6 +600,23 @@ def _thinking_owner(params: dict[str, Any]) -> dict[str, Any]:
     """Return the dict whose ``thinking`` the request sends: the SDK sends ``extra_body`` over the body's own fields."""
     extra_body = params.get("extra_body") or {}
     return extra_body if "thinking" in extra_body else params
+
+
+def _split_beta_header(headers: Mapping[str, str] | None) -> tuple[dict[str, str], list[str]]:
+    """Return ``headers`` without ``anthropic-beta`` (in any case) and the betas it names, in order.
+
+    The SDK sends a request's ``betas`` as one ``anthropic-beta`` header, which a request's ``extra_headers`` replace
+    and which replaces the client's default one, so an authored header joins ``betas`` instead; a request then always
+    sends the client default's betas itself.
+    """
+    kept: dict[str, str] = {}
+    betas: list[str] = []
+    for name, value in (headers or {}).items():
+        if name.lower() == "anthropic-beta":
+            betas.extend(beta.strip() for beta in str(value).split(",") if beta.strip())
+        else:
+            kept[name] = value
+    return kept, betas
 
 
 def _sends_thinking_binding(params: dict[str, Any]) -> bool:

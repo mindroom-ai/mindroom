@@ -702,6 +702,58 @@ async def test_a_beta_authored_in_request_params_stays_beside_the_thinking_bindi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("route", "extra_kwargs"),
+    [
+        pytest.param(
+            "anthropic",
+            {"request_params": {"extra_headers": {"Anthropic-Beta": "mcp-a, mcp-b", "x-trace": "1"}}},
+            id="request-headers",
+        ),
+        pytest.param(
+            "anthropic",
+            {"default_headers": {"anthropic-beta": "mcp-a,mcp-b", "x-trace": "1"}},
+            id="defaults",
+        ),
+        pytest.param(
+            "anthropic",
+            {"client_params": {"default_headers": {"ANTHROPIC-BETA": "mcp-a,mcp-b", "x-trace": "1"}}},
+            id="client-params-defaults",
+        ),
+        pytest.param(
+            "vertexai_claude",
+            {"request_params": {"extra_headers": {"anthropic-beta": "mcp-a,mcp-b", "x-trace": "1"}}},
+            id="vertex-request-headers",
+        ),
+        pytest.param(
+            "bedrock_claude",
+            {"default_headers": {"anthropic-beta": "mcp-a,mcp-b", "x-trace": "1"}},
+            id="bedrock-defaults",
+        ),
+    ],
+)
+async def test_a_beta_authored_in_a_header_map_joins_the_request_s_betas_in_one_header(
+    tmp_path: Path,
+    route: str,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    """A request's ``extra_headers`` would replace the betas the SDK sends, and those would replace a default one.
+
+    So an authored ``anthropic-beta`` joins the request's betas, first, and the request sends exactly one header; the
+    other authored headers go out unchanged.
+    """
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"betas": ["mcp-b"], **extra_kwargs})
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    headers = wire.requests[0].headers
+    added = [] if route == "bedrock_claude" else [_THINKING_BINDING_BETA]
+    assert [value for name, value in headers.multi_items() if name.lower() == "anthropic-beta"] == [
+        ",".join(["mcp-b", "mcp-a", *added]),
+    ]
+    assert headers["x-trace"] == "1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("route", "bound"),
     [("anthropic", True), ("vertexai_claude", True), ("bedrock_claude", False)],
 )
