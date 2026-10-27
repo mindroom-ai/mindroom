@@ -91,5 +91,6 @@ class UserFilterMem0Tools(Mem0Tools):
         # keeps the top-level user_id.
         # Remove when: Agno's Mem0Tools passes filters={"user_id": ...} to search and get_all; keep redacting
         # the credentials in the Mem0 failures the toolkit returns to the model.
-        # Coverage: tests/test_mem0_tool.py::test_mem0_tool_search_and_listing_pass_the_user_as_a_filter
+        # Coverage: tests/test_mem0_tool.py::test_mem0_tool_search_and_listing_pass_the_user_as_a_filter,
+        # tests/test_mem0_tool.py::test_mem0_tool_failures_reach_the_model_without_the_rejected_key
         self.client = _UserFilterClient(self.client)  # ty: ignore[invalid-assignment]
