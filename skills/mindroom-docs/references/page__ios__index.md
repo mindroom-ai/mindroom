@@ -31,7 +31,7 @@ Set up the homeserver (examples use `chat.example.com`):
    `{"handoff_url": "https://chat.example.com/native/cloudflare-access"}`.
    The handoff URL must use HTTPS on the homeserver's own origin.
    Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
-   Accounts that are already signed in pick up a change at their next sign-in.
+   Signed-in accounts pick up a change only when they sign out and in again.
 2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
 
     ```nginx
