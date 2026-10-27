@@ -268,10 +268,10 @@ def test_concurrent_cold_searches_load_the_matrix_once(
     loads: list[int] = []
     real_load = vector_store_module._load_vector_index
 
-    def slow_load(connection: sqlite3.Connection, file: Path, max_matrix_bytes: int | None) -> object:
+    def slow_load(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> object:
         loads.append(1)
         time.sleep(0.2)
-        return real_load(connection, file, max_matrix_bytes)
+        return real_load(connection, max_matrix_bytes)
 
     monkeypatch.setattr(vector_store_module, "_load_vector_index", slow_load)
     with ThreadPoolExecutor(8) as pool:
@@ -300,13 +300,8 @@ def test_a_search_refuses_vectors_past_its_limit_before_loading_them(
     assert collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes)[0].content == "alpha"
 
 
-def test_loading_a_matrix_allocates_no_second_matrix(
-    collection: KnowledgeCollection,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollection) -> None:
     """Normalizing a loaded matrix needs one scratch block, not a temporary as large as the matrix."""
-    # The read-ahead buffer is freed before the matrix is allocated, but would otherwise set the measured peak.
-    monkeypatch.setattr(vector_store_module, "_read_ahead", lambda _file: None)
     rows = 8 * vector_store_module._NORMALIZE_ROWS
     vectors = np.random.default_rng(0).standard_normal((rows, 64), dtype=np.float32)
     collection.add_rows([_row(str(index), f"{index}.md", "doc", vectors[index].tolist()) for index in range(rows)])
@@ -314,7 +309,7 @@ def test_loading_a_matrix_allocates_no_second_matrix(
     with closing(sqlite3.connect(collection.file)) as connection:
         tracemalloc.start()
         try:
-            index = vector_store_module._load_vector_index(connection, collection.file, None)
+            index = vector_store_module._load_vector_index(connection, None)
             _current, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -392,9 +387,7 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection, file, max_matrix_bytes: (
-            loads.append("load") or real_load(connection, file, max_matrix_bytes)
-        ),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _round in range(3):
@@ -428,9 +421,7 @@ def test_the_published_matrix_stays_cached_beside_the_collection_it_retired(
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection, file, max_matrix_bytes: (
-            loads.append("load") or real_load(connection, file, max_matrix_bytes)
-        ),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(3):
@@ -458,9 +449,7 @@ def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatc
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection, file, max_matrix_bytes: (
-            loads.append("load") or real_load(connection, file, max_matrix_bytes)
-        ),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(3):
@@ -503,20 +492,26 @@ def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
 
 
 def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The first search reads the collection file front to back as it loads its matrix; cached searches do not."""
+    """The first search reads the collection file front to back before loading its matrix; cached searches do not."""
     monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
     collection = KnowledgeCollection(path=tmp_path, name="docs")
     collection.reset()
     collection.write_source_rows("a.md", [_row("a", "a.md", "alpha", [1.0, 0.0])])
-    reads: list[str] = []
+    calls: list[str] = []
     real_read_ahead = vector_store_module._read_ahead
+    real_load = vector_store_module._load_vector_index
     monkeypatch.setattr(
         vector_store_module,
         "_read_ahead",
-        lambda file: reads.append(file.name) or real_read_ahead(file),
+        lambda file: calls.append(f"read {file.name}") or real_read_ahead(file),
+    )
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection, max_matrix_bytes: calls.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(2):
         assert collection.search([1.0, 0.0], limit=1)[0].content == "alpha"
 
-    assert reads == ["docs.sqlite3"]
+    assert calls == ["read docs.sqlite3", "load"]

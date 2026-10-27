@@ -495,7 +495,12 @@ def _vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: 
                 if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
             ]:
                 del _index_cache[stale]
-        index = _load_vector_index(connection, file, max_matrix_bytes)
+        # A file swept since the connection opened still loads through it, so reading ahead is only best effort. A
+        # limited base loads in time without it, and one past its limit is refused without reading its file.
+        if max_matrix_bytes is None:
+            with suppress(OSError):
+                _read_ahead(file)
+        index = _load_vector_index(connection, max_matrix_bytes)
         with _index_cache_lock:
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
@@ -522,7 +527,7 @@ def _read_ahead(file: Path) -> None:
             pass
 
 
-def _load_vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: int | None) -> _VectorIndex:
+def _load_vector_index(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> _VectorIndex:
     import numpy as np  # noqa: PLC0415
 
     # One read transaction, so the count and the rows come from the same snapshot.
@@ -534,9 +539,6 @@ def _load_vector_index(connection: sqlite3.Connection, file: Path, max_matrix_by
         if max_matrix_bytes is not None and count * dimension * 4 > max_matrix_bytes:
             message = f"Knowledge collection holds {count} vectors, more than its {max_matrix_bytes}-byte search limit"
             raise _KnowledgeIndexTooLargeError(message)
-        # A file swept since the connection opened still loads through it, so reading ahead is only best effort.
-        with suppress(OSError):
-            _read_ahead(file)
         rowids = np.empty(count, dtype=np.int64)
         matrix = np.empty((count, dimension), dtype=np.float32)
         rows = connection.execute("SELECT rowid, embedding FROM chunks ORDER BY rowid")
