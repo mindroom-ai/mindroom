@@ -467,10 +467,10 @@ class ClaudeProvider:
         tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
         strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
         params = self._request_params(request, output_format, strict_tools=strict_tools)
-        thinking_enabled = settings.thinking_enabled() and not overrides.omit_thinking_setting
+        authors_thinking = settings.authors_thinking() and not overrides.omit_thinking_setting
         conversation = format_claude_messages(
             projected,
-            append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
+            append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
             citations=output_format is None,
             earlier_thinking=self._replays_earlier_thinking(params),
         )
