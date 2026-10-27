@@ -55,6 +55,7 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "export_tools_metadata",
     "get_tool_by_name",
     "listable_tool_metadata",
+    "load_toolkit_class",
     "normalize_authored_tool_overrides",
     "resolved_tool_metadata_for_runtime",
     "resolved_tool_validation_snapshot_for_runtime",
