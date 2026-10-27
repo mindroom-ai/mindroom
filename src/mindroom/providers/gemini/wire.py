@@ -226,7 +226,7 @@ def _stored_parts(stored: list[Any], tool_calls: Sequence[Mapping[str, Any]]) ->
 # LEGACY_COMPAT: Gemini replies stored with one message-level thought signature.
 # Legacy format: a stored Gemini assistant message whose ``provider_data`` holds ``thought_signature`` and no
 # ``gemini_parts``: the reply's text parts joined into ``content`` and the last signed text part's signature.
-# Last legacy release: v2026.10.568 wrote this shape; the release after it stores ``gemini_parts``.
+# Last legacy release: v2026.10.600 wrote this shape; the release after it stores ``gemini_parts``.
 # Handling: such a message replays as one text part carrying that signature, then its calls, as it did.
 # Coverage: tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_replays_a_reply_in_the_order_its_parts_arrived
 def _text_part(text: str, provider_data: Mapping[str, Any] | None) -> dict[str, Any]:

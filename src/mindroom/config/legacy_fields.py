@@ -112,7 +112,7 @@ def reject_legacy_defaults_fields(value: object) -> object:
 # LEGACY_COMPAT: Retired per-tool add_instructions switch of Agno's toolkits.
 # Legacy format: reasoning, zep, and daytona tool entries accepted an authored boolean add_instructions that put the
 #   toolkit's instructions in the agent's prompt.
-# Last legacy release: v2026.10.569; replacement: unreleased; the next release always shows a toolkit's instructions
+# Last legacy release: v2026.10.600; replacement: unreleased; the next release always shows a toolkit's instructions
 #   whenever it offers a function and removes the field.
 # Handling: Reject it on every tool, naming the key and saying to remove it.
 # Coverage: tests/test_tools_metadata.py::test_add_instructions_is_rejected_because_instructions_always_show,
