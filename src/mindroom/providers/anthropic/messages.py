@@ -26,6 +26,7 @@ from anthropic.types import RawContentBlockDeltaEvent, ToolUseBlock
 from anthropic.types import TextDelta as AnthropicTextDelta
 from anthropic.types import ThinkingDelta as AnthropicThinkingDelta
 from anthropic.types.beta import (
+    BetaMessage,
     BetaRawContentBlockDeltaEvent,
     BetaTextDelta,
     BetaThinkingDelta,
@@ -70,6 +71,7 @@ from mindroom.providers.anthropic.settings import (
 )
 from mindroom.providers.anthropic.wire import (
     assistant_message_from_response,
+    checks_thinking_prefix,
     format_claude_messages,
     format_claude_tools,
     inline_url_media,
@@ -91,12 +93,11 @@ from mindroom.runtime_env_policy import AWS_BEDROCK_CLAUDE_ENV_BY_KEY, VERTEXAI_
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     import httpx2
     from anthropic.lib.bedrock import AsyncAnthropicBedrockMantle
     from anthropic.types import Message as AnthropicMessage
-    from anthropic.types.beta import BetaMessage
     from google.auth.credentials import Credentials as GoogleCredentials
     from pydantic import BaseModel
 
@@ -114,6 +115,14 @@ _PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
     "bedrock_claude": "AwsBedrock",
 }
 _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
+# Replayed thinking whose earlier context changed is dropped instead of failing the request. The system prompt carries
+# the date and the turn's memory and enrichment, a turn's transient context leaves the history after it, and
+# compaction and replay limits rewrite earlier turns, so a request regularly replays thinking produced after a different
+# prefix; the API rejects such a request by default on accounts created from 2026-08-31. The default binding goes
+# only on the routes shown to accept the beta, because a platform rejects a beta it does not take, so not on Bedrock;
+# a request without a binding leaves out earlier turns' thinking instead (``_replays_earlier_thinking``).
+_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+_THINKING_BINDING_ROUTES: frozenset[ClaudeRouteKind] = frozenset({"anthropic", "vertexai_claude"})
 _VERTEX_ENDPOINTS = {
     "global": "https://aiplatform.googleapis.com/v1",
     "us": "https://aiplatform.us.rep.googleapis.com/v1",
@@ -304,6 +313,17 @@ class ClaudeProvider:
             )
         elif stop_reason == "refusal":
             logger.warning("claude_safeguard_refusal", model_id=self.identity.id, stop_reason=raw_stop_reason)
+        transformations = response.input_transformations if isinstance(response, BetaMessage) else None
+        dropped = [entry for entry in transformations or () if entry.type == "thinking_dropped"]
+        if dropped:
+            # The model answered without that earlier reasoning; ``reasons`` says why: the context before it changed, or
+            # another model, organization, or end user produced it.
+            logger.info(
+                "claude_replayed_thinking_dropped",
+                model_id=self.identity.id,
+                blocks=len(dropped),
+                reasons=sorted({entry.reason for entry in dropped}),
+            )
         return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
@@ -322,7 +342,8 @@ class ClaudeProvider:
         if settings.max_tokens:
             params["max_tokens"] = settings.max_tokens
         if settings.thinking and not overrides.disable_thinking:
-            params["thinking"] = dict(settings.thinking)
+            # A null field is unset, so an authored null ``block_binding`` is no binding on every route.
+            params["thinking"] = {key: value for key, value in settings.thinking.items() if value is not None}
         if settings.output_config:
             params["output_config"] = dict(settings.output_config)
         if settings.stop_sequences:
@@ -354,6 +375,36 @@ class ClaudeProvider:
             params.pop("extra_body", None)
         return params
 
+    def _with_thinking_binding(self, params: dict[str, Any], request: ModelRequest) -> dict[str, Any]:
+        """Return the params with stale replayed thinking set to be dropped (``_THINKING_BINDING_BETA``).
+
+        The default ``drop_block`` binding goes only on the routes that take the beta, and rides on adaptive
+        thinking, which these models run when the request sends no thinking setting; the API rejects it beside any
+        other thinking type. An authored ``block_binding`` is kept, a null one counts as none, and a request that
+        disables thinking gets none.
+        """
+        if (
+            self.route not in _THINKING_BINDING_ROUTES
+            or request.overrides.disable_thinking
+            or not checks_thinking_prefix(self.identity.id)
+        ):
+            return params
+        owner = _thinking_owner(params)
+        thinking = dict(owner.get("thinking") or {"type": "adaptive"})
+        if thinking.get("type") == "adaptive" and thinking.get("block_binding") is None:
+            thinking["block_binding"] = {"prefix_mismatch_behavior": "drop_block"}
+            owner["thinking"] = thinking
+        return params
+
+    def _replays_earlier_thinking(self, params: dict[str, Any]) -> bool:
+        """Return whether earlier turns' thinking replays: always, unless the API checks it and nothing binds it.
+
+        Where no ``block_binding`` is sent (Bedrock, ``between_tools``, disabled thinking), a stale earlier block
+        fails the request, so earlier turns replay without thinking, which is always valid. An authored binding,
+        ``"error"`` included, is the operator's choice and keeps every block.
+        """
+        return not checks_thinking_prefix(self.identity.id) or _sends_thinking_binding(params)
+
     def _request_params(
         self,
         request: ModelRequest,
@@ -365,14 +416,26 @@ class ClaudeProvider:
 
         Only the direct API gets the structured-outputs beta header; Bedrock sends strict tools without it.
         """
-        params = self._with_sampling_in_extra_body(self._authored_params(request))
+        params = self._with_thinking_binding(self._with_sampling_in_extra_body(self._authored_params(request)), request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
-        betas = list(self.settings.betas or [])
+        extra_headers, header_betas = _split_beta_header(params.pop("extra_headers", None))
+        if extra_headers:
+            params["extra_headers"] = extra_headers
+        # Betas authored in ``request_params`` or in a header map stay beside the ones MindRoom adds, in one header.
+        betas = [
+            *(params.get("betas") or []),
+            *(self.settings.betas or []),
+            *header_betas,
+            *_split_beta_header(self._authored_default_headers())[1],
+        ]
         if output_format is not None or (strict_tools and self.route == "anthropic"):
             betas.append(_STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or compaction_edit:
             betas.append(COMPACTION_BETA)
+        # The API rejects a binding without its beta, so an authored one gets it on every route.
+        if _sends_thinking_binding(params):
+            betas.append(_THINKING_BINDING_BETA)
         if betas:
             params["betas"] = list(dict.fromkeys(betas))
         if output_format is not None:
@@ -390,21 +453,19 @@ class ClaudeProvider:
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
         )
         output_format = self._output_format(request.output_schema)
+        # Vertex rejects the tool-level strict field.
+        strict_allowed = self.route != "vertexai_claude"
+        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
+        strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
+        params = self._request_params(request, output_format, strict_tools=strict_tools)
         thinking_enabled = settings.thinking_enabled() and not overrides.disable_thinking
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
             citations=output_format is None,
+            earlier_thinking=self._replays_earlier_thinking(params),
         )
-        # Vertex rejects the tool-level strict field.
-        strict_allowed = self.route != "vertexai_claude"
-        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
-        strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
-        body: dict[str, Any] = {
-            "model": self.identity.id,
-            "messages": conversation.messages,
-            **self._request_params(request, output_format, strict_tools=strict_tools),
-        }
+        body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
         if tools:
             body["tools"] = tools
         body = prepare_request_body(
@@ -424,6 +485,12 @@ class ClaudeProvider:
             checkpoint_prefix=replays_checkpoint,
         )
 
+    def _authored_default_headers(self) -> Mapping[str, str] | None:
+        """Return the client's authored default headers: ``default_headers``, else the ones in ``client_params``."""
+        if self.settings.default_headers is not None:
+            return self.settings.default_headers
+        return (self.settings.client_params or {}).get("default_headers")
+
     def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:
         """Build this request's SDK client over the shared HTTP client.
 
@@ -436,8 +503,8 @@ class ClaudeProvider:
         if settings.timeout is not None:
             kwargs["timeout"] = settings.timeout
         kwargs.update(settings.client_params or {})
-        if settings.default_headers is not None:
-            kwargs["default_headers"] = dict(settings.default_headers)
+        if (default_headers := self._authored_default_headers()) is not None:
+            kwargs["default_headers"] = dict(default_headers)
         kwargs["http_client"] = self.http_client
         if caller_retries:
             kwargs["max_retries"] = 0
@@ -527,6 +594,35 @@ def _output_event(event: object) -> TextDelta | ReasoningDelta | ToolCallReady |
         if block.type == "tool_use" and isinstance(block, (ToolUseBlock, BetaToolUseBlock)):
             return ToolCallReady(tool_call_from_block(block))
     return None
+
+
+def _thinking_owner(params: dict[str, Any]) -> dict[str, Any]:
+    """Return the dict whose ``thinking`` the request sends: the SDK sends ``extra_body`` over the body's own fields."""
+    extra_body = params.get("extra_body") or {}
+    return extra_body if "thinking" in extra_body else params
+
+
+def _split_beta_header(headers: Mapping[str, str] | None) -> tuple[dict[str, str], list[str]]:
+    """Return ``headers`` without ``anthropic-beta`` (in any case) and the betas it names, in order.
+
+    The SDK sends a request's ``betas`` as one ``anthropic-beta`` header, which a request's ``extra_headers`` replace
+    and which replaces the client's default one, so an authored header joins ``betas`` instead; a request then always
+    sends the client default's betas itself.
+    """
+    kept: dict[str, str] = {}
+    betas: list[str] = []
+    for name, value in (headers or {}).items():
+        if name.lower() == "anthropic-beta":
+            betas.extend(beta.strip() for beta in str(value).split(",") if beta.strip())
+        else:
+            kept[name] = value
+    return kept, betas
+
+
+def _sends_thinking_binding(params: dict[str, Any]) -> bool:
+    """Return whether the thinking the request sends carries a ``block_binding``, which needs the binding beta."""
+    thinking = _thinking_owner(params).get("thinking")
+    return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
 def _raw_request_params(settings: ClaudeSettings, *, disable_thinking: bool) -> dict[str, Any]:

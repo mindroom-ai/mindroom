@@ -120,11 +120,6 @@
           "role": "assistant",
           "content": [
             {
-              "signature": "parity-thinking-signature",
-              "thinking": "Rain is likely, so pack for wet weather.",
-              "type": "thinking"
-            },
-            {
               "text": "Pack a light rain jacket and comfortable shoes.",
               "type": "text",
               "cache_control": {
