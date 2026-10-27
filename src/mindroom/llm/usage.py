@@ -7,11 +7,14 @@ code read.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
+from time import time
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from mindroom.llm.messages import ModelProvenance
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -277,6 +280,36 @@ class RunMetrics(_Counts):
         return result
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RequestUsage:
+    """The usage one provider request reported: when it was answered, its metrics, and the model that answered it.
+
+    ``model`` is None when the usage report names no model.
+    """
+
+    created_at: int
+    metrics: MessageMetrics
+    model: ModelProvenance | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HelperUsage:
+    """The usage of paid model work that no stored run holds, such as one helper prompt's, without any of its content.
+
+    ``run_id`` is the id the usage is recorded under. ``model`` and ``provider`` name the model the work was sent to
+    (``ModelIdentity.id`` and ``ModelIdentity.provider``), None when unknown, and ``metrics`` sums its requests by
+    model. ``requests`` lists each request whose usage describes it alone: a retried request's usage sums its
+    attempts, so ``metrics`` counts it but ``requests`` does not list it.
+    """
+
+    run_id: str
+    model: str | None
+    provider: str | None
+    metrics: RunMetrics
+    requests: tuple[RequestUsage, ...] = ()
+    created_at: int = field(default_factory=lambda: int(time()))
+
+
 @dataclass(slots=True, kw_only=True)
 class SessionMetrics(_Counts):
     """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row.
@@ -341,8 +374,10 @@ def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
 
 __all__ = [
     "TOKEN_FIELDS",
+    "HelperUsage",
     "MessageMetrics",
     "ModelMetrics",
+    "RequestUsage",
     "RunMetrics",
     "SessionMetrics",
     "TokenCounts",

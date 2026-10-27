@@ -16,10 +16,9 @@ from pydantic import BaseModel
 
 from mindroom.agent_loop.prompt import join_sections
 from mindroom.agent_loop.structured import output_format_prompt, parse_structured, structured_answer_text
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, read_model_provenance
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
-from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -34,14 +33,14 @@ _NO_OVERRIDES = RequestOverrides()
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class HelperResult[T: BaseModel]:
-    """One helper call's answer and the run record its usage is saved from.
+    """One helper call's answer and what the call used.
 
     ``content`` is the answer read into the requested schema, or its text when no schema was requested or the text
     does not validate, so callers check ``isinstance``.
     """
 
     content: T | str
-    record: RunRecord
+    usage: HelperUsage
 
 
 async def complete_prompt[T: BaseModel](
@@ -55,17 +54,18 @@ async def complete_prompt[T: BaseModel](
 ) -> HelperResult[T]:
     """Send ``prompt`` as one request under a system message of the caller's ``instructions``, each as written.
 
-    The instructions join with one blank line between them. Returns the answer with a completed run record.
+    The instructions join with one blank line between them. Returns the answer with the call's usage, under ``run_id``
+    when given, which the caller records (``helper_usage.py``).
     ``schema`` asks for structured output the way ``provider`` supports it: a ``forced_tool`` route answers with a
     forced tool call, and a JSON-mode route also gets the JSON prompt at the end of the system message.
     """
     system = join_sections((*instructions, output_format_prompt(provider.capabilities, schema)))
-    messages = [*([Message(role="system", content=system)] if system else []), Message(role="user", content=prompt)]
+    messages = (*([Message(role="system", content=system)] if system else []), Message(role="user", content=prompt))
     started = perf_counter()
     turn = await complete(
         provider,
         ModelRequest(
-            messages=tuple(messages),
+            messages=messages,
             output_schema=schema,
             overrides=overrides,
         ),
@@ -78,16 +78,22 @@ async def complete_prompt[T: BaseModel](
     parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)
     if schema is not None and parsed is None:
         logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
-    record = RunRecord(
-        run_id=run_id or str(uuid4()),
-        status=RunStatus.completed,
-        content=text or None,
-        model=identity.id,
-        model_provider=identity.provider,
-        messages=[*messages, turn.message],
-        metrics=metrics,
+    reply = turn.message
+    request = RequestUsage(
+        created_at=reply.created_at,
+        metrics=turn.usage,
+        model=read_model_provenance(reply.provider_data),
     )
-    return HelperResult(content=text if parsed is None else parsed, record=record)
+    # A retried request's usage sums its attempts, so it describes no one request.
+    sums_attempts = (reply.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+    usage = HelperUsage(
+        run_id=run_id or str(uuid4()),
+        model=identity.id,
+        provider=identity.provider,
+        metrics=metrics,
+        requests=() if sums_attempts else (request,),
+    )
+    return HelperResult(content=text if parsed is None else parsed, usage=usage)
 
 
 __all__ = ["HelperResult", "complete_prompt"]

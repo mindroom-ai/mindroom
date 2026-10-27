@@ -1007,6 +1007,7 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.constants",
     "mindroom.history.storage",
+    "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.usage.storage",
     "mindroom.session_storage.lanes",

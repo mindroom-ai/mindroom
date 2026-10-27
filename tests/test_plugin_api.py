@@ -54,6 +54,7 @@ _EXPORTS = [
     "FinalResponseDraft",
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
+    "HelperResult",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -152,6 +153,7 @@ _SIGNATURES = {
     "FinalResponseDraft": "(response_text, response_kind, envelope)",
     "FinalResponseTransformContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "GoogleWorkspaceConfig": "(*, name, display_name, client_config_service, allowed_hosted_domains, services)",
+    "HelperResult": "(*, content, usage)",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
         "(source_event_id, target, body, attachment_ids, mentioned_agents, agent_name, hook_source, "

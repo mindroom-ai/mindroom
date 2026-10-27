@@ -18,7 +18,6 @@ from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
-from mindroom.agent_loop.helper import complete_prompt
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
@@ -243,8 +242,8 @@ async def test_a_thinking_block_without_text_stores_empty_reasoning(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_a_helper_reply_stores_what_a_streamed_reply_stores(tmp_path: Path) -> None:
-    """A helper that reads only the finished answer stores every thinking block and the time to its first output."""
+async def test_a_drained_reply_keeps_what_a_streamed_reply_keeps(tmp_path: Path) -> None:
+    """A caller that reads only the finished turn gets every thinking block and the time to its first output."""
     blocks = [
         {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
         {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
@@ -258,9 +257,8 @@ async def test_a_helper_reply_stores_what_a_streamed_reply_stores(tmp_path: Path
     )
 
     with isolated_provider_environment():
-        result = await complete_prompt(provider, "Pack for Paris?")
+        message = (await complete(provider, ModelRequest(messages=_user()))).message
 
-    message = result.record.messages[-1]
     assert (message.content, message.reasoning_content) == ("Done.", "First. Second.")
     assert message.metrics.time_to_first_token is not None
 

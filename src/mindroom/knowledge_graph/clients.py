@@ -100,17 +100,16 @@ class MindRoomLLMClient(LLMClient):
             execution_identity=identity,
         )
         system = "\n\n".join(message.content for message in messages if message.role == "system")
-        invocation_id = uuid4().hex
         response = await complete_prompt(
             provider,
             "\n\n".join(message.content for message in messages if message.role != "system"),
             instructions=(system,) if system else (),
             schema=response_model,
-            run_id=invocation_id,
+            run_id=uuid4().hex,
         )
         if target is not None:
             await record_helper_usage(
-                response.record,
+                response.usage,
                 owner=HelperUsageOwner(
                     storage_factory=partial(
                         create_session_storage,
@@ -121,7 +120,6 @@ class MindRoomLLMClient(LLMClient):
                     ),
                     session_id=target.session_id,
                 ),
-                invocation_id=invocation_id,
                 kind="knowledge_graph",
                 requester_id=target.requester_id or (identity.requester_id if identity is not None else None),
             )
