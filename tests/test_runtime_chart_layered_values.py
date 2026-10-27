@@ -31,6 +31,19 @@ AGENT_VAULT_SERVER = (
     "workers.kubernetes.agentVault.server.enabled=true",
     "workers.kubernetes.agentVault.server.image=example.test/agent-vault:test",
 )
+EGRESS_PROXY = (
+    "egressProxy.enabled=true",
+    "egressProxy.networkPolicy.proxyPodSelector.matchLabels.app=egress-proxy",
+)
+POLICY_SET_ARGS = (*KUBERNETES_WORKERS, *AGENT_VAULT_SERVER, *EGRESS_PROXY, "networkPolicy.create=true")
+POLICY_LISTS = (
+    "networkPolicy.apiIngressFrom",
+    "networkPolicy.extraIngress",
+    "networkPolicy.extraEgress",
+    "egressProxy.networkPolicy.extraEgress",
+    "workers.kubernetes.agentVault.server.networkPolicy.extraIngress",
+    "workers.kubernetes.agentVault.server.networkPolicy.extraEgress",
+)
 
 SHARED_VALUES = """
 matrix:
@@ -105,7 +118,11 @@ def _runtime(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]
     return deployment, _container(deployment, "mindroom")
 
 
-def _render_layered(tmp_path: Path, *contents: str, set_args: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+def _render_layered(
+    tmp_path: Path,
+    *contents: str | dict[str, Any],
+    set_args: tuple[str, ...] = (),
+) -> list[dict[str, Any]]:
     return _render_chart(
         RUNTIME_CHART,
         *set_args,
@@ -113,6 +130,44 @@ def _render_layered(tmp_path: Path, *contents: str, set_args: tuple[str, ...] = 
         namespace="mindroom-staging",
         values_files=_values_files(tmp_path, *contents),
     )
+
+
+def _at(path: str, value: object) -> dict[str, Any]:
+    """Nest value under a dotted values path."""
+    for key in reversed(path.split(".")):
+        value = {key: value}
+    return value
+
+
+def _policy_entry(path: str, app: str) -> dict[str, Any]:
+    """A peer for apiIngressFrom, otherwise an ingress or egress rule, selecting pods labeled app."""
+    peer = {"podSelector": {"matchLabels": {"app": app}}}
+    if path == "networkPolicy.apiIngressFrom":
+        return peer
+    return {"to" if path.endswith("Egress") else "from": [peer], "ports": [{"protocol": "TCP", "port": 8080}]}
+
+
+def _rendered_policy_lists(docs: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """The rendered entries of each POLICY_LISTS value, without the chart's own rules."""
+    runtime = _resource(docs, "NetworkPolicy", "mindroom-runtime")["spec"]
+    workers = _resource(docs, "NetworkPolicy", "mindroom-runtime-workers")["spec"]
+    vault = _resource(docs, "NetworkPolicy", "agent-vault")["spec"]
+    return {
+        "networkPolicy.apiIngressFrom": runtime["ingress"][0]["from"],
+        "networkPolicy.extraIngress": runtime["ingress"][1:],
+        "networkPolicy.extraEgress": runtime["egress"],
+        # After the DNS and proxy rules.
+        "egressProxy.networkPolicy.extraEgress": workers["egress"][2:],
+        # No chart-rendered vault clients are enabled.
+        "workers.kubernetes.agentVault.server.networkPolicy.extraIngress": vault["ingress"],
+        # After the DNS and TCP 80/443 rules.
+        "workers.kubernetes.agentVault.server.networkPolicy.extraEgress": vault["egress"][2:],
+    }
+
+
+def _worker_env(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    _, container = _runtime(docs)
+    return json.loads(_env_by_name(container)["MINDROOM_KUBERNETES_WORKER_ENV_JSON"]["value"])
 
 
 def test_list_forms_render_unchanged_in_their_given_order(tmp_path: Path) -> None:
@@ -195,6 +250,79 @@ def test_map_forms_merge_entry_by_entry_across_values_files(tmp_path: Path) -> N
         {"name": "session-state", "mountPath": "/app/tracking", "subPath": "tracking"},
     ]
     assert [entry["name"] for entry in container["env"] if entry["name"] in extra_names] == sorted(extra_names)
+
+
+def test_network_policy_rule_lists_render_lists_in_order_and_maps_in_key_order(tmp_path: Path) -> None:
+    """Each NetworkPolicy rule list keeps a list's order and renders a map as the key-ordered list."""
+    listed = _render_layered(
+        tmp_path,
+        *(_at(path, [_policy_entry(path, "zeta"), _policy_entry(path, "alpha")]) for path in POLICY_LISTS),
+        set_args=POLICY_SET_ARGS,
+    )
+    keyed = _render_layered(
+        tmp_path,
+        *(_at(path, {app: _policy_entry(path, app) for app in ("zeta", "alpha")}) for path in POLICY_LISTS),
+        set_args=POLICY_SET_ARGS,
+    )
+
+    assert _rendered_policy_lists(listed) == {
+        path: [_policy_entry(path, "zeta"), _policy_entry(path, "alpha")] for path in POLICY_LISTS
+    }
+    assert _rendered_policy_lists(keyed) == {
+        path: [_policy_entry(path, "alpha"), _policy_entry(path, "zeta")] for path in POLICY_LISTS
+    }
+
+
+def test_network_policy_rule_maps_merge_rule_by_rule_across_values_files(tmp_path: Path) -> None:
+    """An environment file removes one inherited rule with null and adds another, without restating the rest."""
+    docs = _render_layered(
+        tmp_path,
+        *(_at(path, {app: _policy_entry(path, app) for app in ("alpha", "beta")}) for path in POLICY_LISTS),
+        *(_at(path, {"beta": None, "gamma": _policy_entry(path, "gamma")}) for path in POLICY_LISTS),
+        set_args=POLICY_SET_ARGS,
+    )
+
+    assert _rendered_policy_lists(docs) == {
+        path: [_policy_entry(path, "alpha"), _policy_entry(path, "gamma")] for path in POLICY_LISTS
+    }
+
+
+def test_removing_every_runtime_egress_rule_stops_restricting_runtime_egress(tmp_path: Path) -> None:
+    """The control-plane policy adds the Egress policy type only while an extraEgress rule remains."""
+    path = "networkPolicy.extraEgress"
+    docs = _render_layered(
+        tmp_path,
+        _at(path, {"alpha": _policy_entry(path, "alpha")}),
+        _at(path, {"alpha": None}),
+        set_args=("networkPolicy.create=true",),
+    )
+    spec = _resource(docs, "NetworkPolicy", "mindroom-runtime")["spec"]
+
+    assert spec["policyTypes"] == ["Ingress"]
+    assert "egress" not in spec
+
+
+def test_no_proxy_map_adds_and_removes_hosts_over_the_defaults(tmp_path: Path) -> None:
+    """A map adds a host to the default NO_PROXY hosts, and a later file removes a default by key."""
+    worker_env = _worker_env(
+        _render_layered(
+            tmp_path,
+            """
+            egressProxy:
+              noProxy:
+                internal-api: "api.{{ .Release.Namespace }}.svc.cluster.local"
+            """,
+            """
+            egressProxy:
+              noProxy:
+                loopback-ipv6: null
+            """,
+            set_args=(*KUBERNETES_WORKERS, *EGRESS_PROXY),
+        ),
+    )
+
+    assert worker_env["NO_PROXY"] == "api.mindroom-staging.svc.cluster.local,localhost,127.0.0.1"
+    assert worker_env["no_proxy"] == worker_env["NO_PROXY"]
 
 
 def test_string_env_values_render_templates(tmp_path: Path) -> None:
@@ -383,6 +511,26 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
             "/app/agent_data/knowledge_db, where knowledgeStorage is mounted, must differ from "
             "extraVolumeMounts.kdb.mountPath",
         ),
+        (
+            """
+            networkPolicy:
+              create: true
+              extraEgress:
+                dns: allow
+            """,
+            (),
+            "networkPolicy.extraEgress.dns must be a map or null",
+        ),
+        (
+            """
+            egressProxy:
+              noProxy:
+                internal-api:
+                  hostname: api.example.com
+            """,
+            (*KUBERNETES_WORKERS, *EGRESS_PROXY),
+            "egressProxy.noProxy.internal-api must be a host string or null",
+        ),
     ],
     ids=[
         "vault-managed-env",
@@ -393,6 +541,8 @@ def test_agent_vault_server_env_lists_accept_maps(tmp_path: Path) -> None:
         "scalar-env-from",
         "session-path-env-shorthand",
         "knowledge-mount-overlap",
+        "scalar-policy-rule",
+        "no-proxy-map-without-host",
     ],
 )
 def test_map_forms_keep_chart_validation(
@@ -425,11 +575,23 @@ def test_default_and_layered_renders_emit_no_coalesce_warnings(tmp_path: Path) -
             emptyDir: {}
         """
 
-    for values in (list_values, SHARED_VALUES):
+    policy_lists = tuple(_at(path, [_policy_entry(path, "alpha")]) for path in POLICY_LISTS)
+    policy_maps = (
+        *(_at(path, {"alpha": _policy_entry(path, "alpha")}) for path in POLICY_LISTS),
+        _at("egressProxy.noProxy", {"internal-api": "api.example.com", "loopback-ipv6": None}),
+    )
+
+    for values, set_args in (
+        ((list_values,), ()),
+        ((SHARED_VALUES,), ()),
+        (policy_lists, POLICY_SET_ARGS),
+        (policy_maps, POLICY_SET_ARGS),
+    ):
         completed = _run_helm_template(
             RUNTIME_CHART,
+            *set_args,
             release_name="mindroom-runtime",
-            values_files=_values_files(tmp_path, values),
+            values_files=_values_files(tmp_path, *values),
         )
         completed.check_returncode()
         assert "warning" not in completed.stderr

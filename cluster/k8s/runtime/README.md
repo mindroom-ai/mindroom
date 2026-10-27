@@ -426,9 +426,12 @@ env:
 
 Helm replaces lists wholesale when it merges several values files, so an environment overlay cannot change one list entry without restating the whole list.
 `env.extra`, `env.envFrom`, `workers.kubernetes.agentVault.server.extraEnv`, `workers.kubernetes.agentVault.server.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
+So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolicy.extraIngress`, `networkPolicy.extraEgress`, `egressProxy.networkPolicy.extraEgress`, `workers.kubernetes.agentVault.server.networkPolicy.extraIngress`, and `workers.kubernetes.agentVault.server.networkPolicy.extraEgress`, and the `egressProxy.noProxy` hosts.
 
 - Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
 - An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
+- NetworkPolicy rule keys only identify the rule, and each `egressProxy.noProxy` map value is a host string.
+- `egressProxy.noProxy` defaults to the map `localhost`, `loopback-ipv4`, and `loopback-ipv6`, so a map adds hosts to those defaults while a list replaces them, with a Helm table warning.
 - A `null` entry removes an inherited entry, and a `null` field removes an inherited field, for example to replace `value` with `valueFrom`.
 - An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
 - Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
@@ -574,10 +577,7 @@ egressProxy:
     namespace: mindroom
     port: 3128
   noProxy:
-    - localhost
-    - 127.0.0.1
-    - ::1
-    - internal-api.mindroom.svc.cluster.local
+    internal-api: internal-api.mindroom.svc.cluster.local
   networkPolicy:
     create: true
     proxyPodSelector:

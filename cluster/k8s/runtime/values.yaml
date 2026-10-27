@@ -70,17 +70,17 @@ networkPolicy:
   # NetworkPolicy targets pods rather than Services, so selectors must match the client pods.
   # A bare podSelector only matches pods in the release namespace; combine namespaceSelector and podSelector for cross-namespace clients.
   # Leave empty to allow the API port from all sources while still denying other ingress.
-  apiIngressFrom: []
+  apiIngressFrom: null
   # Example:
   # apiIngressFrom:
   #   - podSelector:
   #       matchLabels:
   #         app.kubernetes.io/name: my-ingress
   # Raw Kubernetes NetworkPolicyIngressRule entries appended after the API rule.
-  extraIngress: []
+  extraIngress: null
   # Raw Kubernetes NetworkPolicyEgressRule entries.
   # Setting any entry adds Egress to policyTypes, so include every egress flow the runtime needs.
-  extraEgress: []
+  extraEgress: null
 
 runtime:
   apiHost: 0.0.0.0
@@ -300,8 +300,8 @@ providerCredentials: []
 #     existingSecret: my-llm-secret
 #     key: anthropic-api-key
 
-# The env lists, Agent Vault server env lists, extraVolumes, and extraVolumeMounts accept
-# either a list or a map keyed by entry; see "Layering Values Files" in the README.
+# The env lists, Agent Vault server env lists, extraVolumes, extraVolumeMounts, and the NetworkPolicy
+# rule lists accept either a list or a map keyed by entry; see "Layering Values Files" in the README.
 # They default to null so Helm accepts either form without table/non-table warnings.
 env:
   # Raw Kubernetes EnvVar entries appended to the MindRoom container.
@@ -566,9 +566,9 @@ workers:
           # Leave empty to reuse the server name.
           name: ""
           # Raw Kubernetes NetworkPolicyIngressRule entries, for example a deployer-managed UI proxy in front of the API port.
-          extraIngress: []
+          extraIngress: null
           # Raw Kubernetes NetworkPolicyEgressRule entries, for example upstream ports beyond 80/443 or an external database.
-          extraEgress: []
+          extraEgress: null
       # How the bootstrap and accessGrants Jobs are named and re-run: fixed keeps stable names and a
       # Helm hook for accessGrants; contentHash appends an input hash so plain `kubectl apply` reruns
       # changed Jobs. See "Agent Vault Access Grants" in the README.
@@ -685,11 +685,12 @@ egressProxy:
     namespace: ""
     port: 3128
     scheme: http
-  # Entries are rendered with tpl, for example "api.{{ .Release.Namespace }}.svc.cluster.local".
+  # Hosts as a list or a map of key to host; a later values file adds a host under a new key or removes
+  # one with null. Hosts render in key order and with tpl, for example "api.{{ .Release.Namespace }}.svc.cluster.local".
   noProxy:
-    - localhost
-    - 127.0.0.1
-    - ::1
+    localhost: localhost
+    loopback-ipv4: 127.0.0.1
+    loopback-ipv6: "::1"
   networkPolicy:
     create: true
     # Labels selecting the existing proxy pods. NetworkPolicy cannot target a Service directly.
@@ -705,7 +706,7 @@ egressProxy:
           k8s-app: kube-dns
       ipBlocks: []
     # Raw Kubernetes NetworkPolicyEgressRule entries appended after DNS and proxy rules.
-    extraEgress: []
+    extraEgress: null
 
 # Optional chart-managed approved egress proxy for dedicated Kubernetes workers.
 # Enabling this deploys the proxy side and automatically points worker proxy

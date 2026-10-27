@@ -746,8 +746,12 @@ Arguments: list <root context> <list or map> <values path>.
 {{- $_ := set $extraEnv "https_proxy" $proxyUrl -}}
 {{- $_ := set $extraEnv "all_proxy" $proxyUrl -}}
 {{- $noProxy := list -}}
-{{- range .Values.egressProxy.noProxy -}}
-{{- $noProxy = append $noProxy (tpl (toString .) $) -}}
+{{- range $entry := include "mindroom-runtime.keyedList" (dict "value" .Values.egressProxy.noProxy "path" "egressProxy.noProxy" "nameKey" "name" "scalarKey" "host") | fromJsonArray -}}
+{{- $host := $entry -}}
+{{- if kindIs "map" $entry -}}
+{{- $host = required (printf "egressProxy.noProxy.%s must be a host string or null" $entry.name) $entry.host -}}
+{{- end -}}
+{{- $noProxy = append $noProxy (tpl (toString $host) $) -}}
 {{- end -}}
 {{- if .Values.scriptGateway.enabled -}}
 {{- $noProxy = append $noProxy (include "mindroom-runtime.scriptGatewayHost" .) -}}
