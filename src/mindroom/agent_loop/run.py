@@ -415,8 +415,16 @@ async def _store_interrupted[R: AnyRunRecord](
 
 
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
-    """Snapshot the live messages the run stores, stamp its status, and close its duration."""
-    record.messages = [message for message in messages if message.add_to_agent_memory and not message.from_history]
+    """Snapshot the live messages the run stores, stamp its status, and close its duration.
+
+    Replayed history never stores. A paused run also stores, in place, the context its requests sent but no history
+    holds (``add_to_agent_memory=False``), such as memory results and the approval receipt, so its resume sends the
+    paused request unchanged; a run that ends otherwise drops it.
+    """
+    paused = status is RunStatus.paused
+    record.messages = [
+        message for message in messages if not message.from_history and (paused or message.add_to_agent_memory)
+    ]
     record.status = status
     assert record.metrics is not None
     record.metrics.duration = time.monotonic() - started

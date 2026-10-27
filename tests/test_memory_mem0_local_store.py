@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -11,6 +13,9 @@ import httpx
 import pytest
 from anthropic import AuthenticationError
 from anthropic.types import Message as AnthropicMessage
+from chromadb.api.rust import RustBindingsAPI
+from mem0.embeddings.base import EmbeddingBase
+from mem0.utils.factory import EmbedderFactory
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -74,6 +79,14 @@ class _TableEmbedder:
 
     async def aembed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
         return self.embed(texts, purpose=purpose)
+
+
+class _TableLocalEmbedding(EmbeddingBase):
+    """Replace Mem0's huggingface embedder, which both local providers load, with the table vectors, offline."""
+
+    def embed(self, text: str, memory_action: str | None = None) -> list[float]:
+        del memory_action
+        return list(_VECTORS.get(text, _OTHER_TEXT_VECTOR))
 
 
 def _claude_reply(*, facts: list[str], thinking_first: bool) -> AnthropicMessage:
@@ -260,6 +273,41 @@ async def test_a_failed_memory_model_call_reaches_the_memory_tool_without_the_re
 
     assert result.startswith("Failed to store memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
     assert rejected_key not in result
+
+
+@pytest.mark.asyncio
+async def test_a_save_and_a_search_that_first_open_one_store_together_both_succeed(
+    config: Config,
+    claude_reply: list[AnthropicMessage | Exception],
+) -> None:
+    """After a restart, the last turn's memory save and the next message's search can first open one store together."""
+    config.memory.embedder.provider = "sentence_transformers"
+    first_start = threading.Event()
+    finish_first_start = threading.Event()
+    start_store = RustBindingsAPI.start
+
+    def slow_first_start(api: RustBindingsAPI) -> None:
+        # Chroma has registered the store's client and is starting it, which is when an overlapping build fails.
+        if not first_start.is_set():
+            first_start.set()
+            finish_first_start.wait(5)
+        start_store(api)
+
+    with (
+        patch.dict(EmbedderFactory.provider_to_class, {"huggingface": f"{__name__}.{_TableLocalEmbedding.__name__}"}),
+        patch("mindroom.memory.config.ensure_sentence_transformers_dependencies"),
+        patch.object(RustBindingsAPI, "start", slow_first_start),
+    ):
+        saving = asyncio.create_task(_remember(config, claude_reply, ["PR review"]))
+        assert await asyncio.to_thread(first_start.wait, 5)
+        searching = asyncio.create_task(_search(config))
+        # An overlapping build reaches the store during this wait and fails both operations.
+        await asyncio.wait({searching}, timeout=0.5)
+        finish_first_start.set()
+        await saving
+        await searching
+
+        assert [memory for memory, _ in await _search(config)] == ["PR review"]
 
 
 def _requester(requester_id: str) -> ToolExecutionIdentity:

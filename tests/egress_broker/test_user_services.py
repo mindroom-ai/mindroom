@@ -530,6 +530,27 @@ def test_oauth_provider_is_refused_outside_personal_scopes(
     assert load_user_services(manager, worker_target())["personal"].oauth_provider == "github"
 
 
+@pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
+def test_a_separate_account_is_refused_outside_personal_scopes(
+    manager: CredentialsManager,
+    scope: WorkerScope | None,
+) -> None:
+    """A shared or unscoped agent's service has no account of its own, and one stored anyway loses it on load."""
+    separate = EgressService.model_validate({"preset": "github", "oauth_separate_account": True})
+    with pytest.raises(ValueError, match="oauth_provider is only available"):
+        _save(manager, worker_target(scope=scope), "mine", separate)
+    manager.for_primary_runtime_agent_scope("code").save_credentials(
+        USER_SERVICES_CREDENTIAL_SERVICE,
+        {"services": {"team": separate.authored_model_dump()}},
+    )
+
+    loaded = load_user_services(manager, worker_target(scope="shared"))["team"]
+
+    assert (loaded.oauth_provider, loaded.oauth_separate_account) == (None, False)
+    _save(manager, worker_target(), "mine", separate)
+    assert load_user_services(manager, worker_target())["mine"].oauth_separate_account is True
+
+
 def test_stored_oauth_provider_is_ignored_outside_personal_scopes(manager: CredentialsManager) -> None:
     """An OAuth provider stored for a shared agent anyway is dropped on load, so nothing resolves or reports a token."""
     store = manager.for_primary_runtime_agent_scope("code")

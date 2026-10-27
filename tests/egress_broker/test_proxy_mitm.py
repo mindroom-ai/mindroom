@@ -26,7 +26,7 @@ from mindroom.egress_broker.ca import materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.messages import ScopeInfo
 from mindroom.egress_broker.mitm import _verifying_context
-from mindroom.egress_broker.rules import read_only_allows
+from mindroom.egress_broker.rules import EgressRules, read_only_allows
 from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
@@ -1547,3 +1547,163 @@ async def test_http10_request_without_host_gets_tunnel_authority(broker: BrokerF
     seen = response.json()["headers"]
     assert seen["host"] == [f"localhost:{tls_upstream.port}"]
     assert seen["authorization"] == [f"Bearer {SECRET}"]
+
+
+_SERVICE_HEADER = "X-Agent-Keys-Service"
+
+
+def _tying_user_service() -> EgressRules:
+    """Return an operator service `op` and the requester's own service `mine` with the same rule on localhost."""
+    rule = EgressRule(host="localhost", auth=EgressAuth(type="bearer"))
+    operator = EgressBrokerConfig(services={"op": EgressService(rules=[rule])})
+    return with_user_services(operator, mine=EgressService(rules=[rule]))
+
+
+@pytest.mark.asyncio
+async def test_the_agent_keys_service_header_picks_the_named_service_and_is_never_forwarded(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """Without the header the operator's service wins the tie as before; naming the user's own sends its key."""
+    rules = _tying_user_service()
+    await broker(rules_provider=lambda _claims: rules, secrets={"op": "operator-key", "mine": "user-key"})
+    client = proxy_client(broker.token())
+
+    default = await client.get(tls_upstream.url("/echo"))
+    named = await client.get(tls_upstream.url("/echo"), headers={_SERVICE_HEADER: "mine"})
+
+    assert default.json()["headers"]["authorization"] == ["Bearer operator-key"]
+    assert named.json()["headers"]["authorization"] == ["Bearer user-key"]
+    assert "x-agent-keys-service" not in named.json()["headers"]
+    assert broker.resolved == ["op", "mine"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["unknown", "narrow", "svc"])
+async def test_a_named_service_without_a_rule_for_the_request_is_refused(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+    name: str,
+) -> None:
+    """A name the requester has no service of their own for, or one whose rules do not cover the path, gets a 403.
+
+    An administrator's service (`svc`) cannot be named, so the administrator's order among their own services holds.
+    """
+    narrow = EgressService(rules=[EgressRule(host="localhost", path_prefix="/other", auth=EgressAuth(type="bearer"))])
+    rules = with_user_services(single_rule_config(), narrow=narrow)
+    await broker(rules_provider=lambda _claims: rules, secrets={"svc": SECRET, "narrow": "user-key"})
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo?page=2"), headers={_SERVICE_HEADER: name})
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "service_not_matched",
+        "service": name,
+        "message": f"The X-Agent-Keys-Service header names {name}, but no service of your own by that name has a "
+        "rule for localhost/echo. Name one of your own services that covers it, or leave the header out.",
+    }
+    assert tls_upstream.hits == []
+    assert broker.resolved == []
+    await assert_audited(audit, kind="denied", status=403, path="/echo", service=name, code="service_not_matched")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(_SERVICE_HEADER, "")],
+        [(_SERVICE_HEADER, "svc"), (_SERVICE_HEADER.lower(), "svc")],
+        [(_SERVICE_HEADER, "Mine")],
+        [(_SERVICE_HEADER, "mine, other")],
+        [(_SERVICE_HEADER, "x" * 64)],
+    ],
+    ids=["empty", "repeated", "not-a-name", "list", "too-long"],
+)
+async def test_an_agent_keys_service_header_without_one_service_name_is_a_400(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+    headers: list[tuple[str, str]],
+) -> None:
+    """A request must name one service by a valid name, or none; what it sent is never echoed or audited."""
+    await broker(single_rule_config(), secrets={"svc": SECRET})
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"), headers=headers)
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "bad_request",
+        "message": "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own "
+        "services.",
+    }
+    assert tls_upstream.hits == []
+    await assert_audited(audit, kind="denied", status=400, code="bad_request", service=None)
+
+
+@pytest.mark.asyncio
+async def test_the_agent_keys_service_header_is_dropped_on_a_host_without_rules(
+    broker: BrokerFactory,
+    http_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """A request no rule applies to is forwarded as before, without the header."""
+    await broker(EgressBrokerConfig())
+    client = proxy_client(broker.token())
+
+    response = await client.get(http_upstream.url("/echo"), headers={_SERVICE_HEADER: "mine"})
+
+    assert response.status_code == 200
+    assert "x-agent-keys-service" not in response.json()["headers"]
+
+
+@pytest.mark.asyncio
+async def test_a_named_service_still_reads_only_with_an_account_allowed_to_read(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """Naming the service changes which service routes, not what an account allowed only to read may do."""
+    lookup = _ReadOnlyLookup()
+    rules = with_user_services(
+        EgressBrokerConfig(),
+        mine=EgressService(rules=[EgressRule(host="localhost", auth=EgressAuth(type="bearer"))]),
+    )
+    await broker(rules_provider=lambda _claims: rules, resolve_secret=lookup, manage_url=MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    write = await client.post(tls_upstream.url("/echo"), content=b"{}", headers={_SERVICE_HEADER: "mine"})
+    read = await client.get(tls_upstream.url("/echo"), headers={_SERVICE_HEADER: "mine"})
+
+    assert (write.status_code, write.json()["error"]) == (403, "read_only")
+    assert read.status_code == 200
+    assert lookup.requests == [SecretRequest(method="POST", path="/echo"), SecretRequest(method="GET", path="/echo")]
+    assert tls_upstream.hits == ["/echo"]
+
+
+@pytest.mark.asyncio
+async def test_a_service_without_its_own_account_asks_to_connect_it_on_the_page(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """The refusal sends the user to connect the service's own account, never to the tools' connect link."""
+    await broker(single_rule_config(), resolve_secret=lambda *_: SecretMissing(own_account=True), manage_url=MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "svc",
+        "manage_url": MANAGE_URL,
+        "message": "No svc account is connected for this agent. "
+        "Ask the user to connect the service's own account at manage_url, then retry.",
+    }
+    assert tls_upstream.hits == []

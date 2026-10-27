@@ -1,0 +1,5 @@
+{"objects":{
+"5b44281e0868":{"content":"probe","created_at":0,"from_history":false,"id":"probe","role":"user","stop_after_tool_call":false},
+"829b96edabab":{"agent_id":"code","created_at":1750000000,"messages":[],"run_id":"kept","status":"RUNNING"}
+},
+"recording":{"sessions":{"session":{"observed":{"folded_tool_call_ids":{},"force_queued":false,"ledger":[],"list_runs":[{"$":"829b96edabab"}],"loaded_runs":[{"$":"829b96edabab"}],"redaction_candidates":[],"request":[{"$":"5b44281e0868"}],"resume_requests":{},"row":{"created_at":1750000000,"session_data":{"session_state":{}},"updated_at":1750000000,"user_id":null},"seen_event_ids":["$consumed"],"session":{"created_at":1750000000,"kind":"agent","metadata":{"mindroom_matrix_history":{"states":{"agent:code":{"seen_event_ids":["$consumed"]}},"version":1}},"owner_id":"code","session_state":{},"summary":null},"session_runs":[]},"run_ids":["kept"],"scope":"agent:code"}},"storage_name":"code"}}

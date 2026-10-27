@@ -368,7 +368,7 @@ async def test_resuming_a_pre_release_team_pause_keeps_its_single_summary(
     system = stored.messages[0]
     assert system.role == "system"
     stored.messages[0] = replace(system, content=f"{system.content}{_LEGACY_SYSTEM_SUFFIX}")
-    team.storage.save_runs(session, [stored])
+    team.storage.save_run(session, stored, record_usage=False)
     team.models["default"] = ScriptedModel([answer("The checker touched it.", usage(50, 5))])
     team.models["checker-model"] = ScriptedModel([answer("Touched.")])
 

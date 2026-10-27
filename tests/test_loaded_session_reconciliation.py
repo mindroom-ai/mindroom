@@ -2,15 +2,13 @@
 
 An agent turn, an approval resume, a team turn with its members, and a delegation driver's parent run each hand
 their records to the store; after each save the loaded session's runs are the runs a fresh load of the store
-returns, also when the store refuses a save because a cut removed the run. A save a summary froze leaves the
-session's copy of the run as it was, or its absence: the row did not change, though a fresh load, which starts
-after the summary, no longer returns it.
+returns, also when the store refuses a save because a cut removed the run. A delegation's last state save onto a
+parent run a summary covered patches only its key, and the session's copy of the run is the patched row, though a
+fresh load, which starts after the summary, no longer returns it.
 """
 
 from __future__ import annotations
 
-import sqlite3
-from contextlib import closing
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -24,10 +22,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.delegation.state import DELEGATION_STATE_KEY
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.history import session_context
+from mindroom.history import session_context, summary_rows
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.store import ConversationStore, delete_run_subtrees_in_transaction, persist_to
+from mindroom.session_storage.store import ConversationStore, delete_runs_in_transaction, persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -44,6 +42,7 @@ from tests.team_turn_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.agent_loop.run import Persist
@@ -123,9 +122,9 @@ def _reloaded(store: ConversationStore, session_id: str = SESSION, kind: Session
 def _cut(store: ConversationStore, run_id: str, session_id: str = SESSION) -> None:
     """Remove ``run_id`` as a redaction's cut does: delete its rows and record it, so a later save of it is refused."""
     with store.transaction(write=True) as connection:
-        delete_run_subtrees_in_transaction(connection, store.names, [run_id], session_id=session_id)
+        delete_runs_in_transaction(connection, store.names, [run_id], session_id=session_id)
         connection.execute(
-            f'INSERT INTO "{store.names.removed_runs}" (run_id, session_id) VALUES (?, ?)',  # noqa: S608
+            f'INSERT INTO "{store.names.log_removed}" (run_id, session_id) VALUES (?, ?)',  # noqa: S608
             (run_id, session_id),
         )
 
@@ -247,7 +246,7 @@ async def test_an_approval_resume_leaves_its_loaded_session_as_the_store_holds_i
         # Another reply finished while the approval waited; the resume loads the session as the store holds it.
         later = paused.store.load_session(SESSION, "agent")
         assert later is not None
-        paused.store.save_runs(later, [_completed("run-later", "code", "Meanwhile.")])
+        paused.store.save_run(later, _completed("run-later", "code", "Meanwhile."), record_usage=False)
         session = paused.store.load_session(SESSION, "agent")
         assert session is not None
 
@@ -424,51 +423,57 @@ async def test_a_delegating_turn_leaves_its_parent_run_in_its_loaded_session_as_
     assert _as_stored(child) == _reloaded(_store("code", config, paths), child.session_id)
 
 
-async def test_a_delegating_turn_keeps_the_stored_parent_when_a_summary_froze_it_before_the_final_state(
+async def test_a_delegating_turns_last_state_save_patches_a_parent_a_summary_covered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     opened_scopes: list[ScopeSessionContext],
 ) -> None:
-    """A compaction folding the finished parent before the driver's last state save leaves the session's copy as stored."""
+    """A compaction covering the finished parent before the driver's last state save leaves the key patched onto it.
+
+    The save patches only the delegation key, so readers by id see the latest state, and the session's copy of the
+    parent is the patched row.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(paths)
     _delegating_leader(monkeypatch)
     store = _store("leader", config, paths)
     _seed(store, "leader", _completed("run-0", "leader", "Earlier."))
-    original_save_runs = ConversationStore.save_runs
-    folded: list[str] = []
+    original_patch = ConversationStore.patch_run_metadata
+    patched: list[Mapping[str, Any]] = []
 
-    def fold_then_save(
+    def cover_then_patch(
         self: ConversationStore,
-        session: ConversationSession,
-        runs: list[AnyRunRecord],
+        session_id: str,
+        run_id: str,
+        changes: Mapping[str, Any],
         **kwargs: Any,  # noqa: ANN401
-    ) -> None:
-        handed: list[AnyRunRecord] = []
-        for run in runs:
-            if run.status is RunStatus.completed and DELEGATION_STATE_KEY in (run.metadata or {}):
-                # Stands in for a compaction that summarized the finished parent just before the driver's state save.
-                with closing(sqlite3.connect(self.path)) as connection, connection:
-                    connection.execute(
-                        f'INSERT INTO "{self.names.summaries}" (session_id, scope_key, after_run_index, summary, '  # noqa: S608
-                        f"created_at) SELECT session_id, 'agent:leader', run_index, 'Summary.', 1 FROM \"{self.names.runs}\" "
-                        "WHERE run_id = ?",
-                        (run.run_id,),
-                    )
-                folded.append(run.run_id)
-                # Marks the record, so a write of it would show in the stored row.
-                run = replace(run, metadata={**(run.metadata or {}), "written_after_fold": True})  # noqa: PLW2901
-            handed.append(run)
-        original_save_runs(self, session, handed, **kwargs)
+    ) -> bool:
+        stored = self.get_run(run_id)
+        if stored is not None and stored.status is RunStatus.completed and DELEGATION_STATE_KEY in changes:
+            # Stands in for a compaction that summarized the finished parent just before the driver's state save.
+            covered = summary_rows.covered_runs(self, session_id=session_id, run_ids=["run-0", run_id])
+            assert summary_rows.append_summary(
+                self,
+                session_id=session_id,
+                scope_key="agent:leader",
+                based_on=None,
+                covered=covered,
+                summary="Summary.",
+            )
+            # Marks the patch, so its write shows in the stored row and in the session's copy.
+            changes = {**changes, "patched_after_summary": True}
+            patched.append(changes)
+        return original_patch(self, session_id, run_id, changes, **kwargs)
 
-    monkeypatch.setattr(ConversationStore, "save_runs", fold_then_save)
+    monkeypatch.setattr(ConversationStore, "patch_run_metadata", cover_then_patch)
 
     assert "Parent done." in str(await _respond("leader", config, paths, run_id="parent-run"))
 
-    assert folded == ["parent-run"]
-    session = _loaded_session(opened_scopes, "leader")
+    [changes] = patched
     stored = store.get_run("parent-run")
     assert stored is not None
-    assert "written_after_fold" not in (stored.metadata or {})
+    assert {key: (stored.metadata or {}).get(key) for key in changes} == changes
+    session = _loaded_session(opened_scopes, "leader")
     assert [run.run_id for run in session.runs] == ["run-0", "parent-run"]
     assert session.runs[1].to_dict() == stored.to_dict()
+    assert _reloaded(store) == []

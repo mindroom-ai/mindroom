@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The conversation message exchanged with models and stored in runs.
 
-Field names are the keys stored ``run_data`` messages and summary-row segments hold, so they decode without
-migration. The record is mutable: history replay, compaction, and notices rewrite fields in place.
+Field names are the keys a stored message row's data holds, and those of the Agno-layout messages only the storage v2
+conversion still reads. The record is mutable: history replay, compaction, and notices rewrite fields in place.
 """
 
 from __future__ import annotations
@@ -93,8 +93,10 @@ class Message:
     """One message in a model conversation.
 
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
-    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks a message
-    sent to the model but never stored.
+    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks context sent
+    to the model that history never replays: a run that pauses stores it, so its resume sends it again where it was,
+    and a run that ends drops it. Rows rewritten outside that ending, minimal mode's checkpoint and a paused delegated
+    child that recovery stopped, keep it but never replay.
     """
 
     role: Literal["system", "user", "assistant", "tool"]
@@ -134,7 +136,10 @@ class Message:
         return ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always."""
+        """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always.
+
+        ``add_to_agent_memory`` is written only when False, which a paused run's context holds.
+        """
         values: dict[str, Any] = {
             "id": self.id,
             "content": self.content,
@@ -168,6 +173,8 @@ class Message:
         metrics = self.metrics.to_dict()
         if metrics:
             result["metrics"] = metrics
+        if not self.add_to_agent_memory:
+            result["add_to_agent_memory"] = False
         result["created_at"] = self.created_at
         return result
 
@@ -175,8 +182,8 @@ class Message:
     def from_dict(cls, data: Mapping[str, Any]) -> Message:
         """Rebuild from a stored dict.
 
-        Keys this type does not model are ignored.
-        The non-persisted flags are read when present so ``model_dump``-shaped payloads decode too.
+        Keys this type does not model are ignored. ``add_to_agent_memory`` is True unless the dict says otherwise, as
+        ``to_dict`` writes it and ``model_dump``-shaped payloads carry it.
         """
         # LEGACY_COMPAT: Agno 3 message dicts carry keys the owned Message dropped.
         # Legacy format: ``run_data`` messages, summary-row segments, and tool-job payloads written by the

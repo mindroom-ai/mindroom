@@ -71,10 +71,10 @@ def _prompt_utterances(message: Message, content: str, requester: str, *, mindro
 def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance]:
     """Return what was said in one stored turn, oldest first.
 
-    Only turns the agent's own history shows count, never copies of earlier turns. A prompt MindRoom wrote is nobody's
-    words: an automation's turn is left out entirely, a background job follow-up keeps only its reply, and a run's own
-    compaction summary is left out. A stopped turn's answer is a rendered summary that can quote tool previews, so it is
-    left out too. ``agent_work`` keeps all of these, plus tool calls and results, for a reviewer of how the agent worked.
+    Only turns the agent's own history shows count. A prompt MindRoom wrote is nobody's words: an automation's turn is
+    left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary is left out.
+    A stopped turn's answer is a rendered summary that can quote tool previews, so it is left out too. ``agent_work``
+    keeps all of these, plus tool calls and results, for a reviewer of how the agent worked.
     """
     if not is_model_history_visible_run(run):
         return []
@@ -86,13 +86,8 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     keeps_reply = agent_work or not is_interrupted_replay_run(run)
     requester = run_requester(run) or "unknown"
     said: list[Utterance] = []
-    # TODO(simplify): Turns are read without the legacy tool-call repair replay applies, so an agent-work transcript shows
-    # legacy calls as stored, placeholders and their results included. Read the turn through replayable_messages.
-    # Skill-review models would notice on runs stored by v2026.9.43 or earlier (#3075).
     for message in run.messages:
         content = message.content if isinstance(message.content, str) else ""
-        if message.from_history:
-            continue
         mindroom_wrote = (
             runtime_prompt
             or is_queued_notice_message(message)

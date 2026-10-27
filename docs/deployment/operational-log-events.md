@@ -16,7 +16,9 @@ See also [Routing & Responder Selection](../configuration/router.md), [Threads, 
 | GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Never point a startup probe at `/api/ready`: the one-time conversion after [upgrading to conversation storage v2](upgrades.md#upgrading-to-conversation-storage-v2) keeps the process not ready for as long as it takes, a probe restart rolls back the database being converted, and a database larger than the probe allows never finishes converting.
+A startup probe on `/api/health` passes as soon as the process answers, as the bundled Helm charts configure it.
 
 The `/api/health` body also contains:
 
@@ -34,7 +36,7 @@ The `/api/ready` phases are:
 | `ready` | Startup finished and requests are being served |
 | `failed` | Startup or runtime failure; `detail` gives the cause |
 
-While `mindroom run` waits for hosted pairing approval, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval`.
+While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
 When an agent, team, or router receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
@@ -168,6 +170,21 @@ Every agent in the room that receives the message logs it, and a burst of failur
 
 Count it grouped by `agent` and alert on a sustained rate.
 Failures from one `sender_device_id` point at that client, while failures across many senders for one agent point at that agent's device.
+
+### `conversation_converted`
+
+Logged once for each conversation database the first start after [upgrading to conversation storage v2](upgrades.md#upgrading-to-conversation-storage-v2) converts, or that converts at its first use later, such as a restored backup.
+
+| Field | Meaning |
+|-------|---------|
+| `path` | The converted database file |
+| `runs` | Runs in the converted database |
+| `messages` | Stored messages in the converted database |
+| `compacted` | Whether the file was compacted to return the space its old tables used |
+| `duration_seconds` | Time the conversion and compaction took |
+
+`compacted` is `false` when compacting would return little or the directory lacked the space the [upgrade notes](upgrades.md#upgrading-to-conversation-storage-v2) give for it; a `conversation_compaction_failed` warning names the database when compacting failed, and the conversion still stands.
+A database that could not convert at startup logs `conversation_conversion_skipped_store` instead.
 
 ### `tool_call_limit_reached`
 

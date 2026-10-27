@@ -220,7 +220,10 @@ def test_preset_service_names_keep_existing_service_name_rules() -> None:
         EgressBrokerConfig(services={"github_oauth": {"preset": "github"}})  # type: ignore[dict-item]
 
 
-@pytest.mark.parametrize("field", ["oauth_on_shared_workers", "restrict_to_rules", "restrict_only"])
+@pytest.mark.parametrize(
+    "field",
+    ["oauth_on_shared_workers", "restrict_to_rules", "restrict_only", "oauth_separate_account"],
+)
 def test_opt_in_field_defaults_off_and_no_preset_sets_it(field: str) -> None:
     """Shared-worker accounts, path restriction, and restrict-only are the operator's choice, never a preset's."""
     service = EgressService.model_validate({"preset": "github"})
@@ -331,6 +334,30 @@ def test_restrict_only_keeps_a_presets_rules_and_names_but_not_its_login_or_plac
         EgressService.model_validate({"preset": "github", "restrict_only": True, "oauth_provider": "github"})
     # A preset's read-only declaration is about its credential, so a limit drops it too.
     assert EgressService.model_validate({"preset": "google_calendar", "restrict_only": True}).read_only is None
+
+
+def test_a_separate_account_needs_an_oauth_provider() -> None:
+    """A service of one's own logs in on its own only with a provider to log in to, and the flag is authored."""
+    rules = [{"host": "www.googleapis.com", "auth": {"type": "bearer"}}]
+
+    with pytest.raises(ValidationError, match="oauth_separate_account needs an oauth_provider"):
+        EgressService.model_validate({"rules": rules, "oauth_separate_account": True})
+    with pytest.raises(ValidationError, match="valid boolean"):
+        EgressService.model_validate({"preset": "google_calendar", "oauth_separate_account": "true"})
+    service = EgressService.model_validate({"preset": "google_calendar", "oauth_separate_account": True})
+    assert service.oauth_separate_account is True
+    assert service.authored_model_dump() == {"preset": "google_calendar", "oauth_separate_account": True}
+    assert EgressService.model_validate({"preset": "google_calendar"}).oauth_separate_account is False
+
+
+def test_a_config_service_cannot_have_a_separate_account() -> None:
+    """Only a service a user adds has its own login; config services use the scope's connection."""
+    message = "service 'team_calendar': oauth_separate_account is only for services users add"
+
+    with pytest.raises(ValidationError, match=message):
+        EgressBrokerConfig.model_validate(
+            {"services": {"team_calendar": {"preset": "google_calendar", "oauth_separate_account": True}}},
+        )
 
 
 def test_a_config_service_cannot_be_restrict_only() -> None:

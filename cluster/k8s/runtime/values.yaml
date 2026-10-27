@@ -359,10 +359,12 @@ resources:
     memory: 2Gi
 
 probes:
+  # Startup and liveness ask whether the process is up; readiness waits for full bootstrap, including the
+  # conversation storage conversion the first start after an upgrade runs.
   startup:
     enabled: true
     custom: {}
-    path: /api/ready
+    path: /api/health
     port: api
     periodSeconds: 5
     timeoutSeconds: 10

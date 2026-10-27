@@ -229,12 +229,14 @@ class SecretMissing:
     connectable provider. The URL carries a one-time connect token, so it stays out of reprs and logs.
     `reuse_off` means nobody allowed Agent Keys to use the `provider` account for this service, so it was not read
     and there is no link; `requester_owned` says the account is the requester's own, which only they can allow.
+    `own_account` means the service's own account is not connected, which only its row on the egress page connects.
     """
 
     provider: str | None = None
     connect_url: str | None = field(default=None, repr=False)
     reuse_off: bool = False
     requester_owned: bool = False
+    own_account: bool = False
 
 
 @dataclass(frozen=True)

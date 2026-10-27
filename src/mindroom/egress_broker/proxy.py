@@ -244,7 +244,7 @@ class EgressBroker:
             return False
         path = target.split(b"?", 1)[0].decode("ascii")
         entry = AuditEntry(claims=claims, kind="request", method=request.method.decode("ascii"), host=host, path=path)
-        routed = await self._relay.route(client, entry, port)
+        routed = await self._relay.route(client, entry, port, request.headers)
         if routed is None:
             return False
         rules, route = routed

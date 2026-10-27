@@ -62,10 +62,7 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
                 "voice_finalized": finalized,
             },
         )
-    storage.delete_run_subtrees(
-        ConversationSession(kind="agent", session_id="session", owner_id="test_agent"),
-        ["run-1"],
-    )
+    storage.delete_runs(["run-1"], session_id="session")
     runner, workers = _install_manual_export_runner(client)
     try:
         assert client.get(route).status_code == 401

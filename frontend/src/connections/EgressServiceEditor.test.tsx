@@ -569,6 +569,106 @@ describe("the editor form", () => {
     });
   });
 
+  it("offers its own account only for a service of one's own that logs in", async () => {
+    const ownAccount = () =>
+      screen.queryByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      );
+    const { onSave } = await renderEditor();
+    type("Name", "team_calendar");
+    openMoreOptions();
+    expect(ownAccount()).toBeNull();
+    type("Preset", "google_calendar");
+    fireEvent.click(ownAccount()!);
+    expect(
+      screen.getByText(
+        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+      ),
+    ).toBeInTheDocument();
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("team_calendar", {
+      preset: "google_calendar",
+      oauth_separate_account: true,
+    });
+  });
+
+  it("names the preset's login by its display name, and the header once beside its own account", async () => {
+    const calendar = credentialService({
+      name: "google_calendar",
+      display_name: "Google Calendar",
+      rules: [
+        {
+          host: "www.googleapis.com",
+          port: null,
+          path_prefix: "/calendar/v3/",
+          auth_type: "bearer",
+        },
+      ],
+    });
+    await renderEditor({
+      service: { preset: "google_calendar", oauth_separate_account: true },
+      name: "team_calendar",
+      agentServices: [
+        calendar,
+        { ...calendar, name: "events", display_name: "Events" },
+      ],
+    });
+    expect(
+      screen.getByText(
+        "Users can connect an account (Google Calendar) instead of an API key.",
+      ),
+    ).toBeVisible();
+    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
+    expect(
+      screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
+    ).toHaveLength(1);
+  });
+
+  it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
+    const cases: [AuthoredEgressService, boolean][] = [
+      [{ preset: "github", oauth_provider: "google_drive" }, true],
+      [{ preset: "google_calendar", oauth_provider: null }, false],
+    ];
+    for (const [service, offered] of cases) {
+      const { onSave } = await renderEditor({ service, name: "svc" });
+      // A replaced login opens More options already.
+      if (!screen.queryByLabelText("Display name")) openMoreOptions();
+      type("Preset", "google_drive");
+      type("Preset", service.preset!);
+      expect(
+        screen.queryByLabelText(
+          "Use its own account, not the one the agent's tools use",
+        ) !== null,
+      ).toBe(offered);
+      save();
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onSave).toHaveBeenCalledWith("svc", service);
+      cleanup();
+    }
+  });
+
+  it("offers no own account on a shared agent, on the dashboard, or for an account each user has", async () => {
+    for (const props of [
+      { sharedTarget: true },
+      { context: "operator" as const },
+      { service: { preset: "github" } },
+    ]) {
+      await renderEditor({
+        service: { preset: "google_calendar" },
+        name: "calendar",
+        ...props,
+      });
+      openMoreOptions();
+      expect(
+        screen.queryByLabelText(
+          "Use its own account, not the one the agent's tools use",
+        ),
+      ).toBeNull();
+      cleanup();
+    }
+  });
+
   it("keeps oauth_on_shared_workers when an operator edits a service", async () => {
     const { onSave } = await renderEditor({
       context: "operator",

@@ -61,7 +61,13 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
-from tests.approval_continuation_helpers import carries_approval_receipt, receipt_call_ids, request_call_ids
+from tests.approval_continuation_helpers import (
+    carries_approval_receipt,
+    receipt_call_ids,
+    receipts,
+    repeats_each_request,
+    request_call_ids,
+)
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
@@ -1026,10 +1032,11 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The member whose call was approved and the leader each read the trusted receipt in their first resumed request.
+    """The member whose call was approved and the leader each read the trusted receipt after their decided results.
 
-    The response runner binds the receipt around the resume; it is projected into each loop's request only, so no
-    stored run holds it. A member the resumed leader then hands a new task runs fresh and never reads it.
+    The response runner binds the receipt around the resume; each run keeps it, as a user message, for the rest of
+    the run, and no finished run stores it. A member the resumed leader then hands a new task runs fresh and never
+    reads it.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(
@@ -1050,11 +1057,59 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
             for request in team.models[model].requests
         ]
 
-    assert receipt_roles("checker-model") == [["system"]]
-    assert receipt_roles("default") == [["system"], []]
+    assert receipt_roles("checker-model") == [["user"]]
+    assert receipt_roles("default") == [["user"], ["user"]]
     assert receipt_roles("writer-model") == [[]]
     record, members = team.stored_runs()
     assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_repeats_the_request_the_leader_and_the_member_each_paused_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader and the member resume with the request each paused on, then the paused turn, its result, the receipt.
+
+    The leader's turn context, which no history keeps, comes back where the paused request sent it; each run's
+    receipt follows its decided result and stays there for the run's later requests.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    location = EnrichmentItem(key="location", text="Alice is in Lisbon.", persist=False)
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(ctx=team.ctx(transient_enrichment_items=(location,)), show_tool_calls=False)
+    [paused_leader] = team.models["default"].requests
+    [paused_checker] = team.models["checker-model"].requests
+    team.models["default"] = ScriptedModel(
+        [delegate("call-polish", "writer", "Polish it"), answer("The checker touched it.", usage(50, 5))],
+    )
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([answer("Polished.")])
+    call = member_approval("call-touch", "dangerous")
+    decided = (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),)
+
+    with approval_receipt_context(decided, run_id=raised.value.paused.run_id):
+        result = await team.resume(raised.value.paused, approved=True, approvals=(call,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert "Alice is in Lisbon." in str(paused_leader.messages[-1].content)
+    for paused_request, model in ((paused_leader, "default"), (paused_checker, "checker-model")):
+        requests = [paused_request, *team.models[model].requests]
+        assert repeats_each_request(requests), model
+        resumed = requests[1]
+        assert [message.role for message in resumed.messages[len(paused_request.messages) :]] == [
+            "assistant",
+            "tool",
+            "user",
+        ], model
+        assert receipts(resumed) == [build_approval_receipt(decided)], model
+    assert [len(receipts(request)) for request in team.models["default"].requests] == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -1062,7 +1117,7 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the runs the approval resumes read its receipt, each once.
+    """Only the runs the approval resumes read its receipt, each once, and keep it for the rest of the run.
 
     The resumed leader hands the writer a fresh task; the writer delegates to the helper and continues with the
     helper's answer. No approval resumed the writer, so neither of its requests carries the receipt.
@@ -1101,7 +1156,7 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
 
     assert isinstance(result, CompletedApprovalRun)
     assert carries("checker-model") == [True]
-    assert carries("default") == [True, False]
+    assert carries("default") == [True, True]
     assert carries("writer-model") == [False, False]
     assert carries("helper-model") == [False]
 
@@ -1113,7 +1168,8 @@ async def test_each_approval_of_a_chained_team_approval_reaches_the_runs_it_resu
 ) -> None:
     """The checker reads each approval's receipt on its resume, and the leader reads the second approval's.
 
-    The checker's first approved call leads only to a second gated call, and the leader's first request comes after
+    The checker's first approved call leads only to a second gated call, so its second resume keeps the first
+    receipt where it was and adds the second after the newly decided result; the leader's first request comes after
     the second approval. What a receipt covers is the response runner's to compose, so each approval here binds a
     receipt of its own call alone.
     """
@@ -1146,7 +1202,9 @@ async def test_each_approval_of_a_chained_team_approval_reaches_the_runs_it_resu
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
-    assert receipts_read("checker-model") == [[receipts[0]], [receipts[1]]]
+    assert receipts_read("checker-model") == [[receipts[0]], [receipts[0], receipts[1]]]
+    first, second = team.models["checker-model"].requests
+    assert second.messages[: len(first.messages)] == first.messages
     assert receipts_read("default") == [[receipts[1]]]
 
 
@@ -3081,7 +3139,8 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
     )
     assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
     assert len(team.models["checker-model"].requests) == 1
-    assert "Helper: dug deeper." in str(team.models["writer-model"].requests[-1].messages[-1].content)
+    *_, helper_result = [m for m in team.models["writer-model"].requests[-1].messages if m.role == "tool"]
+    assert "Helper: dug deeper." in str(helper_result.content)
     record, member, state = _delegation_state(team)
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed"]

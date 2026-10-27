@@ -151,6 +151,13 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- $authenticationRecoveryLoader := "if (!window.__AUTHENTICATION_RECOVERY_READY__) { const script = document.createElement(\"script\"); script.src = new URL(\"authentication-recovery.js\", document.currentScript.src).href; script.async = false; window.__AUTHENTICATION_RECOVERY_READY__ = new Promise((resolve) => { script.onload = resolve; script.onerror = resolve; }); document.head.appendChild(script); }" -}}
 {{- $runtimeConfig = printf "%s window.__AUTHENTICATION_RECOVERY_CONFIG__ = %s; %s" $runtimeConfig $authenticationRecoveryConfig $authenticationRecoveryLoader -}}
 {{- end -}}
+{{- $publicFiles := list (regexQuoteMeta "/runtime-config.js") (regexQuoteMeta (printf "%s/sw.js" $prefix)) -}}
+{{- if .Values.authenticationRecovery.enabled -}}
+{{- $publicFiles = append $publicFiles (regexQuoteMeta "/authentication-recovery.js") -}}
+{{- end -}}
+{{- if .Values.rootServiceWorkerCleanup.enabled -}}
+{{- $publicFiles = append $publicFiles (regexQuoteMeta "/sw.js") -}}
+{{- end -}}
 server {
   listen {{ .Values.nginx.port }};
 {{- if .Values.nginx.ipv6 }}
@@ -174,6 +181,24 @@ server {
     add_header Cache-Control "no-store, max-age=0" always;
     return 200 {{ $runtimeConfig | quote }};
   }
+
+  # Browsers fetch runtime-config.js, the recovery script, and the service
+  # workers without a gateway session, so a gateway may make them public, and
+  # its path rules usually cover every path below them too. Answer 404 there
+  # instead of the app shell or build files. The request line check catches
+  # paths such as /sw.js/../x before nginx resolves them elsewhere, for
+  # gateways that match a path before resolving its dot segments; the locations
+  # catch forms nginx normalizes, such as //sw.js/x. Some gateways treat a
+  # backslash as a slash.
+  if ($request_uri ~ "^(?:{{ join "|" $publicFiles }})(?:[/\x5c]|%2[fF]|%5[cC])") {
+    return 404;
+  }
+{{- range $publicFiles }}
+
+  location ~ ^{{ . }}[/\x5c] {
+    return 404;
+  }
+{{- end }}
 {{- if .Values.authenticationRecovery.enabled }}
 
   # The client image owns the recovery implementation. This chart only loads

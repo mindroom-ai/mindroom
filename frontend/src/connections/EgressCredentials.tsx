@@ -55,6 +55,8 @@ type EditorState = (
       kind: "add";
       /** Add a limit on GitHub repositories, which has no key of its own. */
       restrictOnly?: boolean;
+      /** What the new service starts from, such as another account of a row's preset. */
+      service?: AuthoredEgressService;
     }
   | { kind: "edit"; name: string; service: AuthoredEgressService }
 ) & {
@@ -302,9 +304,12 @@ function RecentRequests({
 /** One agent's services with their editor and request log. */
 function AgentSection({
   agent,
+  catalog,
   onChanged,
 }: {
   agent: EgressCredentialAgent;
+  /** The presets and account logins, which say where another account can be added; `null` until they load. */
+  catalog: EgressPresetCatalog | null;
   onChanged: () => void;
 }) {
   const [editor, setEditor] = useState<EditorState | null>(null);
@@ -410,6 +415,30 @@ function AgentSection({
       setEditor({ kind: "add", restrictOnly: true });
     },
     limitDisabled: editor !== null,
+    // From the preset with the row's login, on a personal agent, where the
+    // accounts are not each user's own (GitHub, Atlassian) or a service account.
+    addAccount: ({ oauth }) => {
+      const login =
+        agent.can_manage &&
+        !agent.shared &&
+        oauth &&
+        !oauth.service_account &&
+        catalog?.oauth_providers.find(
+          (option) => option.id === oauth.provider && !option.requester_scoped,
+        );
+      const preset =
+        login &&
+        catalog?.presets.find((option) => option.oauth_provider === login.id);
+      return preset
+        ? () => {
+            setError(null);
+            setEditor({
+              kind: "add",
+              service: { preset: preset.id, oauth_separate_account: true },
+            });
+          }
+        : null;
+    },
   };
   const rowAgent: RowAgent = {
     displayName: agent.agent_display_name,
@@ -478,7 +507,7 @@ function AgentSection({
             context="personal"
             sharedTarget={agent.shared}
             name={editor.kind === "edit" ? editor.name : undefined}
-            service={editor.kind === "edit" ? editor.service : null}
+            service={editor.service ?? null}
             initialRestrictOnly={
               editor.kind === "add" && editor.restrictOnly === true
             }
@@ -543,11 +572,13 @@ function linkedAgent(): string | null {
 /** One agent's row, with its services below it while it is open. */
 function AgentRow({
   agent,
+  catalog,
   open,
   onToggle,
   onChanged,
 }: {
   agent: EgressCredentialAgent;
+  catalog: EgressPresetCatalog | null;
   open: boolean;
   onToggle: () => void;
   onChanged: () => void;
@@ -599,7 +630,7 @@ function AgentRow({
           colSpan={2}
           className={`border-t border-border/60 p-0 ${STACKED_CELL}`}
         >
-          <AgentSection agent={agent} onChanged={onChanged} />
+          <AgentSection agent={agent} catalog={catalog} onChanged={onChanged} />
         </td>
       </tr>
     </>
@@ -609,6 +640,7 @@ function AgentRow({
 /** Personal page to connect accounts or set the API keys the egress broker injects for each agent. */
 export function EgressCredentials() {
   const [agents, setAgents] = useState<EgressCredentialAgent[] | null>(null);
+  const [catalog, setCatalog] = useState<EgressPresetCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<ReadonlySet<string>>(() => {
     const linked = linkedAgent();
@@ -644,6 +676,13 @@ export function EgressCredentials() {
     void load();
     return () => request.current?.abort();
   }, [load]);
+
+  // Without the presets the rows only leave out Add another account.
+  useEffect(() => {
+    const controller = new AbortController();
+    loadPresets(controller.signal).then(setCatalog, () => {});
+    return () => controller.abort();
+  }, []);
 
   // The linked agent's row exists only once the listing is in, after the browser looked for it.
   useEffect(() => {
@@ -714,6 +753,7 @@ export function EgressCredentials() {
                     <AgentRow
                       key={agent.agent_name}
                       agent={agent}
+                      catalog={catalog}
                       open={open.has(agent.agent_name)}
                       onToggle={() => toggle(agent.agent_name)}
                       onChanged={() => void load()}

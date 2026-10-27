@@ -1,4 +1,4 @@
-"""Trusted approval-receipt rendering and its projection into a resumed run's first request."""
+"""Trusted approval-receipt rendering, and where a reader run gets it: after its decided results or its input, to stay."""
 
 from __future__ import annotations
 
@@ -13,40 +13,48 @@ from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.ai import stream_agent_response
-from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt, messages_with_approval_receipt
+from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt
 from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
-from mindroom.history.request_messages import build_resume_request
+from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request
 from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord
+from mindroom.media_inputs import MediaInputs
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.agent_loop.helpers import collect, context, echo, gated, spec, toolkit
+from tests.agent_loop.helpers import add, collect, context, echo, gated, spec, toolkit
 from tests.approval_continuation_helpers import (
     RECEIPT_CALLS,
     RECEIPT_TEXT,
     carries_approval_receipt,
     receipt_call_ids,
+    receipts,
+    repeats_each_request,
     request_call_ids,
 )
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import (
+    RECALLED_MEMORY,
     ScriptedAgents,
     _delegate_runtime_context,
     _runtime_paths,
     approval_calls_for,
     approval_executor,
+    recall_memories,
     registered_report_tool,
     respond,
     resume,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
+from tests.providers.anthropic_family_support import FAMILIES, route_provider, sse_reply
+from tests.providers.golden_support import Wire, hide_provider_environment
 from tests.providers.openai_family_support import golden_provider
 from tests.scripted_agent_helpers import streamed_text
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
@@ -238,43 +246,12 @@ def test_approval_receipt_rejects_unsettled_calls() -> None:
         pytest.fail("A receipt with a pending call was bound")
 
 
-def test_the_receipt_is_appended_to_a_copy_of_the_last_system_message() -> None:
-    """The projection extends the turn part a resumed model sees, keeping the stable prompt and the run's messages."""
-    messages = [
-        Message(role="system", content="base rules"),
-        Message(role="system", content="session context"),
-        Message(role="assistant", content="calling tool"),
-        Message(role="tool", content="tool result"),
-    ]
-
-    projected = messages_with_approval_receipt(messages, "trusted approval receipt")
-
-    assert [(message.role, message.content) for message in projected] == [
-        ("system", "base rules"),
-        ("system", "session context\n\ntrusted approval receipt"),
-        ("assistant", "calling tool"),
-        ("tool", "tool result"),
-    ]
-    assert projected[0] is messages[0]
-    assert projected[1] is not messages[1]
-    assert messages[1].content == "session context"
-    assert messages[1].provider_data is None
-
-
-def test_a_request_without_a_prompt_message_gets_the_receipt_as_its_own_system_message() -> None:
-    """A run with no system message still delivers the receipt, first, without storing it."""
-    projected = messages_with_approval_receipt([Message(role="user", content="Do the task")], "Approved.")
-
-    assert [(message.role, message.content) for message in projected] == [
-        ("system", "Approved."),
-        ("user", "Do the task"),
-    ]
-    assert projected[0].add_to_agent_memory is False
-
-
 @pytest.mark.asyncio
-async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only() -> None:
-    """The run the receipt names reads it in its first request only; another run and every stored run never do."""
+async def test_a_reader_keeps_the_receipt_after_its_input_in_every_request_and_no_finished_run_stores_it() -> None:
+    """The run the receipt names gets it before its first request and keeps it for its later ones; no other run does.
+
+    It follows the run's input, as a user message of its own, so the system messages stay the ones every request sends.
+    """
     model = ScriptedModel([calls(tool_call("echo", "call-1", text="x")), answer("first"), answer("second")])
 
     with approval_receipt_context(RECEIPT_CALLS, run_id="run-1"):
@@ -299,11 +276,12 @@ async def test_the_hook_projects_the_receipt_into_a_reader_s_first_request_only(
             ),
         )
 
-    assert [request.messages[0].content for request in model.requests] == [
-        f"You are Code.\n\n{RECEIPT_TEXT}",
-        "You are Code.",
-        "You are Code.",
+    assert [[(m.role, m.content) for m in request.messages if m.role != "assistant"] for request in model.requests] == [
+        [("system", "You are Code."), ("user", "Go"), ("user", RECEIPT_TEXT)],
+        [("system", "You are Code."), ("user", "Go"), ("user", RECEIPT_TEXT), ("tool", "x")],
+        [("system", "You are Code."), ("user", "Again")],
     ]
+    assert model.requests[1].messages[:3] == model.requests[0].messages
     assert all(RECEIPT_TEXT not in str(message.content) for message in [*first.messages, *second.messages])
 
 
@@ -393,10 +371,117 @@ async def test_a_chat_resume_sends_the_call_under_the_id_its_receipt_names(
             ),
         )
 
+    paused_request = json.loads(built.requests[0].content)["messages"]
     resumed = json.loads(built.requests[1].content)["messages"]
-    assert [message["role"] for message in resumed] == ["system", "user", "assistant", "tool"]
-    assert f"`echo` (tool call id `{call_id}`): human approval was required" in resumed[0]["content"]
+    assert [message["role"] for message in resumed] == ["system", "user", "assistant", "tool", "user"]
+    assert resumed[:2] == paused_request
+    assert f"`echo` (tool call id `{call_id}`): human approval was required" in resumed[4]["content"]
     assert [resumed[2]["tool_calls"][0]["id"], resumed[3]["tool_call_id"]] == [call_id, call_id]
+
+
+def _without_cache_markers(value: Any) -> Any:  # noqa: ANN401 - arbitrary JSON
+    """Return a request body without its prompt-cache markers, which the API leaves out of a thinking block's prefix."""
+    if isinstance(value, dict):
+        return {key: _without_cache_markers(item) for key, item in value.items() if key != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_markers(item) for item in value]
+    return value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", FAMILIES)
+async def test_a_resumed_claude_run_sends_the_paused_request_unchanged_before_the_decided_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    """The resumed request repeats the paused one on the wire, then the paused turn as Claude answered it.
+
+    Claude checks a replayed thinking block against the system prompt, the tools, and every message before it, so
+    the paused turn's memory results come back where they were, and the receipt follows the decided call's result,
+    where it stays for the run's later requests. Only the prompt-cache markers move.
+    """
+    hide_provider_environment(monkeypatch)
+    thinking = {"type": "thinking", "thinking": "Echo first.", "signature": "sig-echo"}
+    echo_call = {"type": "tool_use", "id": "toolu_echo", "name": "echo", "input": {"text": "x"}}
+    wire = Wire(
+        sse_reply([thinking, echo_call], stop_reason="tool_use"),
+        sse_reply(
+            [
+                {"type": "thinking", "thinking": "Now add.", "signature": "sig-add"},
+                {"type": "tool_use", "id": "toolu_add", "name": "add", "input": {"a": 2, "b": 3}},
+            ],
+            stop_reason="tool_use",
+        ),
+        sse_reply([{"type": "text", "text": "x, then 5."}]),
+    )
+    agent = AgentSpec(
+        id="code",
+        name="Code",
+        model=route_provider(route, tmp_path, wire),
+        system_messages=(
+            Message(role="system", content="You are Code."),
+            Message(role="system", content="Today is Monday."),
+        ),
+        toolkits=(gated(echo), toolkit(add)),
+    )
+    history = [
+        Message(role="user", content="Hi", from_history=True),
+        Message(role="assistant", content="Hello.", from_history=True),
+    ]
+    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", add_to_agent_memory=False)
+    turn = TurnMessages(prompt=Message(role="user", content="Echo x, then add 2 and 3."), transient=(memory,))
+    _, paused = await collect(
+        run_agent(
+            agent,
+            build_request(summary=None, history=history, turn=turn, media=MediaInputs()),
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+    stored = RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
+    approval = ApprovalCall(
+        tool_call_id="toolu_echo",
+        tool_name="echo",
+        invoking_agent="code",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+        toolkit_name="gated",
+        arguments_digest=approval_arguments_digest({"text": "x"}),
+    )
+
+    with approval_receipt_context((approval,), run_id=stored.run_id):
+        await collect(
+            resume_agent(
+                agent,
+                stored,
+                build_resume_request(paused=stored.messages, summary=None, history=history),
+                approved=[approval],
+                denied={},
+                external_results={},
+                context=lambda run_id: context(run_id=run_id),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
+
+    paused_body, resumed_body, later_body = (_without_cache_markers(wire.body(index)) for index in range(3))
+    assert "Alice prefers short answers." in json.dumps(paused_body["messages"][-1])
+    for body in (resumed_body, later_body):
+        assert json.dumps(body["system"]) == json.dumps(paused_body["system"])
+        assert json.dumps(body["tools"]) == json.dumps(paused_body["tools"])
+    sent = len(paused_body["messages"])
+    assert json.dumps(resumed_body["messages"][:sent]) == json.dumps(paused_body["messages"])
+    assert resumed_body["messages"][sent] == {"role": "assistant", "content": [thinking, echo_call]}
+    assert resumed_body["messages"][sent + 1]["content"][1:] == [
+        {"type": "text", "text": build_approval_receipt((approval,))},
+    ]
+    assert [block["type"] for block in resumed_body["messages"][sent + 1]["content"]] == ["tool_result", "text"]
+    resumed = len(resumed_body["messages"])
+    assert json.dumps(later_body["messages"][:resumed]) == json.dumps(resumed_body["messages"])
 
 
 def _leader_delegating_to_code(
@@ -447,15 +532,18 @@ def _receipt_flags(model: ScriptedModel) -> list[bool]:
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receipt_once(
+async def test_a_resumed_parent_continued_after_two_delegations_keeps_the_one_receipt_it_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The receipt goes with the resumed parent's first request only.
+    """The resumed parent repeats the paused request, memory results included, and keeps the receipt it read once.
 
-    No continuation after a delegation repeats it, and the fresh children the resumed parent starts never get it.
+    The paused run stored the memory results its request sent, so the resume sends them again where they were; the
+    receipt follows the approved call's result. The run then pauses on each delegation, so its continuations send
+    the receipt again where it was; the fresh children the resumed parent starts never get it.
     """
     config, paths, identity = _leader_delegating_to_code(tmp_path)
+    recall_memories(monkeypatch)
     leader = ScriptedModel(
         [
             calls(tool_call("write_report", "call-1")),
@@ -485,7 +573,16 @@ async def test_a_resumed_parent_continued_after_two_delegations_sends_the_receip
 
     assert isinstance(result, CompletedApprovalRun)
     # The fresh turn's request, the resumed request, and one continuation after each delegation.
-    assert _receipt_flags(leader) == [False, True, False, False]
+    paused_request, resumed = leader.requests[:2]
+    assert RECALLED_MEMORY in str(paused_request.messages[-1].content)
+    assert repeats_each_request(leader.requests)
+    assert [message.role for message in resumed.messages[len(paused_request.messages) :]] == [
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert receipts(resumed) == [build_approval_receipt(decided)]
+    assert [len(receipts(request)) for request in leader.requests] == [0, 1, 1, 1]
     assert _receipt_flags(code) == [False, False]
 
 
@@ -589,15 +686,17 @@ async def test_every_run_between_the_card_and_a_nested_child_s_approved_call_rea
 
 
 @pytest.mark.asyncio
-async def test_a_fresh_turn_the_receipt_names_sends_it_once_across_its_delegations(
+async def test_a_fresh_turn_the_receipt_names_keeps_it_after_its_input_across_its_delegations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh turn that reads the receipt, as a recovered CLI call's follow-up does, sends it with its first request.
+    """A fresh turn that reads the receipt, as a recovered CLI call's follow-up does, gets it after its input.
 
-    No continuation after a delegation repeats it, and the fresh children the turn starts never get it.
+    Every continuation after a delegation sends the paused request unchanged, the turn's memory results and the
+    receipt included, and the fresh children the turn starts never get it.
     """
     config, paths, identity = _leader_delegating_to_code(tmp_path)
+    recall_memories(monkeypatch)
     leader = ScriptedModel(
         [
             calls(tool_call("run_subagent", "delegate-1", agent_name="code", task="Check the intro")),
@@ -636,7 +735,12 @@ async def test_a_fresh_turn_the_receipt_names_sends_it_once_across_its_delegatio
 
     assert "".join(streamed_text(chunks)).endswith("Both parts are fine.")
     # The first request, then one continuation after each delegation.
-    assert _receipt_flags(leader) == [True, False, False]
+    first, *continued = leader.requests
+    assert [message.role for message in first.messages] == ["system", "system", "user", "user", "user"]
+    assert RECALLED_MEMORY in str(first.messages[3].content)
+    assert receipts(first) == [RECEIPT_TEXT]
+    assert repeats_each_request(leader.requests)
+    assert [len(receipts(request)) for request in continued] == [1, 1]
     assert _receipt_flags(code) == [False, False]
 
 

@@ -890,12 +890,12 @@ async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_even
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_request_only(
+async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_and_never_stores_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The bound receipt reaches the model once, on the system message, and never enters a stored run.
+    """The bound receipt follows the reading run's input in each of its requests and never enters a stored run.
 
     The rejected model switch ends the first attempt, so the turn's answer comes from a second attempt without it.
     """
@@ -914,10 +914,11 @@ async def test_a_turn_that_reads_the_approval_receipt_sends_it_with_its_first_re
         await _stream(reply, run_id="run-1")
 
     assert probe.calls == ["a"]
-    first, *later = reply.model.requests
-    assert system_text(first.messages).endswith(RECEIPT_TEXT)
-    assert len(later) == 2
-    assert all(RECEIPT_TEXT not in str(message.content) for request in later for message in request.messages)
+    first, second, retried = reply.model.requests
+    assert (first.messages[-1].role, first.messages[-1].content) == ("user", RECEIPT_TEXT)
+    assert RECEIPT_TEXT not in system_text(first.messages)
+    assert second.messages[: len(first.messages)] == first.messages
+    assert all(RECEIPT_TEXT not in str(message.content) for message in retried.messages)
     session = reply.storage.load_session(SESSION_ID, "agent")
     assert session is not None
     assert len(session.runs) == 2

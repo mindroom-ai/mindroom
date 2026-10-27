@@ -60,7 +60,7 @@ def _hooks() -> LoopHooks:
 
 @pytest.mark.asyncio
 async def test_approved_batch_notifies_next_real_model_request() -> None:
-    """A queued follow-up reaches the model once, after every resumed tool result and the receipt."""
+    """A queued follow-up reaches the model once, after every resumed tool result, and the receipt follows it."""
     state = _QueuedState()
     executed: list[int] = []
 
@@ -123,10 +123,9 @@ async def test_approved_batch_notifies_next_real_model_request() -> None:
     assert executed == [1, 2]
     [_, request] = model.requests
     messages = request.messages
-    assert any(message.role == "system" and RECEIPT_TEXT in str(message.content) for message in messages)
+    assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "user", "user"]
     assert [message.tool_call_id for message in messages if message.role == "tool"] == ["call-1", "call-2"]
-    assert sum(message.content == _NOTICE for message in messages) == 1
-    assert messages[-1].content == _NOTICE
+    assert [message.content for message in messages[-2:]] == [_NOTICE, RECEIPT_TEXT]
 
 
 @pytest.mark.parametrize(

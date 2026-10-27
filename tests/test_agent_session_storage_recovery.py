@@ -17,10 +17,11 @@ import pytest
 
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.preflight import session_storage_preflight
-from mindroom.session_storage.schema import TableNames
+from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
-from tests.conftest import create_agno_2_sessions_db
+from tests.conftest import create_agno_2_sessions_db, seed_session_row
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -77,32 +78,31 @@ def test_incompatible_session_schema_is_archived_before_real_session_use(tmp_pat
     session = _row("new-session", kind=kind)
 
     storage = _storage(state_root)
-    storage.ensure_session_row(session)
+    seed_session_row(storage, session)
+    if kind == "team":
+        # A member's run is saved when it ends, before its team run's.
+        member = RunRecord(run_id="member-run", parent_run_id="new-run", agent_id="member", content="member answer")
+        storage.save_run(session, member, record_usage=False)
     run = (
         RunRecord(run_id="new-run", content="saved answer", agent_id="general")
         if kind == "agent"
         else TeamRunRecord(run_id="new-run", content="saved answer", team_id="general")
     )
-    storage.save_runs(session, [run])
-    if kind == "team":
-        storage.save_runs(
-            session,
-            [RunRecord(run_id="member-run", parent_run_id="new-run", agent_id="member", content="member answer")],
-        )
+    storage.save_run(session, run, record_usage=False)
 
     storage = _storage(state_root)
     loaded = storage.load_session(session.session_id, kind)
     assert loaded is not None
     expected_runs = [("new-run", "saved answer")]
     if kind == "team":
-        expected_runs.append(("member-run", "member answer"))
+        expected_runs.insert(0, ("member-run", "member answer"))
     assert [(run.run_id, run.content) for run in loaded.runs] == expected_runs
     with storage.transaction(write=False) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
         assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
         assert connection.execute("PRAGMA busy_timeout").fetchone() == (30_000,)
     with closing(sqlite3.connect(state_root / "sessions" / "general.db")) as connection:
-        assert connection.execute("SELECT run_id FROM general_sessions_runs ORDER BY run_id").fetchall() == (
+        assert connection.execute("SELECT run_id FROM general_sessions_log_runs ORDER BY run_id").fetchall() == (
             [("new-run",)] if kind == "agent" else [("member-run",), ("new-run",)]
         )
 
@@ -122,9 +122,7 @@ def test_recovery_preserves_directory_modes_under_restrictive_umask(tmp_path: Pa
     previous_umask = os.umask(0o077)
     try:
         storage = _storage(tmp_path)
-        storage.ensure_session_row(
-            ConversationSession(kind="agent", session_id="new-session", owner_id="general", created_at=1),
-        )
+        seed_session_row(storage, _row("new-session"))
     finally:
         os.umask(previous_umask)
 
@@ -137,12 +135,10 @@ def test_recovery_preserves_directory_modes_under_restrictive_umask(tmp_path: Pa
 def test_compatible_session_reopen_preserves_history_and_extra_columns(tmp_path: Path) -> None:
     """A compatible database is never archived simply because it already exists."""
     storage = _storage(tmp_path)
-    storage.ensure_session_row(
-        ConversationSession(kind="agent", session_id="old-session", owner_id="general", created_at=1),
-    )
-    storage.save_runs(
+    storage.save_run(
         _row("old-session"),
-        [RunRecord(run_id="saved-run", content="saved answer", agent_id="general", session_id="old-session")],
+        RunRecord(run_id="saved-run", content="saved answer", agent_id="general", session_id="old-session"),
+        record_usage=False,
     )
     database = tmp_path / "sessions" / "general.db"
     with closing(sqlite3.connect(database)) as connection:
@@ -165,16 +161,14 @@ def test_compatible_session_reopen_preserves_history_and_extra_columns(tmp_path:
 
 
 def test_missing_session_table_does_not_archive_other_tables(tmp_path: Path) -> None:
-    """An absent session table remains Agno's normal lazy initialization case."""
+    """A database without its sessions table is not archived; it gets the storage v2 tables beside what it holds."""
     database = _old_database(tmp_path)
     with closing(sqlite3.connect(database)) as connection:
         connection.execute("ALTER TABLE general_sessions RENAME TO other_sessions")
         connection.commit()
 
     storage = _storage(tmp_path)
-    storage.ensure_session_row(
-        ConversationSession(kind="agent", session_id="new-session", owner_id="general", created_at=1),
-    )
+    seed_session_row(storage, _row("new-session"))
 
     assert not list(tmp_path.glob("sessions.incompatible-*"))
     with closing(sqlite3.connect(database)) as connection:
@@ -193,9 +187,9 @@ def test_concurrent_constructors_recover_once_and_share_current_store(tmp_path: 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(construct) for _ in range(2)]
         first, second = [future.result(timeout=10) for future in futures]
-    first.ensure_session_row(ConversationSession(kind="agent", session_id="first", owner_id="general", created_at=1))
+    seed_session_row(first, _row("first"))
     assert second.load_session("first", "agent") is not None
-    second.ensure_session_row(ConversationSession(kind="agent", session_id="second", owner_id="general", created_at=1))
+    seed_session_row(second, _row("second"))
     assert first.load_session("second", "agent") is not None
     _assert_old_row(_archived_database(tmp_path))
 
@@ -274,19 +268,10 @@ def test_hot_rollback_recovers_committed_state_before_schema_decision(tmp_path: 
     """A hot journal needs native rollback before schema inspection can classify it."""
     if compatible:
         storage = _storage(tmp_path)
-        storage.ensure_session_row(
-            ConversationSession(kind="agent", session_id="old-session", owner_id="general", created_at=1),
-        )
-        storage.save_runs(
+        storage.save_run(
             _row("old-session"),
-            [
-                RunRecord(
-                    run_id="committed-run",
-                    content="committed answer",
-                    agent_id="general",
-                    session_id="old-session",
-                ),
-            ],
+            RunRecord(run_id="committed-run", content="committed answer", agent_id="general", session_id="old-session"),
+            record_usage=False,
         )
         database = tmp_path / "sessions" / "general.db"
     else:
@@ -309,9 +294,7 @@ def test_hot_rollback_recovers_committed_state_before_schema_decision(tmp_path: 
     if compatible:
         assert isinstance(loaded, ConversationSession)
         assert [(run.run_id, run.content) for run in loaded.runs or []] == [("committed-run", "committed answer")]
-    storage.ensure_session_row(
-        ConversationSession(kind="agent", session_id="new-session", owner_id="general", created_at=2),
-    )
+    seed_session_row(storage, _row("new-session"))
     assert storage.load_session("new-session", "agent") is not None
 
     retained_database = database if compatible else _archived_database(tmp_path)
@@ -334,9 +317,7 @@ def test_wal_only_committed_rows_survive_archive(tmp_path: Path) -> None:
     assert database.with_suffix(".db-shm").is_file()
 
     storage = _storage(tmp_path)
-    storage.ensure_session_row(
-        ConversationSession(kind="agent", session_id="new-session", owner_id="general", created_at=1),
-    )
+    seed_session_row(storage, _row("new-session"))
     assert storage.load_session("new-session", "agent") is not None
 
     archived = _archived_database(tmp_path)
@@ -434,16 +415,15 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
         return create_state_storage("code", tmp_path)
 
     storage = open_storage()
-    storage.save_runs(
-        _row("session-1"),
-        [RunRecord(run_id="row-only", content="new answer", agent_id="code", session_id="session-1")],
+    storage.save_run(
+        _row("session-1", owner="code"),
+        RunRecord(run_id="row-only", content="new answer", agent_id="code", session_id="session-1"),
+        record_usage=False,
     )
-    storage.ensure_session_row(
-        ConversationSession(kind="agent", session_id="current-session", owner_id="code", created_at=2),
-    )
-    storage.save_runs(
-        _row("current-session"),
-        [RunRecord(run_id="current-run", content="current answer", agent_id="code", session_id="current-session")],
+    storage.save_run(
+        _row("current-session", owner="code"),
+        RunRecord(run_id="current-run", content="current answer", agent_id="code", session_id="current-session"),
+        record_usage=False,
     )
 
     storage = open_storage()
@@ -456,11 +436,10 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
     assert isinstance(current, ConversationSession)
     assert [(run.run_id, run.content) for run in current.runs or []] == [("current-run", "current answer")]
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone() == (None,)
-        assert connection.execute(
-            "SELECT version FROM agno_schema_versions WHERE table_name = 'code_sessions'",
-        ).fetchone() == ("2.5.6",)
-        assert connection.execute("SELECT run_id FROM code_sessions_runs ORDER BY run_id").fetchall() == [
+        # The conversion drops the blob column and Agno's own tables; the backup beside the file keeps them.
+        assert "runs" not in {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
+        assert "agno_schema_versions" not in table_names(connection)
+        assert connection.execute("SELECT run_id FROM code_sessions_log_runs ORDER BY run_id").fetchall() == [
             ("current-run",),
             ("row-only",),
             *(() if null_blob else (("run-1",), ("run-2",), ("run-3",))),
@@ -468,21 +447,24 @@ def test_compatible_old_fixture_and_current_run_rows_survive_reopen(tmp_path: Pa
     assert not list(tmp_path.glob("sessions.incompatible-*"))
 
 
-def test_missing_runs_table_stays_lazy(tmp_path: Path) -> None:
-    """A database an older release left without a runs table is not archived on reopen; the first run creates it."""
-    storage = _storage(tmp_path)
-    storage.ensure_session_row(_row("waiting"))
-    database = tmp_path / "sessions" / "general.db"
-    with closing(sqlite3.connect(database)) as connection:
-        connection.execute("DROP TABLE general_sessions_runs")
-        connection.commit()
-        assert (
-            connection.execute("SELECT name FROM sqlite_schema WHERE name = 'general_sessions_runs'").fetchone() is None
+def test_a_missing_runs_table_converts_without_an_archive(tmp_path: Path) -> None:
+    """A database an older release left without a runs table is not archived on reopen; it converts, and runs save."""
+    names = AgnoTableNames("general")
+    database = names.database_path(tmp_path)
+    database.parent.mkdir()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for statement in agno_runs_sql(names):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO general_sessions (session_id, session_type, agent_id, created_at) "
+            "VALUES ('waiting', 'agent', 'general', 1)",
         )
+        connection.execute("DROP TABLE general_sessions_runs")
     storage = _storage(tmp_path)
-    storage.save_runs(
+    storage.save_run(
         _row("waiting"),
-        [RunRecord(run_id="first-run", content="first answer", agent_id="general", session_id="waiting")],
+        RunRecord(run_id="first-run", content="first answer", agent_id="general", session_id="waiting"),
+        record_usage=False,
     )
     loaded = storage.load_session("waiting", "agent")
     assert loaded is not None

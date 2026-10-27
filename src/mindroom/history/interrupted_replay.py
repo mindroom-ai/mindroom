@@ -288,7 +288,8 @@ def persist_interrupted_replay_snapshot(
     """Persist one canonical interrupted replay snapshot into ``session``'s history.
 
     The session names the row, its owner, and whether the run is a team's, so the replay run and the row it is
-    saved into cannot disagree, and the run is saved through it, so it learns the replay run. Calls the run's
+    saved into cannot disagree, and the run is saved through it, so it learns the replay run. The replay run replaces
+    a stored answer too, keeping its place, since it is what the user saw or heard. Calls the run's
     mid-turn folds already summarized stay out, whichever path built the snapshot. With ``state``, a
     ``session_state_snapshot`` of the state ``session`` ran with, the session state commits in the same transaction
     as the replay run.
@@ -300,7 +301,7 @@ def persist_interrupted_replay_snapshot(
         interrupted_tools=_unfolded(snapshot.interrupted_tools, folded),
     )
     persisted_run = _build_interrupted_replay_run(snapshot=snapshot, run_id=run_id, session=session)
-    storage.save_runs(session, [persisted_run], state=state)
+    storage.save_interrupted_record(session, persisted_run, state=state)
 
 
 def persist_interrupted_replay(

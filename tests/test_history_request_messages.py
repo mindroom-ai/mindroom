@@ -11,7 +11,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -29,8 +29,13 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
+from mindroom.session_storage.types import ConversationSession
+from tests.conftest import seed_session
 from tests.history_helpers import replay_settings
 from tests.llm.agno_dict_helpers import stored_run_record
+
+if TYPE_CHECKING:
+    from mindroom.session_storage.store import ConversationStore
 
 _PARITY = Path(__file__).parent / "fixtures" / "agno_parity"
 _LOADED_SESSIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
@@ -285,19 +290,16 @@ def test_team_scope_replays_only_its_own_finished_top_level_runs() -> None:
     assert _contents(_replay(runs, scope=_TEAM)) == ["team question", "team answer"]
 
 
-def test_prompt_roles_and_stored_history_copies_never_replay() -> None:
-    stored_copy = Message(role="user", content="replayed earlier", from_history=True)
-    runs: list[AnyRunRecord] = [
-        _agent_run(
-            "run",
-            messages=[
-                Message(role="system", content="old system prompt"),
-                stored_copy,
-                *_exchange("run"),
-            ],
-        ),
-    ]
-    assert _contents(_replay(runs)) == ["run question", "run answer"]
+def test_a_save_keeps_no_system_message_in_a_visible_run_so_none_replays(store: ConversationStore) -> None:
+    """Replay takes every stored message, because a save never keeps a prompt message in a run that replays."""
+    run = _agent_run("run", messages=[Message(role="system", content="old system prompt"), *_exchange("run")])
+    seed_session(store, ConversationSession(session_id="s1", kind="agent", owner_id="code", runs=[run]))
+
+    loaded = store.load_session("s1", "agent")
+
+    assert loaded is not None
+    assert [message.role for message in loaded.runs[0].messages] == ["user", "assistant"]
+    assert _contents(_replay(loaded.runs)) == ["run question", "run answer"]
 
 
 def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_results() -> None:
@@ -595,6 +597,12 @@ def _tool_call(call_id: str) -> Message:
     )
 
 
+def _paused_row(messages: list[Message]) -> RunRecord:
+    """Return the paused run storing ``messages`` as a stored row reads back."""
+    paused = RunRecord(run_id="paused", agent_id="code", status=RunStatus.paused, messages=messages)
+    return RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
+
+
 def test_resumed_request_repeats_the_request_that_paused() -> None:
     """A resume sends the paused request again, so its prefix and the paused call's reasoning stay valid."""
     runs: list[AnyRunRecord] = [_agent_run("earlier")]
@@ -604,15 +612,32 @@ def test_resumed_request_repeats_the_request_that_paused() -> None:
     )
     paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
     call = _tool_call("call-multiply")
-    # A paused run stores its own messages, its system message included, and never history copies or transient context.
-    stored = [
-        message for message in [*paused_request, call] if not message.from_history and message.add_to_agent_memory
-    ]
+    # A paused run stores its own messages, its system message and its turn context included, and never history.
+    stored = _paused_row([message for message in [*paused_request, call] if not message.from_history]).messages
 
     resumed = build_resume_request(paused=stored, summary=_SUMMARY, history=_replay(runs))
 
-    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+    assert _shape(resumed) == _shape([*paused_request, call])
     assert resumed[0] is stored[0]
+
+
+def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
+    """A row paused before runs stored their turn context resumes from the messages it stored, as it did then."""
+    runs: list[AnyRunRecord] = [_agent_run("earlier")]
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
+    call = _tool_call("call-multiply")
+    old_row = _paused_row(
+        [message for message in [*paused_request, call] if not message.from_history and message.add_to_agent_memory],
+    )
+    assert all("add_to_agent_memory" not in message for message in old_row.to_dict()["messages"])
+
+    resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
+
+    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
 
 
 def test_resumed_request_moves_the_stored_system_message_first() -> None:

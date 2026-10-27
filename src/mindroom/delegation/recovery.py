@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
@@ -18,7 +17,8 @@ from mindroom.delegation.state import (
     child_execution_identity,
 )
 from mindroom.delegation.storage import delegation_storage_config
-from mindroom.history.session_context import load_scope_session
+from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
-    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
@@ -55,13 +55,12 @@ async def resolve_subagent(
     return child
 
 
-def _load_child_context(child: DelegationChild, config: Config, paths: RuntimePaths) -> ScopeSessionContext:
-    """Load the child's agent-scope session from its frozen storage; ``config`` already carries the child's bindings."""
-    return load_scope_session(
+def _child_storage(child: DelegationChild, config: Config, paths: RuntimePaths) -> ConversationStore:
+    """Open the child's agent-scope storage, frozen at delegation; ``config`` already carries the child's bindings."""
+    return create_scope_session_storage(
         scope=HistoryScope(kind="agent", scope_id=child.child_agent_name),
-        session_id=child.session_id,
-        runtime_paths=paths,
         config=config,
+        runtime_paths=paths,
         execution_identity=child_execution_identity(child),
     )
 
@@ -75,11 +74,9 @@ async def read_child_run(
     config = delegation_storage_config(config, child.storage_bindings)
 
     def read() -> RunRecord | None:
-        session = _load_child_context(child, config, paths).session
         # Each turn owns its exact run even after later follow-ups reuse the session.
-        runs = reversed(session.runs) if session is not None else ()
-        response = next((run for run in runs if run.run_id == child.run_id), None)
-        return deepcopy(response) if isinstance(response, RunRecord) else None
+        response = _child_storage(child, config, paths).get_run(child.run_id)
+        return response if isinstance(response, RunRecord) else None
 
     response = await asyncio.to_thread(read)
     if response is not None and (
@@ -161,9 +158,9 @@ async def interrupt_child(
             tool.external_execution_required = False
 
         def persist() -> None:
-            context = _load_child_context(child, config, runtime_paths)
-            # The run exists; this rewrites its row without touching the usage ledger.
-            context.storage.save_runs(context.stored_or_first_session(), [response])
+            # The run exists; this rewrites its row without touching the usage ledger, through a stand-in session.
+            stand_in = new_scope_session(session_id=child.session_id, scope_id=child.child_agent_name, is_team=False)
+            _child_storage(child, config, runtime_paths).save_run(stand_in, response, record_usage=False)
 
         await asyncio.to_thread(persist)
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
@@ -215,16 +212,15 @@ async def cancel_approval_delegations(
         scope = HistoryScope(kind="agent", scope_id=continuation.entity_name)
     if scope.kind == "agent" and continuation.entity_name not in config.agents:
         return
-    context = await asyncio.to_thread(
-        load_scope_session,
+    storage = await asyncio.to_thread(
+        create_scope_session_storage,
         scope=scope,
-        session_id=continuation.session_id,
-        runtime_paths=runtime_paths,
         config=config,
+        runtime_paths=runtime_paths,
         execution_identity=continuation.execution_identity,
     )
-    response = await asyncio.to_thread(context.storage.get_run, continuation.run_id)
+    response = await asyncio.to_thread(storage.get_run, continuation.run_id)
     if response is not None and bool((response.metadata or {}).get(DELEGATION_STATE_KEY)):
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        # The run exists; this rewrites its row without touching the usage ledger.
-        await asyncio.to_thread(context.storage.save_runs, context.stored_or_first_session(), [response])
+        changes = {DELEGATION_STATE_KEY: (response.metadata or {})[DELEGATION_STATE_KEY]}
+        await asyncio.to_thread(storage.patch_run_metadata, continuation.session_id, response.run_id, changes)

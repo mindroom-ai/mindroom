@@ -1912,6 +1912,12 @@
           "description": "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored, once someone allows Agent Keys to use it for this service; checked against the provider registry at runtime",
           "title": "Oauth Provider"
         },
+        "oauth_separate_account": {
+          "default": false,
+          "description": "Give a service a user adds its own oauth_provider login, separate from the connection the agent's tools use; a request chooses the service with the X-Agent-Keys-Service header. Config services and services of shared or unscoped agents cannot set it. Presets never set this",
+          "title": "Oauth Separate Account",
+          "type": "boolean"
+        },
         "read_only": {
           "anyOf": [
             {

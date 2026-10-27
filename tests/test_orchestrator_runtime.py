@@ -7,6 +7,7 @@ import builtins
 import ipaddress
 import os
 import signal
+import socket
 import ssl
 import sys
 import threading
@@ -549,6 +550,52 @@ async def test_a_runtime_that_loses_its_journal_stops() -> None:
     assert shutdown_requested.is_set()
     assert hold_lost.is_set()
     assert orchestrator.event_journal_still_held.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_storage_converts(tmp_path: Path) -> None:
+    """The first start after an upgrade converts before the API binds; probes answer meanwhile and stop when it ends.
+
+    A container's startup and liveness probes then pass while a large conversion runs, and readiness waits for it.
+    """
+
+    class _NextStartupStepError(Exception):
+        pass
+
+    with socket.socket() as finder:
+        finder.bind(("127.0.0.1", 0))
+        port = finder.getsockname()[1]
+    seen: dict[str, httpx.Response] = {}
+
+    async def convert(_runtime_paths: object) -> None:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            seen["health"] = await client.get(f"http://127.0.0.1:{port}/api/health")
+            seen["ready"] = await client.get(f"http://127.0.0.1:{port}/api/ready")
+
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    with (
+        patch("mindroom.orchestrator.setup_logging"),
+        patch("mindroom.orchestrator.sync_env_to_credentials"),
+        patch("mindroom.orchestrator.retire_state_root_worker_mounts"),
+        patch("mindroom.orchestrator.migrate_conversation_storage", side_effect=convert),
+        patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_NextStartupStepError),
+        pytest.raises(_NextStartupStepError),
+    ):
+        await main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=port)
+
+    assert seen["health"].status_code == 200
+    assert (seen["ready"].status_code, seen["ready"].json()) == (
+        503,
+        {"status": "starting", "detail": "Converting conversation storage"},
+    )
+    # The real API binds the address once the conversion ends; until then nothing answers for it.
+    async with httpx.AsyncClient(trust_env=False) as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.get(f"http://127.0.0.1:{port}/api/health")
 
 
 @pytest.mark.asyncio

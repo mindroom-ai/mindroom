@@ -35,6 +35,8 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
+from mindroom.history.storage import has_queued_force_compaction
+from mindroom.history.types import HistoryScope
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -520,8 +522,13 @@ async def test_compaction_cli_marks_real_session_before_next_reply(response_harn
     result = await h.respond([_bash_call("compact_context", "compact_context", {}), "done"])
     assert "done" in str(result)
     assert "before the next reply" in h.shell.receipts[-1]["outcome"]
-    state = h.shell.owner.catalog.run.session_state
-    assert state["mindroom_pending_compaction_scope_keys"]
+    catalog = h.shell.owner.catalog
+    assert catalog.store is not None
+    assert has_queued_force_compaction(
+        catalog.store,
+        catalog.run.session_id,
+        HistoryScope(kind="agent", scope_id="helper"),
+    )
     assert len(h.provider.requests) == 2
 
 

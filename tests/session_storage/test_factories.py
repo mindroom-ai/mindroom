@@ -1,9 +1,10 @@
-"""Opening a conversation database through the factories: migrations first, then the owned store, tables on first write."""
+"""Opening a conversation database through the factories: the preflight, the link checks, the conversion, then the store."""
 
 from __future__ import annotations
 
 import sqlite3
 from contextlib import closing, contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,7 +14,14 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.runs import RunRecord
 from mindroom.session_storage import agent_storage
-from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
+from mindroom.session_storage import store as store_module
+from mindroom.session_storage.agent_storage import (
+    create_session_storage,
+    create_state_storage,
+    prepare_conversation_database,
+)
+from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX
+from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
@@ -21,9 +29,11 @@ from tests.history_helpers import stored_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
     from mindroom.session_storage.store import ConversationStore
+
+
+_NAMES = TableNames("code")
 
 
 def _open(tmp_path: Path) -> ConversationStore:
@@ -32,18 +42,18 @@ def _open(tmp_path: Path) -> ConversationStore:
 
 def _tables(db_file: Path) -> set[str]:
     with closing(sqlite3.connect(db_file)) as connection:
-        return {name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        return table_names(connection)
 
 
 def _run(run_id: str) -> RunRecord:
     return RunRecord(run_id=run_id, agent_id="code", session_id="session-1")
 
 
-def test_migrations_run_in_order_under_the_preflight_lock_before_the_store_opens(
+def test_the_conversion_runs_under_the_preflight_lock_before_the_store_opens(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Archive check, usage ledger, summary rows, then the store, all while the recovery lock is held."""
+    """Archive check, conversion, then the store, all while the recovery lock is held."""
     order: list[str] = []
 
     @contextmanager
@@ -59,33 +69,32 @@ def test_migrations_run_in_order_under_the_preflight_lock_before_the_store_opens
         return real_store(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(agent_storage, "session_storage_preflight", preflight)
-    monkeypatch.setattr(agent_storage, "migrate_usage_database", lambda *_a, **_k: order.append("usage"))
-    monkeypatch.setattr(agent_storage, "migrate_to_summary_rows", lambda *_a, **_k: order.append("summary rows"))
+    monkeypatch.setattr(agent_storage, "prepare_conversation_database", lambda *_a, **_k: order.append("conversion"))
     monkeypatch.setattr(agent_storage, "ConversationStore", open_store)
 
     _open(tmp_path)
 
-    assert order == ["preflight", "usage", "summary rows", "open", "preflight released"]
+    assert order == ["preflight", "conversion", "open", "preflight released"]
 
 
-def test_a_fresh_database_gets_its_tables_from_the_first_write_only(tmp_path: Path) -> None:
-    """Opening creates the file and nothing in it; the first run save creates every table at once."""
+def test_a_new_database_gets_every_table_when_it_opens(tmp_path: Path) -> None:
+    """Opening creates the file with every storage v2 table and no backup, so no write creates a table."""
     store = _open(tmp_path)
 
+    names = TableNames("code")
     assert store.path == tmp_path / "sessions" / "code.db"
-    assert _tables(store.path) == set()
-
-    store.save_runs(
-        ConversationSession(kind="agent", session_id="session-1", owner_id="code"),
-        [_run("r1")],
-    )
-
-    assert _tables(store.path) >= {
-        "code_sessions",
-        "code_sessions_runs",
-        "code_sessions_usage",
-        "code_sessions_summaries",
+    assert _tables(store.path) == {
+        names.sessions,
+        names.usage,
+        names.log_meta,
+        names.log_runs,
+        names.log_messages,
+        names.log_tools,
+        names.log_summaries,
+        names.log_removed,
+        "sqlite_sequence",
     }
+    assert sorted(path.name for path in store.path.parent.iterdir()) == ["code.db"]
 
 
 def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_path: Path) -> None:
@@ -97,32 +106,36 @@ def test_a_storage_name_that_leaves_the_sessions_directory_opens_nothing(tmp_pat
 
 
 def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_path: Path) -> None:
-    """A real 2.6.12 database gets its usage ledger and summary rows, its blob runs become rows, and later saves append."""
+    """A real 2.6.12 database converts once, its usage ledger seeded and its blob runs rows, and later saves append."""
     db_file = create_agno_2_sessions_db(tmp_path / "sessions" / "code.db")
+    original = db_file.read_bytes()
 
     store = _open(tmp_path)
 
-    assert {"code_sessions_usage", "code_sessions_summaries"} <= _tables(db_file)
+    assert {"code_sessions_usage", "code_sessions_log_runs", "code_sessions_log_summaries"} <= _tables(db_file)
     with closing(sqlite3.connect(db_file)) as connection:
         assert [run_id for (run_id,) in connection.execute("SELECT run_id FROM code_sessions_usage ORDER BY id")] == [
             "run-1",
             "run-2",
             "run-3",
         ]
-        assert connection.execute("SELECT runs FROM code_sessions WHERE session_id = 'session-1'").fetchone() == (None,)
+        assert "runs" not in {row[1] for row in connection.execute("PRAGMA table_info(code_sessions)")}
         # Opening a pre-existing file must keep its rollback journal.
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
     loaded = store.load_session("session-1", "agent")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
-    store.delete_run_subtrees(ConversationSession(kind="agent", session_id="session-1", owner_id="code"), ["run-2"])
-    store.save_runs(loaded, [_run("run-4")])
+    store.delete_runs(["run-2"], session_id="session-1")
+    store.save_run(loaded, _run("run-4"), record_usage=False)
     reopened = _open(tmp_path).load_session("session-1", "agent")
 
     assert reopened is not None
     assert [run.run_id for run in reopened.runs] == ["run-1", "run-3", "run-4"]
     assert stored_run_ids(_open(tmp_path), "session-1") == ["run-1", "run-3", "run-4"]
+    # The converted file passes the preflight on every reopen, and its backup keeps the original.
+    assert not list(tmp_path.glob("sessions.incompatible-*"))
+    assert db_file.with_name(f"code.db{BACKUP_SUFFIX}").read_bytes() == original
 
 
 def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:
@@ -150,3 +163,112 @@ def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:
     assert for_alice.load_session("session-alice", "agent") is not None
     assert for_bob.path != for_alice.path
     assert for_bob.load_session("session-alice", "agent") is None
+
+
+def test_a_current_database_costs_one_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening a database in the current layout reads only its marker, beside checking which file SQLite opened."""
+    database, names = _open(tmp_path).path, _NAMES
+    statements: list[str] = []
+    connect = store_module.connect_conversation_database
+
+    def traced(path: Path, *, timeout: float) -> sqlite3.Connection:
+        connection = connect(path, timeout=timeout)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(store_module, "connect_conversation_database", traced)
+    prepare_conversation_database(database, names)
+
+    # SQLite traces the pragma a table-valued function runs as a comment of its own.
+    run = [statement for statement in statements if not statement.startswith("--")]
+    assert len(run) == 2
+    assert "pragma_database_list" in run[0]
+    assert run[1].startswith("SELECT 1 FROM sqlite_master")
+
+
+@pytest.mark.parametrize("link", ["database", "dangling", "directory"])
+def test_a_link_at_the_database_or_its_directory_is_refused(tmp_path: Path, link: str) -> None:
+    """An open never opens a link's target, nor creates a dangling one's."""
+    target, names = _open(tmp_path / "target").path, _NAMES
+    before = target.read_bytes()
+    database = names.database_path(tmp_path / "store")
+    database.parent.parent.mkdir(parents=True)
+    if link == "directory":
+        database.parent.symlink_to(target.parent, target_is_directory=True)
+    else:
+        database.parent.mkdir()
+        database.symlink_to(target if link == "database" else tmp_path / "created.db")
+
+    with pytest.raises(ValueError, match="link"):
+        prepare_conversation_database(database, names)
+
+    assert target.read_bytes() == before
+    assert not (tmp_path / "created.db").exists()
+    assert sorted(path.name for path in target.parent.iterdir()) == [target.name]
+
+
+def test_a_link_planted_after_the_check_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link swapped in between the check and the connect is caught by the file SQLite reports it opened."""
+    target, names = _open(tmp_path / "target").path, _NAMES
+    before = target.read_bytes()
+    database = names.database_path(tmp_path / "store")
+    database.parent.mkdir(parents=True)
+    connect = store_module.connect_conversation_database
+
+    def swapped(path: Path, *, timeout: float) -> sqlite3.Connection:
+        path.symlink_to(target)
+        return connect(path, timeout=timeout)
+
+    monkeypatch.setattr(store_module, "connect_conversation_database", swapped)
+    with pytest.raises(ValueError, match="instead"):
+        prepare_conversation_database(database, names)
+
+    assert target.read_bytes() == before
+
+
+def test_a_sessions_directory_swapped_for_a_link_after_the_check_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link swapped in for the sessions directory between the check and the connect gets no v2 tables written."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    database = _NAMES.database_path(tmp_path / "store")
+    database.parent.mkdir(parents=True)
+    connect = store_module.connect_conversation_database
+
+    def swapped(path: Path, *, timeout: float) -> sqlite3.Connection:
+        path.parent.rename(tmp_path / "moved")
+        path.parent.symlink_to(outside, target_is_directory=True)
+        return connect(path, timeout=timeout)
+
+    monkeypatch.setattr(store_module, "connect_conversation_database", swapped)
+    with pytest.raises(ValueError, match="instead"):
+        prepare_conversation_database(database, _NAMES)
+
+    # SQLite's open may have left an empty file at the link's target, never a database with tables.
+    planted = outside / database.name
+    assert not planted.exists() or planted.stat().st_size == 0
+
+
+def test_a_sessions_directory_swapped_for_a_link_before_the_resolve_is_refused(tmp_path: Path) -> None:
+    """A link swapped in for the sessions directory while the open resolves its expected path is refused too."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sessions = _NAMES.database_path(tmp_path / "store").parent
+    sessions.mkdir(parents=True)
+
+    class SwappedOnFirstResolve(Path):
+        def resolve(self, strict: bool = False) -> Path:
+            if not sessions.is_symlink():
+                sessions.rename(tmp_path / "moved")
+                sessions.symlink_to(outside, target_is_directory=True)
+            return super().resolve(strict=strict)
+
+    database = SwappedOnFirstResolve(_NAMES.database_path(tmp_path / "store"))
+    with pytest.raises(ValueError, match="instead"):
+        prepare_conversation_database(database, _NAMES)
+
+    assert sessions.is_symlink()
+    planted = outside / database.name
+    assert not planted.exists() or planted.stat().st_size == 0

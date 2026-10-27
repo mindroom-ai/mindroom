@@ -15,7 +15,6 @@ from mindroom.constants import (
 from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
     _with_scope_state,
-    add_pending_force_compaction_scope,
     has_queued_force_compaction,
     read_scope_seen_event_ids,
     read_scope_state,
@@ -188,10 +187,7 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
         agent_scope,
         HistoryScopeState(force_compact_before_next_run=True),
     )
-    pending = _session("pending", runs=[_completed_run("run-2")])
-    pending.session_state = {}
-    add_pending_force_compaction_scope(pending.session_state, agent_scope)
-    for session in (flagged, pending, _session("idle", runs=[_completed_run("run-3")])):
+    for session in (flagged, _session("idle", runs=[_completed_run("run-2")])):
         seed_session(storage, session)
     statements: list[str] = []
     connect = store_module.connect_conversation_database
@@ -204,13 +200,12 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
     monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
 
     assert has_queued_force_compaction(storage, "flagged", agent_scope) is True
-    assert has_queued_force_compaction(storage, "pending", agent_scope) is True
     assert has_queued_force_compaction(storage, "flagged", team_scope) is False
-    assert has_queued_force_compaction(storage, "pending", team_scope) is False
     assert has_queued_force_compaction(storage, "idle", agent_scope) is False
     assert has_queued_force_compaction(storage, "missing", agent_scope) is False
     assert statements
-    assert not any(storage.names.runs in statement for statement in statements)
+    run_tables = (storage.names.log_runs, storage.names.log_messages)
+    assert not any(table in statement for table in run_tables for statement in statements)
 
 
 def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:

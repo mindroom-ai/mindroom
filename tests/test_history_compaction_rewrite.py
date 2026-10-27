@@ -432,9 +432,8 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
     run_4 = _completed_run(
         "run-4",
         messages=[
-            # A replayed copy, an encrypted checkpoint, and checkpoints whose request replayed other history are skipped.
-            checkpointed_answer({"type": "compaction", "content": "REPLAYED CHECKPOINT"}, later, from_history=True),
             Message(role="user", content="run-4 question"),
+            # An encrypted checkpoint and checkpoints whose request replayed other history are skipped.
             checkpointed_answer({"type": "compaction", "encrypted_content": "opaque"}, later),
             checkpointed_answer(
                 {"type": "compaction", "content": "OTHER RUNS"},
@@ -460,7 +459,6 @@ async def test_summary_starts_from_the_latest_readable_native_checkpoint() -> No
     for covered in (
         "PREVIOUS SUMMARY",
         "OLDER CHECKPOINT",
-        "REPLAYED CHECKPOINT",
         "OTHER RUNS",
         "OTHER SUMMARY",
         "NO BASIS",
@@ -558,11 +556,11 @@ async def test_checkpoint_before_an_approval_pause_does_not_cover_the_turns_it_w
         "intervening",
         messages=[Message(role="user", content="INTERVENING FACT"), Message(role="assistant", content="Noted")],
     )
-    storage.save_runs(session, [intervening])
+    storage.save_run(session, intervening, record_usage=False)
     completed = deepcopy(paused)
     completed.status = RunStatus.completed
     completed.messages.append(Message(role="assistant", content="Approval completed"))
-    storage.save_runs(session, [completed])
+    storage.save_run(session, completed, record_usage=False)
     loaded = storage.load_session("session-1", "agent")
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["earlier", "intervening", "approval"]
@@ -706,8 +704,8 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
     )
     assert folded_run_ids(storage) == ["run-1", "run-2"]
     assert summary_rows_of(storage, "agent:test_agent") == [
-        StoredSummaryRow(summary="first chunk summary", summary_model="fallback-model-id", legacy=False),
-        StoredSummaryRow(summary="merged summary", summary_model="fallback-model-id", legacy=False),
+        StoredSummaryRow(summary="first chunk summary", legacy=False),
+        StoredSummaryRow(summary="merged summary", legacy=False),
     ]
     assert rewrite_result.compacted_run_count == 2
     assert rewrite_result.served_by.model is fallback
@@ -1607,6 +1605,7 @@ def test_the_compaction_hook_input_keeps_stored_thinking() -> None:
 async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_thinking(
     tmp_path: Path,
 ) -> None:
+    """The run compaction kept keeps every turn's thinking, in memory and in the store."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1686,13 +1685,18 @@ async def test_rewrite_working_session_for_compaction_keeps_the_remaining_runs_t
     assert rewrite_result is not None
     assert rewrite_result.compacted_run_count == 1
     assert [run.run_id for run in working_session.runs] == ["run-2"]
-    remaining_messages = working_session.runs[0].messages or []
-    assert remaining_messages[1].provider_data == {"signature": "sig-old", "keep": "yes"}
-    assert remaining_messages[1].reasoning_content == "old thinking"
-    assert remaining_messages[1].redacted_reasoning_content == "old redacted"
-    assert remaining_messages[3].provider_data == {"signature": "sig-current"}
-    assert remaining_messages[3].reasoning_content == "current thinking"
-    assert remaining_messages[3].redacted_reasoning_content == "current redacted"
+
+    stored = storage.load_session("session-1", "agent")
+    assert stored is not None
+    for session in (working_session, stored):
+        assert [run.run_id for run in session.runs] == ["run-2"]
+        remaining_messages = session.runs[0].messages or []
+        assert remaining_messages[1].provider_data == {"signature": "sig-old", "keep": "yes"}
+        assert remaining_messages[1].reasoning_content == "old thinking"
+        assert remaining_messages[1].redacted_reasoning_content == "old redacted"
+        assert remaining_messages[3].provider_data == {"signature": "sig-current"}
+        assert remaining_messages[3].reasoning_content == "current thinking"
+        assert remaining_messages[3].redacted_reasoning_content == "current redacted"
 
 
 @pytest.mark.asyncio

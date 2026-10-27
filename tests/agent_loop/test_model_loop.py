@@ -592,22 +592,6 @@ async def test_a_hook_that_ends_the_run_stops_before_the_request_and_later_hooks
     assert messages[-1].role == "tool"
 
 
-async def test_a_projected_request_is_sent_without_changing_the_live_list() -> None:
-    receipt = Message(role="user", content="Approval receipt", add_to_agent_memory=False)
-
-    async def project(state: LoopState) -> SendRequest:
-        return SendRequest(messages=[*state.messages, receipt])
-
-    model = ScriptedModel([answer("seen")])
-    messages = _prompt()
-
-    await _run(spec(model), messages, hooks=LoopHooks(before_request=(project,)))
-
-    [request] = model.requests
-    assert request.messages == (*messages[:2], receipt)
-    assert [message.role for message in messages] == ["system", "user", "assistant"]
-
-
 async def test_a_pre_request_hook_rewrites_the_live_list_in_place() -> None:
     async def compact(state: LoopState) -> SendRequest:
         if state.request_index == 1:

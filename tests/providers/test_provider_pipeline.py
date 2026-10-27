@@ -817,6 +817,24 @@ async def test_request_log_keeps_the_fields_a_wire_sends(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_request_log_leaves_out_the_fields_no_wire_sends(tmp_path: Path) -> None:
+    """A replayed message's and turn context's storage flags stay out of the record, as their ids do."""
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=[
+            Message(role="user", content="Earlier.", from_history=True),
+            _user(),
+            Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False),
+        ],
+    )
+
+    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert [sorted(message) for message in record["messages"]] == [["content", "created_at", "role"]] * 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("deferred", "expected"),
     [(frozenset({"lookup_order", "archive_order"}), ["archive_order", "lookup_order"]), (frozenset(), [])],

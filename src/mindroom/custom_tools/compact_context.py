@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.run import RunContext  # noqa: TC002
 from agno.tools import Toolkit
 
 from mindroom.config.main import Config  # noqa: TC001
@@ -34,7 +33,7 @@ class CompactContextTools(Toolkit):
         self._execution_identity = execution_identity
         super().__init__(name="compact_context", tools=[self.compact_context])
 
-    async def compact_context(self, run_context: RunContext | None = None) -> str:
+    async def compact_context(self) -> str:
         """Request compaction before the next reply."""
         runtime_context = get_tool_runtime_context()
         # The scope the running entity stores to: a team member's is its team's, an agent's own is its own.
@@ -60,5 +59,4 @@ class CompactContextTools(Toolkit):
             execution_identity=self._execution_identity,
             active_model_name=runtime_context.active_model_name if runtime_context is not None else None,
             room_id=runtime_context.room_id if runtime_context is not None else None,
-            session_state=run_context.session_state if run_context is not None else None,
         )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from copy import deepcopy
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -61,29 +60,6 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     return "\n".join(lines)
 
 
-def messages_with_approval_receipt(messages: Sequence[Message], receipt_text: str) -> list[Message]:
-    """Return the request's messages with the trusted receipt projected in, leaving ``messages`` as they are.
-
-    The receipt is appended to the last system message as a copy, so the stable prompt before it keeps its bytes; a
-    request without one gets a system message of its own, first.
-    """
-    outbound = list(messages)
-    system_index = next(
-        (
-            index
-            for index in range(len(outbound) - 1, -1, -1)
-            if outbound[index].role == "system" and isinstance(outbound[index].content, str)
-        ),
-        None,
-    )
-    if system_index is None:
-        return [Message(role="system", content=receipt_text, add_to_agent_memory=False), *outbound]
-    receipt_message = deepcopy(outbound[system_index])
-    receipt_message.content = f"{receipt_message.content}\n\n{receipt_text}"
-    outbound[system_index] = receipt_message
-    return outbound
-
-
 def _sent_call_id(messages: Sequence[Message], call_id: str) -> str:
     """Return the id a request for ``messages`` sends for their call ``call_id``.
 
@@ -102,20 +78,21 @@ def _sent_call_id(messages: Sequence[Message], call_id: str) -> str:
 
 
 async def approval_receipt_hook(state: LoopState) -> RequestDecision:
-    """Send the bound receipt with a reader run's first request, once per run.
+    """Add the bound receipt to a reader run's messages before its first request as a reader, once per run.
 
     The hook goes on every run; ``approval_receipt_context`` decides which runs read the receipt, and under which
-    ids it names their calls, each as the request sends it. It is projected into the request only, so no run's
-    history holds it.
+    ids it names their calls, each as the request sends it. The receipt follows what the run's messages end with:
+    a resumed run's answers to its decided calls, or a fresh run's input. It stays there for the run's later
+    requests, so the system prompt and every message before it are what earlier requests sent. Like the turn's
+    memory results, it is context no history keeps: only a paused run stores it, for its resume.
     """
     calls = take_unsent_receipt(state.run.run_id, partial(_sent_call_id, state.messages))
-    if calls is None:
-        return SendRequest()
-    return SendRequest(messages=messages_with_approval_receipt(state.messages, build_approval_receipt(calls)))
+    if calls is not None:
+        state.messages.append(Message(role="user", content=build_approval_receipt(calls), add_to_agent_memory=False))
+    return SendRequest()
 
 
 __all__ = [
     "approval_receipt_hook",
     "build_approval_receipt",
-    "messages_with_approval_receipt",
 ]

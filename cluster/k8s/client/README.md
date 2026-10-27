@@ -182,7 +182,9 @@ The chart serves the image's native `authentication-recovery.js` asset and a fix
 Changing `probeUrl` changes only the client bootstrap target; it does not create another nginx location.
 The selected client image must contain `/usr/share/nginx/html/authentication-recovery.js`.
 
-If an external gateway applies authentication, expose only the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes without authentication so cached application shells can load the configuration and recovery code.
+If an external gateway applies authentication, exempt the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes from it so cached application shells can load the configuration and recovery code.
+You may also exempt the service worker scripts at `basePath/sw.js` and, with `rootServiceWorkerCleanup`, `/sw.js`, so installed service workers can still update after the gateway session expires.
+Gateway rules that exempt a path usually exempt every path below it too, so the chart answers 404 below each of these files.
 Keep `/authentication-recovery-probe`, the configured navigation target, client routes, and API routes protected.
 Enabling this option does not change gateway authentication policies.
 

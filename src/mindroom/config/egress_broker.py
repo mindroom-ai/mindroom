@@ -246,6 +246,15 @@ class EgressService(BaseModel):
             "runtime"
         ),
     )
+    # Strict, so a string such as "true" is refused instead of silently changing which account the service uses.
+    oauth_separate_account: StrictBool = Field(
+        default=False,
+        description=(
+            "Give a service a user adds its own oauth_provider login, separate from the connection the agent's tools "
+            "use; a request chooses the service with the X-Agent-Keys-Service header. Config services and services of "
+            "shared or unscoped agents cannot set it. Presets never set this"
+        ),
+    )
     read_only: EgressReadOnly | None = Field(
         default=None,
         description=(
@@ -336,6 +345,9 @@ class EgressService(BaseModel):
         elif any(rule.auth is None for rule in self.rules):
             msg = "every rule needs auth unless the service is restrict_only"
             raise ValueError(msg)
+        if self.oauth_separate_account and self.oauth_provider is None:
+            msg = "oauth_separate_account needs an oauth_provider to log in to"
+            raise ValueError(msg)
         return self
 
     @field_validator("placeholder_env")
@@ -362,7 +374,7 @@ class EgressService(BaseModel):
         return value
 
 
-_SERVICE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+EGRESS_SERVICE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
 def validate_egress_service_name(name: str) -> None:
@@ -370,8 +382,8 @@ def validate_egress_service_name(name: str) -> None:
 
     A name starts with `[a-z0-9]`, so no service's secret can take a reserved `egress__*` store name.
     """
-    if not _SERVICE_NAME_PATTERN.fullmatch(name):
-        msg = f"service name '{name}' must match {_SERVICE_NAME_PATTERN.pattern}"
+    if not EGRESS_SERVICE_NAME_PATTERN.fullmatch(name):
+        msg = f"service name '{name}' must match {EGRESS_SERVICE_NAME_PATTERN.pattern}"
         raise ValueError(msg)
     # Secrets are stored as `egress_<name>`; OAuth suffixes there would read as OAuth services.
     credential_service = egress_credential_service(name)
@@ -409,7 +421,7 @@ class EgressBrokerConfig(BaseModel):
     @field_validator("services")
     @classmethod
     def validate_services(cls, value: dict[str, EgressService]) -> dict[str, EgressService]:
-        """Validate service names, and refuse `restrict_only`, which only services users add may set.
+        """Validate service names, and refuse `restrict_only` and `oauth_separate_account`, which only services users add may set.
 
         A user's limit narrows the administrator's service in place; in the config, the service that holds the
         credential limits its own paths with `restrict_to_rules`. The broker merges a scope's user services into a
@@ -419,5 +431,8 @@ class EgressBrokerConfig(BaseModel):
             validate_egress_service_name(name)
             if service.restrict_only:
                 msg = f"service '{name}': restrict_only is only for services users add; use restrict_to_rules in config"
+                raise ValueError(msg)
+            if service.oauth_separate_account:
+                msg = f"service '{name}': oauth_separate_account is only for services users add"
                 raise ValueError(msg)
         return value

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import sqlite3
+from contextlib import closing
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +26,8 @@ from mindroom.oauth.credential_lifecycle import refresh_oauth_credentials_with_r
 from mindroom.oauth.providers import OAuthRefreshRejectedError
 from mindroom.providers.pipeline import retry
 from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.session_storage.agent_storage import prepare_conversation_database
+from mindroom.session_storage.schema import TableNames
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.agent_tool_helpers import tool_policy
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
@@ -102,6 +106,7 @@ _STABLE_EVENTS = {
         "key_request_already_sent",
         "hint",
     },
+    "conversation_converted": {"path", "runs", "messages", "compacted", "duration_seconds"},
 }
 _STABLE_EVENT_LEVELS = {
     "event_loop_scheduler_lag_summary": "info",
@@ -114,6 +119,7 @@ _STABLE_EVENT_LEVELS = {
     "event_loop_stall_detected": "error",
     "event_loop_stall_ended": "warning",
     "matrix_event_decryption_failed": "warning",
+    "conversation_converted": "info",
 }
 
 
@@ -137,6 +143,20 @@ def test_docs_page_documents_exactly_the_stable_events_and_fields() -> None:
     }
     assert documented == _STABLE_EVENTS
     assert _STABLE_EVENT_LEVELS.keys() == _STABLE_EVENTS.keys()
+
+
+def test_conversation_converted_keeps_its_name_and_fields(tmp_path: Path) -> None:
+    """Converting a database that holds a table logs the pinned record."""
+    names = TableNames("code")
+    database = names.database_path(tmp_path)
+    database.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE other (x)")
+
+    with capture_logs() as logs:
+        prepare_conversation_database(database, names)
+
+    _assert_logged(logs, "conversation_converted")
 
 
 def test_scheduler_lag_summary_keeps_its_name_and_fields() -> None:

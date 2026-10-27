@@ -16,10 +16,10 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
+from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
-from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats_storage import (
     UsageRunNode,
     UsageSessionRow,
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+# An Agno 2 sessions table: its runs blob column, and the metadata and summary columns the conversion reads.
 _SESSION_COLUMNS = """
     session_id TEXT PRIMARY KEY,
     session_type TEXT NOT NULL,
@@ -44,13 +45,17 @@ _SESSION_COLUMNS = """
     session_data TEXT,
     runs TEXT,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER
+    updated_at INTEGER,
+    metadata TEXT,
+    summary TEXT
 """
+_INSERTED_COLUMNS = "session_id, session_type, agent_id, team_id, user_id, session_data, runs, created_at, updated_at"
 
 
 def _source(path: Path) -> UsageStorageSource:
-    # Existing-history fixtures pass through the same one-time import as startup.
-    migrate_usage_database(path)
+    # Existing-history fixtures pass through the same conversion as startup; a read of a missing file creates none.
+    if path.is_file():
+        prepare_conversation_database(path, TableNames.of_database(path))
     return UsageStorageSource(
         path=path,
         path_label=path.name,
@@ -105,7 +110,7 @@ def _create_database(
     try:
         connection.execute(f'CREATE TABLE "{table}" ({_SESSION_COLUMNS})')
         connection.execute(
-            f'INSERT INTO "{table}" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',  # noqa: S608 - fixture identifier.
+            f'INSERT INTO "{table}" ({_INSERTED_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',  # noqa: S608 - fixture identifier.
             (
                 "session-1",
                 session_type,
@@ -127,7 +132,7 @@ def _insert_runs_row(path: Path, *, session_id: str, runs: object) -> None:
     connection = sqlite3.connect(path)
     try:
         connection.execute(
-            'INSERT INTO "code_sessions" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            f'INSERT INTO "code_sessions" ({_INSERTED_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',  # noqa: S608
             (
                 session_id,
                 "agent",
@@ -260,9 +265,16 @@ def test_reader_extracts_runs_written_by_the_conversation_store(tmp_path: Path) 
 def test_reader_keeps_usage_when_run_timestamp_is_unusable(tmp_path: Path, created_at: object) -> None:
     """Malformed or absent timestamps must not discard usable token metrics."""
     database = tmp_path / "code.db"
-    _create_database(database, runs=[{**_run(), "created_at": created_at}])
+    _create_database(database)
+    source = _source(database)
+    with sqlite3.connect(database) as connection:
+        (payload,) = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()
+        connection.execute(
+            "UPDATE code_sessions_usage SET usage_data = ?",
+            (json.dumps({**json.loads(payload), "created_at": created_at}),),
+        )
 
-    result = list(iter_usage_storage_rows(_source(database)))
+    result = list(iter_usage_storage_rows(source))
 
     assert len(result) == 1
     row = result[0]
@@ -348,11 +360,12 @@ def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path) 
         created_at=1_723_837_600,
         model_provider="openai",
         model="gpt-6-astra",
-        status=RunStatus.completed,
+        status=RunStatus.paused,
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=12, output_tokens=8, total_tokens=20)),
     )
+    # A paused run saves again when it continues; a finished one never changes.
     persist_runs(storage, session, run)
-    persist_runs(storage, session, replace(run, created_at=1_723_924_000))
+    persist_runs(storage, session, replace(run, created_at=1_723_924_000, status=RunStatus.completed))
 
     result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
 
@@ -373,26 +386,7 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
         created_at=1_723_837_600,
     )
     storage = create_state_storage("engineering", tmp_path)
-    persist_runs(
-        storage,
-        session,
-        TeamRunRecord(
-            run_id="team-run",
-            team_id="engineering",
-            metrics=RunMetrics(
-                tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
-                details={
-                    "model": [
-                        ModelMetrics(
-                            tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
-                            id="model-a",
-                            provider="provider-a",
-                        ),
-                    ],
-                },
-            ),
-        ),
-    )
+    # The member saves before its team run, as a team turn saves them.
     persist_runs(
         storage,
         session,
@@ -414,6 +408,26 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
             ),
         ),
     )
+    persist_runs(
+        storage,
+        session,
+        TeamRunRecord(
+            run_id="team-run",
+            team_id="engineering",
+            metrics=RunMetrics(
+                tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
+                details={
+                    "model": [
+                        ModelMetrics(
+                            tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10),
+                            id="model-a",
+                            provider="provider-a",
+                        ),
+                    ],
+                },
+            ),
+        ),
+    )
 
     source = _source(tmp_path / "sessions" / "engineering.db")
     if legacy_encoding:
@@ -427,8 +441,8 @@ def test_reader_extracts_team_session_metrics_with_member_runs(tmp_path: Path, l
     assert isinstance(row, UsageSessionRow)
     assert row.session_metrics == {"input_tokens": 21, "output_tokens": 9, "total_tokens": 30}
     assert [(entry.model_provider, entry.model, dict(entry.metrics)) for entry in row.session_model_metrics or ()] == [
-        ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
         ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
+        ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
     ]
     assert [run.run_id for run in row.runs] == ["team-run"]
     assert row.runs_available is True

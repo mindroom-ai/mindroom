@@ -190,7 +190,7 @@ class TlsInterceptor:
             # Forwarding another Host to the same address is domain fronting: it could carry the secret elsewhere.
             await self._relay.deny(client, entry, refusal_body("host_mismatch"))
             return False
-        routed = await self._relay.route(client, entry, tunnel.port)
+        routed = await self._relay.route(client, entry, tunnel.port, request.headers)
         if routed is None:
             return False
         rules, route = routed
@@ -303,6 +303,7 @@ class TlsInterceptor:
             connectable=lookup.provider is not None and lookup.connect_url is not None,
             reuse_off=lookup.reuse_off,
             requester_owned=lookup.requester_owned,
+            own_account=lookup.own_account,
             manage_url=manage_url,
         )
         if lookup.provider is not None and not lookup.reuse_off:

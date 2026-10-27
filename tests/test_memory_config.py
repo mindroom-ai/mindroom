@@ -1072,7 +1072,7 @@ class TestMemoryConfig:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
+        """Mem0 checks dependencies and waits for a running install without stalling the event loop."""
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(

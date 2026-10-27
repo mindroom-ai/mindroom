@@ -1,9 +1,10 @@
 """Minimal Bash's provider batch, saved before any of its calls takes effect.
 
 The loop hands each tool batch to ``BatchCheckpoint.capture`` before it runs any call, so a Bash call can save the
-run with the exact provider history that requested it, ending in that unanswered call, before its shell or any CLI
-call inside it does anything. The saved run is marked cancelled: if the process dies before the run's own terminal
-record replaces it, history skips it, as every later turn would otherwise send a tool call without its result.
+run with this turn's part of the exact provider history that requested it, ending in that unanswered call, before its
+shell or any CLI call inside it does anything; the store keeps no replayed history copy. The saved run is marked
+cancelled: if the process dies before the run's own terminal record replaces it, history skips it, as every later turn
+would otherwise send a tool call without its result.
 """
 
 from __future__ import annotations
@@ -143,5 +144,5 @@ class BatchCheckpoint:
         await write_with_session_state(
             store,
             session,
-            lambda opened, state: opened.save_runs(session, [run], state=state),
+            lambda opened, state: opened.save_run(session, run, record_usage=False, state=state),
         )

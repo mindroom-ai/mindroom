@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -14,16 +15,15 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
 from mindroom.session_storage.types import ConversationSession
-from mindroom.usage.legacy_usage_storage import migrate_usage_database
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import persist_runs
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -102,25 +102,35 @@ def _run() -> RunRecord:
     )
 
 
-@pytest.fixture
-def request_usage(tmp_path: Path) -> Iterator[tuple[Config, RuntimePaths, ConversationStore]]:
-    """Persist real run and session rows through the production storage owner."""
+def _usage_runtime(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(
         agents={"code": AgentConfig(display_name="Code")},
         authorization=AuthorizationConfig(aliases={"@alice:example.test": ["@alias:example.test"]}),
     )
+    return config, paths
+
+
+def _usage_store(tmp_path: Path, *runs: RunRecord) -> tuple[Config, RuntimePaths, ConversationStore]:
+    """Open the agent's store through the production storage owner and persist ``runs`` as their turns do."""
+    config, paths = _usage_runtime(tmp_path)
     storage = create_state_storage("code", tmp_path / "agents/code")
-    persist_runs(storage, _session(), _run())
+    persist_runs(storage, _session(), *runs)
     return config, paths, storage
 
 
-def test_request_projection_survives_repeated_save_without_content(
-    request_usage: tuple[Config, RuntimePaths, ConversationStore],
-) -> None:
+@pytest.fixture
+def request_usage(tmp_path: Path) -> tuple[Config, RuntimePaths, ConversationStore]:
+    """Persist real run and session rows through the production storage owner."""
+    return _usage_store(tmp_path, _run())
+
+
+def test_request_projection_survives_repeated_save_without_content(tmp_path: Path) -> None:
     """Saving again replaces projected requests instead of appending or copying conversation data."""
-    _, _, storage = request_usage
-    persist_runs(storage, _session(), _run())
+    paused = _run()
+    paused.status = RunStatus.paused
+    # A paused run saves again when it continues; a finished one never changes.
+    _, _, storage = _usage_store(tmp_path, paused, _run())
     with sqlite3.connect(storage.path) as connection:
         payloads = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchall()
     assert len(payloads) == 1
@@ -172,21 +182,20 @@ def test_request_export_keeps_short_calls_distinct_and_preserves_all_counters(
 @pytest.mark.parametrize("first_after_midnight", [False, True])
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_daily_usage_follows_requests_across_midnight_without_counting_extra_replies(
-    request_usage: tuple[Config, RuntimePaths, ConversationStore],
+    tmp_path: Path,
     first_after_midnight: bool,
     retained_run: bool,
 ) -> None:
     """A run's earlier creation date must not pull later provider usage into that day."""
-    config, paths, storage = request_usage
     midnight = int(datetime(2023, 11, 15, tzinfo=UTC).timestamp())
     run = _run()
     assert run.messages is not None
     run.messages[2].created_at = midnight + (10 if first_after_midnight else -10)
     run.messages[5].created_at = midnight + 30
-    persist_runs(storage, _session(), run)
+    config, paths, storage = _usage_store(tmp_path, run)
     if not retained_run:
         with sqlite3.connect(storage.path) as connection:
-            connection.execute("DELETE FROM code_sessions_runs")
+            connection.execute("DELETE FROM code_sessions_log_runs")
 
     payload = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True).to_dict()
     days = payload["daily_breakdown"]
@@ -248,12 +257,11 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
 
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_mixed_model_requests_keep_models_and_actual_dates(
-    request_usage: tuple[Config, RuntimePaths, ConversationStore],
+    tmp_path: Path,
     *,
     retained_run: bool,
 ) -> None:
     """Changing models must not omit request detail or move new usage to the run's original day."""
-    config, paths, storage = request_usage
     run = _run()
     assert run.messages is not None
     assert run.metrics is not None
@@ -276,10 +284,10 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
             "secret": "private provider metadata",
             "mindroom_model": {"id": model_id, "provider": provider},
         }
-    persist_runs(storage, _session(), run)
+    config, paths, storage = _usage_store(tmp_path, run)
     if not retained_run:
         with sqlite3.connect(storage.path) as connection:
-            connection.execute("DELETE FROM code_sessions_runs")
+            connection.execute("DELETE FROM code_sessions_log_runs")
 
     payload = collect_admin_usage(
         config=config,
@@ -378,21 +386,39 @@ def test_request_attribution_must_reconcile_per_model(
     assert report.request_coverage.unavailable_sources == 1
 
 
-def test_initial_migration_imports_available_requests_without_reseeding_old_ledgers(
-    request_usage: tuple[Config, RuntimePaths, ConversationStore],
-) -> None:
+def test_initial_conversion_imports_available_requests_without_reseeding_old_ledgers(tmp_path: Path) -> None:
     """Initial seeding may use retained messages; an initialized ledger is never reconstructed."""
-    config, paths, storage = request_usage
-    with sqlite3.connect(storage.path) as connection:
-        connection.execute("DROP TABLE code_sessions_usage")
-    migrate_usage_database(storage.path)
+    config, paths = _usage_runtime(tmp_path)
+    # A database from before the usage ledger: its Agno-layout run row holds the run's messages.
+    names = AgnoTableNames("code")
+    state_root = tmp_path / "agents/code"
+    database = names.database_path(state_root)
+    database.parent.mkdir(parents=True)
+    run = _run()
+    assert run.metrics is not None
+    totals = SessionMetrics()
+    totals.count_run(run.metrics, replacing=None)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for statement in agno_runs_sql(names):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, session_data, created_at) "
+            "VALUES ('session', 'agent', 'code', ?, ?, ?)",
+            (run.user_id, json.dumps({"session_metrics": totals.to_dict()}), run.created_at),
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, user_id, status, run_index, "
+            "run_data, created_at) VALUES (?, 'session', 'agent', 'code', ?, ?, 0, ?, ?)",
+            (run.run_id, run.user_id, run.status.value, json.dumps(run.to_dict()), run.created_at),
+        )
+    storage = create_state_storage("code", state_root)
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert [row.totals.input_tokens for row in report.request_breakdown] == [120_000, 130_000]
     with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         del payload["requests"]
         connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
-    migrate_usage_database(storage.path)
+    create_state_storage("code", state_root)
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014
     assert report.request_breakdown == ()

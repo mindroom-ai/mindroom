@@ -50,7 +50,7 @@ def _serve(
             # The image logs requests to stdout, which carries the responses.
             "nginx >&2",
             *(
-                f"curl -s -o /tmp/body -w '{write_out}\\t' "
+                f"curl -s --path-as-is -o /tmp/body -w '{write_out}\\t' "
                 f"{shlex.quote(f'http://127.0.0.1:8080{path}')} && tr -d '\\r\\n' < /tmp/body && echo"
                 for path in paths
             ),
@@ -162,6 +162,62 @@ def test_client_chart_serves_pairing_notices_and_app_links_like_the_image(base_p
     )
 
     assert responses == expected
+
+
+@pytest.mark.parametrize("base_path", ["/", "/chat"])
+def test_client_chart_answers_404_below_the_files_a_gateway_makes_public(base_path: str) -> None:
+    """A gateway rule that makes a file public also covers every path below it.
+
+    Browsers fetch the runtime config, the recovery script, and the service workers without a gateway session,
+    so an operator makes them public; the app shell and build files must not answer below them.
+    Some gateways treat a backslash as a slash, and some match the path before resolving its dot segments.
+    """
+    prefix = base_path.rstrip("/")
+    files = {
+        "/usr/share/nginx/html/index.html": "app shell",
+        "/usr/share/nginx/html/assets/app-1a2b.js": "app bundle",
+        "/usr/share/nginx/html/authentication-recovery.js": "recovery script",
+        "/usr/share/nginx/html/sw.js": "service worker",
+        "/usr/share/nginx/html/root-cleanup-sw.js": "cleanup worker",
+    }
+    public_files = {
+        # runtime-config.js is a list of statements; the first one sets the base path.
+        "/runtime-config.js": f'window.__APP_BASE_PATH__ = "{base_path}"',
+        "/authentication-recovery.js": "recovery script",
+        f"{prefix}/sw.js": "service worker",
+    }
+    set_args = [f"basePath={base_path}", "nginx.ipv6=false", "authenticationRecovery.enabled=true"]
+    if prefix:
+        public_files["/sw.js"] = "cleanup worker"
+        set_args.append("rootServiceWorkerCleanup.enabled=true")
+    expected = {
+        **{f"{path}{query}": ("200", body) for path, body in public_files.items() for query in ["", "?v=1"]},
+        **{
+            f"{path}{below}": ("404", None)
+            for path in public_files
+            for below in [
+                "/",
+                "/x",
+                "//x",
+                "%2Fx",
+                "%5Cx",
+                "/assets/app-1a2b.js",
+                "/../assets/app-1a2b.js",
+                "/%2e%2e/assets/app-1a2b.js",
+                "%2F%2E%2E%2Fassets/app-1a2b.js",
+            ]
+        },
+        **{f"/{path}/x": ("404", None) for path in public_files},
+        f"{prefix}/rooms/abc": ("200", "app shell"),
+        f"{prefix}/assets/app-1a2b.js": ("200", "app bundle"),
+    }
+
+    responses = _serve(_client_nginx_conf(*set_args), files, list(expected), ())
+
+    actual = {
+        path: (status, body.split(";", 1)[0] if status == "200" else None) for path, (status, body) in responses.items()
+    }
+    assert actual == expected
 
 
 def _client_pod(tmp_path: Path, values: str) -> dict[str, Any]:

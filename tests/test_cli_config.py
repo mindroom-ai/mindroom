@@ -2572,7 +2572,7 @@ class TestRunFirstRunSetup:
 
         with (
             patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
-            patch("mindroom.cli.pairing_probes.serve_pairing_probes", return_value=nullcontext()),
+            patch("mindroom.api.startup_probes.serve_startup_probes", return_value=nullcontext()),
             patch("mindroom.cli.main._run", side_effect=fake_run),
         ):
             result = _invoke_with_runtime(["run", *args], config_path, input=answers, env=env)

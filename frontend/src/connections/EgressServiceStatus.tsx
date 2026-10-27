@@ -1,5 +1,6 @@
 import { personalAccountRefusal, personalSandboxRefusal } from "./accountCopy";
 import {
+  refusedReadOnly,
   type RowAgent,
   type ServiceEditing,
   sharesAccount,
@@ -27,7 +28,8 @@ export function ServiceStatus({
     <>
       <StatusLabel
         tone={
-          oauth?.reset_required && !service.configured
+          (oauth?.reset_required && !service.configured) ||
+          refusedReadOnly(service)
             ? "attention"
             : service.configured
               ? "set"

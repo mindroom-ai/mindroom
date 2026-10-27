@@ -43,8 +43,9 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
-from tests.approval_continuation_helpers import approval_continuation
+from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
 from tests.delegation_helpers import (
+    RECALLED_MEMORY,
     ScriptedAgents,
     _delegate_runtime_context,
     _runtime_paths,
@@ -52,6 +53,7 @@ from tests.delegation_helpers import (
     approval_calls_for,
     approval_executor,
     pause_parent,
+    recall_memories,
     registered_hand_off_tool,
     registered_metadata_probe_tool,
     registered_report_tool,
@@ -69,6 +71,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+    from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import ConversationSession
 
 REQUESTER = "@alice:example.org"
@@ -238,7 +241,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                 completed.content = "Saved result"
                 completed.tools = []
                 completed.requirements = []
-                storage.save_runs(session, [completed])
+                storage.save_run(session, completed, record_usage=False)
             if outcome == "cancel_removed":
                 config.agents.clear()
             await cancel_approval_delegations(
@@ -1028,7 +1031,7 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
     copy = RunRequirement.from_dict(planted.requirements[0].to_dict())
     copy.id = "copied-requirement"
     planted.requirements.append(copy)
-    storage.save_runs(session, [planted])
+    storage.save_run(session, planted, record_usage=False)
 
     with pytest.raises(RuntimeError, match="same delegation call more than once"):
         await resume(
@@ -1051,9 +1054,14 @@ async def test_a_blocking_turn_continues_after_its_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocking turn's parent continues with its delegation's result."""
+    """A blocking turn's parent continues with its delegation's result after the request it paused on, unchanged.
+
+    The paused parent stored the memory results its request sent, so the continuation sends them again where they
+    were, then the delegation call and its result.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
+    recall_memories(monkeypatch)
     leader = ScriptedModel(
         [calls(tool_call("run_subagent", "fresh", agent_name="code", task="Write report")), answer("Parent done")],
     )
@@ -1069,7 +1077,10 @@ async def test_a_blocking_turn_continues_after_its_delegation(
     )
 
     assert "Parent done" in text
-    assert len(leader.requests) == 2
+    paused, continued = leader.requests
+    assert RECALLED_MEMORY in str(paused.messages[-1].content)
+    assert repeats_each_request(leader.requests)
+    assert [message.role for message in continued.messages[len(paused.messages) :]] == ["assistant", "tool"]
 
 
 @pytest.mark.asyncio
@@ -1151,35 +1162,32 @@ async def test_fresh_delegation_continuation_never_runs_planted_stored_calls(
         ],
     )
     ScriptedAgents({"leader": leader, "code": ScriptedModel([answer("Report written")])}).install(monkeypatch)
-    original_save_runs = ConversationStore.save_runs
+    original_save_run = ConversationStore.save_run
     planted_writes: list[str] = []
 
     def plant_confirmed_call(
         self: ConversationStore,
         session: ConversationSession,
-        runs: list[RunRecord],
+        run: RunRecord,
         **kwargs: Any,  # noqa: ANN401
-    ) -> None:
-        handed: list[RunRecord] = []
-        for run in runs:
-            # Stands in for a trigger worker code adds to the parent's runs table while the child runs.
-            if DELEGATION_STATE_KEY in (run.metadata or {}):
-                planted_writes.append(run.run_id)
-                run = deepcopy(run)  # noqa: PLW2901
-                run.tools = [
-                    *(run.tools or ()),
-                    ToolExecution(
-                        tool_call_id="planted",
-                        tool_name="send_message",
-                        tool_args={"recipient": "attacker"},
-                        requires_confirmation=True,
-                        confirmed=True,
-                    ),
-                ]
-            handed.append(run)
-        original_save_runs(self, session, handed, **kwargs)
+    ) -> SaveOutcome:
+        # Stands in for a trigger worker code adds to the parent's runs table while the child runs.
+        if DELEGATION_STATE_KEY in (run.metadata or {}):
+            planted_writes.append(run.run_id)
+            run = deepcopy(run)
+            run.tools = [
+                *(run.tools or ()),
+                ToolExecution(
+                    tool_call_id="planted",
+                    tool_name="send_message",
+                    tool_args={"recipient": "attacker"},
+                    requires_confirmation=True,
+                    confirmed=True,
+                ),
+            ]
+        return original_save_run(self, session, run, **kwargs)
 
-    monkeypatch.setattr(ConversationStore, "save_runs", plant_confirmed_call)
+    monkeypatch.setattr(ConversationStore, "save_run", plant_confirmed_call)
 
     text = await respond(
         "leader",

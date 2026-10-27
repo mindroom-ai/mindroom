@@ -1,10 +1,9 @@
-"""Stored runs holding one combined tool-result message decode into one result per call, for replay and compaction."""
+"""Stored runs holding one combined tool-result message convert to one result per call, for replay and compaction."""
 # ruff: noqa: D103
 
 from __future__ import annotations
 
 import copy
-import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -17,10 +16,11 @@ from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
-from mindroom.session_storage.codec import run_from_row
+from mindroom.session_storage.schema import TableNames
 from tests.history_helpers import replay_settings
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
 from tests.providers.golden_support import Wire, hide_provider_environment
+from tests.session_storage.agno_layout import converted_store
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,8 +62,8 @@ _STORED_RUN = {
 }
 
 
-def _stored_run() -> RunRecord:
-    run = run_from_row("agent", json.dumps(_STORED_RUN))
+def _stored_run(tmp_path: Path) -> RunRecord:
+    run = converted_store(TableNames("code").database_path(tmp_path), _STORED_RUN).get_run("run-1")
     assert isinstance(run, RunRecord)
     return run
 
@@ -78,8 +78,8 @@ def _history(run: RunRecord, *, max_tool_calls: int | None = None) -> list[Messa
     )
 
 
-def test_combined_results_replay_as_one_history_message_per_result() -> None:
-    run = _stored_run()
+def test_combined_results_replay_as_one_history_message_per_result(tmp_path: Path) -> None:
+    run = _stored_run(tmp_path)
     stored = copy.deepcopy(run.messages)
 
     history = _history(run)
@@ -94,30 +94,39 @@ def test_combined_results_replay_as_one_history_message_per_result() -> None:
     assert run.messages == stored
 
 
-def test_tool_call_window_counts_each_combined_result() -> None:
-    history = _history(_stored_run(), max_tool_calls=1)
+def test_tool_call_window_counts_each_combined_result(tmp_path: Path) -> None:
+    history = _history(_stored_run(tmp_path), max_tool_calls=1)
 
     assistant = next(message for message in history if message.tool_calls)
     assert [call["id"] for call in assistant.tool_calls or []] == ["call_oslo"]
     assert [(m.tool_call_id, m.content) for m in history if m.role == "tool"] == [("call_oslo", "rainy")]
 
 
-def test_a_team_runs_member_responses_decode_each_combined_result() -> None:
-    team_run = {"run_id": "team-1", "team_id": "squad", "status": "COMPLETED", "messages": []}
-    team_run["member_responses"] = [copy.deepcopy(_STORED_RUN)]
+def test_a_paused_team_runs_members_store_each_combined_result(tmp_path: Path) -> None:
+    """A resume read the members a paused team run embedded, so their combined results are split as they convert."""
+    member = {**copy.deepcopy(_STORED_RUN), "run_id": "member-1", "status": "PAUSED"}
+    team_run = {
+        "run_id": "team-1",
+        "team_id": "squad",
+        "status": "PAUSED",
+        "messages": [],
+        "member_responses": [member],
+    }
 
-    team = run_from_row("team", json.dumps(team_run))
+    store = converted_store(TableNames("squad").database_path(tmp_path), team_run, kind="team", owner_id="squad")
 
-    assert isinstance(team, TeamRunRecord)
-    (member,) = team.member_responses
-    results = [(m.tool_call_id, m.content) for m in member.messages if m.role == "tool"]
+    assert isinstance(store.get_run("team-1"), TeamRunRecord)
+    stored = store.get_run("member-1")
+    assert stored is not None
+    assert stored.parent_run_id == "team-1"
+    results = [(m.tool_call_id, m.content) for m in stored.messages if m.role == "tool"]
     assert results == [("call_paris", "sunny"), ("call_oslo", "rainy")]
 
 
-def test_compaction_reads_each_combined_result_as_its_own_tool_result() -> None:
+def test_compaction_reads_each_combined_result_as_its_own_tool_result(tmp_path: Path) -> None:
     settings = replay_settings(max_tool_calls_from_history=1)
 
-    messages = messages_for_runs([_stored_run()], settings)
+    messages = messages_for_runs([_stored_run(tmp_path)], settings)
 
     assistant = next(message for message in messages if message.tool_calls)
     assert [call["id"] for call in assistant.tool_calls or []] == ["call_oslo"]
@@ -166,7 +175,7 @@ async def test_combined_results_reach_every_route(family: str, tmp_path: Path, m
         Message(role="system", content="You are Code."),
         *build_request(
             summary=None,
-            history=_history(_stored_run()),
+            history=_history(_stored_run(tmp_path / "store")),
             turn=TurnMessages(prompt=Message(role="user", content="And tomorrow?")),
             media=MediaInputs(),
         ),

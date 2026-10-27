@@ -647,6 +647,13 @@ async def reset_oauth_credentials(
     )
 
 
+def reset_oauth_credentials_blocking(context: OAuthCredentialContext) -> bool:
+    """Delete one credential from a synchronous caller; return whether one was stored."""
+    return _run_oauth_transaction_sync(
+        _reset_oauth_credentials_transaction(context, operation_id=None, expected_connection_generation=None),
+    )
+
+
 async def _reset_oauth_credentials_transaction(
     context: OAuthCredentialContext,
     *,

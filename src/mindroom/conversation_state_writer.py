@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import copy
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
@@ -83,16 +82,8 @@ class ConversationStateWriter:
         response_event_id: str,
     ) -> None:
         """Persist Matrix response linkage onto the run that produced it, off-loop in the session target's FIFO lane."""
-
-        def persist(storage: ConversationStore) -> None:
-            session = storage.load_session(session_id, scope.kind)
-            if session is None:
-                return
-            run = next((run for run in session.runs if run.run_id == run_id), None)
-            if run is None or (run.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
-                return
-            linked_run = copy(run)
-            linked_run.metadata = {**(run.metadata or {}), MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
-            storage.save_runs(session, [linked_run])
-
-        await run_session_storage_operation(partial(self.create_storage, execution_identity, scope=scope), persist)
+        link = {MATRIX_RESPONSE_EVENT_ID_METADATA_KEY: response_event_id}
+        await run_session_storage_operation(
+            partial(self.create_storage, execution_identity, scope=scope),
+            lambda storage: storage.patch_run_metadata(session_id, run_id, link),
+        )
