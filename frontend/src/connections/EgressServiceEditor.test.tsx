@@ -1705,6 +1705,35 @@ describe("the name of a new service", () => {
     expect(screen.getByLabelText("Name")).toHaveValue("mine");
   });
 
+  it("follows the display name while the user has not typed one, for a service that starts from another too", async () => {
+    const name = () => screen.getByLabelText("Name");
+    await renderEditor({ takenNames: ["team_calendar"] });
+    type("Preset", "google_calendar");
+    openMoreOptions();
+    type("Display name", "Team calendar");
+    expect(name()).toHaveValue("team_calendar-2");
+    type("Display name", "");
+    expect(name()).toHaveValue("google_calendar");
+    type("Name", "mine");
+    type("Display name", "Team calendar");
+    expect(name()).toHaveValue("mine");
+    cleanup();
+
+    // Another account of a row's preset, from Add another account.
+    await renderEditor({
+      service: { preset: "google_calendar", oauth_separate_account: true },
+      takenNames: ["google_calendar"],
+    });
+    expect(name()).toHaveValue("google_calendar-2");
+    type("Display name", "Team calendar");
+    expect(name()).toHaveValue("team_calendar");
+    expect(
+      screen.getByText(
+        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+      ),
+    ).toBeVisible();
+  });
+
   it("follows again after the user empties the name", async () => {
     await renderEditor();
     type("Name", "mine");
