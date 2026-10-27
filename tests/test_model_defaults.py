@@ -226,23 +226,15 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
     )
-    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
-        "claude-fable-5-1",
-        "claude-fable-5.1",
+    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS == (
         "claude-fable-5",
-        "claude-mythos-5-1",
-        "claude-mythos-5.1",
         "claude-mythos-5",
         "claude-mythos-preview",
-        "claude-opus-5-5",
-        "claude-opus-5.5",
         "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4.8",
         "claude-opus-4-7",
         "claude-opus-4.7",
-        "claude-sonnet-5-5",
-        "claude-sonnet-5.5",
         "claude-sonnet-5",
         "claude-haiku-5-5",
         "claude-haiku-5.5",
@@ -383,8 +375,12 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
         ("anthropic.claude-haiku-5-5", True),
         ("anthropic/claude-haiku-5.5", True),
         ("claude-haiku-4-5", False),
+        ("claude-haiku-5-5@20261001", True),
+        ("us.anthropic.claude-opus-4-7-v1:0", True),
+        ("claude-opus-5-5-20261001", True),
+        ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", False),
     ],
 )
 def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:
-    """Direct, Bedrock, and gateway ids name the same generation, in any letter case."""
+    """Direct, Bedrock, Vertex, gateway, and dated snapshot ids name the same generation, in any letter case."""
     assert model_defaults.claude_rejects_sampling_controls(model_id) is rejects

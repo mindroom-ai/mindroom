@@ -15,7 +15,7 @@ __all__ = (
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_PREFIX_CHECKED_THINKING_MODELS",
-    "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
+    "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS",
     "CODEX_GPT_ALIAS",
     "CODEX_GPT_ENDPOINT",
     "CONFIG_INIT_ADDITIONAL_MODELS",
@@ -67,6 +67,7 @@ __all__ = (
     "TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES",
     "ZAI_BASE_URL_DEFAULT",
     "ModelPreset",
+    "claude_core_model_id",
     "claude_rejects_sampling_controls",
     "llama_cpp_server_command",
 )
@@ -162,26 +163,18 @@ GOOGLE_VEO = "veo-3.1-generate-001"
 # below, because a model keeps its sampling rule after the preferred defaults move on from it.
 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
 # The Claude models that reject non-default temperature, top_p, and top_k on every request, Claude 4.7 and later plus
-# Mythos Preview (https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters), in their direct
-# and dotted gateway spellings; newer generations join them. Literal ids, because a model keeps the rule after the
-# preferred defaults move on from it.
-CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
-    "claude-fable-5-1",
-    "claude-fable-5.1",
+# Mythos Preview (https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters), as prefixes of the
+# direct and dotted gateway spellings; newer generations join them. Literal ids, because a model keeps the rule after
+# the preferred defaults move on from it.
+CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS = (
     "claude-fable-5",
-    "claude-mythos-5-1",
-    "claude-mythos-5.1",
     "claude-mythos-5",
     "claude-mythos-preview",
-    "claude-opus-5-5",
-    "claude-opus-5.5",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4.8",
     "claude-opus-4-7",
     "claude-opus-4.7",
-    "claude-sonnet-5-5",
-    "claude-sonnet-5.5",
     "claude-sonnet-5",
     "claude-haiku-5-5",
     "claude-haiku-5.5",
@@ -193,12 +186,20 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
 CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
 
 
-def claude_rejects_sampling_controls(model_id: str) -> bool:
-    """Return whether a Claude model id rejects non-default ``temperature``, ``top_p``, and ``top_k``.
+def claude_core_model_id(model_id: str) -> str:
+    """Strip the decorations that hide which Claude model an id names from the prefix and alias checks.
 
-    The direct, Bedrock, Vertex, and gateway spellings of one generation all end with its suffix.
+    A gateway id such as ``anthropic/claude-opus-4-6`` (LiteLLM) loses its provider path, a Bedrock id such as
+    ``us.anthropic.claude-opus-4-6-v1:0`` its region and ``anthropic.`` prefix, and a Vertex AI id such as
+    ``claude-sonnet-4@20250514`` its snapshot. A Bedrock version suffix or a dated snapshot never changes a check,
+    because every prefix ends before it and no such id is a bare alias.
     """
-    return model_id.casefold().endswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES)
+    return model_id.rsplit("/", 1)[-1].rsplit("anthropic.", 1)[-1].split("@", 1)[0]
+
+
+def claude_rejects_sampling_controls(model_id: str) -> bool:
+    """Return whether a Claude model id rejects non-default ``temperature``, ``top_p``, and ``top_k``."""
+    return claude_core_model_id(model_id.casefold()).startswith(CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS)
 
 
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"

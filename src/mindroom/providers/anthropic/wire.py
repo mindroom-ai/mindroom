@@ -31,7 +31,7 @@ from mindroom.llm.messages import Message, ToolResultView, tool_result_view
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_PREFIX_CHECKED_THINKING_MODELS
+from mindroom.model_defaults import CLAUDE_PREFIX_CHECKED_THINKING_MODELS, claude_core_model_id
 from mindroom.providers.claude_wire_blocks import as_dict
 
 if TYPE_CHECKING:
@@ -115,20 +115,9 @@ _STOP_REASONS: dict[str, StopReason] = {
 }
 
 
-def _core_model_id(model_id: str) -> str:
-    """Strip the decorations that hide which Claude model an id names from the prefix and alias checks.
-
-    A gateway id such as ``anthropic/claude-opus-4-6`` (LiteLLM) loses its provider path, a Bedrock id such as
-    ``us.anthropic.claude-opus-4-6-v1:0`` its region and ``anthropic.`` prefix, and a Vertex AI id such as
-    ``claude-sonnet-4@20250514`` its snapshot. A Bedrock version suffix never changes a check, because every
-    prefix ends before it and no Bedrock id is a bare alias.
-    """
-    return model_id.rsplit("/", 1)[-1].rsplit("anthropic.", 1)[-1].split("@", 1)[0]
-
-
 def supports_prefill(model_id: str) -> bool:
     """Return whether the model accepts a request that ends with an assistant turn."""
-    core_id = _core_model_id(model_id)
+    core_id = claude_core_model_id(model_id)
     if not core_id.startswith("claude"):
         return True
     return core_id in _PREFILL_SUPPORTED_ALIASES or core_id.startswith(_PREFILL_SUPPORTED_PREFIXES)
@@ -137,13 +126,14 @@ def supports_prefill(model_id: str) -> bool:
 def supports_structured_outputs(model_id: str) -> bool:
     """Return whether the direct API offers ``output_config.format`` for this model."""
     # TODO(simplify): Unlike supports_prefill, this reads the raw id, so a gateway id such as anthropic/claude-3-...
-    # counts as supporting structured output. Read it through _core_model_id too. Users of gateway ids would notice.
+    # counts as supporting structured output. Read it through claude_core_model_id too. Users of gateway ids would
+    # notice.
     return model_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not model_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
 
 
 def checks_thinking_prefix(model_id: str) -> bool:
     """Return whether the API rejects or drops this model's replayed thinking once the context before it changed."""
-    return _core_model_id(model_id).startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
+    return claude_core_model_id(model_id).startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
