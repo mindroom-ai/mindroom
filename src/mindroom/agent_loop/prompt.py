@@ -51,12 +51,13 @@ def render_instructions(instructions: Sequence[str]) -> str:
 
     A single instruction stays verbatim; single-line instructions become ``- `` bullets; a multi-line instruction
     stays a block, because its own bullets and paragraphs would otherwise nest under a bullet it does not belong to.
+    Each one is stripped, so blocks stay one blank line apart whatever whitespace they end with.
     """
     if len(instructions) == 1:
         return instructions[0]
     separator = "\n\n" if any(_is_block(instruction) for instruction in instructions) else "\n"
     return separator.join(
-        instruction if _is_block(instruction) else f"- {instruction.strip()}" for instruction in instructions
+        instruction.strip() if _is_block(instruction) else f"- {instruction.strip()}" for instruction in instructions
     )
 
 
