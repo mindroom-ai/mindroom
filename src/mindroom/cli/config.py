@@ -465,9 +465,10 @@ def format_validation_errors(
     else:
         console.print("[red]Error:[/red] Invalid configuration\n")
     console.print("Issues found:")
+    # A location or message can quote a config key, which may contain brackets Rich reads as markup.
     for location, message in iter_config_validation_messages(exc):
         display_location = location.replace(" → ", " -> ")
-        console.print(f"  [red]*[/red] {display_location}: {message}")
+        console.print(f"  [red]*[/red] {escape(display_location)}: {escape(message)}")
     console.print("\nFix these issues:")
     console.print("  [cyan]mindroom config edit[/cyan]      Edit your config")
     console.print("  [cyan]mindroom config validate[/cyan]  Check config after editing")
@@ -1096,7 +1097,7 @@ def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
     if missing:
         console.print("\n[yellow]Warning:[/yellow] Missing environment variables:\n")
         for route, env_key, model_names in missing:
-            console.print(f"  [yellow]*[/yellow] {route}: Set {env_key} (models: {escape(', '.join(model_names))})")
+            console.print(f"  [yellow]*[/yellow] {route}: Set {env_key} (models: {', '.join(model_names)})")
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 

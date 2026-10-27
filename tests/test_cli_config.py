@@ -1928,6 +1928,20 @@ class TestConfigValidate:
         output = normalize_console_output(result.output)
         assert "Rooms: 2 ([/fast], [bold]lobby)" in output
 
+    def test_validate_prints_a_rejected_key_that_looks_like_markup_as_written(self, tmp_path: Path) -> None:
+        """A validation error quotes the config key it rejects verbatim, even one that looks like Rich markup."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
+            '  "[/fast]":\n    provider: ollama\n    id: gemma4\n'
+            "router:\n  model: default\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 1, result.output
+        assert "rename models.[/fast] and update every reference" in normalize_console_output(result.output)
+
     def test_validate_fails_on_an_automation_no_plugin_provides(self, tmp_path: Path) -> None:
         """A plugin automation name that no loaded plugin registers fails validation with its location."""
         cfg = tmp_path / "config.yaml"
