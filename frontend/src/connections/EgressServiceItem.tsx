@@ -26,6 +26,7 @@ import { BusyNote, useLimitActions } from "./EgressLimitRows";
 import { ServiceStatus } from "./EgressServiceStatus";
 import {
   AgentSees,
+  Code,
   type RowAction,
   RowActionsMenu,
   SERVICE_CELL,
@@ -468,6 +469,12 @@ export function EgressServiceItem({
           description={service.description}
         >
           <AgentSees service={service} />
+          {service.separate_account && (
+            <p className="text-xs text-muted-foreground">
+              Agents choose it with{" "}
+              <Code>X-Agent-Keys-Service: {service.name}</Code>
+            </p>
+          )}
           {limitedText && (
             <p className="text-xs text-muted-foreground">{limitedText}</p>
           )}

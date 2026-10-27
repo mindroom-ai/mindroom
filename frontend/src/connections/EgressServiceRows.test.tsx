@@ -865,6 +865,19 @@ describe("connected accounts", () => {
       expect(screen.queryByText("Connected for tools only")).toBeNull();
     });
 
+    it("names the header agents choose a service's own account with", () => {
+      const header = wholeText(
+        "Agents choose it with X-Agent-Keys-Service: team_calendar",
+      );
+      renderRows([
+        { ...toolsOnly, name: "team_calendar", separate_account: true },
+      ]);
+      expect(within(row("GitHub")).getByText(header)).toBeVisible();
+      cleanup();
+      renderRows([toolsOnly]);
+      expect(screen.queryByText(/X-Agent-Keys-Service/)).toBeNull();
+    });
+
     it("leaves the account alone when the confirmation is cancelled", async () => {
       renderRows([toolsOnly]);
       fireEvent.click(
