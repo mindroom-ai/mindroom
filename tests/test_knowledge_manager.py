@@ -297,22 +297,25 @@ async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_loads(
+async def test_only_bases_whose_files_workers_write_limit_the_vectors_a_search_loads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker code can grow private knowledge and file memory, so their searches refuse vectors past the limit."""
-    monkeypatch.setattr(knowledge_registry, "_AGENT_WRITTEN_BASE_MATRIX_BYTES", 1)
+    """Worker code can grow private knowledge, file memory, and shared bases in workspaces, so their searches refuse."""
+    monkeypatch.setattr(knowledge_registry, "_WORKER_WRITTEN_BASE_MATRIX_BYTES", 1)
     runtime_paths = test_runtime_paths(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "note.md").write_text("shared note", encoding="utf-8")
+    exports = agent_workspace_root_path(runtime_paths.storage_root, "helper") / "thread_exports"
+    exports.mkdir(parents=True)
+    (exports / "note.md").write_text("exported note", encoding="utf-8")
     config = bind_runtime_paths(
         Config(
             agents={
                 "helper": AgentConfig(
                     display_name="Helper",
-                    knowledge_bases=["docs"],
+                    knowledge_bases=["docs", "exports"],
                     private=AgentPrivateConfig(
                         per="user",
                         root="mind_data",
@@ -320,7 +323,10 @@ async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_
                     ),
                 ),
             },
-            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs), watch=False)},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path=str(docs), watch=False),
+                "exports": KnowledgeBaseConfig(path=str(exports), watch=False),
+            },
             models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
@@ -342,7 +348,7 @@ async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_
     assert memory is not None
     (memory.root / "memory").mkdir(parents=True)
     (memory.root / "memory" / "note.md").write_text("memory note", encoding="utf-8")
-    bases = {"docs": config, private_base_id: config, memory.base_id: memory.config}
+    bases = {"docs": config, "exports": config, private_base_id: config, memory.base_id: memory.config}
     for base_id, base_config in bases.items():
         await refresh_knowledge_binding(
             base_id,
@@ -368,6 +374,34 @@ async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_
         assert index is not None
         with pytest.raises(_KnowledgeIndexTooLargeError):
             await index.reader.asearch("note", limit=1)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "limited"),
+    [
+        ("agents/helper/workspace/thread_exports", True),
+        ("private_instances/scope/helper_data/knowledge", True),
+        ("shared_directories/team/docs", True),
+        ("workers/worker-a/notes", True),
+        ("agents/helper", True),
+        ("agents", True),
+        (".", True),
+        ("..", True),
+        ("agents/helper/knowledge/docs", False),
+        ("knowledge_docs", False),
+        ("../outside", False),
+    ],
+)
+def test_a_base_is_limited_when_its_path_lies_in_or_holds_storage_workers_write(
+    tmp_path: Path,
+    relative_path: str,
+    limited: bool,
+) -> None:
+    """The limit follows where the base's files live, not how the base is configured."""
+    storage_root = tmp_path / "storage"
+    knowledge_path = Path(os.path.normpath(storage_root / relative_path))
+
+    assert knowledge_registry._workers_write_sources(knowledge_path, storage_root) is limited
 
 
 @pytest.mark.asyncio
