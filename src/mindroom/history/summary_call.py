@@ -43,7 +43,7 @@ _PROVIDER_TIMEOUT_FRAGMENT = "timed out"
 # ``SummaryRetryPolicy`` alone retries a failed summary, a one-off summary never reuses its prefix, and thinking would
 # spend the output budget the summary needs. The transport timeout stays the route's own, so a shorter authored
 # provider timeout still applies; the summary call's wall deadline bounds every request.
-_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_authored_thinking=True)
+_SUMMARY_OVERRIDES = RequestOverrides(caller_retries=True, prompt_cache=False, omit_thinking_setting=True)
 
 
 class _CompactionSummaryTimeoutError(TimeoutError):

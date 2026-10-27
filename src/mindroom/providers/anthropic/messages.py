@@ -350,7 +350,7 @@ class ClaudeProvider:
         params: dict[str, Any] = {}
         if settings.max_tokens:
             params["max_tokens"] = settings.max_tokens
-        if settings.thinking and not overrides.omit_authored_thinking:
+        if settings.thinking and not overrides.omit_thinking_setting:
             # A null field is unset, so an authored null ``block_binding`` is no binding on every route.
             params["thinking"] = {key: value for key, value in settings.thinking.items() if value is not None}
         if settings.output_config:
@@ -368,7 +368,7 @@ class ClaudeProvider:
         if replay is not None and replay.threshold is not None:
             params["context_management"] = compaction_context_management(replay.threshold)
         # The raw request overrides merge last, as the SDK merges a raw body.
-        params.update(_raw_request_params(settings, omit_authored_thinking=overrides.omit_authored_thinking))
+        params.update(_raw_request_params(settings, omit_thinking_setting=overrides.omit_thinking_setting))
         return params
 
     def _with_sampling_in_extra_body(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -390,11 +390,11 @@ class ClaudeProvider:
         The default ``drop_block`` binding goes only on the routes that take the beta, and rides on adaptive
         thinking, which these models run when the request sends no thinking setting; the API rejects it beside any
         other thinking type. An authored ``block_binding`` is kept, a null one counts as none, and a request that
-        omits the authored thinking gets none.
+        omits the thinking setting gets none.
         """
         if (
             self.route not in _THINKING_BINDING_ROUTES
-            or request.overrides.omit_authored_thinking
+            or request.overrides.omit_thinking_setting
             or not checks_thinking_prefix(self.identity.id)
         ):
             return params
@@ -467,7 +467,7 @@ class ClaudeProvider:
         tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
         strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
         params = self._request_params(request, output_format, strict_tools=strict_tools)
-        thinking_enabled = settings.thinking_enabled() and not overrides.omit_authored_thinking
+        thinking_enabled = settings.thinking_enabled() and not overrides.omit_thinking_setting
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or thinking_enabled,
@@ -634,12 +634,12 @@ def _sends_thinking_binding(params: dict[str, Any]) -> bool:
     return isinstance(thinking, dict) and thinking.get("block_binding") is not None
 
 
-def _raw_request_params(settings: ClaudeSettings, *, omit_authored_thinking: bool) -> dict[str, Any]:
-    """Return a copy of the authored raw request overrides, without thinking when the request omits the authored one."""
+def _raw_request_params(settings: ClaudeSettings, *, omit_thinking_setting: bool) -> dict[str, Any]:
+    """Return a copy of the authored raw request overrides, without thinking when the request omits the setting."""
     request_params = {
         key: dict(value) if isinstance(value, dict) else value for key, value in (settings.request_params or {}).items()
     }
-    if omit_authored_thinking:
+    if omit_thinking_setting:
         request_params.pop("thinking", None)
         if isinstance(request_params.get("extra_body"), dict):
             request_params["extra_body"].pop("thinking", None)

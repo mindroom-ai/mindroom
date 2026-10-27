@@ -456,7 +456,7 @@ def test_model_request_defaults_are_immutable_and_empty() -> None:
 
     assert (request.tools, request.tool_choice, request.output_schema) == ((), None, None)
     assert request.overrides == RequestOverrides()
-    assert RequestOverrides().omit_authored_thinking is False
+    assert RequestOverrides().omit_thinking_setting is False
     with pytest.raises(FrozenInstanceError):
         request.tool_choice = "none"  # type: ignore[misc]
 
