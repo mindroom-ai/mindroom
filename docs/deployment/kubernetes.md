@@ -152,7 +152,8 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 
 | Helm value | Environment variable | Default | Effect |
 |------------|----------------------|---------|--------|
-| `workers.kubernetes.image` | `MINDROOM_KUBERNETES_WORKER_IMAGE` | Chart: the main MindRoom image; required without Helm | Worker image |
+| `workers.kubernetes.image.repository`, `.tag`, `.digest` | `MINDROOM_KUBERNETES_WORKER_IMAGE` | Chart: the main MindRoom image (`image.repository`, `image.tag`, `image.digest`); required without Helm | Worker image; `.tag` and `.digest` take effect only with `.repository` and default to the main image's tag and digest |
+| `workers.kubernetes.image.pullPolicy` | `MINDROOM_KUBERNETES_WORKER_IMAGE_PULL_POLICY` | Chart: `image.pullPolicy` (`Always`); otherwise `IfNotPresent` | Worker image pull policy; only `Always` pulls a mutable tag such as `:latest` again when a worker pod starts |
 | `workers.kubernetes.namespace` | `MINDROOM_KUBERNETES_WORKER_NAMESPACE` | Chart: the release namespace; otherwise the pod namespace or `default` | Namespace for worker resources |
 | _(storage claim)_ | `MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME` | Chart: the runtime storage claim; required without Helm | PVC holding agent workspaces |
 | `storage.mountPath` | `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH` | Chart: `/app/agent_data`; otherwise `/app/worker` | Where workers mount storage |

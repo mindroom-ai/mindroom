@@ -158,7 +158,7 @@ Summaries compacted by those releases record no per-run provenance, so redacting
 From v2026.9.327, dedicated Docker and Kubernetes workers mount only agent workspaces.
 Drain worker activity before upgrading, because the upgraded primary stops every older worker before serving, ending its tool calls, shells, background scripts, and CLI sessions.
 Until those workers are gone, startup fails and the primary restarts, so the Docker daemon or Kubernetes API must be reachable.
-Upgrade worker images together with the primary: Docker refuses worker images from older releases, and Kubernetes workers run the configured worker image, which must come from the same release.
+Upgrade worker images together with the primary, because Docker and Kubernetes refuse worker images from older releases.
 Rolling back to v2026.9.326 is safe when the Docker and Kubernetes worker images roll back with the primary; upgrading again stops those workers at startup.
 
 Before upgrading, check two limits:

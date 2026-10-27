@@ -32,6 +32,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     resolve_state_scope_worker_key,
 )
 from mindroom.workers.backends._lifecycle import mark_worker_failed, mark_worker_idle, touch_worker_lifecycle
+from mindroom.workers.compatibility import worker_health_compatibility_error
 from mindroom.workers.models import (
     ProgressSink,
     WorkerHandle,
@@ -66,6 +67,15 @@ _COLD_START_GRACE_SECONDS = 1.5
 _WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
 _PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
+_PULL_POLICY_DOCS_URL = "https://docs.mindroom.chat/deployment/kubernetes/#worker-settings"
+_CACHED_IMAGE_HINT = (
+    "A replacement pod reported the same protocol, so with a mutable tag such as ':latest' its node may still "
+    f"hold an older copy: use this release's tag or set the worker image pull policy to Always ({_PULL_POLICY_DOCS_URL})."
+)
+_RESTART_RUNTIME_HINT = (
+    "For example, when this runtime's pod runs the same mutable tag such as ':latest' and pulls it on every start, "
+    "restarting the pod picks up the worker's release."
+)
 
 logger = logging.getLogger(__name__)
 
@@ -462,7 +472,7 @@ class KubernetesWorkerBackend:
             for current_sink in self._progress_sinks.get(progress.worker_key, ()):
                 current_sink(progress)
 
-    def ensure_worker(  # noqa: PLR0915
+    def ensure_worker(
         self,
         spec: WorkerSpec,
         *,
@@ -479,138 +489,164 @@ class KubernetesWorkerBackend:
                 cached_handle = self._reuse_cached_ready_worker(spec, now=timestamp)
                 if cached_handle is not None:
                     return cached_handle
-                worker_id = self._worker_id(worker_key)
-                state_subpath = self._state_subpath(worker_key)
-                existing = self._resources.read_deployment(worker_id)
-                current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
-                should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
-                startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(
-                    should_restart,
-                )
-                created_at = current_handle.created_at if current_handle is not None else timestamp
-                if should_restart:
-                    last_started_at = timestamp
-                else:
-                    assert current_handle is not None
-                    last_started_at = current_handle.last_started_at
-                annotations = resources.metadata_annotations(
+                return self._provision_worker_locked(spec, timestamp=timestamp)
+        finally:
+            if progress_sink is not None:
+                self._unregister_progress_sink(worker_key, progress_sink)
+
+    def _provision_worker_locked(self, spec: WorkerSpec, *, timestamp: float) -> WorkerHandle:  # noqa: PLR0915
+        """Apply the worker's resources and wait until it is ready and speaks this runtime's protocol."""
+        worker_key = spec.worker_key
+        worker_id = self._worker_id(worker_key)
+        state_subpath = self._state_subpath(worker_key)
+        existing = self._resources.read_deployment(worker_id)
+        current_handle = self._handle_from_deployment(existing, now=timestamp) if existing is not None else None
+        should_restart = current_handle is None or current_handle.status in {"idle", "failed"}
+        startup_count = (current_handle.startup_count if current_handle is not None else 0) + int(
+            should_restart,
+        )
+        created_at = current_handle.created_at if current_handle is not None else timestamp
+        if should_restart:
+            last_started_at = timestamp
+        else:
+            assert current_handle is not None
+            last_started_at = current_handle.last_started_at
+        annotations = resources.metadata_annotations(
+            worker_key=worker_key,
+            state_subpath=state_subpath,
+            created_at=created_at,
+            last_used_at=timestamp,
+            last_started_at=last_started_at,
+            startup_count=startup_count,
+            failure_count=current_handle.failure_count if current_handle is not None else 0,
+            failure_reason=None,
+            status="starting",
+        )
+        should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
+        poll_reporter: Callable[[float], None] | None = None
+        finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
+        destructive_failure_allowed = current_handle is None or current_handle.status != "ready"
+        if should_report_progress:
+            poll_reporter, finalize_progress = _build_progress_reporter(
+                worker_key=worker_key,
+                backend_name=self.backend_name,
+                progress_sink=self._emit_progress,
+            )
+        auth_secret_applied = False
+        try:
+            # kubelet resolves the read-only mirror subPath when the pod starts, so the
+            # primary validates and creates the worker's credential directories first.
+            get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
+            # kubelet creates missing subPath sources as root, so shared workspaces exist first;
+            # the cache keeps these mounts to notice a workspace that appears after planning.
+            workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
+            shared_directory_mounts = self._plan_shared_directory_mounts(spec)
+            self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
+            auth_secret_applied = True
+            replacing_stale_worker = False
+            while True:
+                deployment_apply = self._resources.apply_deployment(
                     worker_key=worker_key,
+                    worker_id=worker_id,
                     state_subpath=state_subpath,
-                    created_at=created_at,
-                    last_used_at=timestamp,
-                    last_started_at=last_started_at,
-                    startup_count=startup_count,
-                    failure_count=current_handle.failure_count if current_handle is not None else 0,
-                    failure_reason=None,
-                    status="starting",
+                    annotations=annotations,
+                    replicas=1,
+                    private_agent_names=spec.private_agent_names,
+                    state_scope_worker_key=spec.state_scope_worker_key,
+                    resource_profile=spec.resource_profile,
+                    recreate=replacing_stale_worker,
                 )
-                should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
-                poll_reporter: Callable[[float], None] | None = None
-                finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
-                destructive_failure_allowed = current_handle is None or current_handle.status != "ready"
-                if should_report_progress:
+                startup_triggered = should_restart or deployment_apply.recreated
+                destructive_failure_allowed = destructive_failure_allowed or startup_triggered
+                if startup_triggered and not should_report_progress:
                     poll_reporter, finalize_progress = _build_progress_reporter(
                         worker_key=worker_key,
                         backend_name=self.backend_name,
                         progress_sink=self._emit_progress,
                     )
-                deployment_apply: resources.DeploymentApplyResult | None = None
-                auth_secret_applied = False
-                try:
-                    # kubelet resolves the read-only mirror subPath when the pod starts, so the
-                    # primary validates and creates the worker's credential directories first.
-                    get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
-                    # kubelet creates missing subPath sources as root, so shared workspaces exist first;
-                    # the cache keeps these mounts to notice a workspace that appears after planning.
-                    workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
-                    shared_directory_mounts = self._plan_shared_directory_mounts(spec)
-                    self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
-                    auth_secret_applied = True
-                    deployment_apply = self._resources.apply_deployment(
+                    should_report_progress = True
+                if deployment_apply.recreated and (replacing_stale_worker or not should_restart):
+                    startup_count += 1
+                    annotations = resources.metadata_annotations(
                         worker_key=worker_key,
-                        worker_id=worker_id,
                         state_subpath=state_subpath,
-                        annotations=annotations,
-                        replicas=1,
-                        private_agent_names=spec.private_agent_names,
-                        state_scope_worker_key=spec.state_scope_worker_key,
-                        resource_profile=spec.resource_profile,
+                        created_at=created_at,
+                        last_used_at=timestamp,
+                        last_started_at=timestamp,
+                        startup_count=startup_count,
+                        failure_count=current_handle.failure_count if current_handle is not None else 0,
+                        failure_reason=None,
+                        status="starting",
                     )
-                    startup_triggered = should_restart or deployment_apply.recreated
-                    destructive_failure_allowed = destructive_failure_allowed or startup_triggered
-                    if startup_triggered and not should_report_progress:
-                        poll_reporter, finalize_progress = _build_progress_reporter(
-                            worker_key=worker_key,
-                            backend_name=self.backend_name,
-                            progress_sink=self._emit_progress,
-                        )
-                        should_report_progress = True
-                    if deployment_apply.recreated and not should_restart:
-                        startup_count = (current_handle.startup_count if current_handle is not None else 0) + 1
-                        annotations = resources.metadata_annotations(
-                            worker_key=worker_key,
-                            state_subpath=state_subpath,
-                            created_at=created_at,
-                            last_used_at=timestamp,
-                            last_started_at=timestamp,
-                            startup_count=startup_count,
-                            failure_count=current_handle.failure_count if current_handle is not None else 0,
-                            failure_reason=None,
-                            status="starting",
-                        )
-                        self._resources.patch_deployment(worker_id, annotations=annotations)
-                    self._sync_shared_credentials(
-                        worker_key,
-                        mirrored_credential_services=spec.mirrored_credential_services,
-                    )
-                    self._resources.apply_service(worker_id)
-                    deployment = self._resources.wait_for_ready(
-                        worker_id,
-                        timeout_seconds=self.config.ready_timeout_seconds,
-                        deployment_ready_fn=self._deployment_ready,
-                        on_poll_tick=poll_reporter,
-                    )
-                    destructive_failure_allowed = False
-                    final_annotations = dict(annotations)
-                    final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
-                    self._resources.patch_deployment(worker_id, annotations=final_annotations)
-                except Exception as exc:
-                    failure_reason = str(exc)
-                    finalize_progress("failed", failure_reason)
-                    self._record_startup_failure_or_cleanup_secret(
-                        worker_key=worker_key,
-                        worker_id=worker_id,
-                        failure_reason=failure_reason,
-                        timestamp=timestamp,
-                        annotations=annotations,
-                        destructive_failure_allowed=destructive_failure_allowed,
-                        auth_secret_applied=auth_secret_applied,
-                    )
-                    if isinstance(exc, WorkerBackendError):
-                        raise
-                    raise WorkerBackendError(failure_reason) from exc
+                    self._resources.patch_deployment(worker_id, annotations=annotations)
+                self._sync_shared_credentials(
+                    worker_key,
+                    mirrored_credential_services=spec.mirrored_credential_services,
+                )
+                self._resources.apply_service(worker_id)
+                deployment = self._resources.wait_for_ready(
+                    worker_id,
+                    timeout_seconds=self.config.ready_timeout_seconds,
+                    deployment_ready_fn=self._deployment_ready,
+                    on_poll_tick=poll_reporter,
+                )
+                if not self._ready_worker_needs_replacement(worker_id, is_replacement=replacing_stale_worker):
+                    break
+                # A mutable tag such as `:latest` keeps an older pod running after an upgrade, and
+                # the template is unchanged, so only a new pod pulls the tag again under `Always`.
+                replacing_stale_worker = True
+            destructive_failure_allowed = False
+            final_annotations = dict(annotations)
+            final_annotations[resources.ANNOTATION_WORKER_STATUS] = "ready"
+            self._resources.patch_deployment(worker_id, annotations=final_annotations)
+        except Exception as exc:
+            failure_reason = str(exc)
+            finalize_progress("failed", failure_reason)
+            self._record_startup_failure_or_cleanup_secret(
+                worker_key=worker_key,
+                worker_id=worker_id,
+                failure_reason=failure_reason,
+                timestamp=timestamp,
+                annotations=annotations,
+                destructive_failure_allowed=destructive_failure_allowed,
+                auth_secret_applied=auth_secret_applied,
+            )
+            if isinstance(exc, WorkerBackendError):
+                raise
+            raise WorkerBackendError(failure_reason) from exc
 
-                finalize_progress("ready", None)
-                final_deployment_annotations = {
-                    **dict(deployment.metadata.annotations or {}),
-                    **final_annotations,
-                }
-                handle = self._handle_from_deployment(
-                    deployment,
-                    now=timestamp,
-                    annotations_override=final_deployment_annotations,
-                )
-                self._store_ready_worker(
-                    spec,
-                    handle,
-                    validated_at=timestamp,
-                    workspace_mounts=workspace_mounts,
-                    shared_directory_mounts=shared_directory_mounts,
-                )
-                return handle
-        finally:
-            if progress_sink is not None:
-                self._unregister_progress_sink(worker_key, progress_sink)
+        finalize_progress("ready", None)
+        final_deployment_annotations = {
+            **dict(deployment.metadata.annotations or {}),
+            **final_annotations,
+        }
+        handle = self._handle_from_deployment(
+            deployment,
+            now=timestamp,
+            annotations_override=final_deployment_annotations,
+        )
+        self._store_ready_worker(
+            spec,
+            handle,
+            validated_at=timestamp,
+            workspace_mounts=workspace_mounts,
+            shared_directory_mounts=shared_directory_mounts,
+        )
+        return handle
+
+    def _ready_worker_needs_replacement(self, worker_id: str, *, is_replacement: bool) -> bool:
+        """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
+        compatibility_error = worker_health_compatibility_error(
+            self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
+            backend_label="Kubernetes",
+            image=self.config.image,
+            # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
+            older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
+            newer_worker_hint=_RESTART_RUNTIME_HINT,
+        )
+        if compatibility_error is not None and is_replacement:
+            raise WorkerBackendError(compatibility_error)
+        return compatibility_error is not None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
