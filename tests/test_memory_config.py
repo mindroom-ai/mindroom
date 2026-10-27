@@ -13,6 +13,9 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from anthropic.types import Message as AnthropicMessage
+from anthropic.types import TextBlock
+from anthropic.types import Usage as AnthropicUsage
 from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
@@ -261,6 +264,78 @@ class TestMemoryConfig:
         assert ("max_tokens" in request_params) is sends_max_tokens
         # A max_completion_tokens cap would also count reasoning tokens and could leave no answer.
         assert "max_completion_tokens" not in request_params
+
+    @pytest.mark.parametrize(
+        ("authored_config", "expected_sampling"),
+        [
+            ({"model": "claude-sonnet-5-5"}, {}),
+            ({"model": "claude-opus-5-5", "temperature": 0.3}, {}),
+            ({"model": "claude-fable-5-1", "top_p": 0.8}, {}),
+            ({"model": "claude-sonnet-5-5", "temperature": None}, {}),
+            ({"model": "claude-sonnet-5-5", "temperature": 0.3, "top_p": 0.8, "top_k": 5}, {}),
+            # Models that accept sampling values keep Mem0's default temperature and the authored values.
+            ({"model": "claude-sonnet-4-5"}, {"temperature": 0.1}),
+            ({"model": "claude-sonnet-4-5", "temperature": None, "top_p": 0.8}, {"top_p": 0.8}),
+            ({}, {"temperature": 0.1}),
+        ],
+        ids=[
+            "sonnet-5.5-default",
+            "opus-5.5-temperature",
+            "fable-5.1-top-p",
+            "sonnet-5.5-null-temperature",
+            "sonnet-5.5-all-three",
+            "sonnet-4.5-default",
+            "sonnet-4.5-top-p",
+            "mem0-default-model",
+        ],
+    )
+    def test_mem0_anthropic_sends_sampling_only_to_models_that_accept_it(
+        self,
+        tmp_path: Path,
+        authored_config: dict[str, object],
+        expected_sampling: dict[str, float],
+    ) -> None:
+        """A Claude memory LLM sends no ``temperature``, ``top_p``, or ``top_k`` to the models that reject them."""
+        config = Config(
+            memory={"llm": {"provider": "anthropic", "config": {"api_key": "sk-ant-test", **authored_config}}},
+            router=RouterConfig(model="default"),
+        )
+        llm_config = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))["llm"]
+        mem0_llm = LlmFactory.create(llm_config["provider"], llm_config["config"])
+        reply = AnthropicMessage(
+            id="msg_test",
+            type="message",
+            role="assistant",
+            model=mem0_llm.config.model,
+            content=[TextBlock(type="text", text='{"memory": []}')],
+            stop_reason="end_turn",
+            usage=AnthropicUsage(input_tokens=1, output_tokens=1),
+        )
+        create_message = MagicMock(return_value=reply)
+        mem0_llm.client.messages.create = create_message
+
+        assert mem0_llm.generate_response([{"role": "user", "content": "remember this"}]) == '{"memory": []}'
+
+        request_params = create_message.call_args.kwargs
+        sampling_names = ("temperature", "top_p", "top_k")
+        assert {name: request_params[name] for name in sampling_names if name in request_params} == expected_sampling
+
+    def test_mem0_openai_memory_llm_keeps_its_authored_sampling_for_claude_models(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only Mem0's Anthropic LLM omits a sampling value set to None; its OpenAI LLM would send it as null."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        config = Config(
+            memory={"llm": {"provider": "openrouter", "config": {"model": "anthropic/claude-sonnet-5.5"}}},
+            router=RouterConfig(model="default"),
+        )
+
+        llm_config = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))["llm"]["config"]
+
+        assert "temperature" not in llm_config
+        assert "top_p" not in llm_config
 
     def test_get_memory_config_passes_configured_embedding_dimensions(
         self,
