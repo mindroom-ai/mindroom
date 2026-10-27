@@ -16,6 +16,7 @@ Moving grants from Agent Vault, whose logins often had read-only Google scopes, 
 
 - **The opt-in entry records an access level.** Each entry in `egress__oauth_reuse` gains `"access": "read" | "read_write"`.
   An entry without the field reads as `"read_write"`, so every existing opt-in keeps working as it does today; nothing is migrated.
+  Rolling back to a release without this feature ignores the field, so it reads `"access": "read"` entries as full access.
   The level is per service, like the opt-in itself, so one account can be read-only for Calendar and read and write for Gmail.
 - **A service declares whether read-only means anything for it.** HTTP methods map onto reads and writes only for APIs that follow REST conventions, so the method alone is not the rule.
   `EgressService` gains `read_only: EgressReadOnly | None`, where `EgressReadOnly` has `post_paths: list[str]` (segment prefixes, matched like `path_prefix`) naming the endpoints that read with `POST`.
@@ -45,6 +46,7 @@ Moving grants from Agent Vault, whose logins often had read-only Google scopes, 
 ## Assumptions
 
 - The APIs behind the declared presets do their reads with `GET` (or `HEAD`), apart from the `post_paths` they list.
+- Atlassian's GraphQL gateway refuses mutations sent with `GET`, which the `atlassian` preset relies on, since its one rule covers all of `api.atlassian.com`.
 - Squid hands the broker every credentialed request, so the broker sees each request's method and headers before any credential is added.
 
 ## Testing
