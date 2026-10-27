@@ -27,8 +27,10 @@ spec:
   selector:
     matchLabels:
       {{- include "mindroom-runtime.approvedEgressSelectorLabels" . | nindent 6 }}
-  {{- if .Values.approvedEgress.podDisruptionBudget.minAvailable }}
-  minAvailable: {{ .Values.approvedEgress.podDisruptionBudget.minAvailable }}
+  {{- $minAvailable := .Values.approvedEgress.podDisruptionBudget.minAvailable }}
+  {{- /* minAvailable: 0 is a valid budget, so only null or "" leaves it unset. */}}
+  {{- if and (not (kindIs "invalid" $minAvailable)) (ne (toString $minAvailable) "") }}
+  minAvailable: {{ $minAvailable }}
   {{- else }}
   maxUnavailable: {{ .Values.approvedEgress.podDisruptionBudget.maxUnavailable }}
   {{- end }}

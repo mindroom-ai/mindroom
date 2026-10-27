@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from tests.test_helm_instance_worker_isolation import _resource
 from tests.test_runtime_chart_approved_egress_rollout import PROXY_NAME, _render
 
@@ -39,10 +41,11 @@ def test_proxy_budget_selects_exactly_the_proxy_pod(tmp_path: Path) -> None:
     assert [doc["metadata"]["name"] for doc in _budgets(docs)] == [PROXY_NAME]
 
 
-def test_proxy_budget_min_available_replaces_max_unavailable(tmp_path: Path) -> None:
-    """Like the primary's budget, a set minAvailable takes the place of maxUnavailable."""
-    docs = _render(tmp_path, {"podDisruptionBudget": {"create": True, "minAvailable": 1}})
+@pytest.mark.parametrize("min_available", [1, 0, "50%"])
+def test_proxy_budget_min_available_replaces_max_unavailable(tmp_path: Path, min_available: int | str) -> None:
+    """A set minAvailable, including 0, takes the place of maxUnavailable."""
+    docs = _render(tmp_path, {"podDisruptionBudget": {"create": True, "minAvailable": min_available}})
 
     spec = _resource(docs, "PodDisruptionBudget", PROXY_NAME)["spec"]
-    assert spec["minAvailable"] == 1
+    assert spec["minAvailable"] == min_available
     assert "maxUnavailable" not in spec
