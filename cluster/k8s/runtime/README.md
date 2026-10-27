@@ -561,6 +561,10 @@ Set `approvedEgress.manageRuntimeConfig: false` to skip that flag when the autho
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
 
+The proxy runs as one pod, so evicting it during a node drain or cluster-autoscaler scale-down interrupts worker egress until its replacement is ready.
+Set `approvedEgress.podDisruptionBudget.create: true` to refuse such evictions while the proxy is ready; an unready proxy can still be evicted.
+A drain of the proxy's node then waits until you remove the budget or restart the proxy Deployment, which the budget does not block.
+
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
 ```yaml
