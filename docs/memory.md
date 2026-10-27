@@ -118,7 +118,7 @@ memory:
       host: http://localhost:11434
 ```
 
-MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
+MindRoom installs the optional `sentence_transformers` extra the first time the `sentence_transformers` or `huggingface` embedder is used.
 
 Some models expect a prompt in front of each text, different for queries and documents.
 With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
