@@ -1922,6 +1922,7 @@ The [macOS app's local model setup](https://docs.mindroom.chat/installation/maco
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
+It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load; name it `gpt-6-1` instead and set `display_name` to show the dotted name.
 `display_name` and `icon` only change how clients show the model and are never sent to the provider:
 
 ```yaml

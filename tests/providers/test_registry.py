@@ -292,6 +292,30 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
     ]
 
 
+@pytest.mark.parametrize("name", ["gpt-6.1", "my model", "team/sol", ""])
+def test_config_load_rejects_a_model_name_the_registry_cannot_build(name: str) -> None:
+    """A model's name names its dashboard key, so config load rejects a name that key cannot carry, naming the key."""
+    synthetic = {"provider": "synthetic", "id": "lorem-ipsum"}
+
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate({"models": {"default": synthetic, name: synthetic}})
+
+    assert iter_config_validation_messages(info.value) == [
+        (
+            "models",
+            "Value error, Model names can only include letters, numbers, colon, underscore, and hyphen; "
+            f"rename models.{name} and update every reference",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("name", ["gpt-6-1", "Sol_2", "openrouter:sol"])
+def test_every_model_name_config_load_accepts_builds(name: str, runtime_paths: RuntimePaths) -> None:
+    config = Config.model_validate({"models": {name: {"provider": "synthetic", "id": "lorem-ipsum"}}})
+
+    assert build_model_provider(config, runtime_paths, name).identity.id == "lorem-ipsum"
+
+
 def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
     claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
 

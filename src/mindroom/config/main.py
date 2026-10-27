@@ -105,6 +105,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
+from mindroom.credentials.manager import SERVICE_NAME_CHARACTERS, SERVICE_NAME_PATTERN
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -557,6 +558,17 @@ class Config(BaseModel):
             field_name="administrators",
             allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
         )
+
+    @field_validator("models")
+    @classmethod
+    def validate_model_names(cls, models: dict[str, ModelConfig]) -> dict[str, ModelConfig]:
+        """Reject a model name the credential store cannot keep the model's dashboard key under, as ``model:<name>``."""
+        invalid = sorted(name for name in models if not SERVICE_NAME_PATTERN.fullmatch(name))
+        if invalid:
+            keys = ", ".join(f"models.{name}" for name in invalid)
+            msg = f"Model names can only include {SERVICE_NAME_CHARACTERS}; rename {keys} and update every reference"
+            raise ValueError(msg)
+        return models
 
     @classmethod
     def _lazy_flag_prohibited_message(cls, *, tool_name: str, config_path: str) -> str | None:
