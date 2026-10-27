@@ -13,7 +13,7 @@ Examples use `chat.example.com` for that host, `admin.example.com` for the dashb
 
 | Order | Paths | Service |
 | --- | --- | --- |
-| 1 | Paths with a `.` or `..` segment, a backslash, or a control character | `http_status:404` |
+| 1 | Paths with a `.` or `..` segment between `/` or `\` separators, or with a control character | `http_status:404` |
 | 2 | `/_matrix/`, `/_synapse/`, `/_tuwunel/`, and exactly `/.well-known/matrix/server` | Tuwunel |
 | 3 | The runtime paths listed below | MindRoom runtime |
 | 4 | Everything else, including `/.well-known/matrix/client`, `/livekit/jwt/`, and `/livekit/sfu/` | MindRoom Chat |
@@ -77,7 +77,7 @@ Point the runtime's `MATRIX_HOMESERVER` (runtime chart `matrix.homeserverUrl`) a
 
 ## Paths That Bypass Access
 
-Protect each host with one Access application for the whole host, then add an application with a Bypass policy for each path below.
+Protect both hosts with one Access application that covers each host as a whole, then add an application with a Bypass policy for each path below.
 Access applies the most specific path application, so every other path keeps the host's policy.
 
 | Path | Requested without an Access session by |
@@ -102,7 +102,10 @@ nginx:
     location ^~ /runtime-config.js/ { return 404; }
     location ^~ /authentication-recovery.js/ { return 404; }
     location ^~ /sw.js/ { return 404; }
+    location ^~ /.well-known/matrix/server/ { return 404; }
 ```
+
+With `basePath` set, guard `<basePath>/sw.js/` instead of `/sw.js/`.
 
 ## Edge Settings
 
