@@ -18,6 +18,7 @@ import aiohttp
 import nio
 import pytest
 from agno.utils import log as agno_log
+from mem0 import AsyncMemory
 
 from mindroom import logging_config
 from mindroom.constants import RuntimePaths
@@ -214,6 +215,31 @@ def test_setup_logging_json_mode_includes_logger_for_foreign_logger(
     assert payload["level"] == "info"
     assert payload["logger"] == "test.foreign"
     assert "timestamp" in payload
+
+
+def test_setup_logging_drops_mem0_advice_to_leave_chroma_and_keeps_other_mem0_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mem0 advises leaving Chroma each time a memory is built, which MindRoom does per memory operation."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+
+    AsyncMemory.from_config(
+        {
+            "embedder": {"provider": "openai", "config": {"api_key": "sk-test"}},
+            "llm": {"provider": "openai", "config": {"api_key": "sk-test"}},
+            "vector_store": {"provider": "chroma", "config": {"collection_name": "memories", "path": str(tmp_path)}},
+            "history_db_path": str(tmp_path / "history.db"),
+        },
+    )
+    logging.getLogger("mem0.memory.main").warning("Another Mem0 warning")
+
+    events = [json.loads(line)["event"] for line in capsys.readouterr().err.strip().splitlines()]
+    assert "Another Mem0 warning" in events
+    assert not [event for event in events if "keyword search" in event]
 
 
 def test_setup_logging_logger_level_overrides_allow_selective_debug(
