@@ -422,7 +422,7 @@ async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itsel
 
 @pytest.mark.asyncio
 async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_path: Path) -> None:
-    """Authored settings reach the request; overrides replace them, and disabling thinking keeps the authored config.
+    """Authored settings reach the request; overrides replace them, and omit_thinking_setting keeps Gemini's config.
 
     Gemini thinks by default, so dropping a ``thinking_budget: 0`` would turn thinking on.
     """
@@ -439,7 +439,7 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
     authored, _ = await run_adapter(config, _request(), tmp_path, response)
     overridden, _ = await run_adapter(
         config,
-        _request(overrides=RequestOverrides(temperature=0.7, disable_thinking=True)),
+        _request(overrides=RequestOverrides(temperature=0.7, omit_thinking_setting=True)),
         tmp_path,
         gemini_sse(_gemini_chunk({"text": "ok"})),
     )

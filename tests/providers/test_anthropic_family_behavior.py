@@ -470,7 +470,7 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(tmp_path: Path) -> None:
-    """One-off summary requests run without thinking or cache writes, with their own limits."""
+    """One-off summary requests send no thinking setting and no cache writes, with their own limits."""
     wire = Wire(sse_reply([{"type": "text", "text": "Summary."}]))
     provider = route_provider(
         "anthropic",
@@ -484,7 +484,7 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
             "request_params": {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 2048}, "top_k": 4}},
         },
     )
-    overrides = RequestOverrides(temperature=0.1, prompt_cache=False, disable_thinking=True)
+    overrides = RequestOverrides(temperature=0.1, prompt_cache=False, omit_thinking_setting=True)
     messages = [*_user("Summarize."), Message(role="assistant", content="Earlier answer.")]
     await claude_turn(provider, ModelRequest(messages=messages, overrides=overrides))
     body = wire.body()
@@ -984,7 +984,13 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             {"type": "between_tools"},
             id="between-tools",
         ),
-        pytest.param("claude-sonnet-5-5", {}, RequestOverrides(disable_thinking=True), None, id="thinking-disabled"),
+        pytest.param(
+            "claude-sonnet-5-5",
+            {},
+            RequestOverrides(omit_thinking_setting=True),
+            None,
+            id="thinking-setting-omitted",
+        ),
         pytest.param("claude-opus-5", {}, RequestOverrides(), None, id="unchecked-model"),
         pytest.param("claude-mythos-5-1", {}, RequestOverrides(), None, id="unchecked-mythos"),
     ],

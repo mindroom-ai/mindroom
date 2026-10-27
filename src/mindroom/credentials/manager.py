@@ -45,7 +45,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-_SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
+# The characters a credential service name may contain. A config name that becomes part of one, such as a model
+# name in its dashboard key ``model:<name>``, follows the same rule.
+SERVICE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9:_-]+$")
+SERVICE_NAME_CHARACTERS = "letters, numbers, colon, underscore, and hyphen"
 _CREDENTIALS_FILE_SUFFIX = "_credentials.json"
 # Worker roots are mounted read-write into worker containers under the primary's own
 # uid, so each operation pins its credential directory with a no-follow descriptor and
@@ -72,6 +75,8 @@ _AES_GCM_NONCE_SIZE = 12
 logger = get_logger(__name__)
 
 __all__ = [
+    "SERVICE_NAME_CHARACTERS",
+    "SERVICE_NAME_PATTERN",
     "CredentialsManager",
     "StoredCredentialsUpdate",
     "WorkerCredentialPathError",
@@ -114,8 +119,8 @@ def validate_service_name(service: str) -> str:
     if not normalized:
         msg = "Service name is required"
         raise ValueError(msg)
-    if not _SERVICE_NAME_PATTERN.fullmatch(normalized):
-        msg = "Service name can only include letters, numbers, colon, underscore, and hyphen"
+    if not SERVICE_NAME_PATTERN.fullmatch(normalized):
+        msg = f"Service name can only include {SERVICE_NAME_CHARACTERS}"
         raise ValueError(msg)
     return normalized
 
@@ -674,7 +679,7 @@ class CredentialsManager:
                 raise
             return []
         services = [name.removesuffix(_CREDENTIALS_FILE_SUFFIX) for name in names]
-        return sorted(service for service in services if _SERVICE_NAME_PATTERN.fullmatch(service))
+        return sorted(service for service in services if SERVICE_NAME_PATTERN.fullmatch(service))
 
     def get_api_key(self, service: str, key_name: str = "api_key") -> str | None:
         """Get an API key for a service.

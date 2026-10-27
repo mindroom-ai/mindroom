@@ -1083,11 +1083,10 @@ async def _prepare_team_turn(
         logger.exception("Team build failed", team=team_name)
         return error_response(500, "Team execution failed", error_type="server_error")
 
-    # TODO(simplify): team requests log under a different name per stream mode, while agent requests log one name
-    # with a stream field. Log "Team completion request" with stream for both. Operators reading logs would notice.
     logger.info(
-        "Team streaming request" if stream else "Team completion request",
+        "Team completion request",
         team=team_name,
+        stream=stream,
         mode=built.spec.mode.value,
         members=len(built.spec.members),
         session_id=session_id,

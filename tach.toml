@@ -3461,6 +3461,7 @@ depends_on = [
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
+    "mindroom.credentials.manager",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
