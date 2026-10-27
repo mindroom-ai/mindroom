@@ -46,13 +46,9 @@ export interface ServiceEditing {
    * GitHub, when the viewer can manage the agent.
    */
   onLimitToRepositories?: (service: EgressCredentialService) => void;
-  /** Turns Limit to repositories off while the editor is open. */
+  /** Turns Limit to repositories and Add another account off while the editor is open. */
   limitDisabled?: boolean;
-  /**
-   * Add another account on a row: starts adding a service of the viewer's own
-   * that signs in to another account of the row's provider, or is null where
-   * no service can have one.
-   */
+  /** Add another account on a row: opens Add service for another account of its provider; null where none can be added. */
   addAccount?: (service: EgressCredentialService) => (() => void) | null;
 }
 

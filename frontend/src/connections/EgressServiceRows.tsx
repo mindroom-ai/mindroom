@@ -43,7 +43,7 @@ const accountConnectedIn = (
 
 // The egress listings say whether each service's account is connected, for any
 // agent and provider; a provider's own status route only knows the agent's tools.
-export function servicePathsFor(
+function servicePathsFor(
   target: ServiceTarget,
   serviceName: string,
 ): ServicePaths {

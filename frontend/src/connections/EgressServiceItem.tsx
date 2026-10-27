@@ -428,7 +428,7 @@ export function EgressServiceItem({
           {
             label: "Add another account",
             ariaLabel: `Add another account for ${name}`,
-            disabled: serviceEditing.disabled,
+            disabled: serviceEditing.disabled || serviceEditing.limitDisabled,
             onSelect: addAccount,
           },
         ]

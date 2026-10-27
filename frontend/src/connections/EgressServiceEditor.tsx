@@ -708,6 +708,7 @@ export function EgressServiceEditor({
               configPlaceholders={configPlaceholders}
               ruleEditing={ruleEditing}
               newService={service === null}
+              focusDisplayName={!editing && service !== null}
             />
           )}
         </section>

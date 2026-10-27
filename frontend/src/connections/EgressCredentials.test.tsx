@@ -2662,15 +2662,10 @@ describe("adding another account", () => {
     },
   };
   const github = { ...service, oauth: account };
-  const authorization = {
-    provider: "google_calendar",
-    auth_url: "https://accounts.google.com/o/oauth2/auth?state=abc",
-    completion_origin: "https://portal.example.com",
-  };
-  // The new service as the listing sends it once its own account is connected.
+  // The new service as the listing sends it once saved, before its account is connected.
   const teamCalendar: EgressCredentialService = {
     ...calendar,
-    name: "team_calendar",
+    name: "google_calendar-2",
     display_name: "Team calendar",
     source: "user",
     separate_account: true,
@@ -2678,25 +2673,18 @@ describe("adding another account", () => {
     active_source: null,
     oauth: {
       ...calendar.oauth!,
-      account_label: "team@example.com",
+      connected: false,
+      account_label: null,
       reuse_enabled: false,
       reuse_access: null,
     },
   };
   let listing: EgressCredentialAgent[];
   let calls: { method: string; path: string; body: unknown }[];
-  let popup: Window & { location: { href: string } };
 
   beforeEach(() => {
     calls = [];
     listing = [{ ...agents[0], services: [calendar, github] }];
-    popup = {
-      closed: false,
-      close: vi.fn(),
-      location: { href: "about:blank" },
-      document: document.implementation.createHTMLDocument(),
-    } as unknown as Window & { location: { href: string } };
-    vi.spyOn(window, "open").mockReturnValue(popup);
     vi.mocked(fetch).mockImplementation(async (input, options) => {
       const path = String(input);
       const method = options?.method ?? "GET";
@@ -2708,83 +2696,52 @@ describe("adding another account", () => {
       if (path === "/api/connections/me") return json(identity);
       if (path === "/api/connections/egress") return json({ agents: listing });
       if (path === PRESETS) return json(egressPresets);
-      if (method === "PUT" && path === `${SERVICES}/team_calendar`)
+      if (method === "PUT" && path === `${SERVICES}/google_calendar-2`) {
+        listing = [
+          { ...agents[0], services: [calendar, github, teamCalendar] },
+        ];
         return new Response(null, { status: 204 });
-      if (method === "POST" && path === `${KEYS}/team_calendar/connect`)
-        return json(authorization);
+      }
       throw new Error(`Unexpected request: ${method} ${path}`);
     });
   });
-  const writes = () => calls.filter((call) => call.method !== "GET");
-  const openDialog = async () => {
+
+  it("opens Add service with the row's preset and its own account, for a display name, and saves it as usual", async () => {
     await renderPage();
     fireEvent.click(await rowAction("Add another account for Google Calendar"));
-    return screen.findByRole("dialog", {
-      name: "Add another Google Calendar account",
-    });
-  };
-  const label = (dialog: HTMLElement, value: string) =>
-    fireEvent.change(within(dialog).getByLabelText("Name"), {
-      target: { value },
-    });
-
-  it("asks only for a name, saves a service with its own account from the row's preset, and opens its sign-in", async () => {
-    const dialog = await openDialog();
-    label(dialog, "Team calendar");
-    expect(
-      within(dialog).getByText(
-        "Agents choose it with X-Agent-Keys-Service: team_calendar",
-      ),
-    ).toBeVisible();
-    await pressInDialog("Continue");
-
-    await waitFor(() =>
-      expect(popup.location.href).toBe(authorization.auth_url),
+    const form = await screen.findByRole("form", { name: "Add service" });
+    await presetsReady();
+    expect(within(form).getByLabelText("Preset")).toHaveValue(
+      "google_calendar",
     );
-    expect(writes()).toEqual([
+    expect(
+      within(form).getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    ).toBeChecked();
+    expect(within(form).getByLabelText("Display name")).toHaveFocus();
+    fireEvent.change(within(form).getByLabelText("Display name"), {
+      target: { value: "Team calendar" },
+    });
+    fireEvent.click(within(form).getByRole("button", { name: "Save service" }));
+
+    // The new row offers its own account's sign-in as any other row does.
+    expect(
+      await screen.findByRole("button", {
+        name: "Connect Google Calendar for Agent Keys for Team calendar",
+      }),
+    ).toBeVisible();
+    expect(calls.filter((call) => call.method !== "GET")).toEqual([
       {
         method: "PUT",
-        path: `${SERVICES}/team_calendar`,
+        path: `${SERVICES}/google_calendar-2`,
         body: {
           preset: "google_calendar",
           display_name: "Team calendar",
           oauth_separate_account: true,
         },
       },
-      { method: "POST", path: `${KEYS}/team_calendar/connect`, body: {} },
     ]);
-    // Back from the sign-in, the new row offers its account as any other does.
-    listing = [{ ...agents[0], services: [calendar, github, teamCalendar] }];
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        origin: authorization.completion_origin,
-        source: popup,
-        data: {
-          type: "mindroom-oauth",
-          provider: "google_calendar",
-          status: "connected",
-        },
-      }),
-    );
-    expect(
-      await screen.findByRole("button", {
-        name: "Use account for Team calendar",
-      }),
-    ).toBeVisible();
-  });
-
-  it("refuses a name another service already has", async () => {
-    const dialog = await openDialog();
-    label(dialog, "Google calendar");
-    expect(
-      within(dialog).getByText(
-        "A service named google_calendar already exists",
-      ),
-    ).toBeVisible();
-    await pressInDialog("Continue");
-    expect(screen.getByRole("dialog")).toBeVisible();
-    expect(writes()).toEqual([]);
-    expect(window.open).not.toHaveBeenCalled();
   });
 
   it("is offered only where a service of one's own can have its own account", async () => {

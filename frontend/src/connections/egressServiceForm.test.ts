@@ -3,7 +3,6 @@ import {
   applyAuthChoice,
   emptyRule,
   formFromService,
-  nameFromLabel,
   offersSeparateAccount,
   ruleFormFrom,
   serializeService,
@@ -486,20 +485,6 @@ describe("the way the key is sent", () => {
         ],
       }),
     ).toEqual(["Header auth needs a header name"]);
-  });
-});
-
-describe("naming a service after a label", () => {
-  it("joins the label's letters and digits with _, as Team calendar gives team_calendar", () => {
-    expect(nameFromLabel("Team calendar")).toBe("team_calendar");
-    expect(nameFromLabel("  Équipe / Événements 2 ")).toBe(
-      "equipe_evenements_2",
-    );
-    expect(nameFromLabel("!!!")).toBe("");
-  });
-
-  it("keeps to the 63 characters a name may have, without a trailing _", () => {
-    expect(nameFromLabel(`${"a".repeat(62)} b`)).toBe("a".repeat(62));
   });
 });
 
