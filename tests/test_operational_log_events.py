@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,16 +16,18 @@ from mindroom.agent_loop.run import run_agent
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.hooks import HookRegistry
-from mindroom.llm.errors import ProviderError, ProviderUnavailable, RateLimited
+from mindroom.llm.errors import RateLimited
 from mindroom.llm.provider import ModelRequest
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
 from mindroom.oauth.credential_lifecycle import refresh_oauth_credentials_with_result
 from mindroom.oauth.providers import OAuthRefreshRejectedError
 from mindroom.providers.pipeline import retry
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.agent_tool_helpers import tool_policy
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
+from tests.providers.test_provider_pipeline import _drain, _ScriptedProvider, _transient, _turn
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room
 from tests.test_decrypt_failure import _runtime_paths as _decrypt_runtime_paths
 from tests.test_oauth_service import _context, _credentials, _FakeOAuthProvider, _save
@@ -100,11 +103,29 @@ _STABLE_EVENTS = {
         "hint",
     },
 }
+_STABLE_EVENT_LEVELS = {
+    "event_loop_scheduler_lag_summary": "info",
+    "matrix_sync_stall_diagnostics": "warning",
+    "tool_call_limit_reached": "warning",
+    "tool_call_failed": "warning",
+    "provider_request_retried": "warning",
+    "agent_error": "error",
+    "oauth_credentials_refresh_failed": "warning",
+    "event_loop_stall_detected": "error",
+    "event_loop_stall_ended": "warning",
+    "matrix_event_decryption_failed": "warning",
+}
 
 
-def _emitted_fields(logs: list[dict[str, object]], event: str) -> set[str]:
+def _assert_logged(logs: list[dict[str, object]], event: str) -> dict[str, object]:
+    """Assert ``event`` was logged once, at its pinned level, with every documented field; return the record.
+
+    A record may carry further diagnostic fields, which the docs page does not promise.
+    """
     [entry] = [entry for entry in logs if entry["event"] == event]
-    return set(entry) - {"event", "log_level"}
+    assert entry["log_level"] == _STABLE_EVENT_LEVELS[event]
+    assert _STABLE_EVENTS[event] <= set(entry)
+    return entry
 
 
 def test_docs_page_documents_exactly_the_stable_events_and_fields() -> None:
@@ -115,6 +136,7 @@ def test_docs_page_documents_exactly_the_stable_events_and_fields() -> None:
         for name, body in zip(sections[1::2], sections[2::2], strict=True)
     }
     assert documented == _STABLE_EVENTS
+    assert _STABLE_EVENT_LEVELS.keys() == _STABLE_EVENTS.keys()
 
 
 def test_scheduler_lag_summary_keeps_its_name_and_fields() -> None:
@@ -125,9 +147,7 @@ def test_scheduler_lag_summary_keeps_its_name_and_fields() -> None:
     with capture_logs() as logs:
         detector._report_scheduler_lag(60.0)
 
-    assert (
-        _emitted_fields(logs, "event_loop_scheduler_lag_summary") == _STABLE_EVENTS["event_loop_scheduler_lag_summary"]
-    )
+    _assert_logged(logs, "event_loop_scheduler_lag_summary")
 
 
 @pytest.mark.asyncio
@@ -138,7 +158,7 @@ async def test_matrix_sync_stall_diagnostics_keeps_its_name_and_fields() -> None
     with capture_logs() as logs:
         diagnostics.observe(now=90.0, sync_age=None, generation=None)
 
-    assert _emitted_fields(logs, "matrix_sync_stall_diagnostics") == _STABLE_EVENTS["matrix_sync_stall_diagnostics"]
+    _assert_logged(logs, "matrix_sync_stall_diagnostics")
 
 
 @pytest.mark.asyncio
@@ -163,7 +183,7 @@ async def test_tool_call_limit_reached_keeps_its_name_and_fields() -> None:
         )
 
     assert len(model.requests) == 2
-    assert _emitted_fields(logs, "tool_call_limit_reached") == _STABLE_EVENTS["tool_call_limit_reached"]
+    _assert_logged(logs, "tool_call_limit_reached")
 
 
 @pytest.mark.asyncio
@@ -177,26 +197,31 @@ async def test_tool_call_failed_keeps_its_name_and_fields() -> None:
     with capture_logs() as logs, pytest.raises(ValueError, match="boom"):
         await tool_policy(HookRegistry.empty(), agent_name="code")("explode", explode, {})
 
-    assert _emitted_fields(logs, "tool_call_failed") == _STABLE_EVENTS["tool_call_failed"]
+    _assert_logged(logs, "tool_call_failed")
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error", "reason"),
-    [
-        (RateLimited("slow down", provider="Scripted", status_code=429), "transient_error"),
-        (ProviderUnavailable("silent", provider="Scripted", code=retry.STREAM_STALLED), "stream_stalled"),
-    ],
+    ("failure", "reason", "status_code"),
+    [(_transient(), "transient_error", 503), (1.0, "stream_stalled", 504)],
+    ids=["transient", "stall"],
 )
-def test_provider_request_retried_keeps_its_name_and_fields_for_either_reason(
-    error: ProviderError,
+async def test_provider_request_retried_keeps_its_name_and_fields_for_either_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception | float,
     reason: str,
+    status_code: int,
 ) -> None:
-    """A transient failure and a stalled stream log the same pinned warning, told apart by ``reason``."""
-    with capture_logs() as logs:
-        retry._reissue(error, request=ModelRequest(messages=[]), budget=retry._RetryBudget(), model_id="scripted")
+    """A transient failure and a stream silent past its idle limit log the same pinned warning, told apart by reason."""
+    monkeypatch.setattr(retry, "_retry_delay_seconds", lambda _attempt: 0.0)
+    inner = _ScriptedProvider([[failure, _turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retry.retrying_stream, idle_timeout_seconds=0.05))
 
-    assert _emitted_fields(logs, "provider_request_retried") == _STABLE_EVENTS["provider_request_retried"]
-    assert [entry["reason"] for entry in logs if entry["event"] == "provider_request_retried"] == [reason]
+    with capture_logs() as logs:
+        await _drain(provider, ModelRequest(messages=[]))
+
+    entry = _assert_logged(logs, "provider_request_retried")
+    assert (entry["reason"], entry["status_code"]) == (reason, status_code)
 
 
 def test_agent_error_keeps_its_name_and_fields() -> None:
@@ -204,8 +229,7 @@ def test_agent_error_keeps_its_name_and_fields() -> None:
     with capture_logs() as logs:
         get_user_friendly_error_message(RateLimited("slow down", provider="Scripted"), "general")
 
-    assert _emitted_fields(logs, "agent_error") == _STABLE_EVENTS["agent_error"]
-    assert [entry["error_type"] for entry in logs if entry["event"] == "agent_error"] == ["RateLimited"]
+    assert _assert_logged(logs, "agent_error")["error_type"] == "RateLimited"
 
 
 @pytest.mark.asyncio
@@ -222,9 +246,7 @@ async def test_oauth_credentials_refresh_failed_keeps_its_name_and_fields(tmp_pa
     with capture_logs() as logs, pytest.raises(OAuthRefreshRejectedError):
         await refresh_oauth_credentials_with_result(oauth_context)
 
-    assert (
-        _emitted_fields(logs, "oauth_credentials_refresh_failed") == _STABLE_EVENTS["oauth_credentials_refresh_failed"]
-    )
+    _assert_logged(logs, "oauth_credentials_refresh_failed")
 
 
 def test_event_loop_stall_events_keep_their_names_and_fields() -> None:
@@ -236,8 +258,8 @@ def test_event_loop_stall_events_keep_their_names_and_fields() -> None:
         detector._note_stalled(1.2, heartbeat)
         detector._note_stall_ended(1.3)
 
-    assert _emitted_fields(logs, "event_loop_stall_detected") == _STABLE_EVENTS["event_loop_stall_detected"]
-    assert _emitted_fields(logs, "event_loop_stall_ended") == _STABLE_EVENTS["event_loop_stall_ended"]
+    _assert_logged(logs, "event_loop_stall_detected")
+    _assert_logged(logs, "event_loop_stall_ended")
 
 
 @pytest.mark.asyncio
@@ -257,4 +279,4 @@ async def test_matrix_event_decryption_failed_keeps_its_name_and_fields(tmp_path
             can_notify=cannot_notify,
         )
 
-    assert _emitted_fields(logs, "matrix_event_decryption_failed") == _STABLE_EVENTS["matrix_event_decryption_failed"]
+    _assert_logged(logs, "matrix_event_decryption_failed")

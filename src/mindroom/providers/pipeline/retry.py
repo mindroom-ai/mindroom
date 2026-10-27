@@ -81,22 +81,44 @@ def _reissue(error: ProviderError, *, request: ModelRequest, budget: _RetryBudge
         if budget.stalls >= _MAX_STALL_RETRIES:
             return None
         budget.stalls += 1
-        _log_retry(error, model_id, attempt=budget.stalls, max_retries=_MAX_STALL_RETRIES, delay_seconds=0.0)
+        _log_retry(
+            error,
+            model_id=model_id,
+            reason=STREAM_STALLED,
+            attempt=budget.stalls,
+            max_retries=_MAX_STALL_RETRIES,
+            delay_seconds=0.0,
+        )
         return Retry(request)
     if budget.transient >= _MAX_TRANSIENT_RETRIES:
         return None
     delay = _retry_delay_seconds(budget.transient)
     budget.transient += 1
-    _log_retry(error, model_id, attempt=budget.transient, max_retries=_MAX_TRANSIENT_RETRIES, delay_seconds=delay)
+    _log_retry(
+        error,
+        model_id=model_id,
+        reason="transient_error",
+        attempt=budget.transient,
+        max_retries=_MAX_TRANSIENT_RETRIES,
+        delay_seconds=delay,
+    )
     return Retry(request, delay)
 
 
-def _log_retry(error: ProviderError, model_id: str, *, attempt: int, max_retries: int, delay_seconds: float) -> None:
+def _log_retry(
+    error: ProviderError,
+    *,
+    model_id: str,
+    reason: str,
+    attempt: int,
+    max_retries: int,
+    delay_seconds: float,
+) -> None:
     """Log one reissued request as the documented operator event, the same fields for either reason."""
     logger.warning(
         "provider_request_retried",
         model_id=model_id,
-        reason=STREAM_STALLED if error.code == STREAM_STALLED else "transient_error",
+        reason=reason,
         error_type=type(error).__name__,
         status_code=error.status_code,
         error=redact_sensitive_text(str(error), max_length=500),

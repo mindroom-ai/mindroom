@@ -20853,7 +20853,7 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 ```
 
 `event_loop_scheduler_lag_summary` is an `info` record, so keep `LOG_LEVEL` at `INFO` or lower, or raise only that logger with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO`.
-`agent_error` and `event_loop_stall_detected` are `error` records, and the other events on this page are `warning` records.
+`agent_error`, `event_loop_stall_detected`, and `event_loop_stall_ongoing` are `error` records, and the other stable events below are `warning` records.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
 ## Events
@@ -20954,7 +20954,7 @@ Reports for every entity at once usually point at the homeserver or at a saturat
 ### `matrix_event_decryption_failed`
 
 Logged when an agent cannot decrypt a new message, in a room it has joined, from a sender it may reply to.
-Every agent in the room that receives the message logs it, so count distinct `event_id` values to count messages.
+Every agent in the room that receives the message logs it, and a burst of failures in one encryption session can log fewer records than messages, so count distinct `event_id` values to approximate affected messages.
 [Troubleshooting Undecryptable Messages](https://docs.mindroom.chat/matrix/#troubleshooting-undecryptable-messages) explains the usual cause and fix.
 
 | Field | Meaning |
@@ -21026,7 +21026,7 @@ Logged when MindRoom cannot refresh the access token of a stored [OAuth connecti
 | `expires_at` | Expiry of the stored access token as a Unix timestamp, or `null` |
 
 - `refresh_rejected`: the provider rejected the refresh grant, for example because it was revoked or expired; MindRoom removes the connection, and the account must be connected again.
-- `token_endpoint_changed`: the provider's token endpoint changed since the account was connected, as [Troubleshooting OAuth Connections](https://docs.mindroom.chat/oauth-framework/#troubleshooting-oauth-connections) describes; the connection is removed too.
+- `token_endpoint_changed`: the provider's token endpoint changed since the account was connected, as [Troubleshooting OAuth Connections](https://docs.mindroom.chat/oauth-framework/#troubleshooting-oauth-connections) describes.
 - `provider_refresh_failed`: any other failure, such as a network error or a provider outage; the connection is kept, so a later refresh can succeed.
 
 A failure caused by an HTTP or network error also carries `transport_error_category`, `transport_error_type`, and, for an HTTP error, `http_status_code`.
@@ -21060,12 +21060,12 @@ Logged each time an agent's or team's reply fails and the user gets an error mes
 |-------|---------|
 | `agent` | Agent or team name |
 | `error_type` | Class name of the error that ended the reply |
-| `error` | The error's text, with credentials redacted |
+| `error` | The error's repr, with credentials redacted |
 
 These `error_type` values are stable; any other value is the class name of an unexpected error and can change:
 
-- `RateLimited`: the provider throttled the request after automatic retries.
-- `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after automatic retries.
+- `RateLimited`: the provider throttled the request, after any retries that were safe.
+- `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after any retries that were safe.
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
 - `ContextWindowExceeded`: the conversation no longer fits the model's context window.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
