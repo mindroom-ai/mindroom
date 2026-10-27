@@ -183,6 +183,7 @@ def _resolve(
     service: str | None = None,
     request: SecretRequest | None = None,
     read_only: EgressReadOnly | None = None,
+    separate_account: bool = False,
 ) -> SecretResult:
     """Resolve the token of the service named `service`, by default after its provider, for a GET unless `request`."""
     return resolve_oauth_token(
@@ -194,6 +195,7 @@ def _resolve(
         worker_target=target,
         request=request or SecretRequest(method="GET", path="/"),
         read_only=read_only,
+        separate_account=separate_account,
     )
 
 
@@ -205,11 +207,13 @@ def _status(
     *,
     provider_id: str = "github",
     service: str | None = None,
+    separate_account: bool = False,
 ) -> OAuthStatus | None:
     return oauth_status(
         provider_id,
         target,
         service=service or provider_id,
+        separate_account=separate_account,
         config=config,
         runtime_paths=runtime_paths,
         credentials_manager=manager,
@@ -368,6 +372,7 @@ def test_status_without_a_worker_target_treats_it_as_unscoped(
         "github",
         None,
         service="github",
+        separate_account=False,
         config=config,
         runtime_paths=runtime_paths,
         credentials_manager=manager,
@@ -1165,3 +1170,82 @@ def test_a_separate_account_is_stored_under_its_services_own_credential_service(
 
     assert separate.credential_service == "google_calendar__team_calendar_oauth"
     assert separate == replace(provider, credential_service="google_calendar__team_calendar_oauth")
+
+
+def _connect_own_account(manager: CredentialsManager, token: str, **fields: object) -> None:
+    """Store Alice's GitHub account of her own service `mine`, beside the connection her GitHub tools use."""
+    own = separate_account_provider(github_oauth_provider(), "mine")
+    connect_account(manager, account_store("@alice:example.org"), token, provider=own, **fields)
+
+
+@pytest.mark.usefixtures("enable_reuse")
+def test_a_separate_account_yields_only_its_own_connection(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """A service with its own account gets that account's token and never the tools' one, not even before it has one.
+
+    Without its own account there is no connect link either: the provider's link would connect the tools' account.
+    """
+    alice = _broker_target("@alice:example.org")
+    connect_account(manager, account_store("@alice:example.org"), "tools-access")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), "mine")
+
+    before = _resolve(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+    _connect_own_account(manager, "own-access")
+    own = _resolve(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+    tools = _resolve(config, runtime_paths, manager, alice, service="mine")
+
+    assert before == SecretMissing()
+    assert own == Secret("own-access")
+    assert tools == Secret("tools-access")
+
+
+@pytest.mark.usefixtures("enable_reuse")
+def test_status_of_a_separate_account_reads_its_own_connection(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+) -> None:
+    """The status, which placeholders and the agent tool read, shows the service's own account, not the tools'."""
+    alice = _broker_target("@alice:example.org")
+    claims = {"_oauth_claims_verified": True}
+    connect_account(
+        manager,
+        account_store("@alice:example.org"),
+        "tools-access",
+        _oauth_claims={"login": "tools"},
+        **claims,
+    )
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), "mine")
+
+    before = _status(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+    _connect_own_account(manager, "own-access", _oauth_claims={"login": "own"}, **claims)
+    after = _status(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+
+    assert before is not None
+    assert after is not None
+    assert (before.connected, before.account_label, before.reuse_enabled) == (False, None, True)
+    assert (after.connected, after.account_label, after.reuse_enabled) == (True, "own", True)
+
+
+@pytest.mark.usefixtures("enable_reuse")
+def test_a_refresh_outage_of_one_connection_never_holds_back_another(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh backoff follows the stored connection, so the tools' outage leaves a service's own account working."""
+    alice = _broker_target("@alice:example.org")
+    connect_account(manager, account_store("@alice:example.org"), "stale-access", expires_at=1.0)
+    _connect_own_account(manager, "own-access")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), "mine")
+    serve_token_endpoint(monkeypatch, [httpx.Response(503, json={"error": "temporarily_unavailable"})])
+
+    tools = _resolve(config, runtime_paths, manager, alice)
+    own = _resolve(config, runtime_paths, manager, alice, service="mine", separate_account=True)
+
+    assert tools == SecretUnavailable(provider="github")
+    assert own == Secret("own-access")

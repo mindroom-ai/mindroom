@@ -1504,6 +1504,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.connections",
+    "mindroom.api.egress_credentials",
     "mindroom.api.oauth",
     "mindroom.api.tools",
     "mindroom.custom_tools.atlassian",
@@ -1912,6 +1913,7 @@ depends_on = [
     "mindroom.config.egress_broker",
     "mindroom.credentials.manager",
     "mindroom.egress_broker",
+    "mindroom.oauth.credential_lifecycle",
     "mindroom.requester_identity",
 ]
 
@@ -7269,6 +7271,7 @@ expose = [
     "refresh_oauth_credentials_sync",
     "refresh_oauth_credentials_with_result",
     "reset_oauth_credentials",
+    "reset_oauth_credentials_blocking",
     "resolve_oauth_credential_context",
 ]
 from = ["mindroom.oauth.credential_lifecycle"]

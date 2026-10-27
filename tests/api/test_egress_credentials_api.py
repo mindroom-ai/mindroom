@@ -1060,7 +1060,7 @@ def test_connect_and_disconnect_mask_an_internal_oauth_error(
 ) -> None:
     """A refusal from the OAuth flow keeps its status, but the route says only its own text and never the detail."""
     portal = oauth_egress_portal
-    monkeypatch.setattr(oauth, action, AsyncMock(side_effect=HTTPException(503, "internal-client-secret")))
+    monkeypatch.setattr(oauth, f"{action}_account", AsyncMock(side_effect=HTTPException(503, "internal-client-secret")))
     response = _account_action(portal, "alice", "personal", "drive", action)
     assert response.status_code == 503
     assert response.json() == {"detail": masked}
@@ -1455,6 +1455,7 @@ def test_service_account_keeps_reporting_a_personal_connection_the_broker_still_
         worker_target=build_connection_agent_target(config, portal["paths"], "@alice:example.org", "personal"),
         request=secrets.SecretRequest(method="GET", path="/"),
         read_only=None,
+        separate_account=False,
     )
     assert isinstance(token, secrets.Secret)
 
@@ -1492,6 +1493,7 @@ def test_a_personal_connection_beside_a_service_account_stays_visible_to_allow_s
             "google_drive",
             target,
             service="drive",
+            separate_account=False,
             config=config,
             runtime_paths=portal["paths"],
             credentials_manager=get_runtime_credentials_manager(portal["paths"]),
@@ -1878,15 +1880,19 @@ def _broker_reads(
 ) -> object:
     """Return what the broker resolves for `service` in a tool call by `requester_id` on `agent`, for a `method`."""
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
+    manager = get_runtime_credentials_manager(portal["paths"])
+    target = _broker_target(portal, requester_id, agent)
+    definition = effective_config(config.egress_broker, manager, target).services[service]
     return resolve_oauth_token(
         service=service,
         provider_id=provider,
         config=config,
         runtime_paths=portal["paths"],
-        credentials_manager=get_runtime_credentials_manager(portal["paths"]),
-        worker_target=_broker_target(portal, requester_id, agent),
+        credentials_manager=manager,
+        worker_target=target,
         request=secrets.SecretRequest(method=method, path="/"),
-        read_only=config.egress_broker.services[service].read_only,
+        read_only=definition.read_only,
+        separate_account=definition.oauth_separate_account,
     )
 
 
@@ -2141,6 +2147,119 @@ def test_deleting_a_service_of_ones_own_removes_its_opt_in(oauth_egress_portal: 
 
     row = _egress_row(portal, "alice", "personal", "mygh")
     assert (row["oauth"]["connected"], row["oauth"]["reuse_enabled"], row["active_source"]) == (True, False, None)
+
+
+def _stored_connection(
+    portal: dict[str, Any],
+    requester_id: str,
+    agent: str,
+    provider: OAuthProvider,
+) -> tuple[bool, str | None]:
+    """Return whether the broker's store for a tool call by `requester_id` on `agent` holds `provider`'s connection."""
+    config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
+    context = oauth_source.broker_credential_context(
+        provider,
+        config,
+        portal["paths"],
+        get_runtime_credentials_manager(portal["paths"]),
+        _broker_target(portal, requester_id, agent),
+    )
+    return oauth_source.oauth_connection_for_display(context)
+
+
+def _put_own_account_service(portal: dict[str, Any], preset: str = "google_drive") -> None:
+    """Add Alice's service `mine` on the personal agent, with an account of its own of the preset's provider."""
+    response = _put_service(portal, "alice", "personal", "mine", {"preset": preset, "oauth_separate_account": True})
+    assert response.status_code == 204, response.text
+
+
+@pytest.mark.parametrize(
+    ("preset", "provider", "tools_service"),
+    [("google_drive", "google_drive", "drive"), ("github", "github", "gh")],
+)
+def test_connecting_a_service_with_its_own_account_stores_only_that_account(
+    oauth_egress_portal: dict[str, Any],
+    preset: str,
+    provider: str,
+    tools_service: str,
+) -> None:
+    """The service's row connects and shows its own account, and the connection the tools use stays unconnected."""
+    portal = oauth_egress_portal
+    alice = "@alice:example.org"
+    _put_own_account_service(portal, preset)
+
+    _connect_account(portal, "alice", "personal", "mine", provider)
+
+    own = oauth_source.separate_account_provider(portal["providers"][provider], "mine")
+    row = _egress_row(portal, "alice", "personal", "mine")["oauth"]
+    assert (row["connected"], row["account_label"]) == (True, "alice@example.com")
+    assert _stored_connection(portal, alice, "personal", own) == (True, "alice@example.com")
+    assert _stored_connection(portal, alice, "personal", portal["providers"][provider]) == (False, None)
+    assert _egress_row(portal, "alice", "personal", tools_service)["oauth"]["connected"] is False
+
+
+def test_disconnecting_a_service_with_its_own_account_leaves_the_tools_connection(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """Each of the two connections disconnects on its own row and leaves the other connected."""
+    portal = oauth_egress_portal
+    _put_own_account_service(portal)
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_account(portal, "alice", "personal", "mine", "google_drive")
+
+    own = _account_action(portal, "alice", "personal", "mine", "disconnect")
+    after_own = [_egress_row(portal, "alice", "personal", name)["oauth"]["connected"] for name in ("mine", "drive")]
+    _connect_account(portal, "alice", "personal", "mine", "google_drive")
+    tools = _account_action(portal, "alice", "personal", "drive", "disconnect")
+    after_tools = [_egress_row(portal, "alice", "personal", name)["oauth"]["connected"] for name in ("mine", "drive")]
+
+    assert (own.status_code, tools.status_code) == (200, 200), (own.text, tools.text)
+    assert after_own == [False, True]
+    assert after_tools == [True, False]
+
+
+def test_allowing_a_service_with_its_own_account_unlocks_only_that_account(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """The opt-in under the service's name gives the broker the service's own account, never the tools' one."""
+    portal = oauth_egress_portal
+    alice = "@alice:example.org"
+    _put_own_account_service(portal)
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+
+    allowed = _allow_reuse(portal, "alice", "personal", "mine")
+    before = _broker_reads(portal, alice, "personal", "mine", "google_drive")
+    _connect_account(portal, "alice", "personal", "mine", "google_drive")
+    after = _broker_reads(portal, alice, "personal", "mine", "google_drive")
+    row = _egress_row(portal, "alice", "personal", "mine")
+
+    assert allowed.status_code == 204, allowed.text
+    assert before == secrets.SecretMissing()
+    assert after == secrets.Secret("google_drive-access-token")
+    assert (row["oauth"]["reuse_enabled"], row["active_source"]) == (True, "oauth")
+    assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["reuse_enabled"] is False
+
+
+def test_deleting_a_service_with_its_own_account_removes_that_account_and_its_opt_in(
+    oauth_egress_portal: dict[str, Any],
+) -> None:
+    """A service saved again under the same name starts unconnected and not allowed; the tools' connection stays."""
+    portal = oauth_egress_portal
+    alice = "@alice:example.org"
+    _put_own_account_service(portal)
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_and_allow(portal, "alice", "personal", "mine", "google_drive")
+
+    deleted = _delete_service(portal, "alice", "personal", "mine")
+    own = oauth_source.separate_account_provider(portal["providers"]["google_drive"], "mine")
+    gone = _stored_connection(portal, alice, "personal", own)
+    _put_own_account_service(portal)
+
+    assert deleted.status_code == 204, deleted.text
+    assert gone == (False, None)
+    row = _egress_row(portal, "alice", "personal", "mine")
+    assert (row["oauth"]["connected"], row["oauth"]["reuse_enabled"]) == (False, False)
+    assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"])[0] is True
 
 
 @pytest.mark.parametrize("action", ["connect", "disconnect"])

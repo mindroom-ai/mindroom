@@ -125,6 +125,7 @@ class EgressCredentialsTools(Toolkit):
                 oauth_status=functools.partial(
                     oauth_status,
                     service=name,
+                    separate_account=service.oauth_separate_account,
                     config=config,
                     runtime_paths=self._runtime_paths,
                     credentials_manager=manager,

@@ -18,6 +18,7 @@ from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
 from mindroom.egress_broker.oauth_source import (
     broker_credential_context,
     oauth_connection_for_display,
+    separate_account_provider,
     shared_worker_oauth,
     shared_worker_unavailable_status,
 )
@@ -387,7 +388,7 @@ async def egress_oauth_status(
     personal connection, which the broker uses once allowed, and nothing is connectable. Any failure to read one provider's state, the worker
     backend check included, shows that service as not connectable instead of failing the page.
     """
-    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service)
+    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service, name)
     if provider is None:
         return None
     try:
@@ -471,22 +472,29 @@ async def egress_service_status(
     )
 
 
-def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None) -> OAuthProvider | None:
-    """Return the registry's provider for an egress service, or None without a service or a known provider."""
+def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None, name: str) -> OAuthProvider | None:
+    """Return the provider whose connection egress service `name` uses, or None without a service or a known provider.
+
+    That is the registry's provider, or for a service with its own account the copy that stores it.
+    """
     if service is None or service.oauth_provider is None:
         return None
-    return load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
+    provider = load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
+    if provider is None or not service.oauth_separate_account:
+        return provider
+    return separate_account_provider(provider, name)
 
 
 def oauth_provider_of_service(
     request: Request,
+    name: str,
     service: EgressService,
     worker_target: ResolvedWorkerTarget | None,
     *,
     connecting: bool,
     headers: Mapping[str, str] | None = None,
 ) -> OAuthProvider:
-    """Return the OAuth provider of an egress service for the connect and disconnect routes.
+    """Return the provider of egress service `name` (`service_oauth_provider`) for the connect and disconnect routes.
 
     A service without a provider, or whose provider the registry does not know, is a 404. A provider that the broker
     refuses for `worker_target` (a requester's account in a sandbox several requesters share, see
@@ -496,7 +504,7 @@ def oauth_provider_of_service(
     A worker backend that cannot be read is a 503 for both actions.
     """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    provider = service_oauth_provider(snapshot, service)
+    provider = service_oauth_provider(snapshot, service, name)
     if provider is None:
         raise HTTPException(404, "Service has no account connection", headers=headers)
     try:

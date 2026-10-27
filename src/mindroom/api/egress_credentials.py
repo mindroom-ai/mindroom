@@ -64,6 +64,7 @@ from mindroom.egress_broker.user_services import (
     service_source,
     user_service_hosts_not_allowed,
 )
+from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking
 from mindroom.oauth.registry import load_oauth_providers, load_oauth_providers_for_snapshot
 from mindroom.requester_identity import resolve_human_requester_alias
 
@@ -212,7 +213,8 @@ def _resolve_agent_and_service(
 
     requester_owned = False
     if requester_owned_oauth:
-        provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service)
+        snapshot = config_lifecycle.bind_current_request_snapshot(request)
+        provider = service_oauth_provider(snapshot, service, service_name)
         requester_owned = provider is not None and provider.requester_scoped_credentials
     if not agent.can_manage and not requester_owned:
         raise HTTPException(403, "Credential management is required", headers=CONNECTIONS_HEADERS)
@@ -571,7 +573,7 @@ def delete_user_service_route(
     name: str,
     requester_id: _EgressUser,
 ) -> None:
-    """Delete one of the scope's own services together with its stored key and its account's opt-in.
+    """Delete one of the scope's own services together with its stored key, its account's opt-in, and its own account.
 
     Returns 404 when the scope has no such service. A config service cannot be deleted, so its name is a 409. An
     inactive entry (see `InactiveUserService`) can still be removed: one stored under a name that a config service
@@ -583,9 +585,19 @@ def delete_user_service_route(
     operator = agent.config.egress_broker
     own = None if name in operator.services else load_user_services(agent.manager, agent.target).get(name)
     if delete_user_service(agent.manager, agent.target, name, config_services=operator.services):
-        provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), own)
+        provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), own, name)
         if provider is not None:
             _set_account_reuse(agent, provider, name, enabled=False, by=requester_id)
+            if own is not None and own.oauth_separate_account:
+                # Only this service uses its own account, so the account goes with it.
+                context = broker_credential_context(
+                    provider,
+                    agent.config,
+                    agent.runtime_paths,
+                    agent.manager,
+                    agent.target,
+                )
+                reset_oauth_credentials_blocking(context)
         return
     if name in operator.services:
         detail = f"Service '{name}' is configured by your administrator and cannot be deleted here"
@@ -620,6 +632,7 @@ async def _account_provider(
     )
     provider = oauth_provider_of_service(
         request,
+        service,
         egress_service,
         agent.target,
         connecting=connecting,
@@ -653,7 +666,12 @@ async def connect_egress_account(
     """Start the OAuth flow of a service's provider for one agent's credential scope."""
     _agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=True)
     return await masked_oauth_call(
-        oauth.connect(provider.id, request, agent_name=agent_name),
+        oauth.connect_account(
+            provider.id,
+            request,
+            agent_name=agent_name,
+            credential_service=provider.credential_service,
+        ),
         "Could not start account connection",
     )
 
@@ -669,7 +687,12 @@ async def disconnect_egress_account(
     """Reset the OAuth connection of a service's provider for one agent's credential scope; its opt-in stays."""
     _agent, _service, provider = await _account_provider(request, requester_id, agent_name, service, connecting=False)
     return await masked_oauth_call(
-        oauth.disconnect(provider.id, request, agent_name=agent_name),
+        oauth.disconnect_account(
+            provider.id,
+            request,
+            agent_name=agent_name,
+            credential_service=provider.credential_service,
+        ),
         "Could not disconnect account",
     )
 

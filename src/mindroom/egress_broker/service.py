@@ -311,6 +311,7 @@ async def _resolve_secret(
         worker_target=target,
         request=request,
         read_only=routed.read_only,
+        separate_account=routed.oauth_separate_account,
     )
     return await asyncio.get_running_loop().run_in_executor(oauth_executor, lookup)
 
@@ -532,6 +533,7 @@ def execution_env_for_worker(
         read_oauth_status = functools.partial(
             oauth_status,
             service=name,
+            separate_account=egress_service.oauth_separate_account,
             config=config,
             runtime_paths=runtime_paths,
             credentials_manager=runtime.credentials_manager,
