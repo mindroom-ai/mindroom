@@ -33,8 +33,8 @@ from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
-from mindroom.session_storage.codec import run_kind
-from mindroom.session_storage.legacy_agno2_runs import decode_json, stored_timestamp
+from mindroom.session_storage.codec import decode_json, run_kind
+from mindroom.session_storage.legacy_agno2_runs import stored_timestamp
 from mindroom.session_storage.legacy_agno3_backup import write_conversion_backup
 from mindroom.session_storage.legacy_agno3_schema import (
     AGNO_SCHEMA_VERSIONS_TABLE,
@@ -809,22 +809,29 @@ def _copy_removed(connection: sqlite3.Connection, names: AgnoTableNames) -> None
     )
 
 
-# LEGACY_COMPAT: The Agno-layout run, summary-row, and removed-run tables, and Agno's own version table.
-# Legacy format: `<s>_runs` (or `agno_runs`), `<s>_summaries`, and `<s>_removed_runs` with their indexes, and
-# `agno_schema_versions`, where Agno recorded the layout version it created each table with.
+# LEGACY_COMPAT: The Agno-layout run, summary-row, and removed-run tables.
+# Legacy format: `<s>_runs` (or `agno_runs`), `<s>_summaries`, and `<s>_removed_runs` with their indexes.
 # Last legacy release: v2026.10.569; replacement: the next release, the `<s>_log_*` tables.
 # Handling: Dropped once copied, in the conversion's transaction; the backup keeps them.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
 def _drop_agno_tables(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     for table in (names.runs, names.summaries, names.removed_runs):
         connection.execute(f"DROP TABLE {quote_identifier(table)}")
+    # LEGACY_COMPAT: Agno's own version table.
+    # Legacy format: `agno_schema_versions`, where Agno's `SqliteDb` recorded the layout version it created each table
+    # with.
+    # Last legacy release: v2026.10.498; replacement: v2026.10.499 (#3022) stopped opening stores through Agno.
+    # Handling: Dropped in the conversion's transaction when present; the backup keeps it.
+    # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.
     connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(AGNO_SCHEMA_VERSIONS_TABLE)}")
 
 
 # LEGACY_COMPAT: Sessions-table columns only Agno wrote.
 # Legacy format: `workflow_id`, `agent_data`, `team_data`, `workflow_data`, and `summary` on every Agno sessions table,
-# Agno 2's cleared `runs` blob column, and the unused `created_at` index.
-# Last legacy release: v2026.10.569; replacement: the next release, the nine columns storage v2 keeps.
+# the unused `created_at` index, and, on files Agno 2 created, its cleared `runs` blob column.
+# Last legacy release: v2026.10.569 for the five columns and the index; replacement: the next release, the nine columns
+# storage v2 keeps. The `runs` column: v2026.9.11 (agno 2.6.12); replacement: v2026.9.12 (agno 3.0.5) created
+# sessions tables without it.
 # Handling: Every column outside `SESSION_COLUMNS` is dropped, and the index, so an older release started on the
 # converted file finds its required columns missing and archives the sessions directory instead of writing into it.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_a_converted_database_holds_only_the_v2_layout.

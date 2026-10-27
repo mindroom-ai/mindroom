@@ -39,13 +39,13 @@ def create_state_storage(storage_name: str, state_root: Path) -> ConversationSto
         return ConversationStore(db_path)
 
 
-def prepare_conversation_database(path: Path, names: TableNames, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> None:
+def prepare_conversation_database(path: Path, names: TableNames) -> None:
     """Bring the database at ``path`` to the current layout before a store opens it.
 
     The connection follows no link to the file (``connect_by_name``). A database in the current layout costs one read,
     a new or empty one gets every table, and only one that holds older tables is handed to the one-way conversion.
     """
-    with ExitStack() as descriptors, closing(connect_by_name(path, timeout=timeout)) as connection:
+    with ExitStack() as descriptors, closing(connect_by_name(path)) as connection:
         if is_current_layout(connection, names):
             return
         if not table_names(connection):

@@ -34,9 +34,8 @@ from mindroom.constants import (
 from mindroom.history.types import ScopeSummary
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.llm.usage import ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
-from mindroom.session_storage.codec import RunColumns, run_columns, run_kind, run_record
+from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
 from mindroom.session_storage.lanes import run_session_storage_operation
-from mindroom.session_storage.legacy_agno2_runs import decode_json
 from mindroom.session_storage.schema import (
     NON_VISIBLE_RUN_STATUS_SQL,
     NON_VISIBLE_RUN_STATUS_VALUES,
@@ -225,15 +224,15 @@ class ConversationStore:
         self,
         connection: sqlite3.Connection,
         session_id: str,
-        kind: SessionKind | None = None,
+        kind: SessionKind,
     ) -> tuple[Any, ...] | None:
-        """Read session ``session_id``'s row, or None when it is missing or, given ``kind``, of another kind."""
+        """Read session ``session_id``'s row, or None when it is missing or of another kind."""
         row = connection.execute(
             "SELECT session_type, agent_id, team_id, session_data, metadata, created_at "  # noqa: S608
             f"FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",
             (session_id,),
         ).fetchone()
-        return None if row is None or (kind is not None and row[0] != kind) else row
+        return None if row is None or row[0] != kind else row
 
     def save_run(
         self,

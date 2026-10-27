@@ -8,6 +8,7 @@ message, and one tool row per tool execution; ``run_record`` joins them again. T
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +35,33 @@ _NOT_IN_RECORD = frozenset(
         "member_responses",
     },
 )
+
+
+# Escaped backslashes match first, so no escape starts inside one; surrogate pairs, which ``json.dumps`` writes for every
+# character beyond the Basic Multilingual Plane, match before a lone surrogate's escape.
+_SURROGATE_ESCAPES = re.compile(
+    r"\\\\|\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[dD][89a-fA-F][0-9a-fA-F]{2}",
+)
+# Text without this holds no surrogate escape, so it skips the substitution.
+_SURROGATE_ESCAPE_START = re.compile(r"\\u[dD]")
+
+
+def decode_json(text: str | bytes | bytearray) -> object:
+    """Decode JSON text worker code may have written, with each lone surrogate in it read as a replacement character.
+
+    A lone surrogate decodes to a string SQLite cannot store, so writing it would fail the conversion. Bytes that are not
+    text in their encoding read as replacement characters too.
+    """
+    if not isinstance(text, str):
+        text = bytes(text).decode(json.detect_encoding(text), "replace")
+    if _SURROGATE_ESCAPE_START.search(text):
+        text = _SURROGATE_ESCAPES.sub(_kept_or_replaced, text)
+    return json.loads(text)
+
+
+def _kept_or_replaced(match: re.Match[str]) -> str:
+    """Keep an escaped backslash or a surrogate pair, and replace a lone surrogate's escape."""
+    return "\\ufffd" if len(match.group()) == len("\\ud800") else match.group()
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +142,7 @@ def run_kind(run: AnyRunRecord) -> SessionKind:
 
 __all__ = [
     "RunColumns",
+    "decode_json",
     "run_columns",
     "run_kind",
     "run_record",

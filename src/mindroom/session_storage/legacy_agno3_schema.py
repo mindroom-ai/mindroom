@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.runs import RunRecord, TeamRunRecord
-from mindroom.session_storage.legacy_agno2_runs import decode_json
+from mindroom.session_storage.codec import decode_json
 from mindroom.session_storage.legacy_tool_results import split_combined_tool_results
 from mindroom.session_storage.schema import TableNames, index_sql
 from mindroom.usage.storage import quote_identifier, usage_table_sql

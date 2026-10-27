@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.session_storage.codec import decode_json
 from mindroom.usage.storage import quote_identifier
 
 if TYPE_CHECKING:
@@ -33,33 +33,6 @@ def decode_session_json(raw_value: object) -> object:
         raise TypeError
     decoded = decode_json(raw_value)
     return decode_json(decoded) if isinstance(decoded, str) else decoded
-
-
-# Escaped backslashes match first, so no escape starts inside one; surrogate pairs, which ``json.dumps`` writes for every
-# character beyond the Basic Multilingual Plane, match before a lone surrogate's escape.
-_SURROGATE_ESCAPES = re.compile(
-    r"\\\\|\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[dD][89a-fA-F][0-9a-fA-F]{2}",
-)
-# Text without this holds no surrogate escape, so it skips the substitution.
-_SURROGATE_ESCAPE_START = re.compile(r"\\u[dD]")
-
-
-def decode_json(text: str | bytes | bytearray) -> object:
-    """Decode JSON text worker code may have written, with each lone surrogate in it read as a replacement character.
-
-    A lone surrogate decodes to a string SQLite cannot store, so writing it would fail the conversion. Bytes that are not
-    text in their encoding read as replacement characters too.
-    """
-    if not isinstance(text, str):
-        text = bytes(text).decode(json.detect_encoding(text), "replace")
-    if _SURROGATE_ESCAPE_START.search(text):
-        text = _SURROGATE_ESCAPES.sub(_kept_or_replaced, text)
-    return json.loads(text)
-
-
-def _kept_or_replaced(match: re.Match[str]) -> str:
-    """Keep an escaped backslash or a surrogate pair, and replace a lone surrogate's escape."""
-    return "\\ufffd" if len(match.group()) == len("\\ud800") else match.group()
 
 
 # LEGACY_COMPAT: Agno 2 session history stored in JSON run blobs.
@@ -205,7 +178,6 @@ def _legacy_entries(blob: object) -> dict[str, dict[str, Any]]:
 
 
 __all__ = [
-    "decode_json",
     "decode_session_json",
     "has_blob_column",
     "insert_run_entry",

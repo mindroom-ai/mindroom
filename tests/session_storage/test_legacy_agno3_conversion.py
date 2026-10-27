@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -30,10 +30,10 @@ from mindroom.session_storage import legacy_agno3_conversion
 from mindroom.session_storage import store as store_module
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_backup import BACKUP_SUFFIX, ConversionSpaceError
-from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
+from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database, migrate_conversation_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql
 from mindroom.session_storage.schema import LOG_VERSION, SESSION_COLUMNS, TableNames, table_names
-from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.store import ConversationStore, connect_by_name
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.storage import SYSTEM_USAGE_STORAGE_NAME
 from tests.llm.agno_dict_helpers import DROPPED_RUN_KEYS, DROPPED_TOOL_EXECUTION_KEYS, expected_run_dict
@@ -43,7 +43,6 @@ from tests.storage_oracle.record import FIXTURES, GOLDEN_DUMPS, storage_name_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from contextlib import ExitStack
 
     from mindroom.llm.runs import AnyRunRecord
 
@@ -1560,8 +1559,12 @@ def test_a_write_ahead_log_another_connection_holds_stops_the_conversion(tmp_pat
     holder = sqlite3.connect(database, isolation_level=None)
     holder.execute("SELECT 1 FROM sqlite_master").fetchall()
     try:
-        with pytest.raises(RuntimeError, match=re.escape(str(database))):
-            prepare_conversation_database(database, names, timeout=0)
+        with (
+            ExitStack() as descriptors,
+            closing(connect_by_name(database, timeout=0)) as connection,
+            pytest.raises(RuntimeError, match=re.escape(str(database))),
+        ):
+            convert_conversation_database(connection, database, names, descriptors)
     finally:
         holder.close()
     assert not _is_converted(database)
