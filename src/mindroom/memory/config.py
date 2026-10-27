@@ -202,14 +202,6 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     }
 
 
-def _import_async_memory() -> type[AsyncMemory]:
-    """Import Mem0 while no extra install runs, so the import never reads a half-installed package."""
-    with optional_dependency_environment():
-        from mem0 import AsyncMemory  # noqa: PLC0415
-
-    return AsyncMemory
-
-
 @timed("system_prompt_assembly.memory_search.mem0.async_memory_from_config")
 async def create_memory_instance(
     storage_path: Path,
@@ -230,7 +222,7 @@ async def create_memory_instance(
     # Mem0 and its Chroma store install on first use, off the event loop.
     await asyncio.to_thread(ensure_optional_deps, ["mem0ai"], "mem0", runtime_paths)
     await asyncio.to_thread(ensure_optional_deps, ["chromadb"], "chromadb", runtime_paths)
-    async_memory = await asyncio.to_thread(_import_async_memory)
+    from mem0 import AsyncMemory  # noqa: PLC0415
 
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     # Create AsyncMemory instance with dictionary config directly
@@ -242,11 +234,11 @@ async def create_memory_instance(
             if config.memory.embedder.provider == "sentence_transformers":
                 ensure_sentence_transformers_dependencies(runtime_paths)
             with optional_dependency_environment():
-                return async_memory.from_config(config_dict)
+                return AsyncMemory.from_config(config_dict)
 
         memory = await asyncio.to_thread(from_config_with_local_embedder)
     else:
-        memory = async_memory.from_config(config_dict)
+        memory = AsyncMemory.from_config(config_dict)
     memory_llm = config.memory.llm
     llm_config = memory.llm.config
     if (
