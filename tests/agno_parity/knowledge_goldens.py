@@ -204,7 +204,10 @@ def golden_config(root: Path) -> tuple[Config, RuntimePaths]:
 
 
 def _normalized_rows(database: Path) -> list[dict[str, Any]]:
-    """Read every row of one collection file, checking and normalizing the values that hash per-version identity."""
+    """Read every row of one collection file, checking and normalizing the values that hash per-version identity.
+
+    The stamp is the file's ctime, which no test can set, so it is normalized like the hashes it feeds.
+    """
     with closing(sqlite3.connect(database)) as connection:
         rows = connection.execute("SELECT id, document, metadata, embedding FROM chunks").fetchall()
     normalized: list[dict[str, Any]] = []
@@ -215,6 +218,8 @@ def _normalized_rows(database: Path) -> list[dict[str, Any]]:
         assert stored["content_id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, str(stored["content_hash"])))
         stored["content_hash"] = "<sha256>"
         stored["content_id"] = "<uuid5>"
+        assert isinstance(stored["source_mtime_ns"], int), stored
+        stored["source_mtime_ns"] = "<stamp>"
         normalized.append(
             {
                 "id": "<md5>",
