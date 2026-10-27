@@ -593,7 +593,7 @@ describe("the editor form", () => {
     });
   });
 
-  it("names the preset's login by its display name, and the header once beside its own account", async () => {
+  it("names the preset's login by its display name, and the header instead of the overlaps beside its own account", async () => {
     const calendar = credentialService({
       name: "google_calendar",
       display_name: "Google Calendar",
@@ -618,6 +618,7 @@ describe("the editor form", () => {
     const instead =
       "Users can connect an account (Google Calendar) instead of an API key.";
     expect(screen.getByText(instead)).toBeVisible();
+    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
     // Its own account is all it uses, so there is no key to connect one instead of.
     fireEvent.click(
       screen.getByLabelText(
@@ -625,10 +626,13 @@ describe("the editor form", () => {
       ),
     );
     expect(screen.queryByText(instead)).toBeNull();
-    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
+    // A request picks it by the header, so one note replaces the warnings.
+    expect(screen.queryByText(/already sends a key/)).toBeNull();
     expect(
-      screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
-    ).toHaveLength(1);
+      screen.getByText(
+        "Requests choose this service with X-Agent-Keys-Service: team_calendar; without the header the usual routing order applies.",
+      ),
+    ).toBeVisible();
   });
 
   it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {

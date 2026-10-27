@@ -397,6 +397,11 @@ export function EgressServiceEditor({
   const overlaps = limiting
     ? []
     : overlapWarnings(form, preset, agentServices, name);
+  // A request picks a service with its own account by its header, so one note stands in for the warnings.
+  const headerNote =
+    form.separateAccount && overlaps.length > 0
+      ? `Requests choose this service with X-Agent-Keys-Service: ${form.name || "<name>"}; without the header the usual routing order applies.`
+      : null;
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -572,11 +577,17 @@ export function EgressServiceEditor({
               <RuleSendFields {...ruleEditing(0, primaryRule)} />
             </div>
           )}
-          {overlaps.map((warning) => (
-            <p key={warning} role="status" className={warningClass}>
-              {warning}
+          {headerNote ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              {headerNote}
             </p>
-          ))}
+          ) : (
+            overlaps.map((warning) => (
+              <p key={warning} role="status" className={warningClass}>
+                {warning}
+              </p>
+            ))
+          )}
         </>
       )}
       <Field
