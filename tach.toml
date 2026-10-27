@@ -9517,6 +9517,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.history.conversation_text",
     "mindroom.history.session_runs",
+    "mindroom.knowledge.search",
     "mindroom.knowledge_graph.store",
     "mindroom.redaction",
 ]
@@ -9558,6 +9559,8 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.custom_tools.knowledge_graph"
 depends_on = [
+    "mindroom.knowledge.read_protocol",
+    "mindroom.knowledge.search",
     "mindroom.knowledge_graph.scope",
     "mindroom.knowledge_graph.store",
     "mindroom.logging_config",

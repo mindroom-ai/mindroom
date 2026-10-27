@@ -58,7 +58,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](scheduling.md#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, `search_knowledge_base` results, which hold graph facts too, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -105,6 +105,7 @@ graph_entity("Project Atlas")
 ```
 
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
+A graph-enabled agent's `search_knowledge_base` also returns matching graph facts, labelled `knowledge_graph`, beside its knowledge-base results, so the agent has that tool even without knowledge bases.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.

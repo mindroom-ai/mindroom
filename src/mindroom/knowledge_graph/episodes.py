@@ -21,6 +21,7 @@ from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
 from mindroom.history.session_runs import DELEGATION_SESSION_PREFIX, run_key
+from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
@@ -37,8 +38,9 @@ type Progress = tuple[int, str, int]
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
 
-# The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
-_GRAPH_FUNCTIONS = ("search_graph", "graph_entity", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS)
+# The knowledge_graph tool's functions, and the knowledge search, which returns a graph-enabled agent's graph facts
+# beside its documents; their results came from the graph, so they are never evidence for it.
+_GRAPH_FUNCTIONS = ("search_graph", "graph_entity", KNOWLEDGE_SEARCH_TOOL_NAME, *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS)
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.

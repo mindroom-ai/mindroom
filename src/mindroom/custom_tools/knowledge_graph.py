@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
 
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_store
 from mindroom.logging_config import get_logger
@@ -23,6 +26,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_LIMIT = 50
+_KNOWLEDGE_SOURCE_ID = "knowledge_graph"
+_KNOWLEDGE_SOURCE_DESCRIPTION = (
+    "Facts about people, projects, documents, and events that your conversations and tools revealed, "
+    "with when each held and its sources."
+)
 
 
 def _date(value: datetime | None) -> str:
@@ -39,6 +47,42 @@ def _render_fact(fact: GraphFact, *, with_id: bool = False) -> str:
         sources = f"{sources}; and {earlier} earlier"
     fact_id = f"\n  id: {fact.uuid}" if with_id else ""
     return f"- {fact.fact}{fact_id}\n  {validity}\n  sources: {sources}"
+
+
+@dataclass(frozen=True)
+class _GraphFactIndex:
+    """The caller's own graph as an index ``search_knowledge_base`` searches, whose hits are facts."""
+
+    agent_name: str
+    config: Config
+    runtime_paths: RuntimePaths
+    execution_identity: ToolExecutionIdentity | None
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        store = knowledge_graph_store()
+        if store is None:
+            msg = "The knowledge graph is not running"
+            raise RuntimeError(msg)
+        scope = graph_scope(self.agent_name, self.config, self.runtime_paths, self.execution_identity)
+        facts = await store.search_facts(scope, query, limit)
+        return [SearchHit(content=_render_fact(fact), meta_data={"source": _KNOWLEDGE_SOURCE_ID}) for fact in facts]
+
+
+def with_knowledge_graph(
+    knowledge: AgentKnowledge | None,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+) -> AgentKnowledge:
+    """Return ``knowledge`` with the caller's graph as one more source, so a knowledge search also finds its facts."""
+    graph = KnowledgeSource(
+        description=KnowledgeSourceDescription(base_id=_KNOWLEDGE_SOURCE_ID, description=_KNOWLEDGE_SOURCE_DESCRIPTION),
+        index=_GraphFactIndex(agent_name, config, runtime_paths, execution_identity),
+    )
+    if knowledge is None:
+        return AgentKnowledge(sources=(graph,))
+    return replace(knowledge, sources=(*knowledge.sources, graph))
 
 
 class KnowledgeGraphTools(Toolkit):

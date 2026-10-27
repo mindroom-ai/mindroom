@@ -1958,6 +1958,12 @@ def create_agent(
         )
     )
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
+    # The graph is one more source of the knowledge search, which agents call far more than search_graph.
+    # A persona that names its knowledge bases searches only those, as it skips file memory.
+    if config.agent_uses_knowledge_graph(agent_name) and (persona is None or persona.kept_knowledge is None):
+        from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415
+
+        knowledge = with_knowledge_graph(knowledge, agent_name, config, runtime_paths, execution_identity)
     enabled_knowledge = (
         knowledge
         if not disable_runtime_capabilities

@@ -302,6 +302,21 @@ def test_automation_thread_renders_nothing() -> None:
             ],
             id="shell-edit",
         ),
+        # A graph-enabled agent's knowledge search returns graph facts beside its documents, directly or through a shell.
+        pytest.param(
+            [_tool("search_knowledge_base", '[{"meta_data": {"source": "knowledge_graph"}}]', query="Atlas owner")],
+            id="knowledge-search",
+        ),
+        pytest.param(
+            [
+                _tool(
+                    "bash",
+                    "- Alice leads Project Atlas",
+                    command="mindroom-agent tools call search_knowledge_base --json '{}'",
+                ),
+            ],
+            id="shell-knowledge-search",
+        ),
         # `think` and `analyze` return the model's own thoughts, not anything a tool observed.
         pytest.param([_tool("think", "Maybe Bob owns Atlas", thought="Maybe Bob owns Atlas")], id="reasoning"),
         # A subagent's answer is another model's prose; its own tool results come in through its own session.
