@@ -34,6 +34,7 @@ export const personal: EditorOptions = {
   sharedTarget: false,
   presets,
   validation,
+  providers: egressPresets.oauth_providers,
 };
 export const sharedPersonal: EditorOptions = {
   ...personal,

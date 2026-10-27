@@ -201,6 +201,7 @@ export function EgressServiceEditor({
     sharedTarget,
     presets,
     validation,
+    providers,
   };
   // Checked against the names the editor opened with: a save that is still
   // running may already have written this name into the page's own list.

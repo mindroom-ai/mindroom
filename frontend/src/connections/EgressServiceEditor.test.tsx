@@ -593,10 +593,11 @@ describe("the editor form", () => {
     });
   });
 
-  it("offers no own account on a shared agent or on the dashboard", async () => {
+  it("offers no own account on a shared agent, on the dashboard, or for an account each user has", async () => {
     for (const props of [
       { sharedTarget: true },
       { context: "operator" as const },
+      { service: { preset: "github" } },
     ]) {
       await renderEditor({
         service: { preset: "google_calendar" },

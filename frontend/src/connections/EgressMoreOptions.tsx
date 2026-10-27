@@ -326,7 +326,11 @@ export function MoreOptions({
 
       {loginField}
 
-      {offersSeparateAccount(form, { context, sharedTarget }, preset) && (
+      {offersSeparateAccount(
+        form,
+        { context, sharedTarget, providers },
+        preset,
+      ) && (
         <div className="space-y-1">
           <label className="flex items-start gap-2 text-sm">
             <input

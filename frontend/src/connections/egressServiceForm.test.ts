@@ -28,6 +28,22 @@ import { githubRepositoryRules } from "./githubRepositoryRules";
 import type { AuthoredEgressService, EgressRule } from "./types";
 
 describe("serializing a service", () => {
+  it("keeps its own account only for a login whose accounts are not each user's", () => {
+    expect(
+      serialize({ preset: "google_calendar", oauth_separate_account: true }),
+    ).toEqual({ preset: "google_calendar", oauth_separate_account: true });
+    expect(
+      serialize({ preset: "github", oauth_separate_account: true }),
+    ).toEqual({ preset: "github" });
+    expect(
+      serialize({
+        rules: [bearerRule],
+        oauth_provider: "atlassian",
+        oauth_separate_account: true,
+      }),
+    ).not.toHaveProperty("oauth_separate_account");
+  });
+
   it("writes a custom service with only the fields that matter", () => {
     expect(
       serialize({

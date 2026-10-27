@@ -3632,9 +3632,13 @@ def test_presets_are_served_as_the_config_model_expands_them(egress_portal: dict
     assert "x-access-token" not in response.text
     # The account login select offers the registry's providers, the ones a saved service is checked against.
     providers = response.json()["oauth_providers"]
-    assert {"id": "github", "display_name": "GitHub"} in providers
+    assert {"id": "github", "display_name": "GitHub", "requester_scoped": True} in providers
     assert {"google_drive", "google_gmail", "atlassian"} <= {provider["id"] for provider in providers}
-    assert all(set(provider) == {"id", "display_name"} for provider in providers)
+    assert all(set(provider) == {"id", "display_name", "requester_scoped"} for provider in providers)
+    # Their accounts belong to each user, so the editor offers no own account for them.
+    scoped = {provider["id"] for provider in providers if provider["requester_scoped"]}
+    assert {"github", "atlassian"} <= scoped
+    assert "google_drive" not in scoped
 
 
 def test_presets_serve_the_user_service_validation_the_server_enforces(egress_portal: dict[str, Any]) -> None:

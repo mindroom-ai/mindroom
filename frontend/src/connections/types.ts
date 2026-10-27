@@ -256,6 +256,8 @@ export interface EgressPreset {
 export interface EgressOAuthProviderOption {
   id: string;
   display_name: string;
+  /** Its accounts belong to each user (GitHub, Atlassian), so a service cannot have one of its own. */
+  requester_scoped: boolean;
 }
 
 /** The rules for the variables a service may set in the sandbox, as the server enforces them. */

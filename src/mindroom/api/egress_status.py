@@ -192,10 +192,11 @@ class EgressPresetResponse(BaseModel):
 
 
 class EgressOAuthProviderOption(BaseModel):
-    """One OAuth provider a service's account login can name."""
+    """One OAuth provider a service's account login can name; `requester_scoped` accounts belong to each user."""
 
     id: str
     display_name: str
+    requester_scoped: bool
 
 
 class PlaceholderValidation(BaseModel):
@@ -278,7 +279,11 @@ def presets_response(oauth_providers: Mapping[str, OAuthProvider]) -> PresetsRes
             ),
         )
     providers = [
-        EgressOAuthProviderOption(id=provider_id, display_name=provider.display_name)
+        EgressOAuthProviderOption(
+            id=provider_id,
+            display_name=provider.display_name,
+            requester_scoped=provider.requester_scoped_credentials,
+        )
         for provider_id, provider in oauth_providers.items()
     ]
     return PresetsResponse(presets=presets, oauth_providers=providers, validation=_egress_validation())

@@ -2,6 +2,7 @@ import { hasCustomTemplate } from "./egressRuleAuth";
 import type {
   AuthoredEgressService,
   EgressAuth,
+  EgressOAuthProviderOption,
   EgressRuleAuthType,
   EgressValidation,
   EgressPreset,
@@ -30,6 +31,8 @@ export interface EditorOptions {
    * in which case the checks that need it are left to the server.
    */
   validation: EgressValidation | null;
+  /** The account logins the server offers, from the presets response; empty while it loads. */
+  providers: readonly EgressOAuthProviderOption[];
 }
 
 export const BROKERED_PLACEHOLDER = "mindroom-brokered";
@@ -281,16 +284,28 @@ export function serializeService(
   return authored;
 }
 
-/** Whether the form is a personal agent's own service with an account login, which may have an account of its own. */
+/**
+ * Whether the form is a personal agent's own service with an account login, which may have an account of its own.
+ * A login whose accounts belong to each user (GitHub, Atlassian) cannot.
+ */
 export function offersSeparateAccount(
   form: EgressServiceForm,
-  { context, sharedTarget }: Pick<EditorOptions, "context" | "sharedTarget">,
+  {
+    context,
+    sharedTarget,
+    providers,
+  }: Pick<EditorOptions, "context" | "sharedTarget" | "providers">,
   preset: EgressPreset | undefined,
 ): boolean {
   if (context !== "personal" || sharedTarget) return false;
-  return form.preset === ""
-    ? form.oauthProvider.trim() !== ""
-    : preset?.oauth_provider != null;
+  const login =
+    form.preset === "" ? form.oauthProvider.trim() : preset?.oauth_provider;
+  return (
+    !!login &&
+    !providers.some(
+      (provider) => provider.id === login && provider.requester_scoped,
+    )
+  );
 }
 
 /** Whether a preset carries an account login. */

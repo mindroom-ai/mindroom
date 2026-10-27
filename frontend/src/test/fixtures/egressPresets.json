@@ -2,35 +2,43 @@
   "oauth_providers": [
     {
       "display_name": "GitHub",
-      "id": "github"
+      "id": "github",
+      "requester_scoped": true
     },
     {
       "display_name": "Google Drive",
-      "id": "google_drive"
+      "id": "google_drive",
+      "requester_scoped": false
     },
     {
       "display_name": "Gmail",
-      "id": "google_gmail"
+      "id": "google_gmail",
+      "requester_scoped": false
     },
     {
       "display_name": "Google Calendar",
-      "id": "google_calendar"
+      "id": "google_calendar",
+      "requester_scoped": false
     },
     {
       "display_name": "Google Sheets",
-      "id": "google_sheets"
+      "id": "google_sheets",
+      "requester_scoped": false
     },
     {
       "display_name": "Google Docs",
-      "id": "google_docs"
+      "id": "google_docs",
+      "requester_scoped": false
     },
     {
       "display_name": "Google Tasks",
-      "id": "google_tasks"
+      "id": "google_tasks",
+      "requester_scoped": false
     },
     {
       "display_name": "Atlassian",
-      "id": "atlassian"
+      "id": "atlassian",
+      "requester_scoped": true
     }
   ],
   "presets": [
