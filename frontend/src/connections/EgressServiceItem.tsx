@@ -150,7 +150,9 @@ export function EgressServiceItem({
   const oauth = service.oauth;
   // Rows with an account keep the key behind a toggle until a key is set.
   const showKeyControls = !oauth || service.key_configured || editing;
-  const canManageKey = service.can_manage && !hideKeyActions;
+  // A service with its own account uses only that account, so it takes no key.
+  const canManageKey =
+    service.can_manage && !hideKeyActions && !service.separate_account;
   const keyInsteadLabel = oauth?.connected
     ? "Use an API key instead of the account"
     : "Use an API key instead";

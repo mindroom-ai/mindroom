@@ -589,6 +589,31 @@ describe("connected accounts", () => {
     await expectNoAction(/Use an API key instead/);
   });
 
+  it("offers no key on a service with its own account, which uses only that account", async () => {
+    const own = { separate_account: true };
+    renderRows([withAccount({}, own)]);
+    expect(
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
+    ).toBeEnabled();
+    await expectNoAction(/Use an API key instead/);
+    cleanup();
+    // Not even as the main action where its account cannot be connected.
+    renderRows([withAccount({ can_connect: false }, own)]);
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
+    await expectNoAction(/Use an API key instead/);
+    cleanup();
+    renderRows([
+      withAccount(
+        { connected: true, account_label: "octocat" },
+        { ...own, configured: true, active_source: "oauth" },
+      ),
+    ]);
+    await expectNoAction(/Use an API key instead/);
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
+  });
+
   it("lets a user without key rights connect a requester-scoped account", async () => {
     renderRows([withAccount({}, { is_shared: true, can_manage: false })], {
       agentName: "shared_dev",
@@ -2337,6 +2362,32 @@ describe("what a row says about how the key is sent", () => {
     renderRows([
       custom([rule("api.github.com", "bearer")], {
         oauth: { ...githubAccount, ...account },
+      }),
+    ]);
+    expect(within(row("httpbin.org")).getByText(note)).toBeVisible();
+  });
+
+  it.each<[string, Partial<EgressOAuthStatus>, string]>([
+    [
+      "its own account to connect",
+      {},
+      "Requests are refused until its own account is connected.",
+    ],
+    [
+      "its own account, connected but not used yet",
+      toolsOnly,
+      "Requests are refused until this account is used for Agent Keys.",
+    ],
+    [
+      "its own account that cannot be connected here",
+      { can_connect: false },
+      "Requests are refused until its own account is connected.",
+    ],
+  ])("never names a key for a service with %s", (_, account, note) => {
+    renderRows([
+      custom([rule("api.github.com", "bearer")], {
+        oauth: { ...githubAccount, ...account },
+        separate_account: true,
       }),
     ]);
     expect(within(row("httpbin.org")).getByText(note)).toBeVisible();
