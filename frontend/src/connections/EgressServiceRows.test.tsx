@@ -886,6 +886,16 @@ describe("connected accounts", () => {
       );
     });
 
+    it("says what allowing a service's own account does, without covering other agents", async () => {
+      renderRows([{ ...toolsOnly, separate_account: true }]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Use account for GitHub" }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveTextContent(approvalBypass);
+      expect(dialog).not.toHaveTextContent("This covers");
+    });
+
     it("says a service's own account is not used yet, never that the tools use it", () => {
       renderRows([{ ...toolsOnly, separate_account: true }]);
       expect(
