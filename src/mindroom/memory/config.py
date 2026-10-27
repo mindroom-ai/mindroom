@@ -142,15 +142,6 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
-def memory_llm_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
-    """Return the Ollama server an ``ollama`` memory LLM, or the default one used without ``memory.llm``, reaches.
-
-    A configured ``OLLAMA_HOST`` beats ``memory.llm.config.host``, which beats the local default.
-    """
-    host = config.memory.llm.config.get("host") if config.memory.llm is not None else None
-    return get_ollama_host(runtime_paths=runtime_paths) or host or OLLAMA_HOST_DEFAULT
-
-
 def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Build the Mem0 LLM config from ``memory.llm``, defaulting to local Ollama."""
     memory_llm = config.memory.llm
@@ -160,17 +151,22 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
             "provider": "ollama",
             "config": {
                 "model": MEMORY_OLLAMA_LLM,
-                "ollama_base_url": memory_llm_ollama_host(config, runtime_paths),
+                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
                 "temperature": 0.1,
                 "top_p": 1,
             },
         }
 
     llm_provider = memory_llm.provider
-    # ``host`` is MindRoom's name for the Ollama server, which no Mem0 LLM config takes.
-    llm_provider_config = {key: value for key, value in memory_llm.config.items() if key != "host"}
-    if llm_provider == "ollama":
-        llm_provider_config["ollama_base_url"] = memory_llm_ollama_host(config, runtime_paths)
+    llm_provider_config: dict[str, Any] = {}
+    # Copy config but handle provider-specific field names
+    for key, value in memory_llm.config.items():
+        if key == "host" and llm_provider == "ollama":
+            llm_provider_config["ollama_base_url"] = (
+                get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
+            )
+        elif key != "host":  # Skip host for other fields
+            llm_provider_config[key] = value
 
     if llm_provider in {"openai", "anthropic", "openrouter"} and not llm_provider_config.get("api_key"):
         api_key = get_api_key_for_provider(llm_provider, runtime_paths=runtime_paths)

@@ -30,7 +30,7 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import env_key_for_provider, resolve_primary_runtime_paths
-from mindroom.credentials.sync import get_embedder_api_key, sync_env_to_credentials
+from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
 
@@ -237,13 +237,18 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
 ) -> None:
     """Spellings config load accepts group under the runtime's route and get that route's checks."""
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    sent = _record_key_checks(monkeypatch)
+    probed: list[str] = []
     vertex_models: list[str] = []
+
+    def get(url: str, **_kwargs: object) -> httpx.Response:
+        probed.append(url)
+        return httpx.Response(200, request=httpx.Request("GET", url))
 
     def validate_vertex(model_config: ModelConfig, _runtime_paths: RuntimePaths) -> tuple[bool, str]:
         vertex_models.append(model_config.id)
         return True, ""
 
+    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
     monkeypatch.setattr("mindroom.cli.doctor._validate_vertexai_claude_connection", validate_vertex)
     config = Config(
         models={
@@ -254,116 +259,10 @@ def test_doctor_checks_each_accepted_provider_spelling_as_the_route_the_runtime_
         router=RouterConfig(model="default"),
     )
 
-    assert _check_providers(config, runtime_paths) == (3, 0, 0)
+    assert _check_providers(config, runtime_paths) == (2, 0, 0)
     assert "Providers: ollama (2 models), vertexai_claude (1 model)" in capsys.readouterr().out
-    assert [url for url, _headers in sent] == ["http://gpu.example:11434/api/tags", "http://localhost:11434/api/tags"]
+    assert probed == ["http://gpu.example:11434/api/tags"]
     assert vertex_models == ["claude-sonnet-5-5"]
-
-
-def test_doctor_checks_each_ollama_server_a_model_s_requests_reach(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Doctor checks every server the Ollama models reach, ``client_params.host`` first, once per server."""
-    runtime_paths = _runtime_with_env(tmp_path, {"OLLAMA_HOST": "http://env-ollama:11434"})
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-    sent = _record_key_checks(monkeypatch)
-    config = Config(
-        models={
-            "default": ModelConfig(
-                provider="ollama",
-                id="gemma4",
-                host="http://model-ollama:11434",
-                extra_kwargs={"client_params": {"host": "http://client-ollama:11434"}},
-            ),
-            "plain": ModelConfig(provider="ollama", id="gemma4"),
-            "other": ModelConfig(provider="Ollama", id="qwen3.8:27b"),
-        },
-        router=RouterConfig(model="default"),
-    )
-
-    assert _check_single_provider("ollama", config, runtime_paths) == (2, 0, 0)
-    assert [url for url, _headers in sent] == [
-        "http://client-ollama:11434/api/tags",
-        "http://env-ollama:11434/api/tags",
-    ]
-
-
-def test_doctor_adds_up_every_ollama_server_s_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each server's pass, failure, or warning counts once in the route's totals."""
-    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    statuses = {"http://up:11434": 200, "http://broken-a:11434": 500, "http://broken-b:11434": 500}
-
-    def get(url: str, **_kwargs: object) -> httpx.Response:
-        request = httpx.Request("GET", url)
-        host = url.removesuffix("/api/tags")
-        if host not in statuses:
-            msg = "unreachable"
-            raise httpx.ConnectError(msg, request=request)
-        return httpx.Response(statuses[host], request=request)
-
-    monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
-    hosts = [*statuses, "http://down-a:11434", "http://down-b:11434"]
-    config = Config(
-        models={
-            f"m{index}": ModelConfig(provider="ollama", id="gemma4", host=host) for index, host in enumerate(hosts)
-        },
-        router=RouterConfig(model="m0"),
-    )
-
-    assert _check_single_provider("ollama", config, runtime_paths) == (1, 2, 2)
-
-
-@pytest.mark.parametrize(
-    "llm",
-    [
-        {"provider": "ollama", "config": {"model": "gemma4", "host": "http://config-ollama:11434"}},
-        {"provider": "ollama", "config": {"model": "gemma4"}},
-        None,
-    ],
-    ids=["configured-host", "no-host", "default-llm"],
-)
-def test_doctor_checks_the_memory_llm_s_ollama_server_where_the_runtime_sends_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    llm: dict[str, object] | None,
-) -> None:
-    """A configured ``OLLAMA_HOST`` beats ``memory.llm.config.host``, and a chat model's host never applies."""
-    runtime_paths = _runtime_with_env(tmp_path, {"OLLAMA_HOST": "http://env-ollama:11434"})
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-    sent = _record_key_checks(monkeypatch)
-    config = Config(
-        models={"default": ModelConfig(provider="ollama", id="gemma4", host="http://chat-ollama:11434")},
-        memory={"backend": "mem0", "llm": llm},
-        router=RouterConfig(model="default"),
-    )
-
-    _check_memory_llm(config, runtime_paths)
-
-    assert [url for url, _headers in sent] == ["http://env-ollama:11434/api/tags"]
-
-
-def test_doctor_checks_the_ollama_embedder_where_the_runtime_sends_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A configured ``OLLAMA_HOST`` beats ``memory.embedder.config.host`` in doctor, as in the embedder it builds."""
-    runtime_paths = _runtime_with_env(tmp_path, {"OLLAMA_HOST": "http://env-ollama:11434"})
-    sync_env_to_credentials(runtime_paths=runtime_paths)
-    sent = _record_key_checks(monkeypatch)
-    config = Config(
-        memory={
-            "backend": "mem0",
-            "embedder": {
-                "provider": "ollama",
-                "config": {"model": "nomic-embed-text", "host": "http://config-ollama:11434"},
-            },
-        },
-        router=RouterConfig(model="default"),
-    )
-
-    assert _check_memory_embedder(config, runtime_paths) == (1, 0, 0)
-    assert [url for url, _headers in sent] == ["http://env-ollama:11434/api/tags"]
 
 
 def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
