@@ -687,6 +687,20 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_beta_authored_in_request_params_stays_beside_the_thinking_binding_beta(tmp_path: Path) -> None:
+    """A beta an operator writes into ``request_params`` is still sent when MindRoom adds the binding beta."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        extra_kwargs={"request_params": {"betas": ["authored-beta-2026-01-01"]}},
+    )
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    assert wire.requests[0].headers["anthropic-beta"] == f"authored-beta-2026-01-01,{_THINKING_BINDING_BETA}"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("route", "bound"),
     [("anthropic", True), ("vertexai_claude", True), ("bedrock_claude", False)],

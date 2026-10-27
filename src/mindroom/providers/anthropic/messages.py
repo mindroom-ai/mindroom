@@ -419,7 +419,8 @@ class ClaudeProvider:
         params = self._with_thinking_binding(self._with_sampling_in_extra_body(self._authored_params(request)), request)
         extra_body = params.get("extra_body") or {}
         compaction_edit = uses_compaction_edit(extra_body.get("context_management", params.get("context_management")))
-        betas = list(self.settings.betas or [])
+        # Betas authored in ``request_params`` stay beside the ones MindRoom adds.
+        betas = [*(params.get("betas") or []), *(self.settings.betas or [])]
         if output_format is not None or (strict_tools and self.route == "anthropic"):
             betas.append(_STRUCTURED_OUTPUTS_BETA)
         if request.native_compaction is not None or compaction_edit:
