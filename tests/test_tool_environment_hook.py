@@ -308,7 +308,7 @@ async def test_database_url_variables_reach_the_command_wherever_it_runs(shell: 
 
 def _broker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy, "egress_broker_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr(sandbox_proxy, "egress_agent_scope", lambda _config, agent_name: agent_name)
+    monkeypatch.setattr(sandbox_proxy, "egress_agent_scope", lambda _config, agent_name, _runtime_paths: agent_name)
     monkeypatch.setattr(egress_service, "execution_env_for_worker", lambda *_args, **_kwargs: {"HTTPS_PROXY": "egress"})
 
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.agents import resolve_runtime_worker_tools
+from mindroom.constants import EXECUTION_ENV_TOOL_NAMES
+from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
@@ -24,6 +26,7 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
     """Log every risky-but-allowed choice in one loaded config."""
     warn_about_foreign_homeserver_authorities(config, runtime_paths)
     _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config, runtime_paths)
+    _warn_about_agent_keys_without_worker_commands(config, runtime_paths)
 
 
 def _primary_tool_is_unconfined(tool_name: str, file_access: str) -> bool:
@@ -66,4 +69,25 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
                 agent=agent_name,
                 worker_code_tools=worker_code_tools,
                 unconfined_primary_tools=unconfined_primary_tools,
+            )
+
+
+def _warn_about_agent_keys_without_worker_commands(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Log one warning per agent that lists `egress_credentials` while its shell and python run in the primary.
+
+    The broker only reaches worker-routed calls, so such an agent is left off the Agent Keys pages.
+    """
+    if not egress_broker_enabled(runtime_paths):
+        return
+    for agent_name in config.agents:
+        tools = config.resolve_entity(agent_name).available_tools
+        if (
+            "egress_credentials" in tools
+            and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(tools)
+            and egress_agent_scope(config, agent_name, runtime_paths) is None
+        ):
+            logger.warning(
+                "Agent lists the egress_credentials tool, but its shell and python run in the primary process, "
+                "so Agent Keys never applies to them",
+                agent=agent_name,
             )

@@ -5503,6 +5503,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials.policy",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.bootstrap",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
     "mindroom.origins",

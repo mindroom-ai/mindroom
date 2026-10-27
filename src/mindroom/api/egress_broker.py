@@ -255,7 +255,11 @@ async def get_services(
 
     services = await _load_service_statuses_for_target(request, target)
     config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
-    scopes = {name: egress_agent_scope(config, name) for name in config.agents} if config is not None else {}
+    scopes = (
+        {name: egress_agent_scope(config, name, target.runtime_paths) for name in config.agents}
+        if config is not None
+        else {}
+    )
     return ServicesResponse(
         services=services,
         shared_agents=[name for name, scope in scopes.items() if scope == "shared"],

@@ -102,6 +102,10 @@ def _signed_headers(key: Any, name: str) -> dict[str, str]:  # noqa: ANN401
     }
 
 
+# A static runner's URL; without one, shell and python calls run in the primary and no agent uses the broker.
+_RUNNER_URL = "http://sandbox-runner.test"
+
+
 @pytest.fixture
 def egress_portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API with signed users and agents that use Agent Keys (shell or python and `egress_credentials`)."""
@@ -1294,7 +1298,7 @@ def test_requester_scoped_provider_on_a_personal_agent_is_unavailable_on_the_sta
     _connect_and_allow(portal, "bob", "personal", "gh", "github")
     assert _egress_row(portal, "bob", "personal", "gh")["oauth"]["connected"] is True
 
-    _restart_with_env(portal, MINDROOM_WORKER_BACKEND="static_runner")
+    _restart_with_env(portal, MINDROOM_WORKER_BACKEND="static_runner", MINDROOM_SANDBOX_PROXY_URL=_RUNNER_URL)
 
     row = _egress_row(portal, "bob", "personal", "gh")
     assert row["oauth"]["unavailable_reason"] == "shared_sandbox"
@@ -1851,7 +1855,7 @@ def _broker_target(portal: dict[str, Any], requester_id: str, agent: str) -> Res
     It is built from the agent's worker scope and a tool call's identity, independently of the API's own target.
     """
     config = Config.model_validate(portal["payload"], context={"runtime_paths": portal["paths"]})
-    scope = egress_agent_scope(config, agent)
+    scope = egress_agent_scope(config, agent, portal["paths"])
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name=agent,
@@ -2444,7 +2448,7 @@ def test_connect_and_disconnect_are_refused_on_the_static_runner_until_the_servi
 ) -> None:
     """A personal agent shares its sandbox on the static runner, so its requester-scoped account is refused there."""
     portal = oauth_egress_portal
-    _restart_with_env(portal, MINDROOM_WORKER_BACKEND="static_runner")
+    _restart_with_env(portal, MINDROOM_WORKER_BACKEND="static_runner", MINDROOM_SANDBOX_PROXY_URL=_RUNNER_URL)
 
     refused = _account_action(portal, "alice", "personal", "gh", action)
     assert refused.status_code == 409, refused.text

@@ -254,7 +254,8 @@ def _client_with_agents(
     config_data["agents"] = agents
     config_data["defaults"].update(defaults)
     egress_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    return _admin_client(egress_config_file)
+    # A sandbox runner, so the agents' shell and python calls run in a worker, where the broker reaches them.
+    return _admin_client(egress_config_file, MINDROOM_SANDBOX_PROXY_URL="http://sandbox-runner.test")
 
 
 def _agent(tools: list[str], **extra: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -277,7 +278,8 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
     """The listing names the shared agents that reach the broker by their resolved tools, a preset's included.
 
     Agents whose keys belong to each requester (`user`, `user_agent`, private) are left out, and so is an agent
-    without a command tool or without the `egress_credentials` tool. Every scope the panel selects gets the same answer.
+    without a command tool, without the `egress_credentials` tool, or whose command tools run in the primary.
+    Every scope the panel selects gets the same answer.
     """
     client = _client_with_agents(
         egress_config_file,
@@ -290,6 +292,7 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
             "mine": _keys_agent(["shell"], private={"per": "user_agent"}),
             "notes": _keys_agent(["calculator"]),
             "coder": _agent(["shell"]),
+            "host_shell": _keys_agent(["shell"], worker_scope="shared", worker_tools=[]),
         },
     )
 

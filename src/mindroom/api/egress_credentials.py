@@ -140,7 +140,7 @@ def _check_agent_eligibility(
     Eligibility requires an agent that reaches the broker (`egress_agent_scope`) and permission to use it.
     Listing, portal catalog, mutations, and the request log's shared-agent rows all decide through this one rule.
     """
-    scope = egress_agent_scope(config, agent_name)
+    scope = egress_agent_scope(config, agent_name, runtime_paths)
     if scope is None:
         return None
     if not is_sender_allowed_for_responder(
@@ -382,12 +382,12 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
     user_store_agents = [
         agent.display_name
         for agent_name, agent in config.agents.items()
-        if agent_name in eligible and egress_agent_scope(config, agent_name) == "user"
+        if agent_name in eligible and egress_agent_scope(config, agent_name, runtime_paths) == "user"
     ]
 
     async def listed_agent(agent_name: str, agent: AgentConfig) -> EgressCredentialAgent | None:
         eligibility = eligible.get(agent_name)
-        scope = egress_agent_scope(config, agent_name)
+        scope = egress_agent_scope(config, agent_name, runtime_paths)
         if eligibility is None or scope is None:
             return None
         is_shared, can_manage = eligibility
@@ -824,7 +824,7 @@ def get_personal_logs(
         is_shared, can_manage = eligibility or (False, False)
         if is_shared and can_manage:
             # Rows the agent logged before it was shared were personal, so they stay with their requesters.
-            log_requester, log_scope = None, egress_agent_scope(config, agent_name)
+            log_requester, log_scope = None, egress_agent_scope(config, agent_name, snapshot.runtime_paths)
     records = audit.query(
         requester_id=log_requester,
         agent_name=agent_name or None,
