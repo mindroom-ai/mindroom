@@ -396,3 +396,10 @@ def test_authored_dump_leaves_out_created_agents(tmp_path: Path) -> None:
     assert {"creator_research", "mind_alice"} < set(config.runtime_model_dump()["agents"])
     revalidated = Config.validate_with_runtime(authored, test_runtime_paths(tmp_path))
     assert revalidated.agents == config.agents
+
+
+def test_an_edited_created_agent_stays_out_of_the_authored_dump(tmp_path: Path) -> None:
+    """An in-place edit never turns a created agent into an authored one that would shadow its roster entry."""
+    config = _load(tmp_path, created=[_created()])
+    config.agents["creator_research"].display_name = "Edited"
+    assert set(config.authored_model_dump()["agents"]) == {"creator"}

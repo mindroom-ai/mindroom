@@ -430,7 +430,6 @@ class Config(BaseModel):
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
     _personal_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
-    _tool_ceilings: dict[str, tuple[str, ...]] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
 
     egress_broker: EgressBrokerConfig = Field(
@@ -1243,8 +1242,7 @@ class Config(BaseModel):
             raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
         # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
-        pass_one = config
-        generated_data, generated = expand_generated_agents(pass_one, cast("dict[str, Any]", expansion.data), roster)
+        generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
         if generated_data is not None:
             try:
                 config = cls._validate_runtime_data(
@@ -1257,12 +1255,7 @@ class Config(BaseModel):
                 logger.warning("generated_agents_invalid", error=str(exc))
             config._personal_agent_instances = expansion.instances
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
-        config._tool_ceilings = {
-            name: tool_ceiling(pass_one, name)
-            for name, agent in pass_one.agents.items()
-            if agent.created_agents_per_owner > 0
-        } | {name: info.allowed_tools for name, info in config._generated_agents.items()}
-        # An agent edited in place stays in the authored dump, so saving the edit fails as a collision.
+        # authored_model_dump drops created agents always and personal agents while they match these dumps.
         config._personal_agent_dumps = {
             agent_name: config.agents[agent_name].model_dump(exclude_unset=True)
             for agent_name in config._generated_agents
@@ -1311,8 +1304,9 @@ class Config(BaseModel):
         agents = payload.get("agents")
         if isinstance(agents, dict):
             for agent_name, generated in self._personal_agent_dumps.items():
-                if agents.get(agent_name) == generated:
-                    del agents[agent_name]
+                # A created agent lives only in the roster; an edited personal agent stays, so saving it collides.
+                if self._generated_agents[agent_name].created or agents.get(agent_name) == generated:
+                    agents.pop(agent_name, None)
             if not agents and self._personal_agents_added_agents_section:
                 payload.pop("agents")
         return payload
@@ -1370,9 +1364,9 @@ class Config(BaseModel):
         return self._generated_agents.get(agent_name)
 
     def tool_ceiling(self, agent_name: str) -> tuple[str, ...]:
-        """Return the tools this agent's own edits, or the agents it creates, may choose from; pass one's when stored."""
-        stored = self._tool_ceilings.get(agent_name)
-        return tool_ceiling(self, agent_name) if stored is None else stored
+        """Return the tools this agent's edits, or the agents it creates, may choose from; pass one's if generated."""
+        info = self._generated_agents.get(agent_name)
+        return tool_ceiling(self, agent_name) if info is None else info.allowed_tools
 
     def personal_agent_name(self, template: str, user_id: str) -> str | None:
         """Return the agent generated from one template for one user, or None before that user is onboarded."""
