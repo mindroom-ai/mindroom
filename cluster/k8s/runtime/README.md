@@ -431,6 +431,7 @@ So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolic
 - Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
 - An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
 - NetworkPolicy rule keys only identify the rule, and each `egressProxy.noProxy` map value is a host string.
+  Removing every entry of a rule list behaves like an empty list, so `apiIngressFrom` then admits every source to the API port.
 - `egressProxy.noProxy` defaults to the map `localhost`, `loopback-ipv4`, and `loopback-ipv6`, so a map adds hosts to those defaults while a list replaces them, with a Helm table warning.
 - A `null` entry removes an inherited entry, and a `null` field removes an inherited field, for example to replace `value` with `valueFrom`.
 - An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
