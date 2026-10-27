@@ -192,8 +192,9 @@ async def run_model_loop(
         request_template=request_template,
     )
     max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
-    # A resume continues its run, so the calls that run already made count toward its limit.
-    progress = _Progress(calls_so_far=len(record.tools or ()))
+    # A resume continues its run, so the calls that run already made count toward its limit; the refusals that never
+    # counted stay out.
+    progress = _Progress(calls_so_far=len(record.tools or ()) - record.uncounted_tool_calls)
     if resumed is not None:
         async for event in _answer_resumed(resumed, state, progress, hooks):
             yield event
@@ -472,10 +473,12 @@ def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelId
 def _record_batch(record: AnyRunRecord, batch: ToolBatch) -> None:
     """Add every call's execution to the record in call order, refused ones included.
 
-    Each paused call also adds its requirement.
+    Each paused call also adds its requirement, and each refusal that does not count toward the tool-call limit is
+    counted in ``uncounted_tool_calls``, so a resume charges the limit only for the calls that count.
     """
     if record.tools is None:
         record.tools = []
+    record.uncounted_tool_calls += sum(isinstance(call, RefusedCall) and not call.counts for call in batch.calls)
     for call in batch.calls:
         record.tools.append(call.execution)
         if call.execution.is_paused:

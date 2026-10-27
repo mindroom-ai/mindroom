@@ -1187,3 +1187,42 @@ async def test_a_resume_keeps_counting_the_calls_its_turn_already_made() -> None
     tool_messages = [message for message in model.requests[-1].messages if message.role == "tool"]
     assert [message.tool_call_id for message in tool_messages] == ["c1", "c2"]
     assert "limit" in str(tool_messages[1].content).lower()
+
+
+@pytest.mark.asyncio
+async def test_a_resume_charges_the_limit_only_for_the_calls_that_counted_before_the_pause() -> None:
+    """A call naming no tool never counts, so the stored run's refusal costs its resume nothing.
+
+    With a limit of two, the unknown call and the gated call are both in the run when it pauses, but only the gated
+    one counts: after the approval the next call is the second that counts and runs, and the one after it is refused.
+    """
+    model = ScriptedModel(
+        [
+            calls(tool_call("missing", "c1"), tool_call("add", "c2", a=1, b=2), metrics=usage(1, 1)),
+            calls(tool_call("echo", "c3", text="second"), metrics=usage(1, 1)),
+            calls(tool_call("echo", "c4", text="third"), metrics=usage(1, 1)),
+            answer("done", usage(1, 1)),
+        ],
+    )
+    agent = spec(model, gated(add), toolkit(echo), max_tool_calls_per_turn=2)
+    _, first = await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="go")],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+    assert first.status is RunStatus.paused
+    stored = RunRecord.from_dict(first.to_dict())
+    assert ([tool.tool_call_id for tool in stored.tools or ()], stored.uncounted_tool_calls) == (["c1", "c2"], 1)
+
+    _, second, _ = await _resume(agent, stored, approved=[_approval("c2", "add", {"a": 1, "b": 2})])
+
+    assert second.status is RunStatus.completed
+    answers = {
+        message.tool_call_id: str(message.content) for message in model.requests[-1].messages if message.role == "tool"
+    }
+    assert answers["c3"] == "second"
+    assert "limit" in answers["c4"].lower()
