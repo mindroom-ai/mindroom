@@ -1895,27 +1895,6 @@ def test_a_file_signed_right_after_a_write_is_read_again_by_the_next_scan(tmp_pa
     assert second["note.md"][0][2] != signature[2]
 
 
-def test_listing_pins_each_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Files of one directory share one pinned parent, instead of a no-follow walk from the root per file."""
-    docs_path = (tmp_path / "docs").resolve()
-    for directory in ("a", "b"):
-        (docs_path / directory).mkdir(parents=True)
-        for index in range(3):
-            (docs_path / directory / f"{index}.md").write_text(directory, encoding="utf-8")
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    pinned: list[str] = []
-    real_open = knowledge_file_listing_module.open_directory_within_root
-
-    def _open(root: object, relative_path: object = Path(), **kwargs: object) -> object:
-        pinned.append(str(relative_path))
-        return real_open(root, relative_path, **kwargs)
-
-    monkeypatch.setattr(knowledge_file_listing_module, "open_directory_within_root", _open)
-
-    assert len(list_knowledge_files(config, "docs", docs_path)) == 6
-    assert sorted(pinned.count(directory) for directory in ("a", "b")) == [1, 1]
-
-
 def test_tracked_path_listing_skips_per_file_strict_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

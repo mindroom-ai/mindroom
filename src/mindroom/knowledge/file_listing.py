@@ -12,7 +12,6 @@ without links, and ``open_knowledge_file`` refuses a swap made after listing.
 from __future__ import annotations
 
 import os
-import posixpath
 import stat
 import subprocess
 from contextlib import contextmanager
@@ -223,8 +222,8 @@ def open_knowledge_file(path: Path) -> Iterator[int]:
 def pinned_directories(root: Path | int) -> Iterator[Callable[[Path], int]]:
     """Yield a function that pins a directory below ``root`` by a no-follow walk, reusing the one it pinned last.
 
-    Listed files arrive grouped by directory, so each directory costs one walk instead of one per file; on a network
-    filesystem every component of that walk is a round trip. The descriptors stay owned here.
+    Files signed in listing order arrive grouped by directory, so each directory costs one walk instead of one per
+    file. The descriptors stay owned here.
     """
     last: list[tuple[Path, int]] = []
 
@@ -248,29 +247,13 @@ def pinned_directories(root: Path | int) -> Iterator[Callable[[Path], int]]:
 def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:
     try:
         with open_directory_within_root(root_fd, relative_path.parent) as parent_fd:
-            return _is_regular_entry(parent_fd, relative_path)
+            status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
     except (OSError, ValueError):
-        return False
-
-
-def _is_regular_entry(parent_fd: int, relative_path: Path) -> bool:
-    """Return whether ``relative_path`` names a regular file within the read cap in its pinned parent."""
-    try:
-        status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError:
         return False
     if stat.S_ISREG(status.st_mode) and status.st_size > MAX_READ_BYTES:
         logger.warning("Skipping a knowledge file above the read cap", path=str(relative_path), size=status.st_size)
         return False
     return stat.S_ISREG(status.st_mode)
-
-
-def _is_regular_pinned_entry(pin: Callable[[Path], int], relative_path: Path) -> bool:
-    try:
-        parent_fd = pin(relative_path.parent)
-    except (OSError, ValueError):
-        return False
-    return _is_regular_entry(parent_fd, relative_path)
 
 
 def _walk_relative_files(root_fd: int, base: Path) -> list[Path]:
@@ -320,12 +303,12 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
     try:
-        with _pinned_directory(root) as root_fd, pinned_directories(root_fd) as pin:
+        with _pinned_directory(root) as root_fd:
             for target in _listing_targets(root, include_patterns):
                 for relative_path in _iter_target_files(root_fd, target, root):
                     if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
                         continue
-                    if _is_regular_pinned_entry(pin, relative_path):
+                    if _is_regular_file_at(root_fd, relative_path):
                         files.add(root / relative_path)
     except FileNotFoundError:
         return []
@@ -345,18 +328,17 @@ def knowledge_files_from_relative_paths(
     root = _canonical_root(knowledge_root)
     if root is None:
         return []
-    files: list[tuple[str, Path]] = []
+    files: list[Path] = []
     try:
-        with _pinned_directory(root) as root_fd, pinned_directories(root_fd) as pin:
-            # By directory first, so each parent is pinned once.
-            for relative_path in sorted(set(relative_paths), key=lambda path: (posixpath.dirname(path), path)):
+        with _pinned_directory(root) as root_fd:
+            for relative_path in sorted(set(relative_paths)):
                 if not include_knowledge_relative_path(config, base_id, relative_path):
                     continue
-                if _is_regular_pinned_entry(pin, Path(relative_path)):
-                    files.append((relative_path, root / relative_path))
+                if _is_regular_file_at(root_fd, Path(relative_path)):
+                    files.append(root / relative_path)
     except (OSError, ValueError):
         return []
-    return [path for _relative_path, path in sorted(files)]
+    return files
 
 
 def git_checkout_present(root: Path, git_dir: Path) -> bool:
