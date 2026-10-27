@@ -118,7 +118,7 @@ Reads of worker-controlled files are capped per surface.
 | Workspace subagent profiles (`subagents/*.md`) | 64 KiB per file; names 64 characters; descriptions 1024 characters; the listing reads at most 256 profiles and 1 MiB; 1,024 examined entries in `subagents/` | An oversized or unreadable file is listed as invalid and cannot run, and profiles past the listing limits are left out of it but still load by name |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
-| Vectors one search loads from private knowledge or semantic file memory | 256 MiB per base | The search fails before loading them, so memory search falls back to keyword matching and `search_knowledge_base` reports the error |
+| Vectors one search loads from private knowledge or semantic file memory | 256 MiB per base | The search fails before loading them, so memory search falls back to keyword matching and `search_knowledge_base` leaves that base out of its results, or reports the error when no other base answers |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
 | `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
