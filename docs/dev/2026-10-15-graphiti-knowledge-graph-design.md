@@ -35,6 +35,8 @@ An automation turn inside an ordinary conversation thread adds no conversation l
 A thread's kind is derived from the trusted hook source of its root prompt (`automation/exploration`, other `automation/` sources, or none), not from a record written after the run, so ingestion classifies a thread correctly however early it reaches it.
 Context that hooks attach to a message (`<mindroom_message_context>`, such as location) is written by MindRoom, not the person, so ingestion strips it from every message and a message holding only that context adds no line.
 Calls to the `knowledge_graph` tool and their results, including lookups and edits through a shell, are never ingested and never become leads, or extracted claims would return as fresh tool evidence; the `reasoning` tool's `think` and `analyze`, subagents', workflow participants', and Claude Code's answers, and results collected from background jobs, which no longer name the tool that produced them, are left out because they are or can be a model's prose.
+A graph-enabled agent's `search_knowledge_base` also returns its graph facts, because models call that tool in ordinary turns and rarely `search_graph`; in a live A/B with three graph-only questions, gpt-6-luna answered 8/12 without the graph source, stopping after the knowledge search missed, and 12/12 with it.
+Ingestion drops only the hits labelled `knowledge_graph` from those results and keeps their documents as evidence, while a knowledge search through a shell is left out whole, because its output cannot be split reliably.
 Each message is joined onto one line, because Graphiti reads every dialogue line as a new speaker's, so a line break in someone's message cannot put words in another person's mouth.
 
 Every fact is an attributed claim, not a verified truth.
@@ -257,6 +259,9 @@ Rejected: deleting old graphs automatically, because a name is a one-way hash of
 - A config reload that changes the embedder or the generation during a graph's pass can add that pass's remaining episodes to the old graph while the graph that replaces it is already filling.
 - More graphs than can be filled at once take turns pass by pass, so with many private instances a graph can wait for others' passes before each of its own.
 - Replacing the Graphiti client, after the embedder settings or credentials change or its server dies, fails the extractions and lookups still running on the old client; an interrupted episode is extracted again after its retry wait, which costs one episode's model calls and does not lose it.
+- The graph shares `search_knowledge_base`'s result slots with the agent's other sources, so an agent with one knowledge base and an active graph gets about half as many document chunks per search.
+- An agent restating a graph fact in its reply adds it back as a `conversation` source, which the knowledge search makes more frequent, so an often-discussed fact can push its original `tool_results` source behind "and N earlier".
+- A minimal-mode conversation makes every call through a shell, so its knowledge searches add none of their documents to the graph.
 
 ## Open questions
 
