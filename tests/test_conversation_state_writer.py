@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,6 +25,7 @@ from mindroom.hooks import EVENT_SESSION_STARTED, HookRegistry, SessionHookConte
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
+from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
@@ -34,8 +35,17 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
 )
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, runtime_paths_for, seed_session, seed_session_row, test_runtime_paths
-from tests.history_helpers import _hook_runtime_context, _plugin
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+    seed_session,
+    seed_session_row,
+    test_runtime_paths,
+)
+from tests.history_helpers import _plugin
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -231,11 +241,23 @@ def _reply(
         runtime_paths,
     )
     registry = HookRegistry.from_plugins([_plugin("session-hooks", [started])]) if hooks else HookRegistry.empty()
-    context = _hook_runtime_context(
+    # A room message the agent answers in a new thread: the session is the thread the reply started.
+    context = make_test_tool_runtime_context(
+        agent_name="test_agent",
+        target=MessageTarget(
+            room_id="!room:localhost",
+            source_thread_id=None,
+            resolved_thread_id="$thread",
+            reply_to_event_id="$thread",
+            session_id=SESSION_ID,
+        ),
+        requester_id="@user:localhost",
+        client=AsyncMock(),
         config=config,
         runtime_paths=runtime_paths,
-        registry=registry,
-        session_id=SESSION_ID,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        hook_registry=registry,
     )
     reply = ReplySession(
         scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),
