@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from dataclasses import replace
@@ -15,18 +16,22 @@ from openai.types.responses.response_input_item_param import ResponseInputItemPa
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.approval.receipt import approval_receipt_hook
+from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.event_journal import ApprovalCall, ApprovalDecision
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, scope_history_messages
+from mindroom.history.types import HistoryScope
 from mindroom.llm.media import File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
+from mindroom.llm.runs import RunRecord
+from mindroom.media_inputs import MediaInputs
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -35,16 +40,16 @@ from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
+    conversation_digest,
     responses_input,
     responses_replay,
     responses_request_kwargs,
-    system_text_digest,
 )
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
 from mindroom.system_prompt import render_session_context
-from tests.agent_loop.helpers import collect, context
+from tests.agent_loop.helpers import collect, context, gated
 from tests.providers.golden_support import responses_events, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
@@ -132,7 +137,7 @@ def _streamed(
         store=store,
         portable_replay=portable_replay,
         native_compaction=native_compaction,
-        system_digest=system_text_digest([]),
+        conversation_digest=conversation_digest([]),
     )
     for event in responses_events(response.model_dump(mode="json", exclude_none=True)):
         stream.add(_STREAM_EVENT.validate_python(event))
@@ -494,9 +499,9 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
 
-def _stored_response(response_id: str, prompt: list[Message] | None = None) -> dict[str, Any]:
-    """Return the provider data of a stored response whose request sent ``prompt``'s system text."""
-    return {"response_id": response_id, "mindroom_system_sha256": system_text_digest(prompt or [])}
+def _stored_response(response_id: str, before: list[Message] | None = None) -> dict[str, Any]:
+    """Return the provider data of a stored response whose request sent the conversation ``before``."""
+    return {"response_id": response_id, "mindroom_conversation_sha256": conversation_digest(before or [])}
 
 
 def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) -> None:
@@ -671,6 +676,104 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 
 
 @pytest.mark.asyncio
+async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continuing_the_chain_it_left(
+    tmp_path: Path,
+) -> None:
+    """A stored chain continues only while it holds the conversation the request replays before it.
+
+    The resumed run sends its paused request again, memory results included, so it continues the chain with the
+    result and the receipt. Once the run finishes, history keeps neither, so the next turn's replay no longer matches
+    what the chain holds: it sends its history explicitly, and the memory results and the receipt never reach it.
+    """
+    adapter, sent = _stored_reply_route(tmp_path, [_CALL])
+
+    def lookup() -> str:
+        """Look the order up."""
+        return "Found it"
+
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=adapter,
+        system_message=Message(role="system", content="You are Code."),
+        toolkits=(gated(lookup),),
+    )
+    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", add_to_agent_memory=False)
+    first_turn = TurnMessages(prompt=Message(role="user", content="Look it up."), transient=(memory,))
+    _, paused = await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=[], turn=first_turn, media=MediaInputs()),
+            ctx=context(),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+    stored = RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
+    approval = ApprovalCall(
+        tool_call_id="fc_lookup",
+        tool_name="lookup",
+        invoking_agent="code",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+        toolkit_name="gated",
+        arguments_digest=approval_arguments_digest({}),
+    )
+    with approval_receipt_context((approval,), run_id=stored.run_id):
+        _, finished = await collect(
+            resume_agent(
+                spec,
+                stored,
+                build_resume_request(paused=stored.messages, summary=None, history=[]),
+                approved=[approval],
+                denied={},
+                external_results={},
+                context=lambda run_id: context(run_id=run_id),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
+                persist=None,
+                request_template=ModelRequest(messages=()),
+            ),
+        )
+    history = scope_history_messages(
+        [RunRecord.from_dict(json.loads(json.dumps(finished.to_dict())))],
+        scope=HistoryScope(kind="agent", scope_id="code"),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    next_turn = TurnMessages(prompt=Message(role="user", content="And the next one?"))
+    await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=history, turn=next_turn, media=MediaInputs()),
+            ctx=context(run_id="run-2"),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+
+    _, resumed, later = sent
+    assert resumed["previous_response_id"] == "resp_1"
+    assert resumed["input"] == [
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+        # The receipt names the call by the ``call_id`` its result references.
+        {"role": "user", "content": build_approval_receipt((replace(approval, tool_call_id="call_lookup"),))},
+    ]
+    assert "previous_response_id" not in later
+    assert [item.get("role", item.get("type")) for item in later["input"]] == [
+        "developer",
+        "user",
+        "function_call",
+        "function_call_output",
+        "assistant",
+        "user",
+    ]
+    assert "Alice prefers short answers." not in json.dumps(later)
+    assert "TOOL APPROVAL RECEIPT" not in json.dumps(later)
+
+
+@pytest.mark.asyncio
 async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_without_their_item_ids(
     tmp_path: Path,
 ) -> None:
@@ -697,16 +800,33 @@ async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_witho
     ]
 
 
+def _legacy_system_text_digest(messages: list[Message]) -> str:
+    """Return the system-text digest a stored reply recorded before replies recorded their conversation's."""
+    system_text = [message.content for message in messages if message.role == "system"]
+    return hashlib.sha256(json.dumps(system_text, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 @pytest.mark.asyncio
-async def test_a_reply_stored_without_a_system_digest_replays_once(tmp_path: Path) -> None:
-    """A reply an older release stored replays its history once, then the route continues the reply it stores."""
+@pytest.mark.parametrize("system_digest", [False, True], ids=["no-digest", "system-text-digest"])
+async def test_a_reply_stored_without_a_conversation_digest_replays_once(
+    tmp_path: Path,
+    *,
+    system_digest: bool,
+) -> None:
+    """A reply an older release stored replays its history once, then the route continues the reply it stores.
+
+    Releases before the conversation digest recorded no digest, or only the digest of their request's system text,
+    which matched here.
+    """
     adapter, sent = _stored_reply_route(tmp_path)
+    before = [_dated_prompt("Monday"), Message(role="user", content="What should I pack?")]
+    legacy = {"mindroom_system_sha256": _legacy_system_text_digest(before)} if system_digest else {}
     older = Message(
         role="assistant",
         content="Pack a jacket.",
-        provider_data={"response_id": "resp_older", "mindroom_response_stored": True},
+        provider_data={"response_id": "resp_older", "mindroom_response_stored": True, **legacy},
     )
-    history = [_dated_prompt("Monday"), Message(role="user", content="What should I pack?"), older]
+    history = [*before, older]
     follow_up = Message(role="user", content="And shoes?")
 
     reply = await _reply(adapter, [*history, follow_up])

@@ -84,6 +84,7 @@
   "parsed": {
     "message": {
       "provider_data": {
+        "mindroom_conversation_sha256": "dedcdff7cc131fbe48c0efa4cab41b760b88a272dcff947adee099253a251993",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -91,7 +92,6 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
       "role": "assistant",

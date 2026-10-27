@@ -100,6 +100,7 @@
   "parsed": {
     "message": {
       "provider_data": {
+        "mindroom_conversation_sha256": "133520146e898ae626283bababeb46ee6d56a64c82eb1cee83574b424d1dc53b",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -107,7 +108,6 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
       "role": "assistant",

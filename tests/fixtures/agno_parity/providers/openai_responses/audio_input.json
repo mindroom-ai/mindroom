@@ -34,6 +34,7 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
+        "mindroom_conversation_sha256": "d90c82140af68caa54b14526c9659d8bbe0b5efc64321c0c13dd5da421dd424d",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -41,7 +42,6 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
       "role": "assistant"

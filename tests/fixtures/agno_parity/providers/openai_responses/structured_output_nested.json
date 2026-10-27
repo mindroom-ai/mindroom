@@ -204,6 +204,7 @@
     "message": {
       "content": "{\"cron_schedule\": {\"day\": \"*\", \"hour\": \"5\", \"minute\": \"30\", \"month\": \"*\", \"weekday\": \"1-5\"}, \"description\": \"Weekday Paris packing check\", \"execute_at\": null, \"history_limit\": 0, \"is_conditional\": false, \"message\": \"@travel_agent Check the Paris forecast and say what to pack.\", \"new_thread\": true, \"schedule_type\": \"cron\"}",
       "provider_data": {
+        "mindroom_conversation_sha256": "9d9cbcff031a80fec3327a99f60f8353077a4e0e8934f04f580faf5e41050ab0",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -211,7 +212,6 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "c42f69107359512c8d893cd0b07ac175dfaf2350efdcb89dae9fadc3b9c983ca",
         "response_id": "resp_parity"
       },
       "role": "assistant"
