@@ -43,7 +43,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.identity import MatrixID
 
 
 @asynccontextmanager
@@ -102,16 +101,13 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     return install_runtime_journal_support(bot)
 
 
-def _team_agents(bot: AgentBot) -> list[MatrixID]:
-    ids = entity_ids(bot.config, runtime_paths_for(bot.config))
-    return [ids["general"], ids["research"]]
+_MEMBER_NAMES = ["general", "research"]
 
 
 @pytest.mark.asyncio
 async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team non-streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
-    team_agents = _team_agents(bot)
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
         response_function = kwargs["response_function"]
@@ -149,7 +145,7 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
                 response_envelope=_response_envelope(),
                 correlation_id="corr-team-non-streaming",
             ),
-            team_agents=team_agents,
+            member_names=_MEMBER_NAMES,
             team_mode="coordinate",
         )
 
@@ -159,7 +155,6 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     """Generic team interruptions should replace the thinking placeholder with an interruption note."""
     bot = _make_bot(tmp_path)
     unique_room_send_responses(bot.client)
-    team_agents = _team_agents(bot)
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError
@@ -183,7 +178,7 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
                 response_envelope=_response_envelope(),
                 correlation_id="corr-team-cancelled",
             ),
-            team_agents=team_agents,
+            member_names=_MEMBER_NAMES,
             team_mode="coordinate",
         )
 
@@ -199,7 +194,6 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
     """Sync restarts should mark team placeholders as interrupted, not user-cancelled."""
     bot = _make_bot(tmp_path)
     unique_room_send_responses(bot.client)
-    team_agents = _team_agents(bot)
 
     async def fake_team_response(*_args: object, **_kwargs: object) -> str:
         raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
@@ -223,7 +217,7 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
                 response_envelope=_response_envelope(),
                 correlation_id="corr-team-restart",
             ),
-            team_agents=team_agents,
+            member_names=_MEMBER_NAMES,
             team_mode="coordinate",
         )
 
@@ -238,7 +232,6 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
 async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     """Team streaming flow should expose scheduler context to tool calls."""
     bot = _make_bot(tmp_path)
-    team_agents = _team_agents(bot)
 
     async def fake_run_cancellable_response(**kwargs: object) -> None:
         response_function = kwargs["response_function"]
@@ -290,7 +283,7 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
                 response_envelope=_response_envelope(),
                 correlation_id="corr-team-streaming",
             ),
-            team_agents=team_agents,
+            member_names=_MEMBER_NAMES,
             team_mode="collaborate",
         )
 
@@ -300,7 +293,6 @@ async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effe
     """A cancel that arrives while a visible team answer's post-effects run does not lose the answer or its effects."""
     bot = _make_bot(tmp_path)
     unique_room_send_responses(bot.client)
-    team_agents = _team_agents(bot)
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -339,7 +331,7 @@ async def test_team_late_cancellation_after_its_answer_is_visible_lets_post_effe
                     response_envelope=_response_envelope(),
                     correlation_id="corr-team-late-cancel",
                 ),
-                team_agents=team_agents,
+                member_names=_MEMBER_NAMES,
                 team_mode="coordinate",
             ),
         )

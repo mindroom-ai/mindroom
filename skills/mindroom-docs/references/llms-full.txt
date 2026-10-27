@@ -3271,6 +3271,7 @@ Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
 With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
+For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml
 memory:
@@ -7425,6 +7426,7 @@ The agent can also call `get_mindroom_update_status()` to report both versions.
 When an enabled tool's optional Python dependencies are missing, MindRoom installs them the first time the tool loads.
 Set `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` to disable this.
 When auto-install is disabled or fails, the tool fails to load with `Missing dependencies for tool '<tool>': <packages>`.
+An installed dependency at a version its extra does not allow, such as one an older MindRoom installed, counts as missing; when it cannot be installed again, loading fails with `Unsupported dependency versions: <package> <version> (needs <requirement>)`.
 Install the tool's extra manually, for example `pip install 'mindroom[<tool>]'` or `uv sync --extra <tool>` in a source checkout.
 
 ## Related Docs

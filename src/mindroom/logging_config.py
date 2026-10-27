@@ -79,6 +79,21 @@ class _NioValidationFilter(logging.Filter):
         return True
 
 
+class _Mem0KeywordSearchFilter(logging.Filter):
+    """Drop Mem0's advice to leave Chroma, which it logs for every memory MindRoom builds."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return False for Mem0's Chroma keyword-search warning and True for every other record.
+
+        Chroma is the only vector store MindRoom configures, so the advice to switch to another one cannot be
+        followed, and MindRoom builds a Mem0 memory for every memory operation.
+        """
+        return not (
+            record.name == "mem0.memory.main"
+            and record.getMessage().startswith("The 'chroma' vector store does not support keyword search.")
+        )
+
+
 class _AgnoLevelFilter(logging.Filter):
     """Drop records below the level MindRoom resolved for one Agno logger."""
 
@@ -395,7 +410,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stderr",
             "formatter": renderer_name,
-            "filters": ["nio_validation"],
+            "filters": ["nio_validation", "mem0_keyword_search"],
         },
     }
     if log_file is not None:
@@ -406,7 +421,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
             "mode": "a",
             "encoding": "utf-8",
             "formatter": "json" if renderer_name == "json" else "text",
-            "filters": ["nio_validation"],
+            "filters": ["nio_validation", "mem0_keyword_search"],
         }
 
     logging.config.dictConfig(
@@ -433,6 +448,9 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
             "filters": {
                 "nio_validation": {
                     "()": _NioValidationFilter,
+                },
+                "mem0_keyword_search": {
+                    "()": _Mem0KeywordSearchFilter,
                 },
             },
             "handlers": handlers,

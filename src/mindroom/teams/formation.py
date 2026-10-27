@@ -21,6 +21,8 @@ from mindroom.providers import registry as provider_registry
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
@@ -82,21 +84,24 @@ class TeamResolution:
     intent: TeamIntent | None
     requested_members: list[MatrixID]
     member_statuses: list[TeamResolutionMember]
-    eligible_members: list[MatrixID]
     outcome: TeamOutcome
     reason: str | None = None
     mode: TeamMode | None = None
 
+    @property
+    def eligible_members(self) -> list[MatrixID]:
+        """Return the Matrix IDs of the members whose status is eligible, in their requested order."""
+        return [member.agent for member in self.member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
+
+    @property
+    def eligible_member_names(self) -> tuple[str, ...]:
+        """Return the entity names of ``eligible_members``, in their order, as member evaluation named them."""
+        return tuple(member.name for member in self.member_statuses if member.status is TeamMemberStatus.ELIGIBLE)
+
     @classmethod
     def none(cls) -> TeamResolution:
         """Return the no-team outcome."""
-        return cls(
-            intent=None,
-            requested_members=[],
-            member_statuses=[],
-            eligible_members=[],
-            outcome=TeamOutcome.NONE,
-        )
+        return cls(intent=None, requested_members=[], member_statuses=[], outcome=TeamOutcome.NONE)
 
     @classmethod
     def team(
@@ -105,7 +110,6 @@ class TeamResolution:
         intent: TeamIntent,
         requested_members: list[MatrixID],
         member_statuses: list[TeamResolutionMember],
-        eligible_members: list[MatrixID],
         mode: TeamMode,
     ) -> TeamResolution:
         """Return the successful team outcome."""
@@ -113,7 +117,6 @@ class TeamResolution:
             intent=intent,
             requested_members=requested_members,
             member_statuses=member_statuses,
-            eligible_members=eligible_members,
             outcome=TeamOutcome.TEAM,
             mode=mode,
         )
@@ -125,14 +128,12 @@ class TeamResolution:
         intent: TeamIntent,
         requested_members: list[MatrixID],
         member_statuses: list[TeamResolutionMember],
-        agent: MatrixID,
     ) -> TeamResolution:
-        """Return the single-agent degraded outcome."""
+        """Return the single-agent degraded outcome, whose one eligible member answers alone."""
         return cls(
             intent=intent,
             requested_members=requested_members,
             member_statuses=member_statuses,
-            eligible_members=[agent],
             outcome=TeamOutcome.INDIVIDUAL,
         )
 
@@ -145,20 +146,21 @@ class _SelectedTeamRequest:
     requested_members: list[MatrixID]
 
 
-async def _select_team_mode(
+async def select_ad_hoc_team_mode(
     message: str,
-    agent_names: list[str],
+    member_names: Sequence[str],
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> TeamMode:
-    """Ask the default model whether ``agent_names`` should coordinate or collaborate on ``message``.
+    """Ask the default model whether an ad hoc team of ``member_names`` should coordinate or collaborate on ``message``.
 
-    A failed call or an answer outside the schema collaborates.
+    Team formation itself is pure; this refinement runs only where the team response executes. A failed call or an
+    answer outside the schema collaborates.
     """
     prompt = config.render_prompt(
         "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
         message=message,
-        agent_names=", ".join(agent_names),
+        agent_names=", ".join(member_names),
     )
 
     try:
@@ -269,22 +271,6 @@ def decide_team_formation(
         reason_prefix="Team request",
         mode=TeamMode.COORDINATE if team_request.intent is TeamIntent.EXPLICIT_MEMBERS else TeamMode.COLLABORATE,
     )
-
-
-async def select_ad_hoc_team_mode(
-    message: str,
-    team_agents: list[MatrixID],
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> TeamMode:
-    """Select the collaboration mode for one ad-hoc team at execution time.
-
-    Team formation itself is pure; this AI refinement must run only where the
-    team response actually executes.
-    """
-    registry = entity_identity_registry(config, runtime_paths)
-    agent_names = [registry.entity_name_or_username(agent_id) for agent_id in team_agents]
-    return await _select_team_mode(message, agent_names, config, runtime_paths)
 
 
 def _filter_team_request_members(
@@ -443,8 +429,8 @@ def _resolve_team_request(
 
     An explicit request names at least two members, so with none rejected it always forms a team.
     """
-    eligible_members = [member.agent for member in member_statuses if member.status is TeamMemberStatus.ELIGIBLE]
     rejected_members = [member for member in member_statuses if member.status is not TeamMemberStatus.ELIGIBLE]
+    eligible_count = sum(member.status is TeamMemberStatus.ELIGIBLE for member in member_statuses)
 
     if intent in {TeamIntent.EXPLICIT_MEMBERS, TeamIntent.CONFIGURED_TEAM}:
         if rejected_members:
@@ -452,30 +438,26 @@ def _resolve_team_request(
                 intent=intent,
                 requested_members=requested_members,
                 member_statuses=member_statuses,
-                eligible_members=eligible_members,
                 outcome=TeamOutcome.REJECT,
                 reason=_team_resolution_reason(rejected_members, config, reason_prefix=reason_prefix),
             )
-    elif len(eligible_members) == 1:
+    elif eligible_count == 1:
         return TeamResolution.individual(
             intent=intent,
             requested_members=requested_members,
             member_statuses=member_statuses,
-            agent=eligible_members[0],
         )
-    elif not eligible_members:
+    elif eligible_count == 0:
         return TeamResolution(
             intent=intent,
             requested_members=requested_members,
             member_statuses=member_statuses,
-            eligible_members=[],
             outcome=TeamOutcome.NONE,
         )
     return TeamResolution.team(
         intent=intent,
         requested_members=requested_members,
         member_statuses=member_statuses,
-        eligible_members=eligible_members,
         mode=mode,
     )
 

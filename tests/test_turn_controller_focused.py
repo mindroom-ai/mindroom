@@ -279,7 +279,7 @@ class _RecordingResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        team_agents: object,  # noqa: ARG002
+        member_names: object,  # noqa: ARG002
         team_mode: str,  # noqa: ARG002
     ) -> str | None:
         self.team_requests.append(request)

@@ -175,7 +175,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
-        matrix_ids = entity_ids(config, runtime_paths)
         mock_team_response = AsyncMock(return_value="Team reply")
 
         async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
@@ -210,7 +209,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -240,7 +239,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
-        matrix_ids = entity_ids(config, runtime_paths)
         mock_team_response = AsyncMock(return_value="Team reply")
 
         async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
@@ -276,7 +274,7 @@ class TestAgentBot(AgentBotTestBase):
                     correlation_id="corr-team",
                     scheduled_model="cheap",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -313,7 +311,6 @@ class TestAgentBot(AgentBotTestBase):
             budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         )
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        matrix_ids = entity_ids(config, runtime_paths)
         mock_team_response = AsyncMock(return_value="Team reply")
 
         with (
@@ -339,7 +336,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -366,7 +363,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
-        matrix_ids = entity_ids(config, runtime_paths)
         mock_team_response = AsyncMock(return_value="Team reply")
 
         async def change_room_default(*_args: object, **_kwargs: object) -> bool:
@@ -400,7 +396,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -443,7 +439,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = entity_ids(config, runtime_paths_for(config))
         with (
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
@@ -471,7 +466,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -502,7 +497,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = entity_ids(config, runtime_paths_for(config))
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
         with (
             patch(
@@ -531,7 +525,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -554,7 +548,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
 
         with (
@@ -588,7 +581,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -617,7 +610,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
         timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
 
@@ -652,7 +644,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -679,7 +671,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
-        matrix_ids = entity_ids(config, runtime_paths_for(config))
         mock_team_response = AsyncMock(return_value="Team reply")
 
         with (
@@ -711,7 +702,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=_hook_envelope(body="What changed?", source_event_id="$team-root"),
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -747,7 +738,6 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths,
         )
-        matrix_ids = entity_ids(config, runtime_paths)
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             target=MessageTarget.resolve(
@@ -790,7 +780,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_envelope=envelope,
                     correlation_id="corr-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -838,7 +828,6 @@ class TestAgentBot(AgentBotTestBase):
                     status=TeamMemberStatus.ELIGIBLE,
                 ),
             ],
-            eligible_members=[],
             outcome=TeamOutcome.NONE,
             reason="No team available",
         )
@@ -872,7 +861,7 @@ class TestAgentBot(AgentBotTestBase):
         assert delivery_resolution is None
         call = generate_team_response.await_args
         assert call.kwargs == {
-            "team_agents": [team_member],
+            "member_names": ["general"],
             "team_mode": "coordinate",
             "resolution_reason": "No team available",
         }
@@ -935,7 +924,6 @@ class TestAgentBot(AgentBotTestBase):
                         status=TeamMemberStatus.NOT_MATERIALIZABLE,
                     ),
                 ],
-                eligible_members=[],
                 outcome=TeamOutcome.REJECT,
                 reason="not materializable",
             )
@@ -1223,7 +1211,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-team-stream",
                 ),
-                team_agents=[bot.matrix_id],
+                member_names=[bot.agent_name],
                 team_mode="coordinate",
             )
 
@@ -1288,7 +1276,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-silent-team",
                 ),
-                team_agents=[bot.matrix_id],
+                member_names=[bot.agent_name],
                 team_mode="coordinate",
             )
 
@@ -1315,7 +1303,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock()
-        matrix_ids = entity_ids(config, runtime_paths)
 
         async def team_response_with_started_receipt_check(*_args: object, **_kwargs: object) -> str:
             for agent_name in ("calculator", "general"):
@@ -1355,7 +1342,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-ad-hoc-silent-team",
                 ),
-                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                member_names=["calculator", "general"],
                 team_mode="collaborate",
             )
 
@@ -1413,7 +1400,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-team-stream-suppress",
                 ),
-                team_agents=[bot.matrix_id],
+                member_names=[bot.agent_name],
                 team_mode="coordinate",
             )
 
@@ -1470,7 +1457,7 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                     correlation_id="corr-team-suppress",
                 ),
-                team_agents=[bot.matrix_id],
+                member_names=[bot.agent_name],
                 team_mode="coordinate",
             )
 

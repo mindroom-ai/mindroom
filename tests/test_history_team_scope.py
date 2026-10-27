@@ -13,7 +13,7 @@ import pytest
 from mindroom import execution_preparation
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
-from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.history.prompt_tokens import build_static_token_estimator
@@ -31,7 +31,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
 )
 from mindroom.llm.messages import Message
-from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
     BuiltTeam,
@@ -52,7 +52,16 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call, usage
 from tests.history_helpers import _completed_team_run, _runtime_paths, _team_session
-from tests.team_turn_helpers import SESSION_ID, TeamTurn, delegate, member_approval, squad_turn
+from tests.team_turn_helpers import (
+    PROBE_TOOL,
+    SESSION_ID,
+    TeamTurn,
+    authored_team_config,
+    build_team_turn,
+    delegate,
+    member_approval,
+    squad_turn,
+)
 from tests.teams.squad import start_team
 
 if TYPE_CHECKING:
@@ -360,6 +369,55 @@ async def test_a_saved_team_approval_resumes_under_the_history_settings_its_conf
     assert _replayed_history(resumed) == _PAST_2_ONLY
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("squad_probe")
+async def test_a_private_ad_hoc_team_approval_that_retained_no_scope_resumes_in_its_requesters_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A saved approval without its scope finds the paused run where its requester's private ad hoc team stored it."""
+    authored = authored_team_config(
+        {
+            "writer": {
+                "display_name": "Writer",
+                "role": "Writes.",
+                "model": "writer-model",
+                "private": {"per": "user", "root": "writer_data"},
+            },
+            "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model", "tools": [PROBE_TOOL]},
+        },
+        models=("default", "writer-model", "checker-model"),
+    )
+    team = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("writer", "checker"),
+        scripts={
+            "default": [delegate("call-team", "checker", "Touch it")],
+            "checker-model": [calls(tool_call("touch", "call-touch", label="dangerous"))],
+        },
+    )
+    team.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    assert team.scope.scope_id.startswith("team_checker+writer_requester_")
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("The checker touched it.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+
+    resumed = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+        history_scope=None,
+    )
+
+    assert isinstance(resumed, CompletedApprovalRun)
+    assert resumed.response_text.endswith("The checker touched it.")
+
+
 def _private_pair_config(tmp_path: Path) -> tuple[Config, object]:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -424,7 +482,7 @@ def test_private_ad_hoc_bound_team_scope_requires_requester_identity(tmp_path: P
             member_names=["private_worker", "shared"],
             config=config,
             team_name=None,
-            execution_identity=None,
+            requester_user_id=None,
         )
 
 
