@@ -62,7 +62,8 @@ class MinimalTurn:
 def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
     """Return the agent's context `mindroom-agent context` reads: what the standard prompt would hold, piece by piece.
 
-    ``agent-context`` is the whole standard system message of the build, toolkit and skill guidance included.
+    ``agent-context`` is the build's whole standard system prompt, its stable and turn system messages a blank line
+    apart, toolkit and skill guidance included.
     """
     surface = build.surface
     documents = {

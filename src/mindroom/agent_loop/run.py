@@ -102,7 +102,7 @@ def run_agent(
     hooks: LoopHooks = NO_HOOKS,
     metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[RunEvent]:
-    """Run one agent turn: the spec's system message, then ``run_input`` as the history subsystem built it.
+    """Run one agent turn: the spec's system messages, stable then turn, then ``run_input`` as history built it.
 
     ``metadata`` is stored on the run's record; the run's tool calls read ``ctx.metadata``, which a team's member runs
     share with the team run while their records store none of it.

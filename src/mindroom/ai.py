@@ -212,8 +212,9 @@ def _initial_agent_continuation(
 class _PreparedAgentRun:
     """Prepared agent invocation state after history planning.
 
-    ``spec`` is the build's spec with this turn's system message; ``history`` and ``summary`` are the stored
-    history the request replays under the resolved plan, and ``turn`` is the new input around the prompt.
+    ``spec`` is the build's spec with this turn's system messages, stable then turn; ``history`` and ``summary``
+    are the stored history the request replays under the resolved plan, and ``turn`` is the new input around the
+    prompt.
     ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
     """
 
@@ -756,7 +757,7 @@ class _TurnRunContinuation:
 
     The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
     compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
-    and reuses the paused run's stored system message.
+    and reuses the paused run's stored system messages.
     """
 
     run_context: _AgentRunContext
@@ -981,7 +982,7 @@ async def _prepare_agent_and_prompt(
     supports_native_tool_approval: bool,
     reusable_build: AgentBuild | None,
 ) -> _PreparedAgentRun:
-    """Prepare the agent build, this turn's system message, and its request input.
+    """Prepare the agent build, this turn's system messages (stable, then turn), and its request input.
 
     Returns the prepared run input plus history bookkeeping for one agent turn.
     """

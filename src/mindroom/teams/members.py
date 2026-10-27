@@ -1,7 +1,7 @@
 """Building a team: its exact members as agent builds, the leader's and members' models, and the team spec.
 
 ``build_team_spec`` turns the materialized members into the team the leader loop runs: the leader's model, prompt,
-job controls, and call budget, and each member's system message, roster role, and loop hooks.
+job controls, and call budget, and each member's system messages, roster role, and loop hooks.
 """
 
 from __future__ import annotations
@@ -322,7 +322,7 @@ def _team_member(
     runtime_paths: RuntimePaths,
     model_name: str,
 ) -> TeamMember:
-    """Return one member as the team runs it: this turn's system message, the roster role, and its loop hooks.
+    """Return one member as the team runs it: this turn's system messages, the roster role, and its loop hooks.
 
     A member runs under the agent hook policy: its own tool-call policy, output-limit policy, portable tool search,
     mid-turn compaction, and the approval receipt hook; its tool-call policy and tools run under its own identity. It

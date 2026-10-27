@@ -161,7 +161,7 @@ def build_request(
     turn: TurnMessages,
     media: MediaInputs,
 ) -> list[Message]:
-    """Return one attempt's request after its system message: the scope summary, the replayed history, then the turn.
+    """Return one attempt's request after its system messages: the scope summary, the replayed history, then the turn.
 
     ``media`` goes on the turn's prompt. The request holds copies of ``history`` and ``turn``, so provider formatting
     never edits the prepared input a retried attempt reuses. Pass ``summary=None`` when the run replays no stored

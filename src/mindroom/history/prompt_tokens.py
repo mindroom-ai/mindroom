@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 class _StaticTokenEstimator:
     """Request-local static-token estimator."""
 
-    # The system message and tool tokens, which do not depend on the prompt text; computed once, on first use.
+    # The system messages' and tools' tokens, which do not depend on the prompt text; computed once, on first use.
     non_prompt_tokens: Callable[[], int]
 
     def estimate(self, full_prompt: str) -> int:

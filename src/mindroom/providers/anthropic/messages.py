@@ -339,9 +339,10 @@ class ClaudeProvider:
         return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
-        """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
+        """Return the ``output_config.format`` value, or None on every route but ``native``.
 
-        A JSON-mode route relies on the prompt asking for JSON.
+        A ``forced_tool`` route answers through the forced ``structured_output`` call, and a JSON-mode route relies on
+        the prompt asking for JSON.
         """
         if schema is None or self.capabilities.structured_output != "native":
             return None
