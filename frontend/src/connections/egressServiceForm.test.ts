@@ -546,6 +546,24 @@ describe("suggesting a name", () => {
   it("suggests nothing, and no suffix, without a base", () => {
     expect(suggestedName(form("", ""), [""])).toBe("");
   });
+
+  it("takes the display name first: lowercase, spaces as _, and what a name cannot hold dropped", () => {
+    const labelled = (displayName: string, preset = "google_calendar") => ({
+      ...form(preset, "httpbin.org"),
+      displayName,
+    });
+    expect(suggestedName(labelled("Team calendar"))).toBe("team_calendar");
+    expect(suggestedName(labelled("  Shared  Inbox (2)! "))).toBe(
+      "shared_inbox_2",
+    );
+    expect(suggestedName(labelled("_Team calendar", ""))).toBe("team_calendar");
+    expect(suggestedName(labelled("Team calendar"), ["team_calendar"])).toBe(
+      "team_calendar-2",
+    );
+    // Nothing left of it: the preset or the host, as without one.
+    expect(suggestedName(labelled("!?"))).toBe("google_calendar");
+    expect(suggestedName(labelled("Ü", ""))).toBe("httpbin");
+  });
 });
 
 describe("knowing when the form uses more than the basic fields", () => {
