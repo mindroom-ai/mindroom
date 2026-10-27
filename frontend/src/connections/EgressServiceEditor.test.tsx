@@ -635,6 +635,26 @@ describe("the editor form", () => {
     ).toBeVisible();
   });
 
+  it("drops the API key from a custom service's login hint while it uses its own account", async () => {
+    await renderEditor();
+    type("Name", "mine");
+    type("Website", "www.googleapis.com");
+    openMoreOptions();
+    const keyHint =
+      "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key.";
+    expect(screen.getByText(keyHint)).toBeInTheDocument();
+    type("Account login (optional)", "google_calendar");
+    fireEvent.click(
+      screen.getByLabelText(
+        "Use its own account, not the one the agent's tools use",
+      ),
+    );
+    expect(screen.queryByText(keyHint)).toBeNull();
+    expect(
+      screen.getByText("Users can connect an account of this kind."),
+    ).toBeInTheDocument();
+  });
+
   it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
     const cases: [AuthoredEgressService, boolean][] = [
       [{ preset: "github", oauth_provider: "google_drive" }, true],
