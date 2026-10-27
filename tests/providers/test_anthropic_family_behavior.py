@@ -1151,6 +1151,38 @@ async def test_tool_definitions_send_each_schema_as_authored(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["anthropic", "vertexai_claude", "bedrock_claude"])
+async def test_a_union_input_schema_reaches_claude_as_an_object_without_its_root_composition(
+    tmp_path: Path,
+    route: str,
+) -> None:
+    """Claude rejects ``anyOf``, ``allOf``, and ``oneOf`` at a schema's root, which an MCP tool with a union input has."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
+    branch = {"type": "object", "properties": {"city": {"$ref": "#/$defs/city"}}, "required": ["city"]}
+    union = {"anyOf": [branch, {"type": "object", "properties": {"zip": {"type": "string"}}}]}
+    tools = [
+        ToolSpec(
+            name="lookup",
+            description="Look up.",
+            parameters={**union, "$defs": {"city": {"type": "string"}}},
+            strict=None,
+        ),
+        ToolSpec(
+            name="typed",
+            description="Typed.",
+            parameters={"type": "object", "oneOf": [branch], "allOf": []},
+            strict=None,
+        ),
+    ]
+    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
+    assert [tool["input_schema"] for tool in wire.body()["tools"]] == [
+        {"type": "object", "$defs": {"city": {"type": "string"}}},
+        {"type": "object"},
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_choice", "expected"),
     [("none", {"type": "none"}), (None, {"type": "any"})],

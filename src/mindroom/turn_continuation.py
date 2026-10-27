@@ -119,9 +119,9 @@ def continuation_decision_from_tools(
     """Return the continuation decision for a completed model response.
 
     ``tools`` are the calls the run stopped after (``stopped_calls``), which the model has not answered; a call the run
-    refused never ran and does not belong here. The last successful thread-model switch in provider call order decides; a response whose
-    every switch was rejected resumes with the current model. At the continuation limit, either case ends the reply
-    with its limit message instead.
+    refused never ran and does not belong here. The last successful thread-model switch in provider call order
+    decides; a response whose every switch was rejected resumes with the current model. At the continuation limit,
+    either case ends the reply with its limit message instead.
     """
     switch_results = [tool.result for tool in tools or () if tool.tool_name == _MODEL_SWITCH_FUNCTION_NAME]
     if not switch_results:

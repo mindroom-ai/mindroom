@@ -502,17 +502,28 @@ def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
     return result
 
 
+# Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support
+# oneOf, allOf, or anyOf at the top level"), as an MCP tool whose input is a union has.
+_TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS = frozenset({"anyOf", "allOf", "oneOf"})
+
+
 def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> list[dict[str, Any]]:
     """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable.
 
-    Each schema goes as authored, except that a strict tool closes every object with ``additionalProperties: false``,
+    Each schema goes as authored, except that its root loses ``anyOf``, ``allOf``, and ``oneOf`` and is
+    ``type: object`` when it names no type, and a strict tool closes every object with ``additionalProperties: false``,
     as strict tool use requires. A tool without a description sends none, and ``strict`` is sent only when it is True
     and the route accepts it.
     """
     formatted: list[dict[str, Any]] = []
     for tool in sorted(tools, key=lambda item: item.name):
         strict = bool(tool.strict) and strict_allowed
-        parameters = deepcopy(dict(tool.parameters))
+        parameters = {
+            key: deepcopy(value)
+            for key, value in tool.parameters.items()
+            if key not in _TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS
+        }
+        parameters.setdefault("type", "object")
         definition: dict[str, Any] = {
             "name": tool.name,
             **({} if tool.description is None else {"description": tool.description}),
