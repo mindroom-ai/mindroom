@@ -379,8 +379,9 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
         ("us.anthropic.claude-opus-4-7-v1:0", True),
         ("claude-opus-5-5-20261001", True),
         ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", False),
+        ("databricks-claude-sonnet-5-5", True),
     ],
 )
 def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:
-    """Direct, Bedrock, Vertex, gateway, and dated snapshot ids name the same generation, in any letter case."""
+    """Direct, dated, Vertex, Bedrock, and gateway ids name the same generation, in any letter case."""
     assert model_defaults.claude_rejects_sampling_controls(model_id) is rejects
