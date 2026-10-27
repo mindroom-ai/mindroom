@@ -86,6 +86,15 @@ function keySavedLabel(saved: string | null): string {
     : "Key saved";
 }
 
+/** An account allowed only to read where the service no longer offers read only: the broker refuses it everything. */
+export function refusedReadOnly(service: EgressCredentialService): boolean {
+  return (
+    service.active_source === "oauth" &&
+    service.oauth?.reuse_access === "read" &&
+    !service.read_only_supported
+  );
+}
+
 /** What the row's status label says about where the service's credential comes from. */
 export function statusLabel(service: EgressCredentialService): string {
   const oauth = service.oauth;
@@ -96,7 +105,10 @@ export function statusLabel(service: EgressCredentialService): string {
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
     // The row names the account below the status label.
-    if (service.active_source === "oauth") return "Using connected account";
+    if (service.active_source === "oauth")
+      return refusedReadOnly(service)
+        ? "Needs read and write"
+        : "Using connected account";
     if (oauth.connected && !oauth.reuse_enabled)
       // The tools never use a service's own account.
       return service.separate_account
@@ -150,8 +162,10 @@ export function serviceHosts(service: EgressCredentialService): string[] {
   return [...new Set(service.rules.map(hostPort))];
 }
 
-/** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
+/** What happens to requests to its hosts while the service has no key or account it can use; null once it has, and for a limit. */
 export function unsetNote(service: EgressCredentialService): string | null {
+  if (refusedReadOnly(service))
+    return "Requests are refused until this account is changed to read and write.";
   if (service.configured || service.restrict_only || service.rules.length === 0)
     return null;
   const oauth = service.oauth;

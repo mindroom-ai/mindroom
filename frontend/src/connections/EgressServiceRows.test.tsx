@@ -1185,6 +1185,27 @@ describe("connected accounts", () => {
       ]);
     });
 
+    it("says requests are refused for an account allowed only to read where the service no longer offers read only", () => {
+      renderRows([
+        drive(
+          { reuse_access: "read" },
+          {
+            read_only_supported: false,
+            configured: true,
+            active_source: "oauth",
+          },
+        ),
+      ]);
+      const drives = row("Drive");
+      expect(within(drives).getByText("Needs read and write")).toBeVisible();
+      expect(
+        within(drives).getByText(
+          "Requests are refused until this account is changed to read and write.",
+        ),
+      ).toBeVisible();
+      expect(within(drives).queryByText("Using connected account")).toBeNull();
+    });
+
     it("changes an account allowed only to read to read and write where the service no longer offers read only", async () => {
       const onChanged = vi.fn();
       renderRows(
