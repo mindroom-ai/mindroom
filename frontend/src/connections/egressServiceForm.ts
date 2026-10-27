@@ -61,6 +61,8 @@ interface ExplicitlyEmpty {
   displayName: "" | null | undefined;
   description: boolean;
   placeholders: boolean;
+  /** The preset service names its own login (`oauthProvider`, empty for none) instead of the preset's. */
+  presetLogin: boolean;
 }
 
 /** No field emptied on purpose: what a new service, or one that picked another preset, starts with. */
@@ -68,6 +70,7 @@ export const NOT_EXPLICITLY_EMPTY: ExplicitlyEmpty = {
   displayName: undefined,
   description: false,
   placeholders: false,
+  presetLogin: false,
 };
 
 /** What the editor shows; `serializeService` turns it into the authored service. */
@@ -152,6 +155,7 @@ export function formFromService(
       placeholders:
         service?.placeholder_env !== undefined &&
         Object.keys(service.placeholder_env).length === 0,
+      presetLogin: preset !== "" && service?.oauth_provider !== undefined,
     },
   };
 }
@@ -270,11 +274,8 @@ export function serializeService(
     // An override written for this preset; another preset has its own login.
     authored.oauth_provider = initial.oauth_provider;
   }
-  if (
-    form.separateAccount &&
-    offersSeparateAccount(form, options, presetOf(options.presets, form.preset))
-  )
-    authored.oauth_separate_account = true;
+  // As the form holds it: the server refuses a combination it cannot serve, and an unchanged save keeps it.
+  if (form.separateAccount) authored.oauth_separate_account = true;
   if (form.restrictToRules) authored.restrict_to_rules = true;
   if (
     options.context === "operator" &&
@@ -285,8 +286,9 @@ export function serializeService(
 }
 
 /**
- * Whether the form is a personal agent's own service with an account login, which may have an account of its own.
- * A login whose accounts belong to each user (GitHub, Atlassian) cannot.
+ * Whether the editor shows "Use its own account": for a personal agent's own service whose login (the service's
+ * own, else the preset's) is not one whose accounts belong to each user (GitHub, Atlassian), and always while the
+ * form has it, so it can be unticked.
  */
 export function offersSeparateAccount(
   form: EgressServiceForm,
@@ -297,9 +299,12 @@ export function offersSeparateAccount(
   }: Pick<EditorOptions, "context" | "sharedTarget" | "providers">,
   preset: EgressPreset | undefined,
 ): boolean {
+  if (form.separateAccount) return true;
   if (context !== "personal" || sharedTarget) return false;
   const login =
-    form.preset === "" ? form.oauthProvider.trim() : preset?.oauth_provider;
+    form.preset === "" || form.explicitlyEmpty.presetLogin
+      ? form.oauthProvider.trim()
+      : preset?.oauth_provider;
   return (
     !!login &&
     !providers.some(

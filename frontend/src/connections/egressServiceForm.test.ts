@@ -3,6 +3,7 @@ import {
   applyAuthChoice,
   emptyRule,
   formFromService,
+  offersSeparateAccount,
   ruleFormFrom,
   serializeService,
   splitHostInput,
@@ -13,6 +14,7 @@ import {
 } from "./egressServiceForm";
 import {
   personal,
+  presets,
   sharedPersonal,
   operator,
   newService,
@@ -28,20 +30,65 @@ import { githubRepositoryRules } from "./githubRepositoryRules";
 import type { AuthoredEgressService, EgressRule } from "./types";
 
 describe("serializing a service", () => {
-  it("keeps its own account only for a login whose accounts are not each user's", () => {
-    expect(
-      serialize({ preset: "google_calendar", oauth_separate_account: true }),
-    ).toEqual({ preset: "google_calendar", oauth_separate_account: true });
-    expect(
-      serialize({ preset: "github", oauth_separate_account: true }),
-    ).toEqual({ preset: "github" });
-    expect(
-      serialize({
+  it("sends its own account exactly as the form holds it, so an unchanged save never drops it", () => {
+    const stored: AuthoredEgressService[] = [
+      { preset: "google_calendar", oauth_separate_account: true },
+      // A preset whose login is replaced, and one the server would refuse: the server judges, not the editor.
+      {
+        preset: "github",
+        oauth_provider: "google_drive",
+        oauth_separate_account: true,
+      },
+      { preset: "github", oauth_separate_account: true },
+      {
+        preset: "google_calendar",
+        oauth_provider: null,
+        oauth_separate_account: true,
+      },
+      {
         rules: [bearerRule],
         oauth_provider: "atlassian",
         oauth_separate_account: true,
-      }),
-    ).not.toHaveProperty("oauth_separate_account");
+      },
+    ];
+    for (const service of stored) expect(serialize(service)).toEqual(service);
+    // Saved while the presets could not be loaded.
+    expect(serialize(stored[0], { ...personal, presets: [] })).toEqual(
+      stored[0],
+    );
+  });
+
+  it("offers its own account for the login the service uses, and always once it has one", () => {
+    const offered = (service: AuthoredEgressService) =>
+      offersSeparateAccount(
+        formFromService("svc", service),
+        personal,
+        presets.find((preset) => preset.id === service.preset),
+      );
+    expect(offered({ preset: "google_calendar" })).toBe(true);
+    expect(offered({ preset: "github", oauth_provider: "google_drive" })).toBe(
+      true,
+    );
+    expect(offered({ preset: "github" })).toBe(false);
+    expect(offered({ preset: "google_calendar", oauth_provider: null })).toBe(
+      false,
+    );
+    expect(offered({ rules: [bearerRule], oauth_provider: "atlassian" })).toBe(
+      false,
+    );
+    expect(offered({ preset: "github", oauth_separate_account: true })).toBe(
+      true,
+    );
+    expect(
+      offersSeparateAccount(
+        formFromService("svc", {
+          preset: "google_calendar",
+          oauth_separate_account: true,
+        }),
+        personal,
+        undefined,
+      ),
+    ).toBe(true);
   });
 
   it("writes a custom service with only the fields that matter", () => {
