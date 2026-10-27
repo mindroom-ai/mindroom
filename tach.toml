@@ -8468,6 +8468,19 @@ from = ["mindroom.tools.agno_compat_visualization"]
 expose = ["WorkspaceVisualizationTools"]
 
 [[modules]]
+path = "mindroom.tools.mem0"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_mem0"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_mem0"
+depends_on = []
+visibility = ["mindroom.tools.mem0"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_mem0"]
+expose = ["UserFilterMem0Tools"]
+
+[[modules]]
 path = "mindroom.tools.newspaper4k"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_newspaper4k"]
 
