@@ -469,3 +469,29 @@ def test_a_file_written_again_within_one_timestamp_tick_is_searched_afresh(
 
     assert [hit.content for hit in collection.search([1.0, 0.0], limit=2)] == expected
     assert len(vector_store_module._index_cache) == 1, "the outdated matrix stayed cached beside the new one"
+
+
+def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first search reads the collection file front to back before loading its matrix; cached searches do not."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    collection = KnowledgeCollection(path=tmp_path, name="docs")
+    collection.reset()
+    collection.write_source_rows("a.md", [_row("a", "a.md", "alpha", [1.0, 0.0])])
+    calls: list[str] = []
+    real_read_ahead = vector_store_module._read_ahead
+    real_load = vector_store_module._load_vector_index
+    monkeypatch.setattr(
+        vector_store_module,
+        "_read_ahead",
+        lambda file: calls.append(f"read {file.name}") or real_read_ahead(file),
+    )
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection: calls.append("load") or real_load(connection),
+    )
+
+    for _search in range(2):
+        assert collection.search([1.0, 0.0], limit=1)[0].content == "alpha"
+
+    assert calls == ["read docs.sqlite3", "load"]
