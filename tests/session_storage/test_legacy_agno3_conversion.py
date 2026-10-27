@@ -229,9 +229,11 @@ def _seqs(database: Path) -> dict[str, int]:
 
 
 def _message_rows(database: Path, run_id: str) -> list[tuple[str, int | None]]:
+    """Return a run's message rows as the debug report lists them: the replayed ones, then each fold's in its order."""
     return _query(
         database,
-        'SELECT message_id, folded_by FROM "code_sessions_log_messages" WHERE run_id = ? ORDER BY ord, message_id',
+        'SELECT message_id, folded_by FROM "code_sessions_log_messages" WHERE run_id = ? '
+        "ORDER BY folded_by IS NOT NULL, folded_by, ord, message_id",
         (run_id,),
     )
 

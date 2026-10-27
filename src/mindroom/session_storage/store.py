@@ -1024,12 +1024,14 @@ def flag_folded(
     """Flag the message dicts ``messages`` of stored run ``run_id`` and its member runs ``member_run_ids`` as folded.
 
     Summary ``summary_id`` took them, in the caller's transaction. A message the run does not hold yet is stored
-    folded; one it holds keeps its data and gains the flag. A message or member run keeps the flag of the first fold
-    that took it, and none replays again.
+    folded; one it holds keeps its data and gains the flag. Either way it takes its place in ``messages`` as its
+    ``ord``, so each fold's messages read in the fold's order. A message or member run keeps the flag and place of the
+    first fold that took it, and none replays again.
     """
     connection.executemany(
         f"INSERT INTO {quote_identifier(names.log_messages)} (run_id, message_id, ord, folded_by, data) "  # noqa: S608
-        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = COALESCE(folded_by, excluded.folded_by)",
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, message_id) DO UPDATE SET folded_by = excluded.folded_by, "
+        "ord = excluded.ord WHERE folded_by IS NULL",
         [
             (run_id, message["id"], position, summary_id, json.dumps(message))
             for position, message in enumerate(messages)

@@ -32,6 +32,7 @@ from mindroom.debug_report import (
 )
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
+from mindroom.history import summary_rows
 from mindroom.history.session_context import _team_scope_state_root
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -338,6 +339,46 @@ def test_read_runs_names_the_fold_that_took_a_message(tmp_path: Path) -> None:
     assert [(message["folded_by"], message["data"].get("tool_call_id")) for message in item["messages"]] == [
         (None, None),
         (fold_id, "call-1"),
+    ]
+
+
+def test_read_runs_lists_a_folds_messages_in_its_order_when_some_were_stored(tmp_path: Path) -> None:
+    """A fold that takes messages the run already stored, beside ones it did not, lists them in the fold's order."""
+    storage = create_state_storage("general", tmp_path / "agents" / "general")
+    session = ConversationSession(kind="agent", session_id=f"{ROOM}:$root", owner_id="general")
+    stored = [Message(role="user", content=f"m{index}", id=f"m{index}") for index in range(1, 6)]
+    run = RunRecord(
+        run_id="run-1",
+        agent_id="general",
+        session_id=session.session_id,
+        status=RunStatus.paused,
+        messages=stored,
+    )
+    assert storage.save_run(session, run, record_usage=False) == "written"
+    unstored = [Message(role="tool", content=f"r{index}", id=f"r{index}", tool_call_id=f"c{index}") for index in (1, 2)]
+    # The fold takes the turn's later stored exchanges and the ones after them that no save stored yet.
+    folded = (stored[3], stored[4], *unstored)
+    fold_id = summary_rows.append_summary(
+        storage,
+        session_id=session.session_id,
+        scope_key=HistoryScope(kind="agent", scope_id="general").key,
+        based_on=None,
+        covered=[],
+        summary="S",
+        fold=summary_rows.Fold(run=run, messages=folded, member_run_ids=frozenset()),
+    )
+
+    result = _read_runs(tmp_path, collect_ids(None, room_id=ROOM, thread_id="$root"))
+
+    [item] = result.items
+    assert [(message["folded_by"], message["data"]["content"]) for message in item["messages"]] == [
+        (None, "m1"),
+        (None, "m2"),
+        (None, "m3"),
+        (fold_id, "m4"),
+        (fold_id, "m5"),
+        (fold_id, "r1"),
+        (fold_id, "r2"),
     ]
 
 
