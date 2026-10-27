@@ -17,6 +17,7 @@ from mindroom.model_defaults import (
     OLLAMA_HOST_DEFAULT,
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
     OPENROUTER_BASE_URL_DEFAULT,
+    claude_rejects_sampling_controls,
 )
 from mindroom.timing import timed
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
@@ -126,12 +127,19 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
         if api_key:
             llm_provider_config["api_key"] = api_key
 
+    model = llm_provider_config.get("model")
+    if llm_provider == "anthropic" and isinstance(model, str) and claude_rejects_sampling_controls(model):
+        # Mem0's Anthropic LLM sends its default temperature of 0.1, else a set top_p, and never top_k; these models
+        # reject every sampling value, and Mem0 sends neither when both are None.
+        llm_provider_config["temperature"] = None
+        llm_provider_config["top_p"] = None
+
     if llm_provider == "openrouter":
         # Mem0's OpenAI LLM reads openrouter_base_url instead when OPENROUTER_API_KEY is exported.
         llm_provider_config.setdefault("openai_base_url", OPENROUTER_BASE_URL_DEFAULT)
         llm_provider_config.setdefault("openrouter_base_url", OPENROUTER_BASE_URL_DEFAULT)
 
-    logger.info("Configured memory LLM", provider=llm_provider, model=memory_llm.config.get("model"))
+    logger.info("Configured memory LLM", provider=llm_provider, model=model)
     return {
         # Mem0 has no OpenRouter provider; its OpenAI LLM speaks the same API.
         "provider": "openai" if llm_provider == "openrouter" else llm_provider,

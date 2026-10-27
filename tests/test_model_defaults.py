@@ -178,21 +178,41 @@ def test_native_compaction_covers_current_claude_models() -> None:
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
-def test_thinking_prefix_check_covers_current_claude_models() -> None:
-    """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
-    presets = [
+def _current_presets() -> list[model_defaults.ModelPreset]:
+    """Return every model preset config init and the hosted platform write."""
+    return [
         *model_defaults.CONFIG_INIT_MODEL_PRESETS.values(),
         *(
             preset
             for alternatives in model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES.values()
             for _, preset in alternatives
         ),
+        *(preset for additions in model_defaults.CONFIG_INIT_ADDITIONAL_MODELS.values() for _, preset in additions),
+        *model_defaults.SAAS_MODEL_PRESETS.values(),
     ]
+
+
+def test_thinking_prefix_check_covers_current_claude_models() -> None:
+    """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
     claude_ids = {
-        preset.id for preset in presets if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
+        preset.id
+        for preset in _current_presets()
+        if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
     }
     assert len(claude_ids) >= 6
     assert [model_id for model_id in sorted(claude_ids) if not checks_thinking_prefix(model_id)] == []
+
+
+def test_sampling_rule_covers_current_claude_models() -> None:
+    """Every current Claude default must count as rejecting non-default sampling, on its own route or a gateway.
+
+    A default bump to a model the rule does not name would send it the thread summary temperature.
+    """
+    claude_ids = {preset.id for preset in _current_presets() if "claude" in preset.id}
+    assert len(claude_ids) >= 12
+    assert [
+        model_id for model_id in sorted(claude_ids) if not model_defaults.claude_rejects_sampling_controls(model_id)
+    ] == []
 
 
 def test_current_google_and_openrouter_specialist_models() -> None:
@@ -206,16 +226,18 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
     )
-    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
-        "claude-fable-5-1",
-        "claude-fable-5.1",
+    assert model_defaults.CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS == (
         "claude-fable-5",
-        "claude-opus-5-5",
-        "claude-opus-5.5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
         "claude-opus-5",
-        "claude-sonnet-5-5",
-        "claude-sonnet-5.5",
+        "claude-opus-4-8",
+        "claude-opus-4.8",
+        "claude-opus-4-7",
+        "claude-opus-4.7",
         "claude-sonnet-5",
+        "claude-haiku-5-5",
+        "claude-haiku-5.5",
     )
     assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
         "openrouter",
@@ -345,9 +367,21 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
         ("anthropic/claude-fable-5.1", True),
         ("Claude-Opus-5-5", True),
         ("claude-sonnet-4-5", False),
-        ("anthropic/claude-haiku-5.5", False),
+        ("claude-opus-4-7", True),
+        ("anthropic/claude-opus-4.8", True),
+        ("claude-opus-4-6", False),
+        ("claude-mythos-preview", True),
+        ("claude-haiku-5-5", True),
+        ("anthropic.claude-haiku-5-5", True),
+        ("anthropic/claude-haiku-5.5", True),
+        ("claude-haiku-4-5", False),
+        ("claude-haiku-5-5@20261001", True),
+        ("us.anthropic.claude-opus-4-7-v1:0", True),
+        ("claude-opus-5-5-20261001", True),
+        ("bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0", False),
+        ("databricks-claude-sonnet-5-5", True),
     ],
 )
 def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:
-    """Direct, Bedrock, and gateway ids name the same generation, in any letter case."""
+    """Direct, dated, Vertex, Bedrock, and gateway ids name the same generation, in any letter case."""
     assert model_defaults.claude_rejects_sampling_controls(model_id) is rejects
