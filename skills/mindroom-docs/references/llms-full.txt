@@ -20434,7 +20434,6 @@ MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM=matrix_user_id
 | `MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN` | The single email domain allowed for template derivation; required with the template |
 
 MindRoom verifies the signature, expiry, issuer, audience, and every configured claim, and picks up gateway key rotation without a restart.
-Behind Cloudflare Access, the header is `Cf-Access-Jwt-Assertion`, the JWKS URL is `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, the issuer is `https://<team>.cloudflareaccess.com`, and the audience is the Access application's AUD tag.
 
 ## Matrix Identity
 
