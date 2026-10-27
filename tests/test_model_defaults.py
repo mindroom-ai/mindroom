@@ -334,7 +334,6 @@ def test_openai_presets_use_current_models() -> None:
         "openai/gpt-6-luna",
         1_050_000,
     )
-    assert model_defaults.OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES == ("gpt-5", "gpt-6")
 
 
 def test_glm_presets_use_current_generation() -> None:
@@ -385,3 +384,27 @@ def test_config_init_openrouter_alternatives_cover_saas_openrouter_models() -> N
 def test_claude_sampling_rule_reads_the_model_behind_any_route_spelling(model_id: str, *, rejects: bool) -> None:
     """Direct, dated, Vertex, Bedrock, and gateway ids name the same generation, in any letter case."""
     assert model_defaults.claude_rejects_sampling_controls(model_id) is rejects
+
+
+@pytest.mark.parametrize(
+    ("model_id", "rejects"),
+    [
+        ("gpt-6-luna", True),
+        ("gpt-6.1-sol", True),
+        ("gpt-5-mini", True),
+        ("gpt-5.5", True),
+        ("gpt-5-2025-08-07", True),
+        ("GPT-6-Astra", True),
+        ("openai/gpt-6-luna", True),
+        ("OpenAI/GPT-5.4-mini", True),
+        ("azure/gpt-5.6-terra", True),
+        ("gpt-4.1", False),
+        ("o3-mini", False),
+        ("openai/gpt-4o", False),
+        ("anthropic/claude-sonnet-5.5", False),
+        ("my-gpt-6-proxy", False),
+    ],
+)
+def test_openai_sampling_rule_reads_the_model_behind_a_gateway_prefix(model_id: str, *, rejects: bool) -> None:
+    """GPT-5 and GPT-6 ids match directly or behind a gateway prefix, in any letter case, and only at the start."""
+    assert model_defaults.openai_rejects_sampling_controls(model_id) is rejects
