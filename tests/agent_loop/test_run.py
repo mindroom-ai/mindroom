@@ -1148,3 +1148,42 @@ async def test_a_resume_connects_before_the_approved_call_runs() -> None:
     )
 
     assert log == ["database connect", "approved call", "request", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_keeps_counting_the_calls_its_turn_already_made() -> None:
+    """A resume continues its turn, so a call past the turn's limit is refused instead of pausing once more."""
+
+    def add(a: int, b: int) -> str:
+        """Add two integers.
+
+        Args:
+            a: First number.
+            b: Second number.
+
+        """
+        return str(a + b)
+
+    model = ScriptedModel(
+        [
+            calls(tool_call("add", "c1", a=1, b=2), metrics=usage(1, 1)),
+            calls(tool_call("add", "c2", a=3, b=4), metrics=usage(1, 1)),
+            answer("done", usage(1, 1)),
+        ],
+    )
+    agent = spec(model, gated(add), max_tool_calls_per_turn=1)
+    _, first = await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="go")],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+    _, second, _ = await _resume(agent, first, denied={"c1": "no"})
+
+    assert second.status is RunStatus.completed
+    tool_messages = [message for message in model.requests[-1].messages if message.role == "tool"]
+    assert [message.tool_call_id for message in tool_messages] == ["c1", "c2"]
+    assert "limit" in str(tool_messages[1].content).lower()

@@ -782,6 +782,7 @@ class _MultiAgentOrchestrator:
             continuation_ready=transport.wake_continuation_sources,
             recovery=self._approval_recovery,
             responder_principal=transport.responder_principal_id,
+            router_missing=transport.router_missing,
         )
 
     async def _ensure_user_account(self, config: Config) -> None:
