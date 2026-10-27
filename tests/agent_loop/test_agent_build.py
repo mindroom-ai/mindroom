@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -30,6 +31,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.provider import ModelRequest
+from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, get_plugin_skill_roots, set_plugin_skill_roots
@@ -574,34 +576,31 @@ def test_reasoning_s_default_instructions_show_only_while_both_its_functions_are
     assert build.prompt.tool_instructions == expected
 
 
-@pytest.mark.parametrize(
-    ("tools", "room_id", "guided"),
-    [
-        ([], "!room:localhost", False),
-        (["matrix_message"], "!room:localhost", True),
-        (["matrix_message"], None, False),
-    ],
-    ids=["without_matrix_message", "with_matrix_message", "outside_a_room"],
-)
-def test_the_delegate_instructions_name_matrix_message_only_while_the_agent_offers_it(
+@pytest.mark.parametrize("realtime_call", [False, True], ids=["chat", "realtime_call"])
+def test_matrix_message_guidance_reaches_the_prompt_only_with_the_matrix_message_function(
     tmp_path: Path,
-    tools: list[str],
-    room_id: str | None,
     *,
-    guided: bool,
+    realtime_call: bool,
 ) -> None:
-    """Delegation guidance for ongoing conversations names matrix_message, a tool of its own the agent may not have."""
-    config, runtime_paths = _config(tmp_path, tools=tools, delegate_to=["assistant"])
+    """Delegation guidance never names matrix_message; its own description, offered only with it, says how to use it.
+
+    A realtime call leaves out matrix_message when it needs approval, and nothing in the prompt still names it.
+    """
+    config, runtime_paths = _config(tmp_path, tools=["matrix_message"], delegate_to=["assistant"])
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
+    )
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name="assistant",
         runtime_paths=runtime_paths,
         requester_id="@user:localhost",
-        room_id=room_id,
+        room_id="!room:localhost",
         thread_id=None,
         resolved_thread_id=None,
         session_id=None,
     )
+    call_filter = partial(_function_available_during_call, config=config, agent_name="assistant")
 
     build = create_agent(
         "assistant",
@@ -611,12 +610,15 @@ def test_the_delegate_instructions_name_matrix_message_only_while_the_agent_offe
         knowledge=None,
         active_model_name=None,
         persist_runtime_state=False,
+        tool_function_filter=call_filter if realtime_call else None,
+        # Chat asks for the approval; the realtime call builds as build_call_tools does.
+        supports_native_tool_approval=not realtime_call,
     )
 
     offered = {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}
-    [delegate] = [text for text in build.prompt.tool_instructions if "run_subagent" in text]
-    assert ("matrix_message" in offered) is guided
-    assert ("matrix_message(" in delegate) is guided
+    assert {"run_subagent", "continue_subagent"} <= offered
+    assert ("matrix_message" in offered) is not realtime_call
+    assert not [text for text in build.prompt.tool_instructions if "matrix_message" in text]
 
 
 def test_a_toolkit_whose_functions_are_all_left_out_shows_no_instructions(tmp_path: Path) -> None:
