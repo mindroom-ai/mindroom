@@ -329,8 +329,8 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
         ctx.pass_through("GH_CONFIG_DIR")
 ```
 
-- `ctx.set_env(name, value)` gives the command `name` with `value`.
-- `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough`.
+- `ctx.set_env(name, value)` gives the command `name` with `value`, even where the workspace's [`.mindroom/worker-env.sh`](deployment/sandbox-proxy.md#workspace-env-hook-mindroomworker-envsh) exports `name` for a worker.
+- `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough` or the workspace's `.mindroom/worker-env.sh`.
   `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
 - `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.

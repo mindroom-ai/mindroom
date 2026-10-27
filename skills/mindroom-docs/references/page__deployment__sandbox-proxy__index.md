@@ -381,6 +381,7 @@ How it behaves:
 - Only exported variables apply: write `export FOO=bar`, because plain `FOO=bar`, aliases, functions, and `cd` do not carry over.
 - The script starts from the prepared request environment, not the runner's full environment.
 - Exported values pass through, including tokens you export on purpose, except MindRoom's control variables (the same ones dropped from [shell passthrough](#shell-environment-and-path)), bash bookkeeping variables such as `PWD` and `SHLVL`, the [workspace home](#workspace-home-contract) variables, and values larger than 32 KiB.
+- A variable a plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) sets or removes for a `shell` call wins over the script's export.
 
 Limits and errors:
 

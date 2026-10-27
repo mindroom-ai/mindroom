@@ -56,11 +56,17 @@ if TYPE_CHECKING:
 
 _ALICE = _MIND_EXECUTION_IDENTITY
 _BOB = replace(_MIND_EXECUTION_IDENTITY, requester_id="@bob:example.org", session_id="session-2")
-# MindRoom's own variables: the shell tool passes PLUGIN_SECRET by configuration, the others only when asked.
+# MindRoom's own variables: the shell tool passes PLUGIN_SECRET by configuration, the others only when asked, and
+# never the control variables, which no command may get.
+_CONTROL_NAMES = ("MINDROOM_CREDENTIALS_ENCRYPTION_KEY", "MINDROOM_SANDBOX_PROXY_TOKEN")
+# A well-formed key, since the runtime refuses to start with a malformed one.
+_ENCRYPTION_KEY = "cHJpbWFyeS1jcmVkZW50aWFscy1rZXktMzItYnl0ZXM="
 _PROCESS_ENV = {
     "PLUGIN_SECRET": "primary-secret",
     "PLUGIN_SHARED_KEY": "primary-shared",
     "DATABASE_URL": "postgres://primary",
+    "MINDROOM_CREDENTIALS_ENCRYPTION_KEY": _ENCRYPTION_KEY,
+    "MINDROOM_SANDBOX_PROXY_TOKEN": "primary-proxy-token",
 }
 _PRINT_PLUGIN_ENV = 'printf "%s|%s|%s" "$PLUGIN_VALUE" "$PLUGIN_SECRET" "$PLUGIN_SHARED_KEY"'
 _PRINT_GRANT_ENV = (
@@ -97,6 +103,8 @@ class _Shell:
     # The worker requests the calls sent; always empty for a local shell.
     sent: list[dict[str, Any]]
     runtime: Callable[[], AbstractContextManager[object]]
+    # The agent workspace a worker command runs in; None for a local shell.
+    workspace: Path | None = None
 
     async def call(
         self,
@@ -174,6 +182,7 @@ def _worker_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool_name: str
         _function(toolkit, tool_name, function_name),
         sent=sent,
         runtime=lambda: tool_runtime_context(_mind_tool_runtime_context(primary_paths, live_config)),
+        workspace=workspace,
     )
 
 
@@ -227,6 +236,56 @@ async def test_a_removal_also_keeps_an_inherited_variable_from_the_command(
         assert shell.sent[-1]["execution_env_unset"] == ["HTTPS_PROXY"]
 
 
+@pytest.mark.parametrize("pattern", ["MINDROOM_*", "*"])
+@pytest.mark.asyncio
+async def test_pass_through_never_hands_a_command_mindroom_s_control_variables(shell: _Shell, pattern: str) -> None:
+    """Even a pass-through matching every variable keeps the encryption key and sandbox token from the command."""
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def everything(ctx: ToolEnvironmentContext) -> None:
+        ctx.pass_through(pattern)
+
+    command = 'printf "%s|%s|%s" "${MINDROOM_CREDENTIALS_ENCRYPTION_KEY-unset}" "${MINDROOM_SANDBOX_PROXY_TOKEN-unset}" "${PLUGIN_SHARED_KEY-unset}"'
+
+    assert (
+        await shell.run(_registry(everything), command)
+        == f"unset|unset|{'primary-shared' if pattern == '*' else 'unset'}"
+    )
+    if shell.sent:
+        request = shell.sent[-1]
+        assert set(_CONTROL_NAMES).isdisjoint(request["execution_env"])
+        assert _ENCRYPTION_KEY not in json.dumps(request)
+
+
+@pytest.mark.asyncio
+async def test_a_hook_s_values_win_over_the_workspace_script_of_a_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A value or removal a hook makes holds even where the workspace's `.mindroom/worker-env.sh` exports the name."""
+    shell = _worker_tool(monkeypatch, tmp_path, "shell", "run_shell_command")
+    assert shell.workspace is not None
+    script = shell.workspace / ".mindroom" / "worker-env.sh"
+    script.parent.mkdir()
+    script.write_text(
+        "export GITHUB_TOKEN=from-script PLUGIN_SECRET=from-script PLUGIN_SCRIPT_ONLY=from-script\n",
+        encoding="utf-8",
+    )
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def fresh_token(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("GITHUB_TOKEN", "from-hook")
+        ctx.unset_env("PLUGIN_SECRET")
+
+    command = 'printf "%s|%s|%s" "${GITHUB_TOKEN-unset}" "${PLUGIN_SECRET-unset}" "${PLUGIN_SCRIPT_ONLY-unset}"'
+    script_only = await shell.run(HookRegistry.empty(), command)
+    with_hook = await shell.run(_registry(fresh_token), command)
+
+    assert script_only == "from-script|from-script|from-script"
+    assert with_hook == "from-hook|unset|from-script"
+    assert shell.sent[-1]["execution_env_set"] == ["GITHUB_TOKEN"]
+
+
 @pytest.mark.asyncio
 async def test_database_url_variables_reach_the_command_wherever_it_runs(shell: _Shell) -> None:
     """Names a worker otherwise keeps from its commands, such as database URLs, reach one a hook gives them to."""
@@ -251,22 +310,32 @@ def _worker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(constants, "worker_proxy_execution_env", lambda _env: {"HTTPS_PROXY": "egress"})
 
 
+def _remove_the_proxy(ctx: ToolEnvironmentContext) -> None:
+    ctx.unset_env("HTTPS_PROXY")
+
+
+def _set_the_proxy(ctx: ToolEnvironmentContext) -> None:
+    ctx.set_env("HTTPS_PROXY", "from-hook")
+
+
+@pytest.mark.parametrize("change", [_remove_the_proxy, _set_the_proxy], ids=["removed", "set"])
 @pytest.mark.parametrize("egress", [_broker_sets_the_proxy, _worker_sets_the_proxy], ids=["broker", "worker-egress"])
 @pytest.mark.asyncio
-async def test_a_removal_leaves_the_egress_proxy_a_worker_call_gets(
+async def test_the_egress_proxy_a_worker_call_gets_wins_over_a_hook(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     egress: Callable[[pytest.MonkeyPatch], None],
+    change: Callable[[ToolEnvironmentContext], None],
 ) -> None:
-    """MindRoom's egress proxy for the call, set by the primary's broker or by the worker, applies over a removal."""
+    """MindRoom's egress proxy for the call, set by the primary's broker or by the worker, applies over a hook's change."""
     shell = _worker_tool(monkeypatch, tmp_path, "shell", "run_shell_command")
     egress(monkeypatch)
 
     @hook(EVENT_TOOL_ENVIRONMENT)
-    async def connect_directly(ctx: ToolEnvironmentContext) -> None:
-        ctx.unset_env("HTTPS_PROXY")
+    async def proxy(ctx: ToolEnvironmentContext) -> None:
+        change(ctx)
 
-    assert await shell.run(_registry(connect_directly), 'printf "%s" "${HTTPS_PROXY-unset}"') == "egress"
+    assert await shell.run(_registry(proxy), 'printf "%s" "${HTTPS_PROXY-unset}"') == "egress"
 
 
 @pytest.mark.asyncio
