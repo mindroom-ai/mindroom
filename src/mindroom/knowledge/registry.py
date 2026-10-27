@@ -100,6 +100,9 @@ _published_indexes: dict[PublishedIndexKey, _PublishedIndexHandle] = {}
 _CONSECUTIVE_REFRESH_FAILURE_ALERT_THRESHOLD = 3
 _PRIVATE_KNOWLEDGE_BASE_ID_PREFIX = "__agent_private__:"
 _MAX_PRIVATE_PUBLISHED_INDEXES = 128
+#: Vectors one search may load from a base fed by one requester's own files, so worker code that grows those files
+#: cannot make a search exhaust the primary's memory. About 43,000 chunks of the default 1,536-dimension embedder.
+_REQUESTER_BASE_MATRIX_BYTES = 256 * 1024 * 1024
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -376,7 +379,16 @@ def _build_published_index_reader(
         path=str(published_index_storage_path(key)),
         embedder=create_configured_embedder(config, runtime_paths),
         published_settings=state.settings,
+        max_matrix_bytes=_REQUESTER_BASE_MATRIX_BYTES if _requester_owns_sources(key, config) else None,
     )
+
+
+def _requester_owns_sources(key: PublishedIndexKey, config: Config) -> bool:
+    """Return whether one requester's own files feed the base: private knowledge, or file memory, a runtime overlay.
+
+    Operator-configured shared bases stay unlimited, since the operator chose and sized their sources.
+    """
+    return _published_index_key_is_private(key) or config.runtime_knowledge_base_overlay(key.base_id) is not None
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:

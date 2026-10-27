@@ -21,6 +21,7 @@ from mindroom.knowledge.vector_store import (
     KnowledgeCollection,
     StoredRow,
     _CollectionNotFoundError,
+    _KnowledgeIndexTooLargeError,
     list_collection_names,
 )
 
@@ -267,10 +268,10 @@ def test_concurrent_cold_searches_load_the_matrix_once(
     loads: list[int] = []
     real_load = vector_store_module._load_vector_index
 
-    def slow_load(connection: sqlite3.Connection) -> object:
+    def slow_load(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> object:
         loads.append(1)
         time.sleep(0.2)
-        return real_load(connection)
+        return real_load(connection, max_matrix_bytes)
 
     monkeypatch.setattr(vector_store_module, "_load_vector_index", slow_load)
     with ThreadPoolExecutor(8) as pool:
@@ -278,6 +279,22 @@ def test_concurrent_cold_searches_load_the_matrix_once(
 
     assert loads == [1]
     assert all(result[0].content == "alpha" for result in results)
+
+
+def test_a_search_refuses_vectors_past_its_limit_before_loading_them(
+    collection: KnowledgeCollection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collection whose matrix exceeds the search's byte limit raises without allocating or caching it."""
+    monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
+    collection.write_source_rows("a.md", [_row(f"a{index}", "a.md", "alpha", [1.0, 0.0]) for index in range(3)])
+    matrix_bytes = 3 * 2 * 4
+
+    with pytest.raises(_KnowledgeIndexTooLargeError):
+        collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes - 1)
+    assert not vector_store_module._index_cache
+
+    assert collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes)[0].content == "alpha"
 
 
 def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollection) -> None:
@@ -289,7 +306,7 @@ def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollec
     with closing(sqlite3.connect(collection.file)) as connection:
         tracemalloc.start()
         try:
-            index = vector_store_module._load_vector_index(connection)
+            index = vector_store_module._load_vector_index(connection, None)
             _current, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -367,7 +384,7 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection: loads.append("load") or real_load(connection),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _round in range(3):
@@ -401,7 +418,7 @@ def test_the_published_matrix_stays_cached_beside_the_collection_it_retired(
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection: loads.append("load") or real_load(connection),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(3):
@@ -429,7 +446,7 @@ def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatc
     monkeypatch.setattr(
         vector_store_module,
         "_load_vector_index",
-        lambda connection: loads.append("load") or real_load(connection),
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(3):

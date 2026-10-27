@@ -66,7 +66,10 @@ from mindroom.knowledge.file_listing import (
     list_git_tracked_knowledge_files,
     list_knowledge_files,
 )
-from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
+from mindroom.knowledge.file_memory_knowledge import (
+    resolve_agent_file_memory_knowledge,
+    resolve_file_memory_knowledge,
+)
 from mindroom.knowledge.git_source import GitKnowledgeSource, GitSyncResult
 from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
 from mindroom.knowledge.index_metadata import state_for_publication
@@ -95,7 +98,7 @@ from mindroom.knowledge.registry import (
     save_published_index_state,
 )
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
-from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
+from mindroom.knowledge.vector_store import KnowledgeCollection, _KnowledgeIndexTooLargeError, list_collection_names
 from mindroom.knowledge.watch import KnowledgeSourceWatcher, _shared_poll_targets
 from mindroom.logging_config import subprocess_logging_env
 from mindroom.memory import _semantic_file_search as semantic_file_search
@@ -291,6 +294,80 @@ async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: P
 
     assert any(query_marker in document.content for document in documents)
     assert any(document.meta_data.get("source_path") == "memory/notes.md" for document in documents)
+
+
+@pytest.mark.asyncio
+async def test_only_bases_fed_by_a_requesters_own_files_limit_the_vectors_a_search_loads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker code can grow private knowledge and file memory, so their searches refuse vectors past the limit."""
+    monkeypatch.setattr(knowledge_registry, "_REQUESTER_BASE_MATRIX_BYTES", 1)
+    runtime_paths = test_runtime_paths(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "note.md").write_text("shared note", encoding="utf-8")
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    knowledge_bases=["docs"],
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="mind_data",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge"),
+                    ),
+                ),
+            },
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs), watch=False)},
+            models={},
+            memory={"backend": "file", "search": {"mode": "semantic"}},
+        ),
+        runtime_paths,
+    )
+    identity = _identity("@alice:localhost")
+    private_base_id = config.resolve_entity("helper").private_knowledge_base_id
+    assert private_base_id is not None
+    private_key = resolve_published_index_key(
+        private_base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+        create=True,
+    )
+    Path(private_key.knowledge_path).mkdir(parents=True, exist_ok=True)
+    (Path(private_key.knowledge_path) / "note.md").write_text("private note", encoding="utf-8")
+    memory = resolve_agent_file_memory_knowledge("helper", config, runtime_paths, identity)
+    assert memory is not None
+    (memory.root / "memory").mkdir(parents=True)
+    (memory.root / "memory" / "note.md").write_text("memory note", encoding="utf-8")
+    bases = {"docs": config, private_base_id: config, memory.base_id: memory.config}
+    for base_id, base_config in bases.items():
+        await refresh_knowledge_binding(
+            base_id,
+            config=base_config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        )
+    readers = {
+        base_id: get_published_index(
+            base_id,
+            config=base_config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+        ).index
+        for base_id, base_config in bases.items()
+    }
+    assert all(index is not None for index in readers.values())
+    shared = readers.pop("docs")
+    assert shared is not None
+
+    assert [hit.content.strip() for hit in await shared.reader.asearch("note", limit=1)] == ["shared note"]
+    for index in readers.values():
+        assert index is not None
+        with pytest.raises(_KnowledgeIndexTooLargeError):
+            await index.reader.asearch("note", limit=1)
 
 
 @pytest.mark.asyncio
