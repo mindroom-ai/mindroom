@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import httpx
 
-from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
@@ -34,6 +33,7 @@ from mindroom.tool_system.runtime_context import (
     get_worker_progress_pump,
     get_worker_runtime_context,
 )
+from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
@@ -932,9 +932,11 @@ def _call_proxy_sync(
         )
         payload.update(worker_payload)
         payload["config_snapshot"] = runner_config_snapshot(runtime_paths, manager_context.runtime_config)
-        if tool_name == "shell" and (cli_env := current_agent_cli_shell_env()) is not None:
-            # A minimal response's grant travels with each command to the agent's own worker.
-            execution_env = {**(execution_env or {}), **cli_env.env()}
+        # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
+        # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
+        call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
+        execution_env = call_environment.applied(execution_env or {}, runtime_paths.process_env)
+        extra_env_passthrough = ",".join(filter(None, (extra_env_passthrough, *call_environment.pass_through))) or None
         runtime_config = manager_context.runtime_config
         agent_name = worker_target.routing_agent_name if worker_target is not None else None
         # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
@@ -960,6 +962,12 @@ def _call_proxy_sync(
             }
         if execution_env:
             payload["execution_env"] = execution_env
+        # The call's set and removed names apply over the worker's own environment and workspace script too, except
+        # where the worker's call env changes them, as its egress settings do; a set name takes its value from above.
+        if execution_env_set := sorted(name for name, value in call_environment.values.items() if value is not None):
+            payload["execution_env_set"] = execution_env_set
+        if call_environment.removed:
+            payload["execution_env_unset"] = sorted(call_environment.removed)
         if extra_env_passthrough is not None:
             payload["extra_env_passthrough"] = extra_env_passthrough
         if tool_config_overrides:

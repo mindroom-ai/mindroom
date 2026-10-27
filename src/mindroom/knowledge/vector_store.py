@@ -13,7 +13,7 @@ import sqlite3
 import struct
 import threading
 from collections import OrderedDict
-from contextlib import closing
+from contextlib import closing, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,6 +43,8 @@ _WORD = re.compile(r"\w+")
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 #: Vector matrices kept loaded across searches, bounded by their total size apart from the largest one.
 _MATRIX_CACHE_BYTES = 512 * 1024 * 1024
+#: Bytes per read while reading a collection file ahead of its matrix load.
+_READ_AHEAD_CHUNK_BYTES = 8 * 1024 * 1024
 #: Rows normalized at a time while a matrix loads.
 _NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
@@ -493,7 +495,7 @@ def _vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: 
                 if Path(cached[0]).parent == file.parent or _file_version(Path(cached[0])) != cached[:-1]
             ]:
                 del _index_cache[stale]
-        index = _load_vector_index(connection, max_matrix_bytes)
+        index = _load_vector_index(connection, file, max_matrix_bytes)
         with _index_cache_lock:
             _index_cache[key] = index
             # The largest index does not count against the budget, so one base too big for it is not reloaded on every
@@ -508,7 +510,19 @@ def _vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: 
     return index
 
 
-def _load_vector_index(connection: sqlite3.Connection, max_matrix_bytes: int | None) -> _VectorIndex:
+def _read_ahead(file: Path) -> None:
+    """Read the collection file front to back, so the row-order matrix load that follows reads from the page cache.
+
+    On a cold network disk a sequential read is several times faster than that load's own reads, which for a
+    collection of a few GB can otherwise exceed a search's budget.
+    """
+    buffer = bytearray(_READ_AHEAD_CHUNK_BYTES)
+    with file.open("rb", buffering=0) as handle:
+        while handle.readinto(buffer):
+            pass
+
+
+def _load_vector_index(connection: sqlite3.Connection, file: Path, max_matrix_bytes: int | None) -> _VectorIndex:
     import numpy as np  # noqa: PLC0415
 
     # One read transaction, so the count and the rows come from the same snapshot.
@@ -520,6 +534,9 @@ def _load_vector_index(connection: sqlite3.Connection, max_matrix_bytes: int | N
         if max_matrix_bytes is not None and count * dimension * 4 > max_matrix_bytes:
             message = f"Knowledge collection holds {count} vectors, more than its {max_matrix_bytes}-byte search limit"
             raise _KnowledgeIndexTooLargeError(message)
+        # A file swept since the connection opened still loads through it, so reading ahead is only best effort.
+        with suppress(OSError):
+            _read_ahead(file)
         rowids = np.empty(count, dtype=np.int64)
         matrix = np.empty((count, dimension), dtype=np.float32)
         rows = connection.execute("SELECT rowid, embedding FROM chunks ORDER BY rowid")

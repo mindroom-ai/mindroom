@@ -341,7 +341,7 @@ async def invoke_tool(
         return _error(context, GatewayErrorCode.INVALID_ARGUMENTS)
 
     async def selected(built: Toolkit) -> InvocationResponse:
-        target = adapt_function(_function(context, built, function))
+        target = replace(adapt_function(_function(context, built, function)), registered_toolkit=toolkit)
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         policy = build_tool_hook_middleware(

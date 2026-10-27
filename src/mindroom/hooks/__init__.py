@@ -38,10 +38,18 @@ from .context import (
     SystemEnrichContext,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import render_enrichment_block, render_system_enrichment_block, render_transient_context
-from .execution import emit, emit_collect, emit_final_response_transform, emit_gate, emit_transform
+from .execution import (
+    emit,
+    emit_collect,
+    emit_collect_environment,
+    emit_final_response_transform,
+    emit_gate,
+    emit_transform,
+)
 from .ingress import HookIngressPolicy, hook_ingress_policy
 from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
 from .sender import build_hook_message_sender, send_hook_message, send_matrix_message
@@ -68,6 +76,7 @@ from .types import (
     EVENT_SYSTEM_ENRICH,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     EnrichmentItem,
     HookCallback,
     HookMatrixAdmin,
@@ -108,6 +117,7 @@ __all__ = [
     "EVENT_SYSTEM_ENRICH",
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
+    "EVENT_TOOL_ENVIRONMENT",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "AfterResponseContext",
     "AgentLifecycleContext",
@@ -146,6 +156,7 @@ __all__ = [
     "SystemEnrichContext",
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
+    "ToolEnvironmentContext",
     "TurnIntent",
     "TurnOrigin",
     "TurnTrust",
@@ -156,6 +167,7 @@ __all__ = [
     "default_timeout_ms_for_event",
     "emit",
     "emit_collect",
+    "emit_collect_environment",
     "emit_final_response_transform",
     "emit_gate",
     "emit_transform",
