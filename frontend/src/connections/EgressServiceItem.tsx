@@ -328,6 +328,7 @@ export function EgressServiceItem({
     !editing &&
     (!oauth || (!canConnect && !oauth.connected && !oauth.reset_required));
   const editable = canEdit(serviceEditing, service);
+  const addAccount = serviceEditing.addAccount?.(service);
   // Everything but the action that makes the service work, which is a button of its own.
   const actions: RowAction[] = [
     ...(oauth && canManageKey && !showKeyControls && !setKeyFirst
@@ -419,6 +420,16 @@ export function EgressServiceItem({
                 "Could not stop using the account. Try again.",
                 write(paths.reuse, "DELETE"),
               ),
+          },
+        ]
+      : []),
+    ...(addAccount
+      ? [
+          {
+            label: "Add another account",
+            ariaLabel: `Add another account for ${name}`,
+            disabled: serviceEditing.disabled,
+            onSelect: addAccount,
           },
         ]
       : []),

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   PASSED_THROUGH,
   deleteServiceWarning,
@@ -13,17 +14,27 @@ import {
 } from "./accountCopy";
 import { AgentIdentity } from "./AgentAvatar";
 import { breakAfterUnderscores } from "./breakAfterUnderscores";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
+import { Field, inputClass } from "./EgressRuleFields";
+import { nameFromLabel } from "./egressServiceForm";
 import { configPlaceholderOwners } from "./egressServiceNotes";
+import { nameProblem } from "./egressServiceValidation";
 import {
   keysSetText,
   type RowAgent,
   type ServiceEditing,
 } from "./egressRowText";
-import { EgressServiceRows, keyPath, servicePath } from "./EgressServiceRows";
+import {
+  EgressServiceRows,
+  keyPath,
+  servicePath,
+  servicePathsFor,
+} from "./EgressServiceRows";
 import { EgressServiceTable } from "./EgressServiceTable";
+import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
 import {
   errorText,
   type RequestErrorMessages,
@@ -36,6 +47,7 @@ import type {
   EgressCredentialList,
   EgressCredentialService,
   EgressLogRecord,
+  EgressOAuthStatus,
   EgressPresetCatalog,
 } from "./types";
 
@@ -299,21 +311,91 @@ function RecentRequests({
   );
 }
 
+/** Asks only what to call another account of a provider; the service that signs in to it is named after that. */
+function AddAccountDialog({
+  provider,
+  takenNames,
+  onCancel,
+  onContinue,
+}: {
+  provider: string;
+  takenNames: readonly string[];
+  onCancel: () => void;
+  onContinue: (label: string, name: string) => void;
+}) {
+  const id = useId();
+  const [label, setLabel] = useState("");
+  const [attempted, setAttempted] = useState(false);
+  const name = nameFromLabel(label);
+  const problem = nameProblem(name, { takenNames });
+  return (
+    <ConfirmDialog
+      open
+      title={`Add another ${provider} account`}
+      description="Give it a name, such as Team calendar. You sign in to the account next; your agents use it only when they ask for it by name."
+      confirmLabel="Continue"
+      destructive={false}
+      onCancel={onCancel}
+      onConfirm={() =>
+        problem ? setAttempted(true) : onContinue(label.trim(), name)
+      }
+    >
+      <Field
+        label="Name"
+        id={id}
+        hint={
+          problem
+            ? undefined
+            : `Agents choose it with X-Agent-Keys-Service: ${name}`
+        }
+        error={
+          (attempted || label.trim() !== "") && problem ? problem : undefined
+        }
+      >
+        {(control) => (
+          <Input
+            {...control}
+            className={inputClass}
+            placeholder="Team calendar"
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+          />
+        )}
+      </Field>
+    </ConfirmDialog>
+  );
+}
+
 /** One agent's services with their editor and request log. */
 function AgentSection({
   agent,
+  catalog,
   onChanged,
 }: {
   agent: EgressCredentialAgent;
+  /** The presets and account logins, which say where another account can be added; `null` until they load. */
+  catalog: EgressPresetCatalog | null;
   onChanged: () => void;
 }) {
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [addingAccount, setAddingAccount] = useState<{
+    preset: string;
+    oauth: EgressOAuthStatus;
+  } | null>(null);
   const operation = useRef<AbortController | null>(null);
+  // Its own, so that another action never closes the sign-in under way.
+  const signIn = useRef<AbortController | null>(null);
 
-  useEffect(() => () => operation.current?.abort(), []);
+  useEffect(
+    () => () => {
+      operation.current?.abort();
+      signIn.current?.abort();
+    },
+    [],
+  );
 
   const newOperation = () => {
     operation.current?.abort();
@@ -385,6 +467,50 @@ function AgentSection({
     onChanged();
   };
 
+  // A service of the user's own with its own account, from the preset that
+  // signs in with the row's provider, and then that account's sign-in. The
+  // popup opens on the click, before the service is saved, so the browser
+  // lets it open.
+  const addAccount = (label: string, name: string) => {
+    if (!addingAccount) return;
+    const { preset, oauth } = addingAccount;
+    setAddingAccount(null);
+    setError(null);
+    signIn.current?.abort();
+    const controller = new AbortController();
+    signIn.current = controller;
+    const { signal } = controller;
+    const paths = servicePathsFor({ agentName: agent.agent_name }, name);
+    void connectWithPopup(
+      oauth.provider,
+      async () => {
+        await requestConnection<void>(
+          servicePath(agent.agent_name, name),
+          signal,
+          "PUT",
+          { preset, display_name: label, oauth_separate_account: true },
+          SERVICE_ERROR_MESSAGES,
+        );
+        onChanged();
+        return requestConnection<OAuthAuthorization>(
+          paths.connect,
+          signal,
+          "POST",
+          {},
+        );
+      },
+      signal,
+      () => paths.accountConnected(signal),
+    )
+      .catch((cause) => {
+        if (!signal.aborted)
+          setError(errorText(cause, "Could not connect. Try again."));
+      })
+      .finally(() => {
+        if (!signal.aborted) onChanged();
+      });
+  };
+
   // Opening another service's editor would throw away what is typed in this one.
   const requestEdit = (service: EgressCredentialService) => {
     if (editor !== null && editorDirty) setPendingEdit(service);
@@ -410,6 +536,28 @@ function AgentSection({
       setEditor({ kind: "add", restrictOnly: true });
     },
     limitDisabled: editor !== null,
+    // On a personal agent, for a login whose accounts are not each user's own
+    // (GitHub, Atlassian) and not a shared service account.
+    addAccount:
+      agent.can_manage && !agent.shared
+        ? ({ oauth }) => {
+            const login =
+              oauth && !oauth.service_account
+                ? catalog?.oauth_providers.find(
+                    (option) => option.id === oauth.provider,
+                  )
+                : undefined;
+            const preset =
+              login && !login.requester_scoped
+                ? catalog?.presets.find(
+                    (option) => option.oauth_provider === login.id,
+                  )
+                : undefined;
+            return oauth && preset
+              ? () => setAddingAccount({ preset: preset.id, oauth })
+              : null;
+          }
+        : undefined,
   };
   const rowAgent: RowAgent = {
     displayName: agent.agent_display_name,
@@ -523,6 +671,14 @@ function AgentSection({
           No services are configured yet.
         </p>
       )}
+      {addingAccount && (
+        <AddAccountDialog
+          provider={addingAccount.oauth.display_name}
+          takenNames={agent.services.map((service) => service.name)}
+          onCancel={() => setAddingAccount(null)}
+          onContinue={addAccount}
+        />
+      )}
       <RecentRequests
         agentName={agent.agent_name}
         shared={agent.shared}
@@ -543,11 +699,13 @@ function linkedAgent(): string | null {
 /** One agent's row, with its services below it while it is open. */
 function AgentRow({
   agent,
+  catalog,
   open,
   onToggle,
   onChanged,
 }: {
   agent: EgressCredentialAgent;
+  catalog: EgressPresetCatalog | null;
   open: boolean;
   onToggle: () => void;
   onChanged: () => void;
@@ -599,7 +757,7 @@ function AgentRow({
           colSpan={2}
           className={`border-t border-border/60 p-0 ${STACKED_CELL}`}
         >
-          <AgentSection agent={agent} onChanged={onChanged} />
+          <AgentSection agent={agent} catalog={catalog} onChanged={onChanged} />
         </td>
       </tr>
     </>
@@ -609,6 +767,7 @@ function AgentRow({
 /** Personal page to connect accounts or set the API keys the egress broker injects for each agent. */
 export function EgressCredentials() {
   const [agents, setAgents] = useState<EgressCredentialAgent[] | null>(null);
+  const [catalog, setCatalog] = useState<EgressPresetCatalog | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<ReadonlySet<string>>(() => {
     const linked = linkedAgent();
@@ -644,6 +803,13 @@ export function EgressCredentials() {
     void load();
     return () => request.current?.abort();
   }, [load]);
+
+  // Without the presets the rows only leave out Add another account.
+  useEffect(() => {
+    const controller = new AbortController();
+    loadPresets(controller.signal).then(setCatalog, () => {});
+    return () => controller.abort();
+  }, []);
 
   // The linked agent's row exists only once the listing is in, after the browser looked for it.
   useEffect(() => {
@@ -714,6 +880,7 @@ export function EgressCredentials() {
                     <AgentRow
                       key={agent.agent_name}
                       agent={agent}
+                      catalog={catalog}
                       open={open.has(agent.agent_name)}
                       onToggle={() => toggle(agent.agent_name)}
                       onChanged={() => void load()}

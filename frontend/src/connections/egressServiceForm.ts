@@ -365,6 +365,22 @@ export function suggestedName(
   return base;
 }
 
+/**
+ * The name a label gives a service: its letters and digits, without accents,
+ * joined by `_` (`Team calendar` gives `team_calendar`), in at most
+ * `MAX_NAME_LENGTH` characters.
+ */
+export function nameFromLabel(label: string): string {
+  return label
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, MAX_NAME_LENGTH)
+    .replace(/_$/, "");
+}
+
 /** Whether the form sets anything the basic fields do not show, so the editor opens More options. */
 export function usesMoreOptions(form: EgressServiceForm): boolean {
   const first = form.rules[0];

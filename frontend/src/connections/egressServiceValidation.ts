@@ -131,7 +131,8 @@ function serverJsonSize(value: unknown): number {
   return JSON.stringify(value).replace(/[\u007f-\uffff]/g, "\\u0000").length;
 }
 
-function nameProblem(
+/** What is wrong with a new service's name, or null. */
+export function nameProblem(
   name: string,
   settings: { takenNames: readonly string[] },
 ): string | null {
