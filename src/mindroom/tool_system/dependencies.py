@@ -25,6 +25,8 @@ from mindroom.vendor_telemetry import vendor_telemetry_env_values
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from packaging.requirements import Requirement
+
     from mindroom.constants import RuntimePaths
 
 _PACKAGE_NAME = "mindroom"
@@ -155,19 +157,68 @@ def _has_lockfile() -> bool:
 
 
 @cache
+def _pyproject_optional_dependencies() -> dict[str, list[str]] | None:
+    """Return the source checkout's optional extras and their requirements, or None for an installed package."""
+    pyproject_path = _PROJECT_ROOT / "pyproject.toml"
+    if not pyproject_path.exists():
+        return None
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    return data.get("project", {}).get("optional-dependencies", {})
+
+
+@cache
 def _available_optional_extras() -> set[str]:
     """Discover available optional extras from pyproject or installed metadata."""
-    pyproject_path = _PROJECT_ROOT / "pyproject.toml"
-    if pyproject_path.exists():
-        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-        optional = data.get("project", {}).get("optional-dependencies", {})
-        return set(optional.keys())
+    if (optional := _pyproject_optional_dependencies()) is not None:
+        return set(optional)
 
     try:
         metadata = importlib_metadata.metadata(_PACKAGE_NAME)
     except importlib_metadata.PackageNotFoundError:
         return set()
     return set(metadata.get_all("Provides-Extra") or [])
+
+
+@cache
+def _extra_requirements(extra_name: str) -> tuple[Requirement, ...]:
+    """Return the requirements an optional extra adds on this platform, from pyproject or installed metadata."""
+    # Imported at first use: the tool registry imports this module, and packaging is not part of its import surface.
+    from packaging.requirements import Requirement  # noqa: PLC0415
+
+    if (optional := _pyproject_optional_dependencies()) is not None:
+        requirements = [Requirement(line) for line in optional.get(extra_name, [])]
+    else:
+        # Installed metadata lists every requirement once, marking the extras that add it.
+        requirements = [
+            requirement
+            for requirement in map(Requirement, importlib_metadata.requires(_PACKAGE_NAME) or [])
+            if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""})
+        ]
+    return tuple(
+        requirement
+        for requirement in requirements
+        if requirement.marker is None or requirement.marker.evaluate({"extra": extra_name})
+    )
+
+
+def _unsupported_extra_requirements(extra_name: str) -> list[str]:
+    """Describe each installed requirement of an optional extra whose version the extra does not allow.
+
+    A requirement that is not installed is left to the import check, so this never asks for a package the
+    caller does not import.
+    """
+    resolved_extra_name = _resolve_optional_extra_name(extra_name)
+    if resolved_extra_name is None:
+        return []
+    unsupported: list[str] = []
+    for requirement in _extra_requirements(resolved_extra_name):
+        try:
+            installed_version = importlib_metadata.version(requirement.name)
+        except importlib_metadata.PackageNotFoundError:
+            continue
+        if not requirement.specifier.contains(installed_version, prereleases=True):
+            unsupported.append(f"{requirement.name} {installed_version} (needs {requirement.specifier})")
+    return unsupported
 
 
 def _resolve_optional_extra_name(extra_name: str) -> str | None:
@@ -325,12 +376,16 @@ def ensure_optional_deps(
     """
     with optional_dependency_environment():
         installed = check_deps_installed(dependencies)
-    if installed:
+        # An installed version the extra does not allow counts as missing, so the extra installs again.
+        unsupported = _unsupported_extra_requirements(extra_name) if installed else []
+    if installed and not unsupported:
         return False
     if not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
-        missing = ", ".join(dependencies)
-        if missing_message is None:
-            missing_message = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
+        install_hint = f"Install with: pip install 'mindroom[{extra_name}]'"
+        if unsupported:
+            missing_message = f"Unsupported dependency versions: {', '.join(unsupported)}. {install_hint}"
+        elif missing_message is None:
+            missing_message = f"Missing dependencies: {', '.join(dependencies)}. {install_hint}"
         raise ImportError(missing_message)
     return True
 
