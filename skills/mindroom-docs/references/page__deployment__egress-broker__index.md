@@ -437,8 +437,8 @@ Such a service usually covers the same hosts and paths as a service of your admi
 curl -H 'X-Agent-Keys-Service: team_calendar' https://www.googleapis.com/calendar/v3/users/me/calendarList
 ```
 
-The header works for any service the [agent tool](#agent-tool) lists: only that service's rules then match, after the same [path limits](#limiting-paths-and-repositories), and a request none of them matches is refused with 403 `service_not_matched`.
-The broker removes the header before forwarding the request.
+The header works for any service the [agent tool](#agent-tool) lists, on hosts that a service's rules name: only the named service's rules then match, after the same [path limits](#limiting-paths-and-repositories), and a request none of them matches is refused with 403 `service_not_matched`.
+On those hosts the broker removes the header before forwarding the request; a request to any other host goes out as it would without the header.
 
 ## Services editor
 

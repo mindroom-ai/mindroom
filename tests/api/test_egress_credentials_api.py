@@ -2262,6 +2262,34 @@ def test_deleting_a_service_with_its_own_account_removes_that_account_and_its_op
     assert _stored_connection(portal, alice, "personal", portal["providers"]["google_drive"])[0] is True
 
 
+@pytest.mark.parametrize("separate_first", [True, False], ids=["own-to-tools", "tools-to-own"])
+def test_switching_between_its_own_and_the_tools_account_stops_the_opt_in(
+    oauth_egress_portal: dict[str, Any],
+    separate_first: bool,
+) -> None:
+    """An opt-in was given for one account, so it never carries over to the other one when the checkbox changes."""
+    portal = oauth_egress_portal
+    alice = "@alice:example.org"
+    body = {"preset": "google_drive", "oauth_separate_account": separate_first}
+    assert _put_service(portal, "alice", "personal", "mine", body).status_code == 204
+    _connect_account(portal, "alice", "personal", "drive", "google_drive")
+    _connect_and_allow(portal, "alice", "personal", "mine", "google_drive")
+    assert isinstance(_broker_reads(portal, alice, "personal", "mine", "google_drive"), secrets.Secret)
+
+    switched = _put_service(portal, "alice", "personal", "mine", {**body, "oauth_separate_account": not separate_first})
+    kept = _put_service(portal, "alice", "personal", "drive_too", {"preset": "google_drive"})
+    allow_again = _allow_reuse(portal, "alice", "personal", "drive_too")
+    unchanged = _put_service(portal, "alice", "personal", "drive_too", {"preset": "google_drive"})
+
+    assert (switched.status_code, kept.status_code, allow_again.status_code) == (204, 204, 204)
+    assert unchanged.status_code == 204
+    assert _broker_reads(portal, alice, "personal", "mine", "google_drive") == secrets.SecretMissing(
+        provider="google_drive",
+        reuse_off=True,
+    )
+    assert _egress_row(portal, "alice", "personal", "drive_too")["oauth"]["reuse_enabled"] is True
+
+
 @pytest.mark.parametrize("action", ["connect", "disconnect"])
 def test_connect_and_disconnect_are_refused_where_the_broker_refuses_the_account(
     oauth_egress_portal: dict[str, Any],

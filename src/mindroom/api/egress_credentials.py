@@ -544,7 +544,7 @@ def put_user_service(
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
     one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, or rules on hosts that
-    `unmatched_hosts: deny` keeps closed.
+    `unmatched_hosts: deny` keeps closed. Switching `oauth_separate_account` stops its account's opt-in.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -553,6 +553,7 @@ def put_user_service(
         raise HTTPException(409, str(UserServiceConflictError(name)), headers=CONNECTIONS_HEADERS)
     service = _parse_user_service(body)
     _require_hosts_within_operator_policy(operator, service)
+    stored = load_user_services(agent.manager, agent.target).get(name)
     try:
         save_user_service(
             agent.manager,
@@ -564,6 +565,10 @@ def put_user_service(
         )
     except ValueError as exc:
         raise _unprocessable(str(exc)) from exc
+    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), stored, name)
+    if provider is not None and stored is not None and stored.oauth_separate_account != service.oauth_separate_account:
+        # The opt-in was given for the other account, so it does not carry over to this one.
+        _set_account_reuse(agent, provider, name, enabled=False, by=requester_id)
 
 
 @router.delete("/agents/{agent_name}/services/{name}", status_code=204)
