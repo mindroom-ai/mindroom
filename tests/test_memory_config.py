@@ -740,6 +740,36 @@ class TestMemoryConfig:
         assert str(embedder._sdk_client().base_url) == f"{OPENROUTER_BASE_URL_DEFAULT}/"
         assert embedder._request_parameters(["hi"], purpose="query")["dimensions"] == 1536
 
+    @pytest.mark.parametrize(
+        ("provider", "canonical", "mem0_provider"),
+        [
+            (" OpenRouter ", "openrouter", "openai"),
+            ("Ollama", "ollama", "ollama"),
+            ("ANTHROPIC", "anthropic", "anthropic"),
+        ],
+    )
+    def test_memory_llm_provider_loads_in_any_spelling_as_the_name_mem0_accepts(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        canonical: str,
+        mem0_provider: str,
+    ) -> None:
+        """A memory LLM provider is spelled as model providers are, so Mem0 builds it instead of rejecting the name."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        config = Config(
+            memory={"llm": {"provider": provider, "config": {"model": "m", "api_key": "sk-test"}}},
+            router=RouterConfig(model="default"),
+        )
+
+        result = _get_memory_config(tmp_path / "memory", config, _runtime_paths(tmp_path))
+
+        assert config.memory.llm is not None
+        assert config.memory.llm.provider == canonical
+        assert result["llm"]["provider"] == mem0_provider
+        LlmFactory.create(result["llm"]["provider"], result["llm"]["config"])
+
     def test_get_memory_config_ollama_embedder_uses_credential_host_before_config(self, tmp_path: Path) -> None:
         """Credential-backed Ollama host should override the embedder config host."""
         runtime_paths = _runtime_paths(tmp_path)
