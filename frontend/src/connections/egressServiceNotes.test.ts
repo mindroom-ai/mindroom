@@ -214,7 +214,7 @@ describe("services of the agent that already send a key to a website", () => {
         true,
       ),
     ).toEqual([
-      "Google Calendar already sends a key to www.googleapis.com for this agent. A request uses this service instead when it sends the header X-Agent-Keys-Service: team_calendar.",
+      "Google Calendar already sends a key to www.googleapis.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically. A request uses this service instead when it sends the header X-Agent-Keys-Service: team_calendar.",
     ]);
   });
 
