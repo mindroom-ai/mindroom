@@ -2782,7 +2782,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
     with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
         await bot._response_runner.generate_team_response_helper(
             request,
-            team_agents=team.member_ids(),
+            member_names=team.member_names,
             team_mode="coordinate",
         )
 
@@ -2808,7 +2808,7 @@ async def test_a_configured_team_turn_is_dated_in_the_global_zone(
     with _older_thread_history(bot), patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)):
         await bot._response_runner.generate_team_response_helper(
             request,
-            team_agents=team.member_ids(),
+            member_names=team.member_names,
             team_mode="coordinate",
         )
 
@@ -2855,7 +2855,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
 
     with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
         task = asyncio.create_task(
-            runner.generate_team_response_helper(_request(), team_agents=team.member_ids(), team_mode="coordinate"),
+            runner.generate_team_response_helper(_request(), member_names=team.member_names, team_mode="coordinate"),
         )
         await asyncio.wait_for(working.wait(), timeout=5)
         # A Stop cancels the reply span's attempt task, as the stop button does.
@@ -2962,7 +2962,7 @@ async def test_a_member_s_gated_delegation_posts_its_card_and_the_approved_reply
     async with _approving_team_bot(team, tmp_path, streaming=streaming) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
-            team_agents=team.member_ids(),
+            member_names=team.member_names,
             team_mode="coordinate",
         )
 
@@ -3007,7 +3007,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
     async with _approving_team_bot(team, tmp_path) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
-            team_agents=team.member_ids(),
+            member_names=team.member_names,
             team_mode="coordinate",
         )
         await _approve(bot, "$card-1")
@@ -3055,7 +3055,7 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
     async with _approving_team_bot(team, tmp_path) as (bot, cards):
         await bot._response_runner.generate_team_response_helper(
             _request(),
-            team_agents=team.member_ids(),
+            member_names=team.member_names,
             team_mode="coordinate",
         )
         await _approve(bot, "$card-1")

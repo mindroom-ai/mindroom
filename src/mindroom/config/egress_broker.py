@@ -59,7 +59,7 @@ _RESERVED_CA_VARS = {*RUNNER_CA_BUNDLE_ENV, "NODE_EXTRA_CA_CERTS"}
 # Every exact name a placeholder cannot take; the prefixes above are refused on top of these.
 RESERVED_PLACEHOLDER_NAMES = frozenset(_RESERVED_EXACT | _RESERVED_PROXY_VARS | _RESERVED_CA_VARS)
 # EgressService fields that only matter for a service that sends a credential; restrict_only services cannot set them.
-_CREDENTIAL_FIELDS = ("oauth_provider", "placeholder_env", "oauth_on_shared_workers")
+_CREDENTIAL_FIELDS = ("oauth_provider", "placeholder_env", "oauth_on_shared_workers", "read_only")
 
 
 class EgressAuth(BaseModel):
@@ -179,10 +179,34 @@ class EgressRule(BaseModel):
     @classmethod
     def validate_path_prefix(cls, value: str) -> str:
         """Ensure path_prefix starts with /."""
-        if not value.startswith("/"):
-            msg = "path_prefix must start with /"
-            raise ValueError(msg)
-        return value
+        return _checked_path_prefix(value, "path_prefix")
+
+
+def _checked_path_prefix(value: str, field: str) -> str:
+    if not value.startswith("/"):
+        msg = f"{field} must start with /"
+        raise ValueError(msg)
+    return value
+
+
+class EgressReadOnly(BaseModel):
+    """How a service's API reads: with `GET` and `HEAD`, and with `POST` only to `post_paths`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    post_paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Path prefixes, matched by segment like a rule's path_prefix, of the endpoints that read with POST; "
+            "a connected account allowed read-only may POST only to these"
+        ),
+    )
+
+    @field_validator("post_paths")
+    @classmethod
+    def validate_post_paths(cls, value: list[str]) -> list[str]:
+        """Ensure every path starts with /."""
+        return [_checked_path_prefix(path, "post_paths entry") for path in value]
 
 
 class EgressService(BaseModel):
@@ -194,7 +218,7 @@ class EgressService(BaseModel):
         default=None,
         description=(
             "Built-in service preset that supplies display_name, description, rules, placeholder_env, "
-            "and oauth_provider; fields set explicitly here replace the preset's values"
+            "oauth_provider, and read_only; fields set explicitly here replace the preset's values"
         ),
     )
     display_name: str | None = Field(
@@ -220,6 +244,14 @@ class EgressService(BaseModel):
             "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored, "
             "once someone allows Agent Keys to use it for this service; checked against the provider registry at "
             "runtime"
+        ),
+    )
+    read_only: EgressReadOnly | None = Field(
+        default=None,
+        description=(
+            "Offer read-only access for the service's connected account: allowed read-only, it gets the token "
+            "only for GET and HEAD, and for POST to read_only.post_paths. Set it only for an API whose writes "
+            "never use GET or HEAD; without it, an account can only be allowed read and write"
         ),
     )
     oauth_on_shared_workers: bool = Field(
@@ -261,7 +293,7 @@ class EgressService(BaseModel):
         so every existing validator runs on the resolved service.
         Afterwards only the authored fields stay in `model_fields_set`,
         so `Config.authored_model_dump()` keeps `{preset: github}` as written and later preset updates still apply.
-        A `restrict_only` service takes no login or placeholders from its preset, since it never sends a credential.
+        A `restrict_only` service takes no login, placeholders, or `read_only` from its preset, since it never sends a credential.
         """
         authored = cast("dict[str, object]", data) if isinstance(data, dict) else {}
         name = authored.get("preset")
@@ -290,7 +322,8 @@ class EgressService(BaseModel):
         """Reject a resolved service without rules, or with credential settings that do not fit `restrict_only`.
 
         A service that sends a credential needs `auth` on every rule. A `restrict_only` service never sends one, so it
-        may not set an OAuth login, placeholders, or `oauth_on_shared_workers`. The error path carries the service name.
+        may not set an OAuth login, placeholders, `oauth_on_shared_workers`, or `read_only`. The error path carries the
+        service name.
         """
         if not self.rules:
             msg = "service must define at least one rule (set `rules` or choose a `preset`)"

@@ -12,6 +12,7 @@ from google.auth.exceptions import DefaultCredentialsError, RefreshError
 from google.oauth2.credentials import Credentials
 
 from mindroom.cli.doctor import (
+    _check_config_valid,
     _check_matrix_homeserver,
     _check_memory_config,
     _check_memory_embedder,
@@ -593,18 +594,41 @@ def test_doctor_names_a_setting_it_did_not_check_as_written(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A model name that looks like Rich markup appears verbatim in the setting path doctor reports."""
+    """A settings key that looks like Rich markup appears verbatim in the setting path doctor reports."""
     runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "shared"})
     sent = _record_key_checks(monkeypatch)
     config = Config(
-        models={"[/fast]": ModelConfig(provider="openai", id="m", extra_kwargs={"base_url": _GATEWAY})},
-        router=RouterConfig(model="[/fast]"),
+        models={
+            "fast": ModelConfig(
+                provider="openai",
+                id="m",
+                extra_kwargs={"client_params": {"[/fast]": {"base_url": _GATEWAY}}},
+            ),
+        },
+        router=RouterConfig(model="fast"),
     )
 
     assert _check_providers(config, runtime_paths) == (0, 0, 1)
     assert sent == []
     output = " ".join(capsys.readouterr().out.split())
-    assert "OPENAI_API_KEY not checked: models.[/fast].extra_kwargs.base_url may send" in output
+    assert "OPENAI_API_KEY not checked: models.fast.extra_kwargs.client_params.[/fast].base_url may send" in output
+
+
+def test_doctor_names_a_rejected_key_that_looks_like_markup_as_written(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A config error that quotes a bracketed key reaches the doctor report verbatim instead of breaking it."""
+    (tmp_path / "config.yaml").write_text(
+        'models:\n  default:\n    provider: ollama\n    id: gemma4\n  "[/fast]":\n    provider: ollama\n    id: gemma4\n'
+        "router:\n  model: default\n",
+        encoding="utf-8",
+    )
+
+    config, *_counts = _check_config_valid(resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml"))
+
+    assert config is None
+    assert "rename models.[/fast] and update every reference" in " ".join(capsys.readouterr().out.split())
 
 
 def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_client_key(

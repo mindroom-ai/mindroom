@@ -172,7 +172,8 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
-        console.print(f"[red]✗[/red] Config invalid: {issues}")
+        # A message can quote a config key, which may contain brackets Rich reads as markup.
+        console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
         return None, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)
@@ -233,7 +234,7 @@ def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons:
     """
     if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
         return False
-    # A setting path holds the model's name and its settings' keys, which may contain brackets Rich reads as markup.
+    # A setting path holds the model's settings' keys, which may contain brackets Rich reads as markup.
     listed = escape(", ".join(reasons))
     effect = "may send it elsewhere or send another key in its place"
     console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} {effect}")
@@ -357,7 +358,7 @@ def _validate_vertexai_claude_connection(
     probe_config = model_config.model_copy(update={"extra_kwargs": probe_kwargs})
     request = ModelRequest(
         messages=[Message(role="user", content="Reply with OK.")],
-        overrides=RequestOverrides(prompt_cache=False, disable_thinking=True),
+        overrides=RequestOverrides(prompt_cache=False, omit_thinking_setting=True),
     )
     try:
         provider = build_provider(probe_config, runtime_paths)

@@ -1,5 +1,5 @@
 {
-  "description": "Helper agent run by mindroom.teams._select_team_mode on vertexai_claude claude-sonnet-5-5.",
+  "description": "Helper agent run by mindroom.teams.formation.select_ad_hoc_team_mode on vertexai_claude claude-sonnet-5-5.",
   "input": {
     "config": {
       "agents": {
@@ -43,7 +43,7 @@
       },
       "timezone": "UTC"
     },
-    "entry_point": "mindroom.teams._select_team_mode"
+    "entry_point": "mindroom.teams.formation.select_ad_hoc_team_mode"
   },
   "requests": [
     {

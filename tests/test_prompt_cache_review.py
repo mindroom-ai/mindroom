@@ -34,8 +34,8 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
-        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
-        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
+        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_id":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
+        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_id":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
         encoding="utf-8",
     )
 
@@ -50,7 +50,7 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
 def _claude_row(second: int, messages: list[dict[str, object]]) -> dict[str, object]:
     return {
         "timestamp": f"2026-04-11T11:00:0{second}-07:00",
-        "agent_name": "opus",
+        "agent_id": "opus",
         "model_id": "claude-opus-5",
         "system_prompt": "S",
         "messages": messages,
@@ -420,6 +420,15 @@ def test_load_request_rows_joins_response_usage_records(tmp_path: Path) -> None:
     assert [row.request_log_id for row in rows] == ["req-1", "req-2"]
     assert rows[0].usage == {"input_tokens": 10, "output_tokens": 4, "cache_read_tokens": 900, "cache_write_tokens": 25}
     assert rows[1].usage is None
+
+
+def test_request_rows_name_the_agent_only_from_agent_id() -> None:
+    """A request without an agent leaves its agent blank instead of taking the model config name."""
+    module = _load_prompt_cache_review_module()
+    agent_row = {**_claude_row(0, [{"role": "user", "content": "a"}]), "agent_id": "code", "model_name": "sonnet"}
+    model_only_row = {key: value for key, value in agent_row.items() if key != "agent_id"}
+
+    assert [module.parse_request_row(row).agent_name for row in (agent_row, model_only_row)] == ["code", ""]
 
 
 def test_response_records_are_not_parsed_as_request_rows() -> None:

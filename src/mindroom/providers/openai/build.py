@@ -21,10 +21,10 @@ from mindroom.model_defaults import (
     DEEPSEEK_BASE_URL_DEFAULT,
     GROQ_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
-    OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
     OPENROUTER_BASE_URL_DEFAULT,
     ZAI_BASE_URL_DEFAULT,
     claude_rejects_sampling_controls,
+    openai_rejects_sampling_controls,
 )
 from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, provider_failure
@@ -208,9 +208,7 @@ def _configured_key(route_key: str, model_config: ModelConfig, runtime: Provider
 
 def _provider_default_sampling(model_id: str) -> bool:
     """Return whether the model rejects a temperature, so overrides must leave sampling to the provider."""
-    return claude_rejects_sampling_controls(model_id) or model_id.casefold().rsplit("/", 1)[-1].startswith(
-        OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES,
-    )
+    return claude_rejects_sampling_controls(model_id) or openai_rejects_sampling_controls(model_id)
 
 
 def _authored_base_url(client_params: Mapping[str, Any] | None, base_url: str | None) -> str | None:

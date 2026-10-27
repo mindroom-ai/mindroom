@@ -1,5 +1,5 @@
 {
-  "description": "Helper agent run by mindroom.teams._select_team_mode on cerebras qwen-3.8-27b.",
+  "description": "Helper agent run by mindroom.teams.formation.select_ad_hoc_team_mode on cerebras qwen-3.8-27b.",
   "input": {
     "config": {
       "agents": {
@@ -42,7 +42,7 @@
       },
       "timezone": "UTC"
     },
-    "entry_point": "mindroom.teams._select_team_mode"
+    "entry_point": "mindroom.teams.formation.select_ad_hoc_team_mode"
   },
   "requests": [
     {

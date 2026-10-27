@@ -1571,7 +1571,9 @@ depends_on = ["mindroom.config.agent"]
 path = "mindroom.custom_tools.memory"
 depends_on = [
     "mindroom.embeddings.errors",
+    "mindroom.failure_text",
     "mindroom.memory",
+    "mindroom.redaction",
 ]
 
 [[modules]]
@@ -3458,6 +3460,7 @@ depends_on = [
     "mindroom.config.voice",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
+    "mindroom.credentials.manager",
     "mindroom.entity_resolution",
     "mindroom.git_urls",
     "mindroom.history.types",
@@ -3625,17 +3628,11 @@ depends_on = [
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
-    "mindroom.memory._mem0_openai",
     "mindroom.memory._mem0_usage",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
 visibility = ["mindroom.memory._backend"]
-
-[[modules]]
-path = "mindroom.memory._mem0_openai"
-depends_on = ["mindroom.model_defaults"]
-visibility = ["mindroom.memory.config"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -4718,14 +4715,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.conversation_state_writer"
 depends_on = [
-    "mindroom.session_storage.agent_storage",
     "mindroom.constants",
-    "mindroom.entity_resolution",
     "mindroom.history.session_context",
     "mindroom.history.types",
-    "mindroom.prompt_message_tags",
     "mindroom.runtime_protocols",
-    "mindroom.history.team_scope",
     "mindroom.session_storage.lanes",
 ]
 
@@ -8463,6 +8456,19 @@ visibility = ["mindroom.tools.visualization"]
 [[interfaces]]
 from = ["mindroom.tools.agno_compat_visualization"]
 expose = ["WorkspaceVisualizationTools"]
+
+[[modules]]
+path = "mindroom.tools.mem0"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_mem0"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_mem0"
+depends_on = ["mindroom.failure_text", "mindroom.redaction"]
+visibility = ["mindroom.tools.mem0"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_mem0"]
+expose = ["UserFilterMem0Tools"]
 
 [[modules]]
 path = "mindroom.tools.newspaper4k"

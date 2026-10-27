@@ -2419,7 +2419,7 @@ async def test_call_that_cannot_run_here_spends_nothing(
 
 
 class _MediaSlackTools(_SlackTools):
-    """The recording Slack toolkit whose one function also takes the run's images."""
+    """The recording Slack toolkit whose one function also takes the run's images, and records the images it got."""
 
     def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> object:
         """Post a Slack message with the run's images.
@@ -2430,32 +2430,24 @@ class _MediaSlackTools(_SlackTools):
             images: The run's images, which the model never supplies.
 
         """
-        del images
-        return super().post_slack_message(channel, text)
+        outcome = super().post_slack_message(channel, text)
+        self.runs[-1]["images"] = images
+        return outcome
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "needs",
-    ["external-execution", "stop-after-tool-call", "media", "media-behind-output-files"],
-)
+@pytest.mark.parametrize("needs", ["external-execution", "stop-after-tool-call"])
 async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     needs: str,
 ) -> None:
-    """A stored call whose function runs elsewhere, ends the turn, or takes the run's media runs nothing, unspent.
-
-    The output-file wrapper forges the function's signature, and the media parameter still shows through it.
-    """
+    """A stored call whose function runs elsewhere or ends the turn runs nothing, unspent."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    toolkit = _MediaSlackTools(runs) if needs.startswith("media") else _SlackTools(runs)
-    if needs == "media-behind-output-files":
-        wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
     agent = _live_agent(
-        toolkit=toolkit,
+        runs,
         external_execution=needs == "external-execution",
         stop_after_tool_call=needs == "stop-after-tool-call",
     )
@@ -2467,6 +2459,40 @@ async def test_call_that_needs_live_input_is_refused_before_spending_its_approva
         assert "needs live input or conversation control" in _failed_answer(result)
         assert runs == []
         assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "behind-output-files"])
+async def test_a_stored_call_of_a_tool_that_takes_the_runs_media_runs_without_media_as_its_live_calls_do(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    wrapped: bool,
+) -> None:
+    """A tool's live calls get no run media, so its stored call runs, getting none either.
+
+    The output-file wrapper forges the function's signature, and the media parameter still shows through it.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    toolkit = _MediaSlackTools(runs)
+    if wrapped:
+        wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
+    agent = _live_agent(toolkit=toolkit)
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent)
+        await agent.call("post_slack_message", **_ARGUMENTS)
+
+        assert result == "sent"
+        assert [{key: run[key] for key in ("channel", "text", "images")} for run in runs] == [
+            {**_ARGUMENTS, "images": None},
+            {**_ARGUMENTS, "images": None},
+        ]
+        assert await _binding_column(journal, "outcome") == "completed"
     finally:
         await manager.shutdown()
 

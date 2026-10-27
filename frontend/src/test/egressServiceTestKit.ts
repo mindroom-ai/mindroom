@@ -123,6 +123,7 @@ export const credentialService = (
   source: "config",
   rules: [],
   restrict_only: false,
+  read_only_supported: false,
   is_shared: false,
   can_manage: true,
   configured: false,
@@ -147,6 +148,7 @@ export const oauthStatus = (
   unavailable_reason: null,
   shared_worker_opt_in: false,
   reuse_enabled: true,
+  reuse_access: "read_write",
   ...changes,
 });
 

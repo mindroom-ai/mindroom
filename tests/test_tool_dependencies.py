@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -13,10 +14,12 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system import dependencies
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolMetadata, ToolStatus
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
@@ -28,6 +31,7 @@ from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
     check_deps_installed,
+    ensure_optional_deps,
     install_command_for_current_python,
     optional_dependency_environment,
 )
@@ -37,6 +41,9 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
 )
 from mindroom.tools.openbb import openbb_tools
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 REPO_ROOT = Path(__file__).parent.parent
 HOOK_SCRIPT = REPO_ROOT / ".github" / "scripts" / "check_tool_extras_sync.py"
@@ -567,6 +574,103 @@ def test_auto_install_optional_extra_matches_installed_metadata_names(
     assert _auto_install_optional_extra("sentence_transformers", TEST_RUNTIME_PATHS)
 
 
+@pytest.fixture
+def old_mem0_distribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shadow the installed Mem0's metadata with 2.0.1, as an auto-install by an older MindRoom leaves behind."""
+    dist_info = tmp_path / "old-site" / "mem0ai-2.0.1.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: mem0ai\nVersion: 2.0.1\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(dist_info.parent))
+
+
+@pytest.fixture
+def fresh_extra_requirements() -> Iterator[None]:
+    """Read the extras and their requirements again in this test and after it."""
+    caches = (
+        dependencies._pyproject_optional_dependencies,
+        dependencies._available_optional_extras,
+        dependencies._extra_requirements,
+    )
+    for cached in caches:
+        cached.cache_clear()
+    yield
+    for cached in caches:
+        cached.cache_clear()
+
+
+@pytest.fixture(params=["source checkout", "installed package"])
+def extra_requirements_source(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_extra_requirements: None,
+) -> None:
+    """Read the extras' requirements from pyproject.toml, or from the installed metadata as a wheel install does."""
+    del fresh_extra_requirements
+    if request.param == "installed package":
+        monkeypatch.setattr("mindroom.tool_system.dependencies._PROJECT_ROOT", tmp_path / "no-checkout")
+
+
+@pytest.mark.usefixtures("old_mem0_distribution", "extra_requirements_source")
+def test_an_installed_version_the_extra_does_not_allow_installs_the_extra(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An importable Mem0 older than the extra's floor counts as missing, so the extra installs."""
+    installs: list[list[str]] = []
+
+    def install(extras: list[str], *, quiet: bool = False) -> bool:
+        installs.append(extras)
+        return quiet
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", install)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    assert ensure_optional_deps(["mem0ai"], "mem0", runtime_paths) is True
+    assert installs == [["mem0"]]
+
+
+@pytest.mark.usefixtures("old_mem0_distribution", "extra_requirements_source")
+def test_an_installed_version_the_extra_does_not_allow_names_the_version_when_install_is_off(tmp_path: Path) -> None:
+    """With auto-install off, the error names the installed version, the extra's requirement, and the install."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1"},
+    )
+
+    message = (
+        "Unsupported dependency versions: mem0ai 2.0.1 (needs >=2.2.1). Install with: pip install 'mindroom[mem0]'"
+    )
+    with pytest.raises(ImportError, match=re.escape(message)):
+        ensure_optional_deps(["mem0ai"], "mem0", runtime_paths, missing_message="Missing dependencies: mem0ai")
+
+
+@pytest.mark.usefixtures("fresh_extra_requirements")
+def test_requirements_absent_or_for_another_platform_start_no_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only installed requirements that apply on this platform are compared with the versions the extra allows."""
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._pyproject_optional_dependencies",
+        lambda: {
+            "demo": [
+                "pytest>=1",
+                "nonexistent-package-xyz-123>=1",
+                "pytest>=999; sys_platform == 'no-such-platform'",
+            ],
+        },
+    )
+
+    def unexpected_install(_extras: list[str], **_kwargs: object) -> bool:
+        pytest.fail("A requirement that is absent or for another platform must not start an install")
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", unexpected_install)
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+
+    assert ensure_optional_deps(["pytest"], "demo", runtime_paths) is False
+
+
 def test_auto_install_enabled_uses_runtime_env(tmp_path: Path) -> None:
     """Auto-install disable flags should come from the explicit runtime context."""
     runtime_paths = resolve_runtime_paths(
@@ -654,7 +758,6 @@ elif mode == 'mem0_reader':
     from mindroom.memory import config as memory_config
 
     class Memory:
-        vector_store = object()
         llm = SimpleNamespace(config=SimpleNamespace(model='gemma4'), client=SimpleNamespace(chat=lambda **_: None))
 
         @classmethod
@@ -668,7 +771,6 @@ elif mode == 'mem0_reader':
     sys.modules['mem0'] = mem0
     memory_config.ensure_optional_deps = lambda *args, **kwargs: False
     memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
-    memory_config._install_chroma_similarity_scores = lambda store: None
     config = Config()
     config.memory.embedder.provider = 'sentence_transformers'
     config.memory.llm = None

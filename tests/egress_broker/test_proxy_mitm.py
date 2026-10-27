@@ -21,12 +21,20 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
-from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressRule, EgressService
+from mindroom.config.egress_broker import EgressAuth, EgressBrokerConfig, EgressReadOnly, EgressRule, EgressService
 from mindroom.egress_broker.ca import materialize_ca_bundle
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.messages import ScopeInfo
 from mindroom.egress_broker.mitm import _verifying_context
-from mindroom.egress_broker.secrets import Secret, SecretMissing, SecretNeedsReconnect, SecretUnavailable
+from mindroom.egress_broker.rules import read_only_allows
+from mindroom.egress_broker.secrets import (
+    Secret,
+    SecretMissing,
+    SecretNeedsReconnect,
+    SecretReadOnly,
+    SecretRequest,
+    SecretUnavailable,
+)
 from tests.egress_broker.conftest import (
     AMBIGUOUS_PATH,
     BODY_TOO_LARGE,
@@ -59,6 +67,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.egress_broker.audit import AuditLog
+    from mindroom.egress_broker.secrets import SecretResult
     from mindroom.egress_broker.tokens import WorkerClaims
     from tests.egress_broker.conftest import BrokerFactory, ProxyClient, RawResponse, ServeFactory, Upstream, UpstreamCA
 
@@ -584,7 +593,10 @@ async def test_missing_secret_offers_oauth_connect_link(
     """
     await broker(
         single_rule_config(),
-        resolve_secret=lambda _claims, _service, _routed: SecretMissing(provider="github", connect_url=CONNECT_URL),
+        resolve_secret=lambda _claims, _service, _routed, _request: SecretMissing(
+            provider="github",
+            connect_url=CONNECT_URL,
+        ),
         manage_url=MANAGE_URL,
         scope_info=scope_info,
     )
@@ -617,7 +629,7 @@ async def test_an_account_agent_keys_may_not_use_is_named_without_a_connect_link
     """A connected account nobody allowed for the service is named with `oauth_reuse: off` and no connect link."""
     await broker(
         single_rule_config(),
-        resolve_secret=lambda _claims, _service, _routed: SecretMissing(
+        resolve_secret=lambda _claims, _service, _routed, _request: SecretMissing(
             provider="github",
             reuse_off=True,
             requester_owned=True,
@@ -640,6 +652,100 @@ async def test_an_account_agent_keys_may_not_use_is_named_without_a_connect_link
     }
     assert tls_upstream.hits == []
     await assert_audited(audit, kind="denied", status=403, service="svc", code="credential_not_configured")
+
+
+_READ_ONLY_MESSAGE = (
+    "Agent Keys may use the github account for svc only to read, so this request was refused. "
+    "Ask the user to allow read and write at manage_url if the agent needs it, then retry."
+)
+
+
+class _ReadOnlyLookup:
+    """A resolver for an account allowed read-only on a service without POST reads; records each request's facts."""
+
+    def __init__(self) -> None:
+        self.requests: list[SecretRequest] = []
+
+    def __call__(
+        self,
+        _claims: WorkerClaims,
+        _service: str,
+        _routed: EgressService,
+        request: SecretRequest,
+    ) -> SecretResult:
+        self.requests.append(request)
+        return Secret(SECRET) if read_only_allows(EgressReadOnly(), request) else SecretReadOnly(provider="github")
+
+
+@pytest.mark.asyncio
+async def test_read_only_write_is_refused_and_audited(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+    audit: AuditLog,
+) -> None:
+    """A write with an account allowed read-only gets an audited 403 `read_only` that names where to allow writes.
+
+    Nothing reaches the upstream, so no credential is sent. The resolver gets the method and the path without its query.
+    """
+    lookup = _ReadOnlyLookup()
+    await broker(single_rule_config(), resolve_secret=lookup, manage_url=MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    response = await client.post(tls_upstream.url("/echo?page=2"), content=b"{}")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "read_only",
+        "service": "svc",
+        "provider": "github",
+        "manage_url": MANAGE_URL,
+        "message": _READ_ONLY_MESSAGE,
+    }
+    assert tls_upstream.hits == []
+    assert lookup.requests == [SecretRequest(method="POST", path="/echo")]
+    await assert_audited(
+        audit,
+        kind="denied",
+        status=403,
+        method="POST",
+        path="/echo",
+        service="svc",
+        code="read_only",
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_only_get_is_forwarded_with_token(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """A GET gets the token, but not one carrying a method override in any spelling, nor a WebSocket upgrade."""
+    lookup = _ReadOnlyLookup()
+    await broker(single_rule_config(), resolve_secret=lookup, manage_url=MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    read = await client.get(tls_upstream.url("/echo"))
+    overridden = [
+        await client.get(tls_upstream.url("/echo"), headers={name: "DELETE"})
+        for name in ("X-HTTP-Method-Override", "x-http-method", "X-Method-Override")
+    ]
+    [upgrade] = await _exchange(broker, tls_upstream.port, _websocket_handshake(tls_upstream.port))
+
+    assert read.status_code == 200
+    [seen] = tls_upstream.requests
+    assert seen.headers["authorization"] == [f"Bearer {SECRET}"]
+    assert [response.status_code for response in overridden] == [403, 403, 403]
+    assert {response.json()["error"] for response in overridden} == {"read_only"}
+    assert upgrade.status == 403
+    assert json.loads(upgrade.body)["error"] == "read_only"
+    assert lookup.requests == [
+        SecretRequest(method="GET", path="/echo"),
+        *[SecretRequest(method="GET", path="/echo", method_override=True)] * 3,
+        SecretRequest(method="GET", path="/ws", websocket=True),
+    ]
+    assert tls_upstream.hits == ["/echo"]
 
 
 @pytest.mark.asyncio
@@ -712,7 +818,7 @@ async def test_oauth_reconnect_required_gets_403_without_reaching_upstream(
     """A connection that cannot supply a token tells the agent to reconnect, or to reset first, and is audited."""
     await broker(
         single_rule_config(),
-        resolve_secret=lambda _claims, _service, _routed: result,
+        resolve_secret=lambda _claims, _service, _routed, _request: result,
         manage_url=MANAGE_URL,
     )
     client = proxy_client(broker.token())
@@ -744,7 +850,7 @@ async def test_oauth_refresh_outage_gets_retryable_503(
     """A provider outage is a retryable 503 that names the service and provider, with no reconnect prompt."""
     await broker(
         single_rule_config(),
-        resolve_secret=lambda _claims, _service, _routed: SecretUnavailable(provider="github"),
+        resolve_secret=lambda _claims, _service, _routed, _request: SecretUnavailable(provider="github"),
         manage_url=MANAGE_URL,
     )
     client = proxy_client(broker.token())
@@ -855,7 +961,7 @@ async def test_personal_scope_without_the_personal_page_links_no_page(
     """Where the personal page is not served, a personal scope's refusal never names the dashboard, which cannot help."""
     await broker(
         single_rule_config(),
-        resolve_secret=lambda _claims, _service, _routed: result,
+        resolve_secret=lambda _claims, _service, _routed, _request: result,
         manage_url="https://m.test/",
         scope_info=lambda _claims: _WITHOUT_PAGE,
     )
@@ -1308,7 +1414,7 @@ async def test_secret_with_line_break_gets_502_without_leaking(
     """A stored secret that is not a valid header value fails the request without reaching logs or the upstream."""
     await broker(
         single_rule_config(),
-        resolve_secret=lambda _claims, _service, _routed: Secret(f"{SECRET}\r\nX-Injected: y"),
+        resolve_secret=lambda _claims, _service, _routed, _request: Secret(f"{SECRET}\r\nX-Injected: y"),
     )
     client = proxy_client(broker.token())
 

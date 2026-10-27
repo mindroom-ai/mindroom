@@ -68,7 +68,8 @@ class EgressCredentialsTools(Toolkit):
         which credential they need. Returns each configured service with whether this agent has a
         credential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).
         `source` says who defined the service: `config` for the administrator, `user` for the user's own.
-        `oauth_reuse` says whether Agent Keys may use the service's account (null without one). A service with
+        `oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`
+        whether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with
         nothing configured also says whether the user can connect an account instead of adding a key
         (`can_connect_account`), with the account's
         `provider` when it can or when the account still needs allowing. The result carries the link
@@ -136,6 +137,7 @@ class EgressCredentialsTools(Toolkit):
                 "configured": False,
                 "active_source": None,
                 "oauth_reuse": None,
+                "oauth_access": None,
                 "can_connect_account": False,
                 "provider": None,
             }
@@ -146,6 +148,7 @@ class EgressCredentialsTools(Toolkit):
             "configured": status.configured,
             "active_source": status.active_source,
             "oauth_reuse": reuse,
+            "oauth_access": oauth.reuse_access if oauth is not None and reuse else None,
         }
         if not status.configured:
             # An unreadable stored connection must be reset before a new one can be stored, so it is not connectable.
@@ -195,6 +198,8 @@ class EgressCredentialsTools(Toolkit):
             "`active_source` names what a configured service uses; an API key wins over a connected account. "
             "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
             f"{fix}"
+            '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '
+            "until whoever allows the account allows read and write there. "
             "Never ask the user to paste a key into the chat."
         )
 

@@ -52,8 +52,9 @@ _PUBLISHED_SEAL_FILENAME = "published_index_seal.json"
 _RETIRED_SEAL_FILENAME = "retired_index_seal.json"
 
 #: ``(source_mtime_ns, source_size, source_content_digest)`` for one source file.
-#: The content digest is what makes resume safe across Git checkouts, which
-#: rewrite mtimes without changing content.
+#: The stamp is the file's status-change time (``st_ctime_ns``), or 0 for a file read while it was changing; the
+#: name stays for the stored format. The content digest is what makes resume safe across Git checkouts, which
+#: rewrite the stamp without changing content.
 FileSignature = tuple[int, int, str]
 
 _CandidateStatus = Literal["building", "failed"]
@@ -368,6 +369,11 @@ def load_seals(base_storage_path: Path) -> dict[Path, CandidateCheckpoint | None
     """Return each seal file present, with the claims it holds or None when it is unreadable."""
     paths = (base_storage_path / _RETIRED_SEAL_FILENAME, base_storage_path / _PUBLISHED_SEAL_FILENAME)
     return {path: _load_snapshot(path) for path in paths if path.exists()}
+
+
+def load_published_seal(base_storage_path: Path) -> CandidateCheckpoint | None:
+    """Return the claims sealed with the published collection, or None when there is no readable seal."""
+    return _load_snapshot(base_storage_path / _PUBLISHED_SEAL_FILENAME)
 
 
 def take_sealed_candidate(base_storage_path: Path, seal_path: Path) -> None:

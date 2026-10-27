@@ -54,7 +54,6 @@ __all__ = (
     "OPENAI_IMAGE",
     "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
     "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
-    "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
     "OPENAI_TRANSCRIPTION",
     "OPENAI_TTS",
@@ -70,6 +69,7 @@ __all__ = (
     "ModelPreset",
     "claude_rejects_sampling_controls",
     "llama_cpp_server_command",
+    "openai_rejects_sampling_controls",
 )
 
 
@@ -145,8 +145,9 @@ OPENAI_GPT_LUNA = "gpt-6-luna"
 # The Decisions API serves only this model, so it does not follow the Luna default.
 OPENAI_DECISIONS_MODEL = "gpt-6-luna"
 # OpenAI model families whose models mostly reject sampling values other than their defaults, as gpt-5-mini, gpt-5.5,
-# and gpt-6-luna reject temperature 0.1; each user decides how it matches IDs and which parameters it drops.
-OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
+# and gpt-6-luna reject temperature 0.1; ``openai_rejects_sampling_controls`` matches their ids, and each caller
+# decides which parameters it drops.
+_OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES = ("gpt-5", "gpt-6")
 # Original detail preserves patch coverage on these models; the provider's
 # separate rejection limit and maximum pixel dimension still apply.
 OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")
@@ -197,6 +198,14 @@ def claude_rejects_sampling_controls(model_id: str) -> bool:
     """
     folded = model_id.casefold()
     return any(name in folded for name in CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS)
+
+
+def openai_rejects_sampling_controls(model_id: str) -> bool:
+    """Return whether an OpenAI model id names a GPT-5 or GPT-6 model, which mostly reject non-default sampling values.
+
+    The id may carry a gateway prefix such as OpenRouter's ``openai/``, in any letter case.
+    """
+    return model_id.casefold().rsplit("/", 1)[-1].startswith(_OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
 
 
 _OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"

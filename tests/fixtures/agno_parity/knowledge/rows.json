@@ -64,7 +64,7 @@
             "linked_to": "",
             "name": "broken.json",
             "source_digest": "6b1488c464eee8ce5aef65840c8376d7e2021f0a80178a20fc6dad0e54f9db4b",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "broken.json",
             "source_size": 24
           }
@@ -90,7 +90,7 @@
             "linked_to": "",
             "name": "control.txt",
             "source_digest": "0f28779c1d6045bdf81621c5189be349bd3afe9d1350c4f0b8749b82ae40aba9",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "control.txt",
             "source_size": 26
           }
@@ -116,7 +116,7 @@
             "linked_to": "",
             "name": "guide.md",
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           }
@@ -142,7 +142,7 @@
             "linked_to": "",
             "name": "guide.md",
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           }
@@ -168,7 +168,7 @@
             "linked_to": "",
             "name": "guide.md",
             "source_digest": "5ec67f1a4ab6624db06c14b6dfae9eb93e0ef5ba24b5ee397067d1dbb54a45a7",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "guide.md",
             "source_size": 279
           }
@@ -195,7 +195,7 @@
             "name": "records.json",
             "page": 1,
             "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "records.json",
             "source_size": 99
           }
@@ -222,7 +222,7 @@
             "name": "records.json",
             "page": 2,
             "source_digest": "4e0e0eff61bf249ca0545ae3b4f37505a03383e8024d6d814661ebbe88374062",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "records.json",
             "source_size": 99
           }
@@ -249,7 +249,7 @@
             "name": "settings.json",
             "page": 1,
             "source_digest": "b22455cab350542fb426cefaa999a85578b58482643af0348bc06c0fe11b419a",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "settings.json",
             "source_size": 49
           }
@@ -274,7 +274,7 @@
             "name": "table.csv",
             "row_number": 1,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           }
@@ -299,7 +299,7 @@
             "name": "table.csv",
             "row_number": 2,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           }
@@ -324,7 +324,7 @@
             "name": "table.csv",
             "row_number": 3,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           }
@@ -349,7 +349,7 @@
             "name": "table.csv",
             "row_number": 5,
             "source_digest": "1f2d1e1341347bae41645797f27db2fef0e97b095e82bbae48303078566cbf85",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "table.csv",
             "source_size": 46
           }
@@ -375,7 +375,7 @@
             "linked_to": "",
             "name": "policies.txt",
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           }
@@ -401,7 +401,7 @@
             "linked_to": "",
             "name": "policies.txt",
             "source_digest": "1bc41d8f7e0e0423bf0cc5cf0c74acb8ddb89ce04e9f8a5d92dec5ebf5aee8a1",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "team/policies.txt",
             "source_size": 149
           }
@@ -427,7 +427,7 @@
             "linked_to": "",
             "name": "unicode.md",
             "source_digest": "95c704ad81a5cbe4215ad241f24c80dc673ddf67fcf79bc8f171fe3eb5912bbc",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "unicode.md",
             "source_size": 65
           }
@@ -476,7 +476,7 @@
             "linked_to": "",
             "name": "notes.md",
             "source_digest": "b32f11bbe66058c79b6c2435a5937d54597ea0ef8d1b941e7dd228057375ad45",
-            "source_mtime_ns": 1790000000000000000,
+            "source_mtime_ns": "<stamp>",
             "source_path": "notes.md",
             "source_size": 78
           }

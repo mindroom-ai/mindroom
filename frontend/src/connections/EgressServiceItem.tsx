@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   accountReuseDescription,
   egressDisconnectDescription,
@@ -40,7 +41,7 @@ import {
 } from "./request";
 import { SharedAccountDialog } from "./SharedAccountDialog";
 import { ItemName } from "./ToolRow";
-import type { EgressCredentialService } from "./types";
+import type { EgressAccess, EgressCredentialService } from "./types";
 
 /** The endpoints one service row talks to. */
 export interface ServicePaths {
@@ -56,12 +57,18 @@ export interface ServicePaths {
 // What the server needs before Agent Keys may use an account: the user saw that commands skip the tools' approvals.
 const REUSE_BODY = { acknowledge_approval_bypass: true };
 
-/** Asked before Agent Keys may use an account; a second click while it closes goes on only once. */
+/**
+ * Asked before Agent Keys may use an account; a second click while it closes
+ * goes on only once. With `onAccessChange`, for a service that offers read
+ * only, it also asks how much the account may do.
+ */
 function AccountReuseDialog({
   open,
   provider,
   description,
   confirmLabel,
+  access,
+  onAccessChange,
   onContinue,
   onCancel,
 }: {
@@ -69,6 +76,8 @@ function AccountReuseDialog({
   provider: string;
   description: string;
   confirmLabel: string;
+  access: EgressAccess;
+  onAccessChange: ((access: EgressAccess) => void) | null;
   onContinue: () => void;
   onCancel: () => void;
 }) {
@@ -89,7 +98,23 @@ function AccountReuseDialog({
         continued.current = true;
         onContinue();
       }}
-    />
+    >
+      {onAccessChange && (
+        <ToggleGroup
+          type="single"
+          aria-label="Access"
+          className="self-start"
+          value={access}
+          // Pressing the chosen level again would clear it; one stays chosen.
+          onValueChange={(value) =>
+            value && onAccessChange(value as EgressAccess)
+          }
+        >
+          <ToggleGroupItem value="read">Read only</ToggleGroupItem>
+          <ToggleGroupItem value="read_write">Read and write</ToggleGroupItem>
+        </ToggleGroup>
+      )}
+    </ConfirmDialog>
   );
 }
 
@@ -143,6 +168,16 @@ export function EgressServiceItem({
     oauth.unavailable_reason === null &&
     (service.can_manage || oauth.can_connect);
   const reuseEnabled = oauth?.reuse_enabled === true;
+  // The level the reuse question allows the account at; a service that
+  // offers read only asks, starting from it, and any other sends no level.
+  const readOnlyOffered = service.read_only_supported;
+  const [access, setAccess] = useState<EgressAccess>("read");
+  const reuseBody = (level: EgressAccess) =>
+    readOnlyOffered ? { ...REUSE_BODY, access: level } : REUSE_BODY;
+  const askReuse = (level: EgressAccess) => {
+    setAccess(level);
+    setConfirm("reuse");
+  };
 
   // A limit of the viewer's that narrows this administrator's service.
   const limit = limitOf(service, agent.services);
@@ -248,7 +283,7 @@ export function EgressServiceItem({
               paths.reuse,
               signal,
               "PUT",
-              REUSE_BODY,
+              reuseBody(access),
               errorMessages,
             );
           return requestConnection<OAuthAuthorization>(
@@ -340,6 +375,28 @@ export function EgressServiceItem({
             destructive: true,
             onSelect: () => setConfirm("key"),
           },
+        ]
+      : []),
+    // Only a connected account: connecting one already allowed keeps its level.
+    ...(oauth?.connected && reuseEnabled && canChangeReuse && readOnlyOffered
+      ? [
+          oauth.reuse_access === "read"
+            ? {
+                label: "Change to read and write",
+                ariaLabel: `Change to read and write for ${name}`,
+                // More access skips the tools' approvals for writes too, so it is confirmed.
+                onSelect: () => askReuse("read_write"),
+              }
+            : {
+                label: "Change to read only",
+                ariaLabel: `Change to read only for ${name}`,
+                onSelect: () =>
+                  void run(
+                    "reuse",
+                    "Could not change the access. Try again.",
+                    write(paths.reuse, "PUT", reuseBody("read")),
+                  ),
+              },
         ]
       : []),
     ...(oauth && reuseEnabled && canChangeReuse
@@ -443,7 +500,7 @@ export function EgressServiceItem({
                 aria-label={`Connect ${oauth.display_name} for Agent Keys for ${name}`}
                 onClick={() =>
                   !reuseEnabled
-                    ? setConfirm("reuse")
+                    ? askReuse("read")
                     : asksAboutSharedAccount
                       ? setConfirm("shared")
                       : connect()
@@ -480,7 +537,7 @@ export function EgressServiceItem({
               variant="outline"
               disabled={busy !== null}
               aria-label={`Use account for ${name}`}
-              onClick={() => setConfirm("reuse")}
+              onClick={() => askReuse("read")}
             >
               Use account
             </Button>
@@ -602,15 +659,18 @@ export function EgressServiceItem({
               service: name,
               sharedAgent: asksAboutSharedAccount ? agent.displayName : null,
               unscoped: agent.scope === "unscoped",
+              readOnly: readOnlyOffered && access === "read",
             })}
             confirmLabel={oauth.connected ? "Use account" : "Continue"}
+            access={access}
+            onAccessChange={readOnlyOffered ? setAccess : null}
             onCancel={() => setConfirm(null)}
             onContinue={() =>
               oauth.connected
                 ? void run(
                     "reuse",
                     "Could not allow the account. Try again.",
-                    write(paths.reuse, "PUT", REUSE_BODY),
+                    write(paths.reuse, "PUT", reuseBody(access)),
                   )
                 : connect()
             }

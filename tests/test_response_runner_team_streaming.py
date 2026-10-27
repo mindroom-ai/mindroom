@@ -67,7 +67,6 @@ from tests.bot_helpers import (
 )
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel
-from tests.identity_helpers import fixture_entity_matrix_id
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -159,7 +158,7 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
                 _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
                 model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
             ),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -195,7 +194,7 @@ async def test_generate_team_response_helper_runs_the_team_in_its_mode(tmp_path:
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Plan the launch", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode=team_mode,
         )
 
@@ -247,7 +246,7 @@ async def test_process_shutdown_blocks_team_terminal_delivery_after_generation_c
         task = asyncio.create_task(
             coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                member_names=["general"],
                 team_mode="coordinate",
             ),
         )
@@ -321,7 +320,7 @@ async def test_team_delivery_exposes_fixed_shutdown_phase(
     async def team_response_owner() -> None:
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -385,7 +384,7 @@ async def test_generate_team_response_appends_matrix_tool_prompt_context(tmp_pat
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -432,7 +431,7 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -482,19 +481,13 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[
-                fixture_entity_matrix_id("private_worker", "localhost", runtime_paths),
-                fixture_entity_matrix_id("calculator", "localhost", runtime_paths),
-            ],
+            member_names=["private_worker", "calculator"],
             team_mode="coordinate",
         )
 
     assert seen_agent_names == [["private_worker", "calculator"]]
     bot._conversation_state_writer.team_history_scope.assert_called_once_with(
-        [
-            fixture_entity_matrix_id("private_worker", "localhost", runtime_paths),
-            fixture_entity_matrix_id("calculator", "localhost", runtime_paths),
-        ],
+        ["private_worker", "calculator"],
         requester_user_id="@alice:localhost",
     )
 
@@ -541,7 +534,7 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
                 ),
                 history_boundary_event_id=history_boundary_event_id,
             ),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -606,7 +599,7 @@ async def test_generate_team_response_preserves_model_prompt_in_persisted_sessio
                 _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
                 model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
             ),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -674,7 +667,7 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
                 _response_request(prompt="Describe this image", user_id="@alice:localhost", thread_id="$thread-root"),
                 model_prompt="Available attachment IDs: att_1. Use tool calls to inspect or process them.",
             ),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -763,7 +756,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
         resolution = await coordinator.generate_team_response_helper(
             request,
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -836,7 +829,7 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -899,7 +892,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -982,7 +975,7 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1064,7 +1057,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1125,7 +1118,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1198,7 +1191,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1272,7 +1265,7 @@ async def test_generate_team_response_helper_preserves_structured_stream_cancel_
 
         resolution = await coordinator.generate_team_response_helper(
             request,
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1349,7 +1342,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1404,7 +1397,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1565,7 +1558,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1654,7 +1647,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1746,7 +1739,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1805,7 +1798,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1894,7 +1887,7 @@ async def test_generate_team_response_helper_links_its_reply_event_to_the_report
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -1938,7 +1931,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
                 user_id="@alice:localhost",
                 thread_id="$thread-root",
             ),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -2013,7 +2006,7 @@ async def test_generate_team_response_helper_uses_delivery_result_failure_reason
 
         resolution = await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 
@@ -2079,7 +2072,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
 
         await coordinator.generate_team_response_helper(
             _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            member_names=["general"],
             team_mode="coordinate",
         )
 

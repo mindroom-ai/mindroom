@@ -105,8 +105,12 @@ class ClaudeSettings:
         """Return the thinking setting after the raw request overrides."""
         return self._after_request_params("thinking", self.thinking)
 
-    def thinking_enabled(self) -> bool:
-        """Return whether requests run with thinking on, so prefill is rejected and a trailing user turn is needed."""
+    def authors_thinking(self) -> bool:
+        """Return whether the settings send a thinking setting other than ``disabled``, which rules out prefill.
+
+        A model that thinks by default with no setting sent, such as every Claude 5 model, gets False here; none of
+        those accepts prefill either.
+        """
         thinking = self.effective_thinking()
         return isinstance(thinking, dict) and thinking.get("type") != "disabled"
 

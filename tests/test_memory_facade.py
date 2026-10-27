@@ -311,6 +311,7 @@ class TestMemoryFacade:
                 "calculation",
                 filters={"user_id": "agent_calculator"},
                 top_k=5,
+                threshold=pytest.approx(1 / 2.8),
             )
             assert results == mock_results
 
@@ -944,10 +945,12 @@ class TestMemoryFacade:
         config: Config,
     ) -> None:
         config.teams = {"finance_team": MockTeamConfig(agents=["calculator", "data_analyst", "finance"])}
+        thresholds: dict[str, float] = {}
 
-        def search_side_effect(query: str, *, filters: dict[str, str], top_k: int) -> dict:  # noqa: ARG001
+        def search_side_effect(query: str, *, filters: dict[str, str], top_k: int, threshold: float) -> dict:  # noqa: ARG001
             del top_k
             user_id = filters["user_id"]
+            thresholds[user_id] = threshold
             if user_id == "agent_calculator":
                 return {"results": [{"id": "1", "memory": "Individual fact", "score": 0.9}]}
             if user_id == "team_calculator+data_analyst+finance":
@@ -963,6 +966,11 @@ class TestMemoryFacade:
         assert results[0]["memory"] == "Individual fact"
         assert results[1]["memory"] == "Team fact"
         assert mock_memory.search.call_count == 2
+        # Both scopes keep the same cosine-0.1 cutoff on Mem0's score scale.
+        assert thresholds == {
+            "agent_calculator": pytest.approx(1 / 2.8),
+            "team_calculator+data_analyst+finance": pytest.approx(1 / 2.8),
+        }
 
     @pytest.mark.asyncio
     async def test_agent_memory_backend_override_to_file_uses_file_storage(

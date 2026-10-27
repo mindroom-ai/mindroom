@@ -62,6 +62,7 @@ _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
         "chroma",
         "knowledge_db",
         "learning",
+        "mem0",
         "memory_files",
         "sessions",
     },

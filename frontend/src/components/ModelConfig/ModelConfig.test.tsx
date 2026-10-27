@@ -766,6 +766,71 @@ describe("ModelConfig", () => {
     });
   });
 
+  it("rejects a model name its dashboard key cannot be stored under on add", async () => {
+    const { toast } = await import("@/components/ui/toaster");
+
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByRole("button", { name: /add model/i }));
+    const addRow = screen.getByPlaceholderText("model name").closest("tr");
+    if (!addRow) throw new Error("add row not found");
+
+    fireEvent.change(within(addRow).getByPlaceholderText("model name"), {
+      target: { value: "gpt-6.1" },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText("provider model id"), {
+      target: { value: "openai/gpt-6.1-sol" },
+    });
+    fireEvent.change(within(addRow).getByPlaceholderText("Paste new API key"), {
+      target: { value: "sk-new" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Error",
+          description:
+            "Model name can only include letters, numbers, colon, underscore, and hyphen",
+          variant: "destructive",
+        }),
+      );
+    });
+    expect(mockStore.updateConfigValue).not.toHaveBeenCalled();
+    expect(
+      fetchMock.mock.calls.some(
+        ([, init]) => (init as RequestInit | undefined)?.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects renaming a model to a name its dashboard key cannot be stored under", async () => {
+    const { toast } = await import("@/components/ui/toaster");
+
+    render(<ModelConfig />);
+
+    fireEvent.click(screen.getByText("anthropic"));
+    const row = screen.getByDisplayValue("anthropic").closest("tr");
+    if (!row) throw new Error("row not found");
+
+    fireEvent.change(within(row).getByDisplayValue("anthropic"), {
+      target: { value: "claude 5.5" },
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description:
+            "Model name can only include letters, numbers, colon, underscore, and hyphen",
+        }),
+      );
+    });
+    expect(mockStore.updateConfigValue).not.toHaveBeenCalled();
+    expect(mockStore.deleteModel).not.toHaveBeenCalled();
+  });
+
   it("saves custom OpenAI base URL on add", async () => {
     render(<ModelConfig />);
 
