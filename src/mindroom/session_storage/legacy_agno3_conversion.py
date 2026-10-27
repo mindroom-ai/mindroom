@@ -395,7 +395,7 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # LEGACY_COMPAT: Agno 3 run rows, one `run_data` JSON document per run.
 # Legacy format: `<s>_runs` (`agno_runs` for the storage name `agno`) rows ordered by `run_index`, each run's messages,
 # tools, and a paused team run's embedded `member_responses` inside `run_data`; workflow rows and members of members.
-# Last legacy release: run rows, v2026.10.569; replacement: the next release, `<s>_log_runs` rows with their
+# Last legacy release: run rows, v2026.10.604; replacement: the next release, `<s>_log_runs` rows with their
 # `<s>_log_tools` rows.
 # Workflow rows and members of members have no known MindRoom writer (unversioned external input).
 # Handling: Per session, each agent or team row becomes a `<s>_log_runs` row with the next `seq` in the order a load
@@ -593,7 +593,7 @@ def _write_run(
 # LEGACY_COMPAT: Run messages stored as a list inside an Agno 3 run row.
 # Legacy format: `run_data.messages`, which may hold history copies (CLI checkpoints), system messages of runs that
 # are not paused, and one message id twice.
-# Last legacy release: history copies, v2026.10.569; replacement: the next release, one
+# Last legacy release: history copies, v2026.10.604; replacement: the next release, one
 # `<s>_log_messages` row each. System messages of runs that are not paused: no single verified cutoff. v2026.5.250
 # (#1013) stopped the reply path's agent and team-scope stores writing them, but through v2026.10.498 an agent built
 # without such a store opened an unstripped one (`agents.py` `_open_agent_session_storage`), and v2026.10.499 (#3022)
