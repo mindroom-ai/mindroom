@@ -46,9 +46,8 @@ from mindroom.llm.provider import (
 )
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill
+from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill, supports_structured_outputs
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.system_prompt import render_session_context
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
     ROUTE_CONFIGS,
@@ -120,7 +119,7 @@ def test_identity_and_capabilities_per_route(
     assert capabilities.structured_output == structured_output
     assert capabilities.native_tool_search is native_tool_search
     assert capabilities.omitted_media == frozenset({"audio", "video"})
-    assert capabilities.claude_family is True
+    assert capabilities.conservative_token_estimates is True
     assert capabilities.provider_default_sampling is True
     assert capabilities.native_compaction is (route != "bedrock_claude")
 
@@ -145,9 +144,6 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
             description="Forecast.",
             parameters={"type": "object", "properties": {}},
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     streamed = await claude_events(provider, ModelRequest(messages=_user(), tools=tools))
@@ -596,6 +592,25 @@ def test_prefill_support_reads_the_model_behind_route_decorated_ids(model_id: st
     assert supports_prefill(model_id) is prefill
 
 
+@pytest.mark.parametrize(
+    ("model_id", "structured"),
+    [
+        ("anthropic/claude-3-5-haiku-20241022", False),
+        ("us.anthropic.claude-3-7-sonnet-20250219-v1:0", False),
+        ("claude-sonnet-4@20250514", False),
+        ("anthropic/claude-opus-4-6", True),
+        ("claude-sonnet-5-5", True),
+    ],
+)
+def test_structured_output_support_reads_the_model_behind_route_decorated_ids(
+    model_id: str,
+    *,
+    structured: bool,
+) -> None:
+    """A gateway path, Bedrock region, or Vertex snapshot does not make an older Claude model count as supporting it."""
+    assert supports_structured_outputs(model_id) is structured
+
+
 @pytest.mark.asyncio
 async def test_audio_inputs_are_not_sent(tmp_path: Path) -> None:
     """Claude takes images and documents; audio stays out of the request for the media fallback to describe."""
@@ -621,9 +636,6 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
             description="Pick.",
             parameters={"type": "object", "properties": {}},
             strict=True,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     completed = await claude_turn(
@@ -658,8 +670,8 @@ async def test_authored_output_config_and_stop_sequences_reach_the_request(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("structured", [False, True], ids=["plain", "structured-output"])
-async def test_documents_ask_for_citations_except_under_structured_output(tmp_path: Path, *, structured: bool) -> None:
-    """The API rejects citations beside an output format, so a structured answer sends its documents without them."""
+async def test_documents_ask_for_no_citations(tmp_path: Path, *, structured: bool) -> None:
+    """No MindRoom reply shows citations, so a document never asks for them, with or without structured output."""
     wire = Wire(sse_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = route_provider("anthropic", tmp_path, wire)
     document = File(content=b"Paris is in France.", mime_type="text/plain")
@@ -670,9 +682,58 @@ async def test_documents_ask_for_citations_except_under_structured_output(tmp_pa
 
     body = wire.body()
     (block,) = [block for block in body["messages"][-1]["content"] if block["type"] == "document"]
-    assert ("citations" in block, "output_config" in body) == (not structured, structured)
-    if not structured:
-        assert block["citations"] == {"enabled": True}
+    assert ("citations" in block, "output_config" in body) == (False, structured)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id"),
+    [
+        ("bedrock_claude", "anthropic.claude-haiku-4-5"),
+        ("vertexai_claude", "claude-opus-4-6"),
+        ("anthropic", "claude-3-5-haiku-latest"),
+    ],
+)
+async def test_a_route_without_native_structured_output_forces_the_answer_tool(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+) -> None:
+    """Where the model accepts forced tool use, the output schema goes as the one tool the request forces."""
+    call = {"type": "tool_use", "id": "toolu_1", "name": "structured_output", "input": {"city": "Paris"}}
+    wire = Wire(sse_reply([call], stop_reason="tool_use"))
+    provider = route_provider(route, tmp_path, wire, id=model_id)
+
+    completed = await claude_turn(provider, ModelRequest(messages=_user(), output_schema=_Answer))
+
+    body = wire.body()
+    assert provider.capabilities.structured_output == "forced_tool"
+    assert body["tool_choice"] == {"type": "tool", "name": "structured_output"}
+    assert [(tool["name"], tool["input_schema"]) for tool in body["tools"]] == [
+        ("structured_output", _Answer.model_json_schema()),
+    ]
+    assert "output_config" not in body
+    assert [json.loads(call["function"]["arguments"]) for call in completed.message.tool_calls] == [{"city": "Paris"}]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "extra_kwargs"),
+    [
+        ("anthropic.claude-sonnet-5-5", {}),
+        ("anthropic.claude-opus-5-5", {}),
+        ("anthropic.claude-haiku-4-5", {"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+    ],
+    ids=["sonnet-5-5", "opus-5-5", "manual-thinking"],
+)
+def test_a_model_that_rejects_forced_tool_use_answers_in_json_mode(
+    tmp_path: Path,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+) -> None:
+    """Some models reject forced tool use on every request, and manual extended thinking rejects it on every model."""
+    provider = route_provider("bedrock_claude", tmp_path, Wire(sse_reply([])), id=model_id, extra_kwargs=extra_kwargs)
+
+    assert provider.capabilities.structured_output == "json_mode"
 
 
 @pytest.mark.asyncio
@@ -686,9 +747,6 @@ async def test_vertex_route_strips_strict_and_answers_in_json_mode(tmp_path: Pat
             description="Pick.",
             parameters={"type": "object", "properties": {}},
             strict=True,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, output_schema=_Answer))
@@ -1062,14 +1120,16 @@ def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(mo
         ("bedrock_claude", True, "/v1/messages?beta=true", None),
     ],
 )
-async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
+async def test_tool_definitions_send_each_schema_as_authored(
     tmp_path: Path,
     route: str,
     strict_sent: bool,
     url_suffix: str,
     beta_header: str | None,
 ) -> None:
-    """An unset description goes out empty, ``strict`` only when True on a route that takes it, approval flags never.
+    """Schemas go as authored, an unset description not at all, and a strict tool's objects closed where strict counts.
+
+    A strict tool, on a route that takes it, closes its objects as strict tool use requires.
 
     The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
     through the beta endpoint without one.
@@ -1083,45 +1143,63 @@ async def test_tool_definitions_carry_only_the_fields_the_claude_wire_takes(
             description=None,
             parameters=schema,
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
         ToolSpec(
             name="gated",
             description="Gated.",
             parameters=schema,
             strict=True,
-            requires_confirmation=True,
-            external_execution=True,
-            approval_type="mindroom_policy",
         ),
         ToolSpec(
             name="plain",
             description="Plain.",
             parameters=schema,
             strict=False,
-            requires_confirmation=False,
-            external_execution=False,
-            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
-    input_schema = {
-        "type": "object",
-        "properties": {"city": {"type": "string", "description": ""}},
-        "required": [],
-        "additionalProperties": False,
-    }
+    closed = {**schema, "additionalProperties": False}
     assert wire.body()["tools"] == [
-        {"name": "gated", "description": "Gated.", "input_schema": input_schema}
+        {"name": "gated", "description": "Gated.", "input_schema": closed if strict_sent else schema}
         | ({"strict": True} if strict_sent else {}),
-        {"name": "plain", "description": "Plain.", "input_schema": input_schema},
-        {"name": "unset", "description": "", "input_schema": input_schema},
+        {"name": "plain", "description": "Plain.", "input_schema": schema},
+        {"name": "unset", "input_schema": schema},
     ]
     request = wire.requests[0]
     assert str(request.url).endswith(url_suffix)
     assert request.headers.get("anthropic-beta") == beta_header
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["anthropic", "vertexai_claude", "bedrock_claude"])
+async def test_a_union_input_schema_reaches_claude_as_an_object_without_its_root_composition(
+    tmp_path: Path,
+    route: str,
+) -> None:
+    """Claude rejects ``anyOf``, ``allOf``, and ``oneOf`` at a schema's root, which an MCP tool with a union input has."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
+    branch = {"type": "object", "properties": {"city": {"$ref": "#/$defs/city"}}, "required": ["city"]}
+    union = {"anyOf": [branch, {"type": "object", "properties": {"zip": {"type": "string"}}}]}
+    tools = [
+        ToolSpec(
+            name="lookup",
+            description="Look up.",
+            parameters={**union, "$defs": {"city": {"type": "string"}}},
+            strict=None,
+        ),
+        ToolSpec(
+            name="typed",
+            description="Typed.",
+            parameters={"type": "object", "oneOf": [branch], "allOf": []},
+            strict=None,
+        ),
+    ]
+    await claude_turn(provider, ModelRequest(messages=_user(), tools=tools))
+    assert [tool["input_schema"] for tool in wire.body()["tools"]] == [
+        {"type": "object", "$defs": {"city": {"type": "string"}}},
+        {"type": "object"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -1144,9 +1222,6 @@ async def test_request_tool_choice_replaces_an_authored_one(
             description="Forecast.",
             parameters={"type": "object", "properties": {}},
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
     await claude_turn(provider, ModelRequest(messages=_user(), tools=tools, tool_choice=tool_choice))
@@ -1191,9 +1266,6 @@ async def test_claude_native_tools_cannot_execute_during_decision(tmp_path: Path
                 description="Look it up.",
                 parameters={"type": "object", "properties": {}},
                 strict=None,
-                requires_confirmation=None,
-                external_execution=None,
-                approval_type=None,
             ),
         ]
     wire = Wire(sse_reply([{"type": "text", "text": "{}"}]))
@@ -1799,21 +1871,21 @@ def _markers(payload: object) -> list[dict[str, Any]]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
 @pytest.mark.parametrize("cache", ["extended", "short", "disabled"])
-async def test_the_shared_instructions_stay_cacheable_when_the_session_context_changes(
+async def test_the_stable_prompt_stays_cacheable_when_the_turn_context_changes(
     tmp_path: Path,
     route: str,
     cache: str,
 ) -> None:
-    """The instructions before the session context keep one marked block, so a new date reuses the cached prefix."""
+    """The stable system message is its own marked block, so a new date in the turn part reuses the cached prefix."""
     settings = {"extended_cache_time": cache == "extended", "cache_system_prompt": cache != "disabled"}
     bodies = []
     for day in ("Monday", "Tuesday"):
         wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
         (tmp_path / day).mkdir()
         provider = route_provider(route, tmp_path / day, wire, extra_kwargs=settings)
-        system = "Shared instructions.\n\n" + render_session_context(f"Current date: {day}")
         messages = [
-            Message(role="system", content=system),
+            Message(role="system", content="Shared instructions."),
+            Message(role="system", content=f"Current date: {day}"),
             Message(role="user", content="First request."),
             Message(role="assistant", content="First answer."),
             Message(role="user", content="Follow-up request."),
@@ -1827,7 +1899,7 @@ async def test_the_shared_instructions_stay_cacheable_when_the_session_context_c
         return
     cache_control = {"type": "ephemeral", **({"ttl": "1h"} if cache == "extended" else {})}
     assert monday["system"][0] == tuesday["system"][0]
-    assert monday["system"][0] == {"type": "text", "text": "Shared instructions.\n\n", "cache_control": cache_control}
+    assert monday["system"][0] == {"type": "text", "text": "Shared instructions.", "cache_control": cache_control}
     assert "cache_control" not in monday["system"][1]
     assert monday["system"][1] != tuesday["system"][1]
     assert monday["messages"][-1]["content"][-1]["cache_control"] == cache_control

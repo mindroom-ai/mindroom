@@ -197,7 +197,7 @@ async def test_stored_history_does_not_count_as_an_attempt_s_answer(
 
     assert text.endswith("Recovered answer")
     assert "Previous turn answer" not in text
-    assert "Previous turn answer" in str(team.models["default"].requests[0].messages[2].content)
+    assert "Previous turn answer" in str(team.models["default"].requests[0].messages[3].content)
     assert len(team.models["default"].requests) == 2
 
 
@@ -317,11 +317,11 @@ async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no
 
 
 @pytest.mark.asyncio
-async def test_a_blocking_member_reply_split_by_a_hidden_tool_call_is_joined_directly(
+async def test_a_blocking_member_reply_split_by_a_hidden_tool_call_keeps_two_paragraphs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The member's text before and after its tool call joins with no gap, as Agno's blocking reply joined it."""
+    """The member's text before and after its tool call reads as two paragraphs, as a streamed reply shows it."""
     team = _team(
         tmp_path,
         monkeypatch,
@@ -332,7 +332,7 @@ async def test_a_blocking_member_reply_split_by_a_hidden_tool_call_is_joined_dir
     text = await team.respond(message="Check.", show_tool_calls=False)
 
     assert text == (
-        "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Let me check.Done.\n\n\n**Team Consensus**:\n\nChecked."
+        "🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**: Let me check.\n\nDone.\n\n\n**Team Consensus**:\n\nChecked."
     )
     assert team.recorder.assistant_text == text
 

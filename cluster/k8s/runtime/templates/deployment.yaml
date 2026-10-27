@@ -463,6 +463,9 @@ spec:
                   name: {{ $entry.existingSecret }}
                   key: {{ $entry.key }}
             {{- end }}
+            {{- with include "mindroom-runtime.trustedUpstreamAuthEnv" . | fromJsonArray }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
             {{- with include "mindroom-runtime.envList" (list . .Values.env.extra "env.extra") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

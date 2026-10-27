@@ -19,13 +19,10 @@
     },
     "output_schema": null,
     "portable_replay": null,
-    "provider_tools_disabled": true,
     "tool_choice": "none",
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -47,13 +44,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Search the user's travel notes.",
-        "external_execution": false,
         "name": "search_notes",
         "parameters": {
           "properties": {
@@ -71,7 +65,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -120,11 +113,11 @@
             {
               "description": "Return the forecast for one city.",
               "name": "get_weather",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "city": {
                     "description": "City name.",
-                    "type": "STRING"
+                    "type": "string"
                   },
                   "unit": {
                     "description": "Temperature unit.",
@@ -132,33 +125,33 @@
                       "celsius",
                       "fahrenheit"
                     ],
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
                   "city"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             },
             {
               "description": "Search the user's travel notes.",
               "name": "search_notes",
-              "parameters": {
+              "parameters_json_schema": {
                 "properties": {
                   "limit": {
                     "description": "Maximum results.",
-                    "type": "INTEGER"
+                    "type": "integer"
                   },
                   "query": {
                     "description": "Search text.",
-                    "type": "STRING"
+                    "type": "string"
                   }
                 },
                 "required": [
                   "query"
                 ],
-                "type": "OBJECT"
+                "type": "object"
               }
             }
           ]

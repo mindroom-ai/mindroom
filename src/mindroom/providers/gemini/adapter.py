@@ -36,13 +36,13 @@ from mindroom.providers.gemini.wire import (
     function_declarations,
     malformed_tool_call_error,
     read_chunk,
-    response_schema,
+    reply_provider_data,
     stop_reason,
     tool_config,
     without_tool_selection,
 )
 from mindroom.providers.google_adc import with_runtime_application_credentials
-from mindroom.providers.tool_policy import provider_tools_disabled
+from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
@@ -120,7 +120,7 @@ class GeminiProvider:
             content=reply.content or None,
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
-            provider_data={} if reply.thought_signature is None else {"thought_signature": reply.thought_signature},
+            provider_data=reply_provider_data(reply),
             usage=reply.usage,
             started=started,
             first_output_at=first_output_at,
@@ -158,7 +158,8 @@ class GeminiProvider:
             config["system_instruction"] = system_instruction
         if request.output_schema is not None:
             config["response_mime_type"] = "application/json"
-            config["response_schema"] = response_schema(request.output_schema)
+            # The output schema goes as authored, as JSON Schema.
+            config["response_json_schema"] = request.output_schema.model_json_schema()
         thinking = {
             "thinking_budget": settings.thinking_budget,
             "include_thoughts": settings.include_thoughts,
@@ -181,7 +182,7 @@ class GeminiProvider:
         if overrides.caller_retries:
             # The SDK retries only as ``http_options.retry_options`` authors it; one attempt overrides that here.
             config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
-        if provider_tools_disabled():
+        if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config
 

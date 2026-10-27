@@ -86,8 +86,8 @@ class ChatSettings:
     models: list[str] | None = None
     cache_system_prompt: bool = True
     extended_cache_time: bool = True
-    # DeepSeek thinking mode; None keeps the model default.
-    use_thinking: bool | None = None
+    # DeepSeek thinking mode.
+    use_thinking: bool = True
     # Kimi Code login.
     kimi_home: str | None = None
     prompt_cache_key: str | None = None
@@ -173,7 +173,7 @@ class ResponsesSettings:
     extra_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     extra_body: dict[str, Any] | None = None
     request_params: dict[str, Any] | None = None
-    # Split the shared system prefix from session context so the prefix caches across threads.
+    # Mark the stable system message, the first, with an explicit prompt-cache breakpoint where the route takes one.
     cache_system_prompt: bool = True
     # Client parameters.
     api_key: str | None = field(default=None, metadata=SECRET)

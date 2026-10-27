@@ -1,4 +1,4 @@
-"""Static prompt-token estimation: the rendered system message, the offered tool definitions, and the prompt text.
+"""Static prompt-token estimation: the rendered system messages, the offered tool definitions, and the prompt text.
 
 Compaction consumes these numbers through the resolved execution plan; an agent and a team leader size their
 requests through the same estimator.
@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from functools import cache
 from typing import TYPE_CHECKING
 
+from mindroom.llm.messages import system_text
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 class _StaticTokenEstimator:
     """Request-local static-token estimator."""
 
-    # The system message and tool tokens, which do not depend on the prompt text; computed once, on first use.
+    # The system messages' and tools' tokens, which do not depend on the prompt text; computed once, on first use.
     non_prompt_tokens: Callable[[], int]
 
     def estimate(self, full_prompt: str) -> int:
@@ -32,7 +33,7 @@ class _StaticTokenEstimator:
 
 
 def build_static_token_estimator(
-    system_message: Message,
+    system_messages: Sequence[Message],
     tools: Sequence[ToolSpec],
     deferred_tool_names: frozenset[str],
 ) -> _StaticTokenEstimator:
@@ -42,7 +43,7 @@ def build_static_token_estimator(
     """
 
     def non_prompt_tokens() -> int:
-        return estimate_text_tokens(str(system_message.content or "")) + tool_definition_tokens(
+        return estimate_text_tokens(system_text(system_messages)) + tool_definition_tokens(
             tools,
             deferred_tool_names,
         )

@@ -409,7 +409,10 @@ class DefaultsConfig(BaseModel):
         description="Tool entries automatically added to every agent, with optional inline overrides",
         json_schema_extra=dashboard_hint(reference="tool"),
     )
-    markdown: bool = Field(default=True, description="Default markdown setting")
+    markdown: bool = Field(
+        default=True,
+        description="Default for whether system prompts tell agents and team leaders their replies are shown as Markdown",
+    )
     enable_streaming: bool = Field(
         default=True,
         description="Enable streaming responses via progressive message edits",

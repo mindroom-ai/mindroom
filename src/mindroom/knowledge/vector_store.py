@@ -18,7 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY, SearchHit
+from mindroom.knowledge.read_protocol import (
+    DISTANCE_KEY,
+    SOURCE_DIGEST_KEY,
+    SOURCE_MTIME_NS_KEY,
+    SOURCE_PATH_KEY,
+    SOURCE_SIZE_KEY,
+    SearchHit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -49,6 +56,11 @@ _READ_AHEAD_CHUNK_BYTES = 8 * 1024 * 1024
 _NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
+# Stored row keys that serve indexing and say nothing about the chunk; ``content_id``, ``content_hash``, and the empty
+# ``linked_to`` are the keys the rows Agno wrote carry.
+_INDEXING_KEYS = frozenset(
+    {SOURCE_MTIME_NS_KEY, SOURCE_SIZE_KEY, SOURCE_DIGEST_KEY, "content_id", "content_hash", "linked_to"},
+)
 _SCHEMA = f"""
 CREATE TABLE chunks (
     rowid INTEGER PRIMARY KEY,
@@ -410,7 +422,11 @@ def _reciprocal_rank_fusion(*rankings: Sequence[int]) -> list[int]:
 
 
 def _hits(connection: sqlite3.Connection, ranked: Sequence[tuple[int, float]], *, limit: int) -> list[SearchHit]:
-    """Build hits for ranked ``(rowid, cosine distance)`` pairs, dropping a document's repeated chunks."""
+    """Build hits for ranked ``(rowid, cosine distance)`` pairs, dropping a document's repeated chunks.
+
+    A hit shows its source, its reader keys, and its distance; the row keys that serve indexing, the source signature
+    and the content hash and id, and Agno's empty ``linked_to`` stay out of it.
+    """
     rows = {
         rowid: (document, metadata)
         for rowid, document, metadata in connection.execute(
@@ -422,14 +438,10 @@ def _hits(connection: sqlite3.Connection, ranked: Sequence[tuple[int, float]], *
     seen: set[tuple[str | None, str]] = set()
     for rowid, distance in ranked:
         document, metadata_json = rows[rowid]
-        meta_data = json.loads(metadata_json)
-        name = meta_data.pop("name", None)
-        meta_data.pop("content_id", None)
-        # TODO(simplify): Hits show the model the stored source signature, Agno's empty `linked_to`, `content_hash`, and
-        # the cosine distance twice, once as a `similarity_score` that falls as matches improve. Show the source, the
-        # chunk, and one distance. Models would read shorter hits; the knowledge goldens pin these keys.
-        meta_data["distances"] = distance
-        meta_data["similarity_score"] = distance
+        stored = json.loads(metadata_json)
+        name = stored.pop("name", None)
+        meta_data = {key: value for key, value in stored.items() if key not in _INDEXING_KEYS}
+        meta_data[DISTANCE_KEY] = distance
         hit = SearchHit(content=document, name=None if name is None else str(name), meta_data=meta_data)
         if (hit.name, hit.content) in seen:
             continue

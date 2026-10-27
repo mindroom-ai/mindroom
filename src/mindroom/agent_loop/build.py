@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.agent_loop.prompt import render_system_message
+from mindroom.agent_loop.prompt import render_system_messages
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,7 +62,7 @@ class AgentSurface:
 class AgentBuild:
     """One configured agent as ``create_agent`` built it.
 
-    ``spec`` carries no system message: ``prompt_for_turn`` renders one per turn from ``prompt``, whose
+    ``spec`` carries no system messages: ``prompt_for_turn`` renders them per turn from ``prompt``, whose
     ``turn_context`` is the build's own context, the date and session context. ``request_template`` holds the
     settings of every request of a run, such as the deferred tool names. Each function a run offers names the
     authored toolkit it comes from, which approvals check (``tool_owners_by_agent``); a function generated for the
@@ -98,16 +98,16 @@ def tool_owners_by_agent(*builds: AgentBuild) -> dict[tuple[str, str], str]:
     }
 
 
-def prompt_for_turn(build: AgentBuild, *context: str) -> Message:
-    """Render the system message of one turn: the build's prompt with the turn's context blocks appended in order.
+def prompt_for_turn(build: AgentBuild, *context: str) -> tuple[Message, ...]:
+    """Render the system messages of one turn: the build's prompt with the turn's context blocks appended in order.
 
-    Each block follows the context so far after one blank line, trailing whitespace of the earlier text dropped;
-    an empty block adds nothing.
+    The blocks join the turn part, so the stable part stays the build's own. Each block follows the context so far
+    after one blank line, trailing whitespace of the earlier text dropped; an empty block adds nothing.
     """
     turn_context = build.prompt.turn_context
     for block in context:
         turn_context = appended_context(turn_context, block)
-    return render_system_message(replace(build.prompt, turn_context=turn_context))
+    return render_system_messages(replace(build.prompt, turn_context=turn_context))
 
 
 def appended_context[Context: (str, str | None)](existing: Context, block: str) -> Context:

@@ -1,8 +1,10 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Render an agent's system message from its prompt inputs.
+"""Render an agent's system prompt from named sections, as a stable part and a turn part.
 
-The layout is part of every provider's prompt-cache prefix: changing its section order, tags, or blank lines changes
-the cacheable prefix and may prevent reuse of cached tokens.
+The stable part holds what an agent's build fixes, so it stays byte for byte the same across the build's turns and
+providers can cache it as the request's prefix. The turn part holds the date and session context and the blocks a turn
+appends. The request carries the two parts as separate system messages, the stable one first, and each wire sends
+them as its API takes system text (``system_text`` for wires that take one text).
 """
 
 from __future__ import annotations
@@ -13,26 +15,25 @@ from typing import TYPE_CHECKING
 from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
-    from mindroom.llm.provider import Capabilities
-
-# Claude routes add this line to the system message of every request that offers tools (``model_note_for``).
-CLAUDE_TOOLS_NOTE = "Do not reflect on the quality of the returned search results in your response\n\n"
+# The chat renders every reply as Markdown; ``PromptSpec.markdown`` decides whether the prompt says so.
+MARKDOWN_OUTPUT_FORMAT = "Your replies are shown as Markdown, so format them with Markdown where it helps the reader."
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PromptSpec:
-    """Every input of one agent's system message, in the order the message renders them.
+    """Every input of one agent's system prompt, in the order its sections render.
 
-    ``persona`` is an authored prompt that leads the message in place of the agent's identity.
+    ``persona`` is an authored prompt that leads the stable part in place of the agent's identity.
     ``role`` fills ``<your_role>``: an agent's identity, runtime facts, preloaded files, and authored role (only the
-    runtime facts under a persona), or a helper's task.
-    ``turn_context`` is the date and session context, plus the blocks a turn appends (``build.prompt_for_turn``).
-    ``markdown`` adds the markdown line; callers with an output schema leave it False, since their answer is JSON.
+    runtime facts under a persona), or a team's identity.
+    ``markdown`` states the chat's Markdown output format right after the role (``MARKDOWN_OUTPUT_FORMAT``): an agent
+    and a team leader set it from the ``markdown`` setting, and a voice call, realtime or cascaded, turns it off
+    (``matrix_rtc.call_tools._spoken``), since a call speaks its replies.
     ``tool_instructions`` holds the toolkit and function instructions in the order the tools are offered.
-    ``model_note`` is the text the provider family adds (``model_note_for``), and ``output_format_prompt`` the JSON
-    prompt a structured-output request needs (``structured.output_format_prompt``).
+    ``turn_context`` is the turn part: the date and session context, plus the blocks a turn appends
+    (``build.prompt_for_turn``).
     """
 
     persona: str | None = None
@@ -40,24 +41,23 @@ class PromptSpec:
     instructions: tuple[str, ...]
     markdown: bool = False
     tool_instructions: tuple[str, ...] = ()
-    turn_context: str | None = None
     skills_block: str | None = None
     knowledge_block: str | None = None
-    model_note: str | None = None
-    output_format_prompt: str | None = None
+    turn_context: str | None = None
 
 
 def render_instructions(instructions: Sequence[str]) -> str:
-    """Render an instruction list as one system-message section.
+    """Render an instruction list as one system-prompt section.
 
     A single instruction stays verbatim; single-line instructions become ``- `` bullets; a multi-line instruction
     stays a block, because its own bullets and paragraphs would otherwise nest under a bullet it does not belong to.
+    Each one is stripped, so blocks stay one blank line apart whatever whitespace they end with.
     """
     if len(instructions) == 1:
         return instructions[0]
     separator = "\n\n" if any(_is_block(instruction) for instruction in instructions) else "\n"
     return separator.join(
-        instruction if _is_block(instruction) else f"- {instruction.strip()}" for instruction in instructions
+        instruction.strip() if _is_block(instruction) else f"- {instruction.strip()}" for instruction in instructions
     )
 
 
@@ -66,49 +66,32 @@ def _is_block(instruction: str) -> bool:
     return "\n" in instruction.strip()
 
 
-def model_note_for(capabilities: Capabilities, *, offers_tools: bool) -> str | None:
-    """Return the text a provider family adds to the system message of a request, given whether it offers tools."""
-    # TODO(simplify): every Claude request that offers any tool gets a note about search results, whatever the
-    # tools are. Drop the note, which removes this function and the prompts' ``model_note`` inputs.
-    # Models would notice: system prompts on Claude routes lose the line.
-    return CLAUDE_TOOLS_NOTE if capabilities.claude_family and offers_tools else None
+def join_sections(sections: Iterable[str | None]) -> str:
+    """Join prompt sections with one blank line between them, each stripped; an empty section adds nothing."""
+    return "\n\n".join(text for section in sections if section and (text := section.strip()))
 
 
-def render_system_message(spec: PromptSpec) -> Message:
-    """Return the system message for ``spec``."""
-    return Message(role="system", content=(_agent_sections(spec) + _context_sections(spec)).strip())
-
-
-def _agent_sections(spec: PromptSpec) -> str:
-    """Render the agent's own sections: persona, role, instructions, the markdown line, and tool instructions."""
-    content = ""
-    if spec.persona is not None:
-        content += f"{spec.persona}\n"
-    if spec.role is not None:
-        content += f"\n<your_role>\n{spec.role}\n</your_role>\n\n"
-    if spec.instructions:
-        content += render_instructions(spec.instructions) + "\n\n"
-    if spec.markdown:
-        content += "<additional_information>\n- Use markdown to format your answers.\n</additional_information>\n\n"
-    return content + "".join(f"{instruction}\n" for instruction in spec.tool_instructions)
-
-
-def _context_sections(spec: PromptSpec) -> str:
-    """Render the per-turn context, skills, knowledge, and provider sections that follow the agent's own."""
-    content = ""
-    if spec.turn_context is not None:
-        content += f"{spec.turn_context}\n"
-    if spec.skills_block:
-        content += f"\n{spec.skills_block}\n"
-    if spec.knowledge_block is not None:
-        content += spec.knowledge_block + "\n"
-    return content + (spec.model_note or "") + (spec.output_format_prompt or "")
+def render_system_messages(spec: PromptSpec) -> tuple[Message, ...]:
+    """Return the system messages for ``spec``: the stable part, then the turn part; an empty part sends none."""
+    stable = join_sections(
+        (
+            spec.persona,
+            f"<your_role>\n{spec.role.strip()}\n</your_role>" if spec.role and spec.role.strip() else None,
+            MARKDOWN_OUTPUT_FORMAT if spec.markdown else None,
+            render_instructions(spec.instructions) if spec.instructions else None,
+            *spec.tool_instructions,
+            spec.skills_block,
+            spec.knowledge_block,
+        ),
+    )
+    turn = join_sections((spec.turn_context,))
+    return tuple(Message(role="system", content=text) for text in (stable, turn) if text)
 
 
 __all__ = [
-    "CLAUDE_TOOLS_NOTE",
+    "MARKDOWN_OUTPUT_FORMAT",
     "PromptSpec",
-    "model_note_for",
+    "join_sections",
     "render_instructions",
-    "render_system_message",
+    "render_system_messages",
 ]

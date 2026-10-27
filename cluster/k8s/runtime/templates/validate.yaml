@@ -321,6 +321,27 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- $trustedUpstreamAuthEnv := include "mindroom-runtime.trustedUpstreamAuthEnv" . | fromJsonArray -}}
+{{- if $trustedUpstreamAuthEnv -}}
+{{- $trustedUpstreamAuth := .Values.trustedUpstreamAuth -}}
+{{- if and $trustedUpstreamAuth.emailToMatrixUserIdTemplate (not $trustedUpstreamAuth.emailDomain) -}}
+{{- fail "trustedUpstreamAuth.emailDomain is required when trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" -}}
+{{- end -}}
+{{- range $key := list "jwtHeader" "jwksUrl" "jwtAudience" "jwtIssuer" -}}
+{{- if not (index $trustedUpstreamAuth $key) -}}
+{{- fail (printf "trustedUpstreamAuth.%s is required when trustedUpstreamAuth.enabled=true" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- $trustedUpstreamAuthEnvNames := list -}}
+{{- range $trustedUpstreamAuthEnv -}}
+{{- $trustedUpstreamAuthEnvNames = append $trustedUpstreamAuthEnvNames .name -}}
+{{- end -}}
+{{- range include "mindroom-runtime.envList" (list $ .Values.env.extra "env.extra") | fromJsonArray -}}
+{{- if has (default "" .name) $trustedUpstreamAuthEnvNames -}}
+{{- fail (printf "trustedUpstreamAuth and env.extra both set %s; remove one of them" .name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $providerCredentialEnvMap := include "mindroom-runtime.providerCredentialEnvMap" . | fromYaml -}}
 {{- $providerCredentialProviders := dict -}}
 {{- range $index, $entry := .Values.providerCredentials -}}

@@ -1452,10 +1452,10 @@ def _trusted_upstream_jwt_args(prefix: str, *, omit: str | None = None) -> tuple
     return tuple(f"{prefix}.{name}={value}" for name, value in _TRUSTED_UPSTREAM_JWT_VALUES.items() if name != omit)
 
 
-@pytest.mark.parametrize("chart", ["instance", "platform"])
+@pytest.mark.parametrize("chart", ["instance", "platform", "runtime"])
 @pytest.mark.parametrize("email_domain", ["", "example.com"])
 def test_chart_email_mapping_requires_explicit_domain(chart: str, email_domain: str) -> None:
-    """Both deployment paths must carry the email namespace into runtime configuration."""
+    """Every deployment path must carry the email namespace into runtime configuration."""
     prefix = "provisioner.trustedUpstreamAuth" if chart == "platform" else "trustedUpstreamAuth"
     completed = _run_helm_template(
         Path("cluster/k8s") / chart,
@@ -1480,10 +1480,10 @@ def test_chart_email_mapping_requires_explicit_domain(chart: str, email_domain: 
         assert email_domain in completed.stdout
 
 
-@pytest.mark.parametrize("chart", ["instance", "platform"])
+@pytest.mark.parametrize("chart", ["instance", "platform", "runtime"])
 @pytest.mark.parametrize("missing", list(_TRUSTED_UPSTREAM_JWT_VALUES))
 def test_chart_rejects_trusted_upstream_without_jwt_setting(chart: str, missing: str) -> None:
-    """Both charts fail before deploying an instance whose trusted upstream auth cannot verify the signed assertion."""
+    """Every chart fails before deploying a runtime whose trusted upstream auth cannot verify the signed assertion."""
     prefix = "provisioner.trustedUpstreamAuth" if chart == "platform" else "trustedUpstreamAuth"
     completed = _run_helm_template(
         Path("cluster/k8s") / chart,
@@ -1495,18 +1495,21 @@ def test_chart_rejects_trusted_upstream_without_jwt_setting(chart: str, missing:
     assert f"{prefix}.{missing} is required when {prefix}.enabled=true" in completed.stderr
 
 
-def test_instance_chart_renders_trusted_upstream_jwt_env() -> None:
+@pytest.mark.parametrize(
+    ("chart", "deployment_name"),
+    [("instance", "mindroom-demo"), ("runtime", "mindroom-demo-mindroom-runtime")],
+)
+def test_chart_renders_trusted_upstream_jwt_env(chart: str, deployment_name: str) -> None:
     """Trusted upstream settings should render to MindRoom runtime env vars."""
     docs = _render_chart(
-        Path("cluster/k8s/instance"),
+        Path("cluster/k8s") / chart,
         "trustedUpstreamAuth.enabled=true",
         "trustedUpstreamAuth.jwtEmailClaim=email",
         "trustedUpstreamAuth.jwtUserIdClaim=sub",
         "trustedUpstreamAuth.jwtMatrixUserIdClaim=matrix_user_id",
         set_string_args=_trusted_upstream_jwt_args("trustedUpstreamAuth"),
     )
-    deployment = _resource(docs, "Deployment", "mindroom-demo")
-    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    container = _container(_resource(docs, "Deployment", deployment_name), "mindroom")
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"] == "true"
@@ -1517,6 +1520,38 @@ def test_instance_chart_renders_trusted_upstream_jwt_env() -> None:
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM"] == "email"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"] == "sub"
     assert env_values["MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"] == "matrix_user_id"
+
+
+def test_runtime_chart_renders_no_trusted_upstream_env_by_default() -> None:
+    """Trusted upstream auth stays off unless the runtime chart's block enables it."""
+    docs = _render_chart(Path("cluster/k8s/runtime"))
+    for container in _resource(docs, "Deployment", "mindroom-demo-mindroom-runtime")["spec"]["template"]["spec"][
+        "containers"
+    ]:
+        assert not [env["name"] for env in container["env"] if env["name"].startswith("MINDROOM_TRUSTED_UPSTREAM_")]
+
+
+@pytest.mark.parametrize(
+    "env_extra_args",
+    [
+        ("env.extra[0].name=MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE", "env.extra[0].value=duplicate"),
+        ("env.extra.MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=duplicate",),
+    ],
+)
+def test_runtime_chart_rejects_trusted_upstream_env_also_in_env_extra(env_extra_args: tuple[str, ...]) -> None:
+    """A trusted upstream variable has one source, so env.extra cannot silently override the block."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "trustedUpstreamAuth.enabled=true",
+        *env_extra_args,
+        set_string_args=_trusted_upstream_jwt_args("trustedUpstreamAuth"),
+    )
+
+    assert completed.returncode != 0
+    assert (
+        "trustedUpstreamAuth and env.extra both set MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE; remove one of them"
+        in completed.stderr
+    )
 
 
 @pytest.mark.parametrize("webhook_secret", ["", " ", "whsec_test"])

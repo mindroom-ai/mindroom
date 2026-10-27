@@ -29,7 +29,7 @@ __all__ = [
 logger = get_logger(__name__)
 
 # Python's MIME database lacks or misnames these supported formats; host /etc/mime.types must not decide.
-_RESPONSES_FILE_MIME_TYPES = {
+_FILE_MIME_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -105,47 +105,51 @@ def _content_bytes(file: File) -> bytes | None:
     return file.content
 
 
+def _file_part_name(file: File, fallback: str) -> str:
+    """Return the name a file part carries: the attachment's original filename, else its stored file's name."""
+    return file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or fallback
+
+
+def _file_part_data_url(file: File, name: str, data: bytes) -> str:
+    """Return a file part's data URL, typed by the declared type, else by the original filename, then the stored path.
+
+    The original filename comes first because a storage path is opaque and may end in ``.bin``. A declared
+    ``application/octet-stream`` names no type, and Responses rejects it, so the filename decides then too; a
+    compressed name such as ``report.csv.gz`` names no type either.
+    """
+    mime_type = file.mime_type if file.mime_type and file.mime_type != "application/octet-stream" else None
+    display_name = file.filename or file.name
+    if mime_type is None and display_name:
+        guessed, encoding = mimetypes.guess_type(display_name)
+        guessed = _FILE_MIME_TYPES.get(Path(display_name).suffix.lower(), guessed)
+        mime_type = guessed if encoding is None else None
+    if mime_type is None:
+        guessed, encoding = mimetypes.guess_type(file.filepath or name)
+        mime_type = guessed if guessed and encoding is None else "application/octet-stream"
+    return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
+
+
 def chat_file_part(file: File) -> dict[str, Any] | None:
-    """Return a Chat Completions ``file`` part with an inline data URL, or None."""
-    if file.filepath is not None:
-        name = Path(file.filepath).name
-    elif file.content is not None:
-        name = file.filename or "file"
-    else:
+    """Return a Chat Completions ``file`` part with an inline data URL, or None.
+
+    It is named and typed as a Responses file part is (``_file_part_name``, ``_file_part_data_url``).
+    """
+    if file.filepath is None and file.content is None:
         logger.warning("Remote file input is not fetched", file_id=file.id)
         return None
+    name = _file_part_name(file, "file")
     data = _content_bytes(file)
     if data is None:
         return None
-    mime_type = file.mime_type or mimetypes.guess_type(name)[0] or "application/pdf"
-    data_url = f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
-    return {"type": "file", "file": {"filename": name, "file_data": data_url}}
-
-
-def _responses_file_mime_type(file: File, filename: str) -> str:
-    """Prefer the original filename over an opaque storage path, which may end in ``.bin``.
-
-    A declared ``application/octet-stream`` names no type, and Responses rejects it, so the filename decides then too.
-    """
-    if file.mime_type and file.mime_type != "application/octet-stream":
-        return file.mime_type
-    display_name = file.filename or file.name
-    if display_name:
-        guessed, encoding = mimetypes.guess_type(display_name)
-        guessed = _RESPONSES_FILE_MIME_TYPES.get(Path(display_name).suffix.lower(), guessed)
-        if guessed and encoding is None:
-            return guessed
-    source = file.filepath or filename
-    return mimetypes.guess_type(source)[0] or "application/octet-stream"
+    return {"type": "file", "file": {"filename": name, "file_data": _file_part_data_url(file, name, data)}}
 
 
 def responses_file_part(file: File) -> dict[str, Any] | None:
     """Return a Responses ``input_file`` part, a URL reference or inline data, or None when neither is available."""
-    filename = file.filename or file.name or (Path(file.filepath).name if file.filepath else None) or "document"
+    name = _file_part_name(file, "document")
     if file.url:
         return {"type": "input_file", "file_url": file.url}
     data = _content_bytes(file)
     if data is None:
         return None
-    data_url = f"data:{_responses_file_mime_type(file, filename)};base64,{base64.b64encode(data).decode('utf-8')}"
-    return {"type": "input_file", "filename": filename, "file_data": data_url}
+    return {"type": "input_file", "filename": name, "file_data": _file_part_data_url(file, name, data)}

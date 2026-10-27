@@ -3035,7 +3035,7 @@ class TeamBot(AgentBot):
             )
         assert self.client is not None
         team_config = self.config.teams[self.agent_name]
-        configured_mode = TeamMode.COORDINATE if team_config.mode == "coordinate" else TeamMode.COLLABORATE
+        configured_mode = TeamMode(team_config.mode)
         availability = self._turn_policy.responder_availability()
         team_resolution = resolve_configured_team(
             self.agent_name,

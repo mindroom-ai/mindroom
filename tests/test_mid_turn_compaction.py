@@ -169,7 +169,7 @@ class _Agent:
             id="test_agent",
             name="test_agent",
             model=self.model,
-            system_message=None,
+            system_messages=(),
             toolkits=(adapt_toolkit(Toolkit(name="probes", tools=list(self.tools))),),
             max_tool_calls_per_turn=self.max_tool_calls_per_turn,
         )
@@ -495,9 +495,6 @@ def test_request_sizing_leaves_out_deferred_tool_definitions() -> None:
             description="Look up a value.",
             parameters={},
             strict=None,
-            requires_confirmation=None,
-            external_execution=None,
-            approval_type=None,
         ),
     ]
 
@@ -512,11 +509,8 @@ def test_request_sizing_costs_a_tool_what_the_static_estimate_costs_it() -> None
         description="Look up a value.",
         parameters={"type": "object", "properties": {"key": {"type": "string"}}},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
-    static = build_static_token_estimator(Message(role="system", content=""), [lookup], frozenset())
+    static = build_static_token_estimator((), [lookup], frozenset())
 
     assert mid_turn_compaction._tool_tokens([lookup], [], frozenset()) == static.estimate("")
 

@@ -52,7 +52,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\nNormalize voice transcriptions while preserving natural language and mention intent\n</your_role>",
+          "content": "Normalize voice transcriptions while preserving natural language and mention intent",
           "role": "system"
         },
         {

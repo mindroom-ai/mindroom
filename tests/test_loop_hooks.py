@@ -50,7 +50,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     model = ScriptedModel([])
     settings = replay_settings()
     build = AgentBuild(
-        spec=AgentSpec(id="general", name="General", model=model, system_message=None, toolkits=()),
+        spec=AgentSpec(id="general", name="General", model=model, system_messages=(), toolkits=()),
         prompt=PromptSpec(role="test", instructions=()),
         request_template=ModelRequest(
             messages=(),

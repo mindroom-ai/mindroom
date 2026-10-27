@@ -36,6 +36,7 @@ from anthropic.types.beta import (
 from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
+    STRUCTURED_OUTPUT_TOOL,
     Capabilities,
     ModelIdentity,
     ModelRequest,
@@ -48,6 +49,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
     hosted_tool_started,
+    structured_output_tools,
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, claude_rejects_sampling_controls
@@ -77,6 +79,7 @@ from mindroom.providers.anthropic.wire import (
     inline_url_media,
     parse_claude_usage,
     stop_reason_of,
+    supports_forced_tool_use,
     supports_prefill,
     supports_structured_outputs,
     tool_call_from_block,
@@ -103,7 +106,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import NativeHistoryRoute
+    from mindroom.llm.provider import NativeHistoryRoute, StructuredOutput
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -336,9 +339,10 @@ class ClaudeProvider:
         return UsageReported(message.metrics), TurnCompleted(message=message, stop_reason=stop_reason)
 
     def _output_format(self, schema: type[BaseModel] | None) -> dict[str, Any] | None:
-        """Return the ``output_config.format`` value, or None when the route answers in JSON mode instead.
+        """Return the ``output_config.format`` value, or None on every route but ``native``.
 
-        A JSON-mode route relies on the prompt asking for JSON.
+        A ``forced_tool`` route answers through the forced ``structured_output`` call, and a JSON-mode route relies on
+        the prompt asking for JSON.
         """
         if schema is None or self.capabilities.structured_output != "native":
             return None
@@ -462,16 +466,16 @@ class ClaudeProvider:
             manual_thinking=(settings.effective_thinking() or {}).get("type") == "enabled",
         )
         output_format = self._output_format(request.output_schema)
+        output_tool = structured_output_tools(self.capabilities.structured_output, request.output_schema)
         # Vertex rejects the tool-level strict field.
         strict_allowed = self.route != "vertexai_claude"
-        tools = format_claude_tools(request.tools, strict_allowed=strict_allowed)
+        tools = format_claude_tools((*request.tools, *output_tool), strict_allowed=strict_allowed)
         strict_tools = strict_allowed and any(tool.strict for tool in request.tools)
         params = self._request_params(request, output_format, strict_tools=strict_tools)
         authors_thinking = settings.authors_thinking() and not overrides.omit_thinking_setting
         conversation = format_claude_messages(
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
-            citations=output_format is None,
             earlier_thinking=self._replays_earlier_thinking(params),
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
@@ -486,6 +490,8 @@ class ClaudeProvider:
             extended_cache_time=settings.extended_cache_time,
             cache_system_prompt=settings.cache_system_prompt and overrides.prompt_cache,
         )
+        if output_tool:
+            body = {**body, "tool_choice": {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}}
         return _PreparedRequest(
             client=self._client(caller_retries=overrides.caller_retries),
             kwargs=body,
@@ -671,6 +677,18 @@ def _bedrock_credentials(settings: ClaudeSettings) -> dict[str, Any]:
     }
 
 
+def _structured_output(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> StructuredOutput:
+    """Return how the route answers an output schema.
+
+    The direct API answers natively where the model offers it; otherwise a forced tool call answers where the model
+    accepts one, and JSON mode where it does not.
+    """
+    if route == "anthropic" and supports_structured_outputs(model_id):
+        return "native"
+    manual_thinking = (settings.effective_thinking() or {}).get("type") == "enabled"
+    return "forced_tool" if supports_forced_tool_use(model_id, manual_thinking=manual_thinking) else "json_mode"
+
+
 def _claude_capabilities(
     route: ClaudeRouteKind,
     model_id: str,
@@ -679,7 +697,7 @@ def _claude_capabilities(
 ) -> Capabilities:
     """Return what one Claude route offers for this model."""
     return Capabilities(
-        structured_output="native" if route == "anthropic" and supports_structured_outputs(model_id) else "json_mode",
+        structured_output=_structured_output(route, model_id, settings),
         omitted_media=frozenset({"audio", "video"}),
         native_tool_search=native_tool_search_supported(route, model_id),
         native_compaction=native_compaction_supported(
@@ -691,7 +709,8 @@ def _claude_capabilities(
         # Vertex summaries always keep the provider's sampling default; the newest Claude generations reject
         # non-default sampling on every route.
         provider_default_sampling=route == "vertexai_claude" or claude_rejects_sampling_controls(model_id),
-        claude_family=True,
+        # Claude's tokenizer has no local encoding and counts more tokens than o200k for some text.
+        conservative_token_estimates=True,
     )
 
 

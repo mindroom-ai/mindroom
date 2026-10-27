@@ -15,7 +15,6 @@ import asyncio
 import json
 import os
 import re
-from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from importlib import import_module
@@ -32,7 +31,6 @@ from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCom
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
-from mindroom.providers.tool_policy import without_provider_tools
 from mindroom.tool_jobs.execution import project_definitions
 from tests.agno_parity.golden_files import STORAGE_ONLY_MESSAGE_KEYS, sorted_keys, turn_message
 
@@ -95,7 +93,6 @@ _HANDLED_INPUT_KEYS = frozenset(
         "native_compaction",
         "output_schema",
         "portable_replay",
-        "provider_tools_disabled",
         "tool_choice",
         "tool_jobs",
         "tools",
@@ -499,8 +496,6 @@ def golden_request(case_input: dict[str, Any], *, native: NativeHistoryRoute | N
     tools = [ToolSpec(**tool) for tool in case_input["tools"]]
     if (tool_jobs := case_input.get("tool_jobs")) is not None:
         tools = list(project_definitions(tools, frozenset(tool_jobs["managed"])))
-    if case_input.get("provider_tools_disabled"):
-        assert case_input["tool_choice"] == "none", "decision requests disable tool selection through tool_choice"
     native_compaction = None
     if (asked := case_input.get("native_compaction")) is not None:
         assert native is not None, "the golden's route has no native compaction"
@@ -560,17 +555,12 @@ async def replay_through_pipeline(
     case_input: dict[str, Any],
     recorded: list[httpx.Request],
 ) -> Replay:
-    """Send a golden's request through the pipeline around ``adapter`` and return what it sent and produced.
-
-    A decision request runs inside ``without_provider_tools()``, as participation decisions and judgments do.
-    """
+    """Send a golden's request through the pipeline around ``adapter`` and return what it sent and produced."""
     request = golden_request(case_input, native=adapter.native_history_route)
     if (deferred := case_input["deferred_tool_search"]) is not None:
         # The build defers natively exactly where the route has native tool search, so the recorded mode follows it.
         assert adapter.capabilities.native_tool_search == (deferred["mode"] == "native")
-    decision = without_provider_tools() if case_input.get("provider_tools_disabled") else nullcontext()
-    with decision:
-        events = [event async for event in pipeline_provider(adapter).stream(request)]
+    events = [event async for event in pipeline_provider(adapter).stream(request)]
     if len(recorded) != 1:
         msg = f"expected one provider request, got {[str(request.url) for request in recorded]}"
         raise AssertionError(msg)

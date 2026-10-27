@@ -107,7 +107,7 @@ from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
-from mindroom.turn_continuation import continuation_decision_from_tools
+from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 logger = get_logger(__name__)
@@ -406,7 +406,7 @@ async def _execute_child(
 
     if response.status == RunStatus.completed:
         decision = continuation_decision_from_tools(
-            [tool.call for tool in response.tools or ()],
+            stopped_calls(response.tools or ()),
             original_prompt=child.task,
             continuation_count=0,
         )

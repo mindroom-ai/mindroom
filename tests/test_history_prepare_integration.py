@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -36,7 +36,7 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, HistoryScopeState, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
@@ -108,6 +108,11 @@ def _planned(prepared: PreparedHistoryState) -> Iterator[AsyncMock]:
         patch("mindroom.execution_preparation.finalize_history_preparation", return_value=prepared),
     ):
         yield prepare
+
+
+def _after_prompt(messages: Sequence[Message]) -> list[Message]:
+    """Return a request's messages after its system prompt."""
+    return [message for message in messages if message.role != "system"]
 
 
 def _contents(messages: list[Message] | tuple[Message, ...]) -> list[str]:
@@ -212,7 +217,7 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
     assert prepare.await_args is not None
     build = prepared.build
     estimator = build_static_token_estimator(
-        prepared.spec.system_message or Message(role="system", content=""),
+        prepared.spec.system_messages,
         PreparedTools(functions=build.spec.functions).specs(),
         build.request_template.deferred_tools.names,
     )
@@ -564,7 +569,7 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
 
     assert response == "ok"
     [request] = provider.model.requests
-    history = request.messages[1:]
+    history = _after_prompt(request.messages)
     assert is_compaction_summary(history[0])
     assert "stored summary" in str(history[0].content)
     assert [(message.role, message.content) for message in history[1:3]] == [
@@ -677,7 +682,7 @@ async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_c
     assert isinstance(finished, RunFinished)
     assert finished.record.content == "ok"
     [request] = provider.model.requests
-    seen = request.messages[1:]
+    seen = _after_prompt(request.messages)
     assert is_compaction_summary(seen[0])
     assert "stored summary" in str(seen[0].content)
     assert [(message.role, message.content) for message in seen[1:3]] == [
@@ -710,9 +715,7 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
             runtime_paths=runtime_paths,
             config=config,
         )
-        system_message = provider.model.requests[-1].messages[0]
-        assert system_message.role == "system"
-        return str(system_message.content)
+        return system_text(provider.model.requests[-1].messages)
 
     assert "Fact one." in await system_prompt_of_turn("First prompt")
     with memory_path.open("a", encoding="utf-8") as memory_file:
@@ -773,8 +776,7 @@ async def _three_turns(
                 current_timestamp_ms=(timestamps or {}).get(prompt),
             )
             request = provider.model.requests[-1]
-            assert request.messages[0].role == "system"
-            assert _SESSION_PREAMBLE in str(request.messages[0].content)
+            assert _SESSION_PREAMBLE in system_text(request.messages)
             requests.append(
                 [
                     {
@@ -782,7 +784,7 @@ async def _three_turns(
                         "content": str(message.content),
                         "add_to_agent_memory": message.add_to_agent_memory,
                     }
-                    for message in request.messages[1:]
+                    for message in _after_prompt(request.messages)
                 ],
             )
     return requests, config, runtime_paths

@@ -30,7 +30,7 @@ from mindroom.history.types import (
     HistoryScope,
     PreparedHistoryState,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -133,8 +133,7 @@ def _expected_static_tokens(built: BuiltTeam, prompt: str) -> int:
         {key: value for key, value in asdict(tool).items() if value is not None}
         for tool in leader_tool_specs(built.spec)
     ]
-    system_content = built.spec.leader.system_message.content
-    assert isinstance(system_content, str)
+    system_content = system_text(built.spec.leader.system_messages)
     return estimate_text_tokens(prompt) + estimate_text_tokens(system_content) + len(stable_serialize(payloads)) // 4
 
 
@@ -147,7 +146,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
     config, runtime_paths = _pair_config(tmp_path)
     built = _build_pair(config, runtime_paths, monkeypatch, configured_team_name=None)
     estimator = build_static_token_estimator(
-        built.spec.leader.system_message,
+        built.spec.leader.system_messages,
         leader_tool_specs(built.spec),
         frozenset(),
     )
@@ -217,9 +216,13 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
     sized: dict[str, Any] = {}
     real_estimator = execution_preparation.build_static_token_estimator
 
-    def capture_estimator(system_message: Message, tools: Any, deferred_tool_names: frozenset[str]) -> Any:  # noqa: ANN401
-        sized["system_message"], sized["tools"] = system_message, list(tools)
-        return real_estimator(system_message, tools, deferred_tool_names)
+    def capture_estimator(
+        system_messages: tuple[Message, ...],
+        tools: Any,  # noqa: ANN401
+        deferred_tool_names: frozenset[str],
+    ) -> Any:  # noqa: ANN401
+        sized["system_messages"], sized["tools"] = system_messages, list(tools)
+        return real_estimator(system_messages, tools, deferred_tool_names)
 
     monkeypatch.setattr(execution_preparation, "build_static_token_estimator", capture_estimator)
 
@@ -253,7 +256,7 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         async for _event in events:
             pass
 
-    assert sized["system_message"] is built.spec.leader.system_message
+    assert sized["system_messages"] is built.spec.leader.system_messages
     offered = [tool.name for tool in leader.requests[0].tools]
     assert [tool.name for tool in sized["tools"]] == offered
     assert "delegate_task_to_member" in offered

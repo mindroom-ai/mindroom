@@ -167,6 +167,8 @@ spec:
       protocol: TCP
 {{- if $server.networkPolicy.create }}
 {{- $np := $server.networkPolicy -}}
+{{- $extraIngress := include "mindroom-runtime.keyedList" (dict "value" $np.extraIngress "path" "workers.kubernetes.agentVault.server.networkPolicy.extraIngress") | fromJsonArray -}}
+{{- $extraEgress := include "mindroom-runtime.keyedList" (dict "value" $np.extraEgress "path" "workers.kubernetes.agentVault.server.networkPolicy.extraEgress") | fromJsonArray -}}
 {{- $workerClients := and (eq .Values.workers.backend "kubernetes") $av.enabled -}}
 {{- /* Squid-first workers reach the proxy port only through approved egress; otherwise they use agentVault.proxyUrl directly. */ -}}
 {{- $squidProxyClients := and .Values.approvedEgress.enabled .Values.approvedEgress.parentProxy.enabled -}}
@@ -189,7 +191,7 @@ spec:
     - Ingress
     - Egress
   ingress:
-    {{- if not (or $workerClients $releaseApiClients $squidProxyClients $np.extraIngress) }} []{{ end }}
+    {{- if not (or $workerClients $releaseApiClients $squidProxyClients $extraIngress) }} []{{ end }}
     {{- if $workerClients }}
     - from:
         - namespaceSelector:
@@ -239,7 +241,7 @@ spec:
         - protocol: TCP
           port: {{ $server.mitmPort }}
     {{- end }}
-    {{- with $np.extraIngress }}
+    {{- with $extraIngress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
   egress:
@@ -267,7 +269,7 @@ spec:
         - protocol: TCP
           port: {{ $server.smtp.port }}
     {{- end }}
-    {{- with $np.extraEgress }}
+    {{- with $extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 {{- end }}
