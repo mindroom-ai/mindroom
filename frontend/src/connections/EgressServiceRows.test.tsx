@@ -1013,6 +1013,9 @@ describe("connected accounts", () => {
         screen.getByRole("button", { name: "Use account for Drive" }),
       );
       const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveAccessibleName(
+        "Use your Google Drive account for Agent Keys?",
+      );
       // A compact control at the start, not stretched across the dialog's grid.
       expect(within(dialog).getByRole("group", { name: "Access" })).toHaveClass(
         "justify-self-start",
@@ -1137,11 +1140,15 @@ describe("connected accounts", () => {
       expect(within(row("Drive")).getByText("Read only")).toBeVisible();
       fireEvent.click(await rowAction("Change to read and write for Drive"));
       const dialog = await screen.findByRole("dialog");
-      expect(
-        within(dialog).getByRole("radio", { name: "Read and write" }),
-      ).toBeChecked();
+      expect(dialog).toHaveAccessibleName(
+        "Change Google Drive to read and write?",
+      );
+      expect(within(dialog).queryByRole("radio")).toBeNull();
+      expect(dialog).toHaveTextContent(
+        "will act as me@example.com with its full access, without the approval prompts",
+      );
       expect(fetch).not.toHaveBeenCalled();
-      await pressInDialog("Use account");
+      await pressInDialog("Change");
 
       await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
       expect(reuseBodies()).toEqual([
@@ -1174,7 +1181,7 @@ describe("connected accounts", () => {
       await expectNoAction(/^Change to /, row("GitHub"));
       await expectNoAction("Change to read only for Drive");
       fireEvent.click(await rowAction("Change to read and write for Drive"));
-      await pressInDialog("Use account");
+      await pressInDialog("Change");
 
       await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
       expect(reuseBodies()).toEqual([
