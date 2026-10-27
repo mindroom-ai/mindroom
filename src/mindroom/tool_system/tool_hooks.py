@@ -447,15 +447,46 @@ async def _run_before_hooks(
     return _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=before_context.decline_reason)
 
 
+async def _collect_environment(
+    *,
+    hook_registry: HookRegistry,
+    resolved_context: _ResolvedToolContext,
+    arguments: dict[str, Any],
+    tool_name: str,
+    registered_toolkit: str | None,
+    timing: _ToolBridgeTiming,
+) -> ToolEnvironment:
+    """Run the environment hooks once for the call, timed, and return the environment its shell commands get."""
+    started_at = time.perf_counter()
+    environment = await emit_collect_environment(
+        hook_registry,
+        ToolEnvironmentContext(
+            function_name=tool_name,
+            registered_toolkit=registered_toolkit,
+            arguments=arguments,
+            agent_name=resolved_context.agent_name,
+            room_id=resolved_context.room_id,
+            requester_id=resolved_context.requester_id,
+            config=resolved_context.config,
+            runtime_paths=resolved_context.runtime_paths,
+            correlation_id=resolved_context.correlation_id,
+            _hook_registry_state=resolved_context.hook_registry_state,
+        ),
+    )
+    timing.environment_hooks_ms = elapsed_ms_since(started_at, clock=time.perf_counter, ndigits=2)
+    return environment
+
+
 @dataclass(slots=True)
 class _ToolBridgeTiming:
     started_at: float
     before_hooks_ms: float | None = None
+    environment_hooks_ms: float | None = None
     tool_body_ms: float | None = None
     after_hooks_ms: float | None = None
 
     def result_ready(self) -> ToolCallTiming:
-        """Return the timing tool_calls.jsonl stores once the result is ready; after hooks stay debug-event only."""
+        """Return what tool_calls.jsonl stores once the result is ready; environment and after hooks stay debug events."""
         return ToolCallTiming(
             result_ready_ms=elapsed_ms_since(self.started_at, clock=time.perf_counter, ndigits=2),
             before_hooks_ms=self.before_hooks_ms,
@@ -470,6 +501,7 @@ class _ToolBridgeTiming:
             agent_name=agent_name,
             outcome=outcome,
             before_hooks_ms=self.before_hooks_ms,
+            environment_hooks_ms=self.environment_hooks_ms,
             tool_body_ms=self.tool_body_ms,
             result_ready_ms=ready.result_ready_ms,
             after_hooks_ms=self.after_hooks_ms,
@@ -564,6 +596,7 @@ async def _execute_bridge(  # noqa: C901
         tool_name=tool_name,
         agent_name=resolved_agent_name,
         has_before_hooks=has_before_hooks,
+        has_environment_hooks=has_environment_hooks,
         has_after_hooks=has_after_hooks,
     )
     # The hooks of one call share one copy of its arguments, made only when a hook runs.
@@ -622,20 +655,13 @@ async def _execute_bridge(  # noqa: C901
 
     # Collected only once the call may run, so a hook computes values such as short-lived tokens just before the body.
     environment = (
-        await emit_collect_environment(
-            hook_registry,
-            ToolEnvironmentContext(
-                function_name=tool_name,
-                registered_toolkit=registered_toolkit,
-                arguments=hook_arguments,
-                agent_name=resolved_context.agent_name,
-                room_id=resolved_context.room_id,
-                requester_id=resolved_context.requester_id,
-                config=resolved_context.config,
-                runtime_paths=resolved_context.runtime_paths,
-                correlation_id=resolved_context.correlation_id,
-                _hook_registry_state=resolved_context.hook_registry_state,
-            ),
+        await _collect_environment(
+            hook_registry=hook_registry,
+            resolved_context=resolved_context,
+            arguments=hook_arguments,
+            tool_name=tool_name,
+            registered_toolkit=registered_toolkit,
+            timing=timing,
         )
         if has_environment_hooks
         else ToolEnvironment()

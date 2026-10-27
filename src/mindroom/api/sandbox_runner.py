@@ -1100,12 +1100,12 @@ def _prepare_execute_request(
             extra_env_passthrough=request.extra_env_passthrough,
         )
     # The call's own changes, except where the worker's call env changes the name, as its egress settings do.
-    call_environment: dict[str, str | None] = {
-        name: request.execution_env[name]
+    kept_set_names = [
+        name
         for name in request.execution_env_set
         if name in request.execution_env and execution_env.get(name) == request.execution_env[name]
-    }
-    call_environment.update(dict.fromkeys(name for name in request.execution_env_unset if name not in execution_env))
+    ]
+    removed_names = [name for name in request.execution_env_unset if name not in execution_env]
     config = config or _runtime_config_or_empty(runtime_paths)
     prepared = sandbox_worker_prep.resolve_prepared_worker_request(
         worker_key=request.worker_key,
@@ -1117,6 +1117,9 @@ def _prepare_execute_request(
         runner_token=runner_token,
     )
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
+    # A kept name takes its value as the worker composed it, so its own PATH entries stay around a hook's PATH.
+    call_environment: dict[str, str | None] = {name: execution_env[name] for name in kept_set_names}
+    call_environment.update(dict.fromkeys(removed_names))
     request_workspace = _resolve_request_workspace(request, prepared, runtime_paths=runtime_paths, config=config)
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(

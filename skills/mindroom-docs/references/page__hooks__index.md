@@ -331,7 +331,7 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
 - Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
-- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/)'s proxy variables, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
+- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
 - A failing or timed-out hook loses its changes and the call still runs, so decline the call in a `tool:before_call` hook when it must not run without them.
 
 ## Custom events

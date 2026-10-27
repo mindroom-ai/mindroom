@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -13,9 +14,10 @@ import pytest
 
 from mindroom import constants
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
+from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_paths
 from mindroom.egress_broker import service as egress_service
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -35,6 +37,10 @@ from mindroom.tool_system.plugins import reload_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.workers.backends import local as local_workers
+from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
+from mindroom.workers.models import WorkerHandle
+from tests.api.test_sandbox_runner_api import SANDBOX_TOKEN, _write_general_agent_config
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import _bind_runtime_paths, _preserved_plugin_loader_state
 from tests.test_sandbox_proxy import (
@@ -356,6 +362,74 @@ async def test_a_removal_leaves_the_workspace_variables_of_a_worker_command(
 
     assert await shell.run(_registry(remove_home), command) == workspace
     assert "unset" not in workspace
+
+
+@pytest.mark.asyncio
+async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path: Path) -> None:
+    """A dedicated worker still puts its virtualenv first on a command's `PATH` when a hook sets `PATH`.
+
+    The hook's `PATH` also wins over the one the workspace's `.mindroom/worker-env.sh` exports.
+    """
+    config_path = tmp_path / "config.yaml"
+    _write_general_agent_config(config_path)
+    worker_key = "v1:default:unscoped:code"
+    worker_runtime = build_dedicated_worker_runtime_paths(
+        runtime_paths=resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage"),
+        backend_name="Docker",
+        worker_key=worker_key,
+        config_path=config_path,
+        dedicated_root=tmp_path / "worker",
+        worker_port=8766,
+        shared_storage_root=str(tmp_path / "shared-storage"),
+        extra_env={},
+    )
+    worker_paths = local_workers.local_worker_state_paths_for_root(tmp_path / "worker-root")
+    venv_tool = worker_paths.venv_dir / "bin" / "worker-venv-tool"
+    venv_tool.parent.mkdir(parents=True)
+    venv_tool.write_text("#!/bin/sh\necho from-venv\n", encoding="utf-8")
+    venv_tool.chmod(0o755)
+    workspace = tmp_path / "workspace"
+    (workspace / ".mindroom").mkdir(parents=True)
+    (workspace / ".mindroom" / "worker-env.sh").write_text('export PATH="/script/bin:$PATH"\n', encoding="utf-8")
+    handle = WorkerHandle(
+        worker_id="worker-1",
+        worker_key=worker_key,
+        endpoint="http://127.0.0.1:8766",
+        auth_token=SANDBOX_TOKEN,
+        status="ready",
+        backend_name="docker",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+    hook_path = os.pathsep.join(("/plugin/bin", os.environ["PATH"]))
+    prepared = sandbox_runner._prepare_execute_request(
+        sandbox_runner.SandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            worker_key=worker_key,
+            args=[["bash", "-c", 'printf "%s\\n" "$PATH"; worker-venv-tool']],
+            execution_env={"PATH": hook_path},
+            execution_env_set=["PATH"],
+        ),
+        worker_runtime,
+        prepared_worker=sandbox_runner.sandbox_worker_prep.PreparedWorkerRequest(
+            handle=handle,
+            paths=worker_paths,
+            runtime_overrides={"base_dir": str(workspace)},
+        ),
+    )
+
+    response = await sandbox_runner._execute_prepared_request_inprocess(
+        prepared.request,
+        prepared.runtime_paths,
+        Config(),
+    )
+
+    assert response.ok, response.error
+    command_path, tool_output = str(response.result).splitlines()[-2:]
+    assert command_path.split(os.pathsep)[:2] == [str(venv_tool.parent), "/plugin/bin"]
+    assert "/script/bin" not in command_path
+    assert tool_output == "from-venv"
 
 
 @pytest.mark.asyncio
