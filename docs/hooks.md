@@ -334,7 +334,7 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
   `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
 - `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
 - `ctx.prepend_path(directory)` puts `directory`, an absolute path, first on the command's `PATH`, ahead of the shell tool's `shell_path_prepend`, the entries a worker adds, and a `PATH` a hook sets, so a wrapper such as a `gh` there is the one the command runs.
-  A later call or hook puts its directory ahead of earlier ones, and only the [agent CLI](tools/agent-cli.md)'s own directory comes before them all.
+  A later call or hook puts its directory ahead of earlier ones; only a locally run command's [agent CLI](tools/agent-cli.md) directory comes before them all, and in a worker a hook's directory comes first.
 - `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
   When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
@@ -342,6 +342,7 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - The [agent CLI](tools/agent-cli.md)'s variables, the egress proxy variables from the [egress broker](deployment/egress-broker.md) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](deployment/sandbox-proxy.md#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
 - A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
   A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
+  A hook that waits on the network bounds that wait below its `timeout_ms`, because a timeout also discards its decline.
 
 ## Custom events
 
