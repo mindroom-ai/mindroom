@@ -19,7 +19,6 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.api.egress_status import (
-    RESTRICT_ONLY_KEY_REFUSAL,
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
@@ -30,6 +29,7 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    key_refusal,
     load_concurrently,
     oauth_provider_of_service,
     presets_response,
@@ -281,11 +281,11 @@ def put_service_secret(
     """Set an egress service secret.
 
     Raises 404 if the service is neither configured nor one of the selected scope's own services, 422 if the
-    secret is invalid or the service is `restrict_only`, which takes no key.
+    secret is invalid or the service takes no key (`key_refusal`).
     """
     target, worker_target, service = _resolve_scope_and_service(request, name, agent_name)
-    if service.restrict_only:
-        raise HTTPException(status_code=422, detail=RESTRICT_ONLY_KEY_REFUSAL)
+    if (refusal := key_refusal(service)) is not None:
+        raise HTTPException(status_code=422, detail=refusal)
 
     try:
         save_secret(target.base_manager, worker_target, name, body.secret)

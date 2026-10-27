@@ -2196,6 +2196,18 @@ def test_connecting_a_service_with_its_own_account_stores_only_that_account(
     assert _egress_row(portal, "alice", "personal", "drive")["oauth"]["connected"] is False
 
 
+def test_a_service_with_its_own_account_never_takes_a_key(oauth_egress_portal: dict[str, Any]) -> None:
+    """Such a service uses only its own account, so its key route refuses a key the broker would never send."""
+    portal = oauth_egress_portal
+    _put_own_account_service(portal)
+
+    response = _put_key(portal, "alice", "personal", "mine", "never-used")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == egress_status._OWN_ACCOUNT_KEY_REFUSAL
+    assert _stored_key(portal, "mine") is None
+
+
 @pytest.mark.parametrize("body", [{"preset": "github"}, _MY_GITHUB], ids=["preset", "custom"])
 def test_a_per_user_account_cannot_be_a_services_own_account(
     oauth_egress_portal: dict[str, Any],
@@ -3112,14 +3124,14 @@ def test_a_restrict_only_limit_is_saved_listed_and_never_takes_a_key(egress_port
     # Neither page stores a key for it: the broker would never send one.
     personal_put = _put_key(portal, "bob", "shared_dev", "github-limited", "never-used")
     assert personal_put.status_code == 422
-    assert personal_put.json()["detail"] == egress_status.RESTRICT_ONLY_KEY_REFUSAL
+    assert personal_put.json()["detail"] == egress_status._RESTRICT_ONLY_KEY_REFUSAL
     admin_put = client.put(
         "/api/egress-broker/services/github-limited/secret?agent_name=shared_dev",
         json={"secret": "never-used"},
         headers=admin,
     )
     assert admin_put.status_code == 422
-    assert admin_put.json()["detail"] == egress_status.RESTRICT_ONLY_KEY_REFUSAL
+    assert admin_put.json()["detail"] == egress_status._RESTRICT_ONLY_KEY_REFUSAL
     assert _stored_key(portal, "github-limited", "shared_dev") is None
 
     # The scope's rules keep the config service's credential on the listed paths and refuse the rest.
