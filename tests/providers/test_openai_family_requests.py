@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.approval.receipt import approval_receipt_hook, messages_with_approval_receipt
+from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
@@ -49,7 +49,6 @@ from tests.providers.golden_support import responses_events, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     import httpx
@@ -565,57 +564,42 @@ def _next_day(history: list[Message]) -> list[Message]:
     return [_dated_prompt("Tuesday"), *history[1:]]
 
 
-def _with_receipt(history: list[Message]) -> list[Message]:
-    return messages_with_approval_receipt(history, "trusted approval receipt")
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("change_prompt", "sent_system_text"),
-    [
-        pytest.param(_next_day, "Today is Tuesday.", id="next day"),
-        pytest.param(_with_receipt, "trusted approval receipt", id="approval receipt"),
-    ],
-)
-async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(
-    tmp_path: Path,
-    change_prompt: Callable[[list[Message]], list[Message]],
-    sent_system_text: str,
-) -> None:
+async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(tmp_path: Path) -> None:
     """A stored chain holds the prompt it started with, so a changed prompt replays the history instead of chaining."""
     adapter, sent = _stored_reply_route(tmp_path)
     question = Message(role="user", content="Plan my day.")
     reply = await _reply(adapter, [_dated_prompt("Monday"), question])
     follow_up = Message(role="user", content="And tomorrow?")
 
-    await _reply(adapter, change_prompt([_dated_prompt("Monday"), question, reply, follow_up]))
+    await _reply(adapter, _next_day([_dated_prompt("Monday"), question, reply, follow_up]))
 
     assert "previous_response_id" not in sent[1]
     assert [item["role"] for item in sent[1]["input"]] == ["developer", "developer", "user", "assistant", "user"]
-    assert sent_system_text in sent[1]["input"][1]["content"]
+    assert "Today is Tuesday." in sent[1]["input"][1]["content"]
 
 
 @pytest.mark.asyncio
-async def test_an_approval_resume_on_a_stored_chain_replays_its_tool_loop(tmp_path: Path) -> None:
-    """The receipt changes the prompt mid tool loop, so the resumed request replays the loop, still stored.
+async def test_an_approval_resume_on_a_stored_chain_continues_it_with_the_result_and_the_receipt(
+    tmp_path: Path,
+) -> None:
+    """The receipt follows the decided call's result and leaves the prompt as the chain stored it, so the chain goes on.
 
-    The route recorded no reasoning for the stored call, so the replayed call drops the item ID its reasoning owns.
+    The resumed request sends only what follows the stored reply: the result, then the receipt.
     """
     adapter, sent = _stored_reply_route(tmp_path, [{"type": "reasoning", "id": "rs_first", "summary": []}, _CALL])
     prompt = _dated_prompt("Monday")
     question = Message(role="user", content="Look it up.")
     call = await _reply(adapter, [prompt, question])
     result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
+    receipt = Message(role="user", content="trusted approval receipt", add_to_agent_memory=False)
 
-    await _reply(adapter, _with_receipt([prompt, question, call, result]))
+    await _reply(adapter, [prompt, question, call, result, receipt])
 
-    assert sent[1]["store"] is True
-    assert "previous_response_id" not in sent[1]
-    assert "trusted approval receipt" in sent[1]["input"][1]["content"]
-    assert sent[1]["input"][2:] == [
-        {"role": "user", "content": "Look it up."},
-        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+    assert (sent[1]["store"], sent[1]["previous_response_id"]) == (True, "resp_1")
+    assert sent[1]["input"] == [
         {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+        {"role": "user", "content": "trusted approval receipt"},
     ]
 
 
@@ -645,14 +629,15 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 ) -> None:
     """The receipt names each call by the ``call_id`` the replayed call and its result keep, not its item id.
 
-    Two calls of one tool are told apart only by their ids, and the replay drops each call's ``fc_`` item id.
+    Two calls of one tool are told apart only by their ids, and the replay drops each call's ``fc_`` item id. The
+    stored reply's prompt has changed since, so the request replays the calls instead of continuing the chain.
     """
     adapter, sent = _stored_reply_route(tmp_path)
     prompt = Message(role="system", content="You are Code.")
     calls = Message(
         role="assistant",
         tool_calls=[_lookup("first"), _lookup("second")],
-        provider_data=_stored_response("resp_1", [prompt]),
+        provider_data=_stored_response("resp_1", [Message(role="system", content="You were Code.")]),
     )
     history = [
         Message(role="user", content="Look up both orders."),
@@ -677,7 +662,8 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 
     [request] = sent
     assert "previous_response_id" not in request
-    receipt_ids = re.findall(r"tool call id `([^`]+)`", request["input"][0]["content"])
+    assert request["input"][-1]["role"] == "user"
+    receipt_ids = re.findall(r"tool call id `([^`]+)`", request["input"][-1]["content"])
     assert receipt_ids == ["call_first", "call_second"]
     for item_type in ("function_call", "function_call_output"):
         assert [item["call_id"] for item in request["input"] if item.get("type") == item_type] == receipt_ids

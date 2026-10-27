@@ -67,7 +67,13 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
-from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
+from tests.approval_continuation_helpers import (
+    RECEIPT_CALLS,
+    RECEIPT_TEXT,
+    approval_continuation,
+    carries_approval_receipt,
+    receipts,
+)
 from tests.conftest import install_model_providers, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
@@ -1132,10 +1138,11 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     assert published[0].tool_trace
     assert any("finished" in chunk.content for chunk in published)
     assert len(provider.requests) == (2 if nested == "approval" else 1)
-    assert [carries_approval_receipt(request) for request in provider.requests] == (
-        [True, False] if nested == "approval" else [True]
-    )
+    # The follow-up run reads the receipt after its input and keeps it, unchanged, in its later request.
     first = provider.requests[0]
+    assert (first.messages[-1].role, first.messages[-1].content) == ("user", RECEIPT_TEXT)
+    assert all(request.messages[: len(first.messages)] == first.messages for request in provider.requests[1:])
+    assert [len(receipts(request)) for request in provider.requests] == [1] * len(provider.requests)
     assert offered_tools(first) == ["bash"]
     assert sibling_image.url in str(first.messages)
     assert "completed sibling result" in str(first.messages)

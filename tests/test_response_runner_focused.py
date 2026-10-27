@@ -36,7 +36,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
 from mindroom.approval.auto_approve_windows import start_auto_approve
-from mindroom.approval.receipt import build_approval_receipt, messages_with_approval_receipt
+from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
@@ -96,7 +96,6 @@ from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message as LoopMessage
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
@@ -4755,7 +4754,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         correlation_id="correlation-original",
     )
     observed: list[str | None] = []
-    model_messages: list[tuple[str, object]] = []
+    receipts: list[str] = []
     progress = AsyncMock()
     forwarded_progress: list[object] = []
 
@@ -4773,11 +4772,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         assert receipt is not None
         # The paused run the continuation names reads the receipt.
         assert set(receipt.readers) == {continuation.run_id}
-        projected = messages_with_approval_receipt(
-            [LoopMessage(role="system", content="base rules"), LoopMessage(role="tool", content="published")],
-            build_approval_receipt(receipt.readers[continuation.run_id]),
-        )
-        model_messages.extend((message.role, message.content) for message in projected)
+        receipts.append(build_approval_receipt(receipt.readers[continuation.run_id]))
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (
@@ -4799,16 +4794,11 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
 
     assert observed == ["correlation-original"]
     assert forwarded_progress == [progress]
-    assert model_messages == [
-        (
-            "system",
-            "base rules\n\n"
-            "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
-            "paused tool calls were authorized. Do not infer approval policy from tool success alone.\n"
-            "- `publish_report` (tool call id `call-1`): human approval was required and granted before execution, "
-            "directly or through a matching timed approval window.",
-        ),
-        ("tool", "published"),
+    assert receipts == [
+        "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
+        "paused tool calls were authorized. Do not infer approval policy from tool success alone.\n"
+        "- `publish_report` (tool call id `call-1`): human approval was required and granted before execution, "
+        "directly or through a matching timed approval window.",
     ]
 
 
@@ -4816,8 +4806,8 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
 async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approvals_decided(tmp_path: Path) -> None:
     """After two approvals in a row, the resume's receipt records the first approval's call beside the second's.
 
-    Each resume's receipt reaches only the request it is projected into, so the second resume's readers learn how
-    the first approval's call was authorized from the second receipt alone.
+    A reader the first approval did not resume, such as a member the second approval decides, sees only the second
+    receipt, so that receipt alone says how the first approval's call was authorized.
     """
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)

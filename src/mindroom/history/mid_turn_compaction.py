@@ -555,8 +555,8 @@ def _layout(messages: list[Message], prompt_id: str | None, *, scoped: bool) -> 
 def _exchanges(messages: Sequence[Message]) -> list[list[Message]]:
     """Group each message with the tool results that answer it, so a tool batch is never split.
 
-    A tool result joins the latest assistant tool call even when a projection, such as an approval receipt, sits
-    between them; that projection stays its own exchange.
+    A tool result joins the latest assistant tool call even when another message sits between them; that message
+    stays its own exchange.
     """
     exchanges: list[list[Message]] = []
     calls: list[Message] | None = None

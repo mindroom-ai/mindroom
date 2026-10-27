@@ -75,9 +75,7 @@ class LoopState:
 
 @dataclass(frozen=True, slots=True)
 class SendRequest:
-    """Send the request; ``messages`` replaces the outbound list for this request only, leaving the live list as is."""
-
-    messages: Sequence[Message] | None = None
+    """Send the request with the live messages as the hooks left them."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +97,8 @@ class LoopHooks:
     """The extension points of one loop, each fired at a fixed stage.
 
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
-      ``state.messages`` in place (mid-turn compaction), end the loop (participation, the skill review's budget),
-      or send a projected message list for this request only (the approval receipt); the last projection wins.
+      ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
+      (participation, the skill review's budget).
     - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
       when it returns result messages, they answer the batch in place of running it (the output-limit policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
@@ -194,10 +192,9 @@ async def run_model_loop(
         async for event in _answer_resumed(resumed, state, progress, hooks):
             yield event
     while not (progress.stopped or progress.paused):
-        outbound = await _before_request(hooks, state, max_requests=max_requests)
-        if outbound is None:
+        if not await _before_request(hooks, state, max_requests=max_requests):
             break
-        request = replace(state.request_template, messages=tuple(outbound), tools=state.tools)
+        request = replace(state.request_template, messages=tuple(state.messages), tools=state.tools)
         progress.last_request = request
         turn: TurnCompleted | None = None
         events = _stream_turn(model, request, messages, metrics)
@@ -226,8 +223,8 @@ async def _before_request(
     state: LoopState,
     *,
     max_requests: int | None,
-) -> Sequence[Message] | None:
-    """Apply the request cap, then the pre-request hooks; return the messages to send, or None to end the loop."""
+) -> bool:
+    """Apply the request cap, then the pre-request hooks; return whether to send the request or end the loop."""
     if max_requests is not None and state.request_index >= max_requests:
         logger.warning(
             "tool_call_limit_reached",
@@ -235,15 +232,11 @@ async def _before_request(
             budget=max_requests - _EXTRA_MODEL_REQUESTS,
             model_requests=state.request_index,
         )
-        return None
-    outbound: Sequence[Message] = state.messages
+        return False
     for hook in hooks.before_request:
-        decision = await hook(state)
-        if isinstance(decision, EndRun):
-            return None
-        if decision.messages is not None:
-            outbound = decision.messages
-    return outbound
+        if isinstance(await hook(state), EndRun):
+            return False
+    return True
 
 
 def _accept_turn(

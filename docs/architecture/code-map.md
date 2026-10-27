@@ -100,7 +100,7 @@ Matrix sync callback
 | `approval/tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval/execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
 | `approval/resume.py` | Resuming a persisted paused agent run on the agent loop with exact decisions: its history replay, native history, hooks, and the parent continuation the delegation driver injects |
-| `approval/receipt.py` | The trusted approval receipt: the text naming each decided call of one tool-approval continuation, and the request hook that puts it into a reader's first request |
+| `approval/receipt.py` | The trusted approval receipt: the text naming each decided call of one tool-approval continuation, and the request hook that adds it to a reader's messages before its first request |
 | `approval/receipt_readers.py` | Which runs read the bound approval receipt: the binding an approval continuation sets around itself, free of model-loop imports so work the loop starts can leave it |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |

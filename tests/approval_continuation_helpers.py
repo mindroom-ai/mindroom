@@ -42,28 +42,26 @@ RECEIPT_CALLS = (
     ),
 )
 RECEIPT_TEXT = build_approval_receipt(RECEIPT_CALLS)
-# Every receipt opens with this line, which the model sees in the system prompt the receipt is appended to.
+# Every receipt opens with this line; the model sees it as a message of its own.
 _RECEIPT_HEADER = RECEIPT_TEXT.splitlines()[0]
 
 
-def _receipts(request: ModelRequest) -> list[str]:
-    """Return each approval receipt the system prompt of ``request`` carries, from its header to its message's end."""
-    return [
-        content[content.index(_RECEIPT_HEADER) :]
-        for message in request.messages
-        if message.role == "system" and _RECEIPT_HEADER in (content := str(message.content))
-    ]
+def receipts(request: ModelRequest) -> list[str]:
+    """Return each approval receipt ``request`` carries, in order, checking each is a user message nothing stores."""
+    found = [message for message in request.messages if str(message.content).startswith(_RECEIPT_HEADER)]
+    assert all(message.role == "user" and not message.add_to_agent_memory for message in found)
+    assert all(_RECEIPT_HEADER not in str(message.content) for message in request.messages if message not in found)
+    return [str(message.content) for message in found]
 
 
 def carries_approval_receipt(request: ModelRequest) -> bool:
-    """Return whether the system prompt of ``request`` carries an approval receipt."""
-    return bool(_receipts(request))
+    """Return whether ``request`` carries an approval receipt."""
+    return bool(receipts(request))
 
 
 def receipt_call_ids(request: ModelRequest) -> list[str]:
-    """Return the tool call ids the approval receipt projected into ``request`` names, in its order."""
-    [receipt] = _receipts(request)
-    return re.findall(r"tool call id `([^`]+)`", receipt)
+    """Return the tool call ids the newest approval receipt in ``request`` names, in its order."""
+    return re.findall(r"tool call id `([^`]+)`", receipts(request)[-1])
 
 
 def repeats_each_request(requests: Sequence[ModelRequest]) -> bool:
