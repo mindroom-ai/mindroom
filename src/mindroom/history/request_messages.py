@@ -201,7 +201,8 @@ def build_resume_request(
     # whose paused runs store them in place.
     # Handling: such a run resumes from the messages it stored, without that context, as it did before; nothing
     # else changes, and the run it resumes into stores the current shape when it pauses again.
-    # Coverage: tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it
+    # Coverage: tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it,
+    #   tests/test_approval_resume.py::test_a_paused_approval_resumes_into_its_golden_rows
     paused = repair_legacy_tool_calls(paused)
     system = next((message for message in paused if message.role == "system"), None)
     messages = [

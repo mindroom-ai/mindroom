@@ -47,11 +47,11 @@ async def test_a_paused_approval_resumes_into_its_golden_rows(
     expected = comparable(golden_run("agent_code", create_session_id(ROOM, case.thread), run_id))
     assert comparable(run.stored().to_dict()) == expected
     assert run.paused.to_dict() == before
-    # The resumed request carries the stored prompt, the turn, the decided call's result, and the receipt once.
+    # The resumed request carries the stored prompt, the turn, the decided call's result, then the receipt once.
     [request] = run.code.requests
-    assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool"]
+    assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool", "user"]
     assert receipt_call_ids(request) == [f"call-{run_id}"]
-    assert request.messages[-1].tool_call_id == f"call-{run_id}"
+    assert request.messages[-2].tool_call_id == f"call-{run_id}"
 
 
 async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
@@ -78,11 +78,13 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     assert isinstance(child_record, RunRecord)
     expected_child = comparable(golden_run("agent_helper", child.session_id, child.run_id))
     assert comparable(child_record.to_dict()) == expected_child
-    # The parent reads the child's answer where it read the pause, on its own stored request.
+    # The parent reads the child's answer where it read the pause, on its own stored request, then the receipt.
     [request] = run.code.requests
-    assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool"]
-    assert request.messages[-1].tool_call_id == "call-delegate-approved"
-    assert str(request.messages[-1].content).startswith("42")
+    assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool", "user"]
+    assert request.messages[-2].tool_call_id == "call-delegate-approved"
+    assert str(request.messages[-2].content).startswith("42")
+    # The parent holds no such call, so it reads the card's id for the child's approved call.
+    assert receipt_call_ids(request) == [call.tool_call_id for call in run.calls()]
 
 
 def _save(run: CodeResume, record: RunRecord) -> None:
