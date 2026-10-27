@@ -1002,7 +1002,7 @@ Set up the homeserver (examples use `chat.example.com`):
     }
     ```
 
-   If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart), or an installed web app answers the handoff in Safari with its own page.
+   If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
    The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
    That token gets past Access for every host of the Access application until the session ends, so give the homeserver its own Access application.
 3. Turn on "Bypass OPTIONS requests to origin" (`options_preflight_bypass`) on the Access application, because browsers send CORS preflights without credentials.
@@ -1012,10 +1012,10 @@ Set up the homeserver (examples use `chat.example.com`):
    The app checks `/versions` before the organization's sign-in, images and uploads cannot carry the header, and the homeserver refuses the media paths without a Matrix access token.
    A bypass covers everything below its path, so answer 404 for anything below the advert path.
    Cloudflare also matches a bypass before nginx decodes `%2F` and resolves `..`, so `/.well-known/mindroom/cloudflare-access/..%2F..%2Fsecret` would reach `/secret` without Access.
-   Reject such requests in the nginx `server` block, before any `location`:
+   Reject such requests in the nginx `server` block, before any `location`; the check looks only at the path, so encoded URLs in query strings still pass:
 
     ```nginx
-    if ($request_uri ~* "%2f|%5c|%2e|/\.\.?(?:/|\?|$)") { return 404; }
+    if ($request_uri ~* "^[^?]*(?:%2f|%5c|%2e|/\.\.?(?:/|\?|$))") { return 404; }
     ```
 
    If `/_matrix` also passes through this nginx, the check refuses Matrix requests that encode `/` in a path parameter, such as some state keys, so send `/_matrix` to the homeserver without this nginx where you can.
