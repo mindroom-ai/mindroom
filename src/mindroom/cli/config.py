@@ -821,9 +821,11 @@ def config_validate(
     console.print("[green]Configuration is valid.[/green]\n")
     console.print(f"  Agents: {len(config.agents)} ({', '.join(config.agents.keys()) or 'none'})")
     console.print(f"  Teams:  {len(config.teams)} ({', '.join(config.teams.keys()) or 'none'})")
-    console.print(f"  Models: {len(config.models)} ({', '.join(config.models.keys()) or 'none'})")
+    # Model names and room references may contain brackets, which Rich would read as markup; agent and team names
+    # cannot.
+    console.print(f"  Models: {len(config.models)} ({escape(', '.join(config.models.keys())) or 'none'})")
     rooms = config.get_all_configured_rooms()
-    console.print(f"  Rooms:  {len(rooms)} ({', '.join(sorted(rooms)) or 'none'})")
+    console.print(f"  Rooms:  {len(rooms)} ({escape(', '.join(sorted(rooms))) or 'none'})")
 
     # Check for missing API keys based on configured providers
     check_env_keys(config, runtime_paths=runtime_paths)

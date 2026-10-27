@@ -1913,6 +1913,23 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
+    def test_validate_prints_model_and_room_names_as_written(self, tmp_path: Path) -> None:
+        """The summary prints configured names verbatim, even ones that look like Rich markup."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n    host: http://gpu.example:11434\n"
+            '  "[/fast]":\n    provider: ollama\n    id: gemma4\n    host: http://gpu.example:11434\n'
+            'agents:\n  assistant:\n    display_name: Assistant\n    model: default\n    rooms: ["[bold]lobby"]\n'
+            "router:\n  model: default\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0, result.output
+        output = normalize_console_output(result.output)
+        assert "Models: 2 (default, [/fast])" in output
+        assert "Rooms: 1 ([bold]lobby)" in output
+
     def test_validate_fails_on_an_automation_no_plugin_provides(self, tmp_path: Path) -> None:
         """A plugin automation name that no loaded plugin registers fails validation with its location."""
         cfg = tmp_path / "config.yaml"
