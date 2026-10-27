@@ -104,10 +104,14 @@ class _VertexAIReranker:
 
 @functools.cache
 def _google_credentials(credentials_path: Path | None) -> tuple[Any, str | None]:
-    """Load the runtime's Google credential file, or else Application Default Credentials, once per process."""
+    """Load the runtime's Google credential file, or else Application Default Credentials, once per process.
+
+    Returns the credentials with the project they name; a service account key names its own, user credentials none.
+    """
     if credentials_path is None:
         return load_ambient_google_credentials()
-    return load_google_application_credentials(str(credentials_path)), None
+    credentials = load_google_application_credentials(str(credentials_path))
+    return credentials, getattr(credentials, "project_id", None)
 
 
 _google_credentials_lock = threading.Lock()
@@ -118,7 +122,7 @@ def _google_request_auth(credentials_path: Path | None, project: str | None) -> 
     credentials, credentials_project = _google_credentials(credentials_path)
     project = project or credentials_project
     if not project:
-        msg = "The vertex_ai reranker needs GOOGLE_CLOUD_PROJECT or a project in Application Default Credentials"
+        msg = "The vertex_ai reranker needs GOOGLE_CLOUD_PROJECT or Google credentials that name a project"
         raise ValueError(msg)
     headers: dict[str, str] = {}
     with _google_credentials_lock:

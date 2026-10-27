@@ -161,13 +161,13 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
 ) -> None:
     """Candidates go out in concurrent requests of 100 records, the unit Vertex AI bills, and are scored together.
 
-    The project and credential file come from the runtime's ``.env``, which MindRoom does not export.
+    The credential file comes from the runtime's ``.env``, which MindRoom does not export, and names the project.
     """
     bodies: list[dict[str, object]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         assert str(request.url) == (
-            "https://discoveryengine.googleapis.com/v1/projects/env-project/locations/global"
+            "https://discoveryengine.googleapis.com/v1/projects/key-project/locations/global"
             "/rankingConfigs/default_ranking_config:rank"
         )
         assert request.headers["Authorization"] == "Bearer t"
@@ -187,13 +187,15 @@ async def test_vertex_ai_reranker_splits_records_into_ranking_requests(
         "AsyncClient",
         lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
     )
+    credentials = _GoogleCredentials(token=None, quota_project_id="quota")
+    credentials.project_id = "key-project"  # as a service account key carries it
     credential_files: list[str] = []
     monkeypatch.setattr(
         rerank_module,
         "load_google_application_credentials",
-        lambda path: credential_files.append(path) or _GoogleCredentials(token=None, quota_project_id="quota"),
+        lambda path: credential_files.append(path) or credentials,
     )
-    (tmp_path / ".env").write_text("GOOGLE_CLOUD_PROJECT=env-project\nGOOGLE_APPLICATION_CREDENTIALS=adc.json\n")
+    (tmp_path / ".env").write_text("GOOGLE_APPLICATION_CREDENTIALS=adc.json\n")
     rerank_module._google_credentials.cache_clear()
     reranker = create_reranker(
         KnowledgeRerankerConfig(provider="vertex_ai", model="semantic-ranker-default@latest"),
