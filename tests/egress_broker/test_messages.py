@@ -63,6 +63,12 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             "Ask the user to add it at manage_url if the agent needs it.",
         ),
         (
+            "service_not_matched",
+            {"host": "www.googleapis.com", "path": "/calendar/v3?page=2", "service": "team_calendar"},
+            "The X-Agent-Keys-Service header names team_calendar, but no rule of an agent service by that name covers "
+            "www.googleapis.com/calendar/v3. Name a service that covers it, or leave the header out.",
+        ),
+        (
             "bad_request",
             {"path": "/repos/o/a/../b"},
             "The request path is ambiguous (dot segments, //, backslashes, or encoded forms of them) and was refused. "

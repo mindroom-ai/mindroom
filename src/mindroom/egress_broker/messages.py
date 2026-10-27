@@ -26,6 +26,10 @@ _MESSAGES = {
         "Retry in a minute; if it keeps failing, ask the user to reconnect at manage_url."
     ),
     "path_not_allowed": _PATH_OUTSIDE + "Ask the user to add it at manage_url if the agent needs it.",
+    "service_not_matched": (
+        "The X-Agent-Keys-Service header names {service}, but no rule of an agent service by that name covers "
+        "{host}{path}. Name a service that covers it, or leave the header out."
+    ),
     "bad_request": (
         "The request path is ambiguous (dot segments, //, backslashes, or encoded forms of them) and was refused. "
         "Use a plain path."
