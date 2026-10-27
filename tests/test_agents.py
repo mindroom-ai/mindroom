@@ -4884,18 +4884,22 @@ def test_graph_agent_knowledge_search_also_searches_its_graph(configured_base: s
     assert (f"- {configured_base}: " in description) is (configured_base is not None)
 
 
-def test_persona_naming_its_knowledge_bases_does_not_search_the_graph() -> None:
-    """A persona that names the bases it keeps searches only those, as it skips file memory."""
+@pytest.mark.parametrize(("kept", "searches_graph"), [(("engineering",), False), (None, True)])
+def test_persona_searches_the_graph_only_when_it_keeps_every_source(
+    kept: tuple[str, ...] | None,
+    searches_graph: bool,
+) -> None:
+    """A persona that names the bases it keeps skips the graph, as it skips file memory; one that keeps all searches it."""
     config = _test_config()
     config.agents["general"].knowledge_graph = True
-    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", knowledge=("engineering",))
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", knowledge=kept)
 
     agent = _create_agent_for_test("general", config, knowledge=_knowledge("engineering"), persona=persona)
 
     description = _offered(agent)["search_knowledge_base"].description
     assert description is not None
     assert "- engineering: " in description
-    assert "knowledge_graph" not in description
+    assert ("- knowledge_graph: " in description) is searches_graph
 
 
 def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(

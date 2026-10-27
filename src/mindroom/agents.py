@@ -1853,7 +1853,8 @@ def create_agent(
         execution_identity: Request execution identity used to resolve scoped
             state, workspaces, worker routing, and requester-local storage.
         knowledge: The shared knowledge of a RAG-enabled agent, or None; for a persona, callers resolve
-            it narrowed to the persona's kept knowledge bases.
+            it narrowed to the persona's kept knowledge bases. A graph-enabled agent's graph is added to it,
+            unless a persona names the bases it keeps.
         active_model_name: The runtime-selected model name overriding the configured model, or None.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
