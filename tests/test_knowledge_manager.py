@@ -297,12 +297,12 @@ async def test_file_memory_overlay_query_returns_memory_markdown_hit(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_only_bases_fed_by_a_requesters_own_files_limit_the_vectors_a_search_loads(
+async def test_only_bases_fed_by_an_agents_own_files_limit_the_vectors_a_search_loads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Worker code can grow private knowledge and file memory, so their searches refuse vectors past the limit."""
-    monkeypatch.setattr(knowledge_registry, "_REQUESTER_BASE_MATRIX_BYTES", 1)
+    monkeypatch.setattr(knowledge_registry, "_AGENT_WRITTEN_BASE_MATRIX_BYTES", 1)
     runtime_paths = test_runtime_paths(tmp_path)
     docs = tmp_path / "docs"
     docs.mkdir()

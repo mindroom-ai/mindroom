@@ -12,6 +12,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
+from typing import NoReturn
 
 import numpy as np
 import pytest
@@ -281,23 +282,30 @@ def test_concurrent_cold_searches_load_the_matrix_once(
     assert all(result[0].content == "alpha" for result in results)
 
 
+def _refuse_allocation(*_args: object, **_kwargs: object) -> NoReturn:
+    message = "a matrix past the search's limit was allocated"
+    raise AssertionError(message)
+
+
 def test_a_search_refuses_vectors_past_its_limit_before_loading_them(
     collection: KnowledgeCollection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A collection whose matrix exceeds the search's byte limit raises without reading its file ahead or caching it."""
+    """A collection whose matrix exceeds the search's byte limit raises before allocating, reading ahead, or caching it."""
     monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
     reads: list[Path] = []
     monkeypatch.setattr(vector_store_module, "_read_ahead", reads.append)
     collection.write_source_rows("a.md", [_row(f"a{index}", "a.md", "alpha", [1.0, 0.0]) for index in range(3)])
     matrix_bytes = 3 * 2 * 4
 
-    with pytest.raises(_KnowledgeIndexTooLargeError):
-        collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes - 1)
-    assert not reads
+    with monkeypatch.context() as allocation:
+        allocation.setattr(np, "empty", _refuse_allocation)
+        with pytest.raises(_KnowledgeIndexTooLargeError):
+            collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes - 1)
     assert not vector_store_module._index_cache
 
     assert collection.search([1.0, 0.0], limit=1, max_matrix_bytes=matrix_bytes)[0].content == "alpha"
+    assert not reads, "a limited search read its file ahead"
 
 
 def test_loading_a_matrix_allocates_no_second_matrix(collection: KnowledgeCollection) -> None:
