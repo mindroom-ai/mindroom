@@ -7,7 +7,9 @@ import math
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import httpx
 import pytest
+from anthropic import AuthenticationError
 from anthropic.types import Message as AnthropicMessage
 from mem0.memory.storage import SQLiteManager
 
@@ -16,6 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory import add_agent_memory, list_all_agent_memories, search_agent_memories, store_conversation_memory
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -91,13 +94,15 @@ def _claude_reply(*, facts: list[str], thinking_first: bool) -> AnthropicMessage
 
 
 class _FakeAnthropicClient:
-    """Answer every Messages API request with one canned reply."""
+    """Answer every Messages API request with one canned reply, or raise it when it is an error."""
 
-    def __init__(self, reply: AnthropicMessage) -> None:
+    def __init__(self, reply: AnthropicMessage | Exception) -> None:
         self.messages = self
         self._reply = reply
 
     def create(self, **_: object) -> AnthropicMessage:
+        if isinstance(self._reply, Exception):
+            raise self._reply
         return self._reply
 
 
@@ -126,13 +131,13 @@ def config(tmp_path: Path) -> Config:
 
 
 @pytest.fixture
-def claude_reply() -> list[AnthropicMessage]:
+def claude_reply() -> list[AnthropicMessage | Exception]:
     """Hold the reply the memory model gives; a test replaces it before writing."""
     return [_claude_reply(facts=[], thinking_first=False)]
 
 
 @pytest.fixture(autouse=True)
-def offline_mem0(tmp_path: Path, claude_reply: list[AnthropicMessage]) -> Iterator[None]:
+def offline_mem0(tmp_path: Path, claude_reply: list[AnthropicMessage | Exception]) -> Iterator[None]:
     """Run real Mem0 and Chroma with table embeddings, a canned Claude reply, and history kept under ``tmp_path``."""
     with (
         patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_TableEmbedder()),
@@ -144,7 +149,7 @@ def offline_mem0(tmp_path: Path, claude_reply: list[AnthropicMessage]) -> Iterat
 
 async def _remember(
     config: Config,
-    claude_reply: list[AnthropicMessage],
+    claude_reply: list[AnthropicMessage | Exception],
     facts: list[str],
     *,
     thinking_first: bool = False,
@@ -171,7 +176,7 @@ async def _search(config: Config, *, limit: int = 5) -> list[tuple[str, float]]:
 @pytest.mark.asyncio
 async def test_memory_search_ranks_the_closest_memory_first_and_drops_cosine_below_one_tenth(
     config: Config,
-    claude_reply: list[AnthropicMessage],
+    claude_reply: list[AnthropicMessage | Exception],
 ) -> None:
     """Mem0 reports Chroma hits as 1 / (1 + distance); search keeps their order and the cosine-0.1 cutoff."""
     await _remember(config, claude_reply, ["PR review", "Hardware notes", "Barely related", "Hardly related"])
@@ -186,7 +191,7 @@ async def test_memory_search_ranks_the_closest_memory_first_and_drops_cosine_bel
 @pytest.mark.asyncio
 async def test_an_exact_team_memory_outranks_the_agents_loosely_related_memories(
     config: Config,
-    claude_reply: list[AnthropicMessage],
+    claude_reply: list[AnthropicMessage | Exception],
 ) -> None:
     """Agent and team hits are ranked together, so the agent's own memories cannot push out a better team match."""
     await _remember(config, claude_reply, list(_AGENT_MEMORY_COSINES))
@@ -214,7 +219,7 @@ async def test_an_exact_team_memory_outranks_the_agents_loosely_related_memories
 @pytest.mark.asyncio
 async def test_claude_reply_that_starts_with_thinking_stores_its_extracted_memories(
     config: Config,
-    claude_reply: list[AnthropicMessage],
+    claude_reply: list[AnthropicMessage | Exception],
 ) -> None:
     """A Claude extraction reply that opens with a thinking block still stores the facts in its text block."""
     facts = ["PR review", "Hardware notes", "Grocery list"]
@@ -224,3 +229,22 @@ async def test_claude_reply_that_starts_with_thinking_stores_its_extracted_memor
     stored = await list_all_agent_memories("general", runtime_paths.storage_root, config, runtime_paths)
 
     assert sorted(memory["memory"] for memory in stored) == sorted(facts)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_memory_model_call_reaches_the_memory_tool_without_the_rejected_key(
+    config: Config,
+    claude_reply: list[AnthropicMessage | Exception],
+) -> None:
+    """Mem0 raises the provider's error text when extraction fails, and the tool output redacts its credentials."""
+    rejected_key = "sk-ant-" + "api03-" + "Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe9Dc8Ba7"
+    message = f"Error code: 401 - invalid x-api-key {rejected_key}"
+    response = httpx.Response(401, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    claude_reply[0] = AuthenticationError(message, response=response, body=None)
+    runtime_paths = runtime_paths_for(config)
+    tools = MemoryTools("general", runtime_paths.storage_root, config, runtime_paths)
+
+    result = await tools.add_memory("Remember my notes.")
+
+    assert result.startswith("Failed to store memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
+    assert rejected_key not in result

@@ -1572,7 +1572,9 @@ depends_on = ["mindroom.config.agent"]
 path = "mindroom.custom_tools.memory"
 depends_on = [
     "mindroom.embeddings.errors",
+    "mindroom.failure_text",
     "mindroom.memory",
+    "mindroom.redaction",
 ]
 
 [[modules]]

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.embeddings.errors import classified_embedder_error, is_embedder_auth_failure_detail
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
     add_agent_memory,
@@ -21,6 +22,7 @@ from mindroom.memory import (
     search_agent_memories,
     update_agent_memory,
 )
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,12 +90,16 @@ def _degraded_search_text(outcome: MemorySearchOutcome, config: Config) -> str:
 
 
 def _memory_tool_failure(exc: Exception, *, action: str, **context: object) -> str:
-    """Log and render provider failures without exposing raw response text."""
+    """Log a failure and return what the model may see of it, without credentials.
+
+    A classified embedder failure becomes its fixed detail. Any other failure keeps its text with credentials
+    redacted, because a failed memory LLM call carries the provider's error body, which can quote the rejected key.
+    """
     if (detail := classified_embedder_error(exc)) is not None:
         logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
         return detail
     logger.exception(f"Failed to {action} memory via tool", error_type=type(exc).__name__, **context)
-    return str(exc)
+    return redact_sensitive_text(failure_text(exc))
 
 
 class MemoryTools(Toolkit):
