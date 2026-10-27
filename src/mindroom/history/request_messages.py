@@ -33,9 +33,10 @@ class TurnMessages:
     """A new turn's input around its prompt.
 
     ``context`` holds the Matrix messages the scope has not stored yet, sent before the prompt and stored with the run.
-    ``transient`` holds turn context that is sent but never stored (``add_to_agent_memory=False``). It follows the
-    prompt because the next turn replays the prompt where it sat, so this request stays a prefix of the next one and
-    provider prompt caches, or routing by a conversation's opening messages, still match.
+    ``transient`` holds turn context that is sent but no later turn replays (``add_to_agent_memory=False``): only a
+    paused run stores it, for its resume. It follows the prompt because the next turn replays the prompt where it sat,
+    so this request up to the prompt stays a prefix of the next one and provider prompt caches, or routing by a
+    conversation's opening messages, still match.
     """
 
     prompt: Message
@@ -186,10 +187,21 @@ def build_resume_request(
 
     ``paused`` holds the paused run's stored messages, which never include history copies; their tool calls are read in
     the shape current releases store, as history's are. The resumed run stores this request, so a legacy paused run is
-    stored in that shape too. Its stored system message is reused, so a signed reasoning block in the paused request
-    stays valid against an unchanged prefix. A run paused while Agno rendered the summary inside that system message
-    keeps that single summary.
+    stored in that shape too. Its stored system message is reused, and the context the paused request sent without
+    any history keeping it (``add_to_agent_memory=False``), such as memory results, stays where it was. So when the
+    summary and history replay as they did for the paused request, this request repeats that one up to its last
+    assistant turn: a signed reasoning block there stays valid against an unchanged prefix, and the provider's prompt
+    cache still matches. A run paused while Agno rendered the summary inside that system message keeps that single
+    summary.
     """
+    # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
+    # Legacy format: a paused ``run_data`` row whose messages hold no ``add_to_agent_memory: false`` message, because
+    # the run ended without storing its memory results, transient enrichment, job notes, and approval receipt.
+    # Last legacy release: v2026.10.578, whose runs stored no such message; replacement: the first release after it,
+    # whose paused runs store them in place.
+    # Handling: such a run resumes from the messages it stored, without that context, as it did before; nothing
+    # else changes, and the run it resumes into stores the current shape when it pauses again.
+    # Coverage: tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it
     paused = repair_legacy_tool_calls(paused)
     system = next((message for message in paused if message.role == "system"), None)
     messages = [

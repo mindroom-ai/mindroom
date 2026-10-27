@@ -272,6 +272,16 @@ def test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads() 
     assert message.add_to_agent_memory is False
 
 
+def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:
+    """A paused run's turn context stores ``add_to_agent_memory: false``; every other message stores no such key."""
+    context = Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False)
+    prompt = Message(role="user", content="Hi")
+
+    assert context.to_dict()["add_to_agent_memory"] is False
+    assert "add_to_agent_memory" not in prompt.to_dict()
+    assert [Message.from_dict(message.to_dict()) for message in (context, prompt)] == [context, prompt]
+
+
 # --- tool executions and requirements --------------------------------------------------------------------------
 
 

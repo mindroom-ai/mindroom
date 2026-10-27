@@ -43,8 +43,9 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import quote_identifier
 from tests.access_schema_support import with_responder_access
-from tests.approval_continuation_helpers import approval_continuation
+from tests.approval_continuation_helpers import approval_continuation, repeats_each_request
 from tests.delegation_helpers import (
+    RECALLED_MEMORY,
     ScriptedAgents,
     _delegate_runtime_context,
     _runtime_paths,
@@ -52,6 +53,7 @@ from tests.delegation_helpers import (
     approval_calls_for,
     approval_executor,
     pause_parent,
+    recall_memories,
     registered_hand_off_tool,
     registered_metadata_probe_tool,
     registered_report_tool,
@@ -1051,9 +1053,14 @@ async def test_a_blocking_turn_continues_after_its_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A blocking turn's parent continues with its delegation's result."""
+    """A blocking turn's parent continues with its delegation's result after the request it paused on, unchanged.
+
+    The paused parent stored the memory results its request sent, so the continuation sends them again where they
+    were, then the delegation call and its result.
+    """
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=())
+    recall_memories(monkeypatch)
     leader = ScriptedModel(
         [calls(tool_call("run_subagent", "fresh", agent_name="code", task="Write report")), answer("Parent done")],
     )
@@ -1069,7 +1076,10 @@ async def test_a_blocking_turn_continues_after_its_delegation(
     )
 
     assert "Parent done" in text
-    assert len(leader.requests) == 2
+    paused, continued = leader.requests
+    assert RECALLED_MEMORY in str(paused.messages[-1].content)
+    assert repeats_each_request(leader.requests)
+    assert [message.role for message in continued.messages[len(paused.messages) :]] == ["assistant", "tool"]
 
 
 @pytest.mark.asyncio

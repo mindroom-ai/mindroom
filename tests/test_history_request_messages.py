@@ -595,6 +595,12 @@ def _tool_call(call_id: str) -> Message:
     )
 
 
+def _paused_row(messages: list[Message]) -> RunRecord:
+    """Return the paused run storing ``messages`` as a stored row reads back."""
+    paused = RunRecord(run_id="paused", agent_id="code", status=RunStatus.paused, messages=messages)
+    return RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
+
+
 def test_resumed_request_repeats_the_request_that_paused() -> None:
     """A resume sends the paused request again, so its prefix and the paused call's reasoning stay valid."""
     runs: list[AnyRunRecord] = [_agent_run("earlier")]
@@ -604,15 +610,32 @@ def test_resumed_request_repeats_the_request_that_paused() -> None:
     )
     paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
     call = _tool_call("call-multiply")
-    # A paused run stores its own messages, its system message included, and never history copies or transient context.
-    stored = [
-        message for message in [*paused_request, call] if not message.from_history and message.add_to_agent_memory
-    ]
+    # A paused run stores its own messages, its system message and its turn context included, and never history.
+    stored = _paused_row([message for message in [*paused_request, call] if not message.from_history]).messages
 
     resumed = build_resume_request(paused=stored, summary=_SUMMARY, history=_replay(runs))
 
-    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+    assert _shape(resumed) == _shape([*paused_request, call])
     assert resumed[0] is stored[0]
+
+
+def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
+    """A row paused before runs stored their turn context resumes from the messages it stored, as it did then."""
+    runs: list[AnyRunRecord] = [_agent_run("earlier")]
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
+    call = _tool_call("call-multiply")
+    old_row = _paused_row(
+        [message for message in [*paused_request, call] if not message.from_history and message.add_to_agent_memory],
+    )
+    assert all("add_to_agent_memory" not in message for message in old_row.to_dict()["messages"])
+
+    resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
+
+    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
 
 
 def test_resumed_request_moves_the_stored_system_message_first() -> None:

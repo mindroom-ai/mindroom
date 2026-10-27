@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from contextlib import asynccontextmanager
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -23,7 +24,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import message_origin, unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Mapping, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
@@ -63,6 +64,18 @@ def receipt_call_ids(request: ModelRequest) -> list[str]:
     """Return the tool call ids the approval receipt projected into ``request`` names, in its order."""
     [receipt] = _receipts(request)
     return re.findall(r"tool call id `([^`]+)`", receipt)
+
+
+def repeats_each_request(requests: Sequence[ModelRequest]) -> bool:
+    """Return whether each request sends the one before it unchanged, then the assistant turn that answered it.
+
+    A resume or a continuation after a delegation rebuilds its request from the paused run, so this holds across them.
+    """
+    return all(
+        later.messages[: len(earlier.messages)] == earlier.messages
+        and later.messages[len(earlier.messages)].role == "assistant"
+        for earlier, later in pairwise(requests)
+    )
 
 
 def request_call_ids(request: ModelRequest) -> list[str]:

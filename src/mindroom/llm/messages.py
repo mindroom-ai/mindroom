@@ -93,8 +93,8 @@ class Message:
     """One message in a model conversation.
 
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
-    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks a message
-    sent to the model but never stored.
+    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks context sent
+    to the model that, like a prompt, only a paused run stores, so its resume sends it again where it was.
     """
 
     role: Literal["system", "user", "assistant", "tool"]
@@ -134,7 +134,10 @@ class Message:
         return ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always."""
+        """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always.
+
+        ``add_to_agent_memory`` is written only when False, which a paused run's context holds.
+        """
         values: dict[str, Any] = {
             "id": self.id,
             "content": self.content,
@@ -168,6 +171,8 @@ class Message:
         metrics = self.metrics.to_dict()
         if metrics:
             result["metrics"] = metrics
+        if not self.add_to_agent_memory:
+            result["add_to_agent_memory"] = False
         result["created_at"] = self.created_at
         return result
 
@@ -175,8 +180,8 @@ class Message:
     def from_dict(cls, data: Mapping[str, Any]) -> Message:
         """Rebuild from a stored dict.
 
-        Keys this type does not model are ignored.
-        The non-persisted flags are read when present so ``model_dump``-shaped payloads decode too.
+        Keys this type does not model are ignored. ``add_to_agent_memory`` is True unless the dict says otherwise, as
+        ``to_dict`` writes it and ``model_dump``-shaped payloads carry it.
         """
         # LEGACY_COMPAT: Agno 3 message dicts carry keys the owned Message dropped.
         # Legacy format: ``run_data`` messages, summary-row segments, and tool-job payloads written by the

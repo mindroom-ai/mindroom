@@ -36,7 +36,7 @@ __all__ = ["RequestLog", "logged_stream"]
 logger = get_logger(__name__)
 
 # Message fields the request record leaves out: none of them reaches any wire.
-_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history"})
+_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history", "add_to_agent_memory"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
