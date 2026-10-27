@@ -46,7 +46,7 @@ from mindroom.startup_errors import PermanentStartupError
 from .config import activate_cli_runtime, console, load_config_quiet
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from google.auth.exceptions import DefaultCredentialsError
 
@@ -395,17 +395,18 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
         n = len(provider_models[provider])
         parts.append(f"{provider} ({n} model{'s' if n != 1 else ''})")
     console.print(f"  Providers: {', '.join(parts)}")
+    return _sum_counts(_check_single_provider(provider, config, runtime_paths) for provider in sorted(provider_models))
 
+
+def _sum_counts(counts: Iterable[tuple[int, int, int]]) -> tuple[int, int, int]:
+    """Add up (passed, failed, warnings) results, running each check in turn."""
     passed = 0
     failed = 0
     warnings = 0
-
-    for provider in sorted(provider_models):
-        p, f, w = _check_single_provider(provider, config, runtime_paths)
+    for p, f, w in counts:
         passed += p
         failed += f
         warnings += w
-
     return passed, failed, warnings
 
 
@@ -429,25 +430,17 @@ def _print_validation(
 
 def _check_single_provider(provider: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Validate the models of one route, as ``provider_route`` names it. Returns (passed, failed, warnings)."""
+    route_models = [model for model in config.models.values() if provider_route(model.provider) == provider]
     if provider == "vertexai_claude":
-        passed = 0
-        failed = 0
-        warnings = 0
-        for model_config in config.models.values():
-            if provider_route(model_config.provider) != provider:
-                continue
-            valid, detail = _validate_vertexai_claude_connection(model_config, runtime_paths)
-            p, f, w = _print_validation(
-                valid,
-                detail,
+        return _sum_counts(
+            _print_validation(
+                *_validate_vertexai_claude_connection(model_config, runtime_paths),
                 f"{provider} connection valid for {model_config.id}",
                 f"{provider} connection failed for {model_config.id}",
                 f"{provider}: could not validate connection for {model_config.id}",
             )
-            passed += p
-            failed += f
-            warnings += w
-        return passed, failed, warnings
+            for model_config in route_models
+        )
 
     if provider == "ollama":
         # The adapter loads the ollama SDK, so it is imported only when an Ollama model is checked.
@@ -455,26 +448,17 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
 
         # Each model's adapter resolves the server its requests reach; check each server once.
         hosts = dict.fromkeys(
-            build_provider(model_config, runtime_paths).identity.endpoint
-            for model_config in config.models.values()
-            if provider_route(model_config.provider) == provider
+            build_provider(model_config, runtime_paths).identity.endpoint for model_config in route_models
         )
-        passed = 0
-        failed = 0
-        warnings = 0
-        for host in hosts:
-            valid, detail = _http_check(f"{host}/api/tags")
-            p, f, w = _print_validation(
-                valid,
-                detail,
+        return _sum_counts(
+            _print_validation(
+                *_http_check(f"{host}/api/tags"),
                 f"{provider} reachable ({host})",
                 f"{provider} unreachable: {host}",
                 f"{provider}: could not reach {host}",
             )
-            passed += p
-            failed += f
-            warnings += w
-        return passed, failed, warnings
+            for host in hosts
+        )
 
     env_key = env_key_for_provider(provider)
     if not env_key:
