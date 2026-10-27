@@ -23,6 +23,7 @@ import {
   NOT_EXPLICITLY_EMPTY,
   emptyRule,
   formFromService,
+  offersSeparateAccount,
   presetOf,
   serializeService,
   suggestedName,
@@ -389,7 +390,13 @@ export function EgressServiceEditor({
   // The services this form would send a key to the same website as, for this agent.
   const overlaps = limiting
     ? []
-    : overlapWarnings(form, preset, agentServices, name);
+    : overlapWarnings(
+        form,
+        preset,
+        agentServices,
+        name,
+        form.separateAccount && offersSeparateAccount(form, options, preset),
+      );
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
