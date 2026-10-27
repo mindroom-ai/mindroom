@@ -50,7 +50,7 @@ def _serve(
             # The image logs requests to stdout, which carries the responses.
             "nginx >&2",
             *(
-                f"curl -s -o /tmp/body -w '{write_out}\\t' "
+                f"curl -s --path-as-is -o /tmp/body -w '{write_out}\\t' "
                 f"{shlex.quote(f'http://127.0.0.1:8080{path}')} && tr -d '\\r\\n' < /tmp/body && echo"
                 for path in paths
             ),
@@ -170,7 +170,7 @@ def test_client_chart_answers_404_below_the_files_a_gateway_makes_public(base_pa
 
     Browsers fetch the runtime config, the recovery script, and the service workers without a gateway session,
     so an operator makes them public; the app shell and build files must not answer below them.
-    Some gateways treat a backslash as a slash.
+    Some gateways treat a backslash as a slash, and some match the path before resolving its dot segments.
     """
     prefix = base_path.rstrip("/")
     files = {
@@ -191,12 +191,23 @@ def test_client_chart_answers_404_below_the_files_a_gateway_makes_public(base_pa
         public_files["/sw.js"] = "cleanup worker"
         set_args.append("rootServiceWorkerCleanup.enabled=true")
     expected = {
-        **{path: ("200", body) for path, body in public_files.items()},
+        **{f"{path}{query}": ("200", body) for path, body in public_files.items() for query in ["", "?v=1"]},
         **{
             f"{path}{below}": ("404", None)
             for path in public_files
-            for below in ["/", "/x", "//x", "%2Fx", "%5Cx", "/assets/app-1a2b.js"]
+            for below in [
+                "/",
+                "/x",
+                "//x",
+                "%2Fx",
+                "%5Cx",
+                "/assets/app-1a2b.js",
+                "/../assets/app-1a2b.js",
+                "/%2e%2e/assets/app-1a2b.js",
+                "%2F%2E%2E%2Fassets/app-1a2b.js",
+            ]
         },
+        **{f"/{path}/x": ("404", None) for path in public_files},
         f"{prefix}/rooms/abc": ("200", "app shell"),
         f"{prefix}/assets/app-1a2b.js": ("200", "app bundle"),
     }
