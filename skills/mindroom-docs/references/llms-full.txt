@@ -979,7 +979,7 @@ The app can instead send the Access token in a `cf-access-token` header, which A
 
 With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
 When the Access session ends, the bar at the top asks for that sign-in again.
-The app registers no push notifications for such a homeserver, because the public push gateway would carry its messages outside the organization.
+Push notifications for such a homeserver carry no message content: the public push gateway sees only event and room IDs and the unread count, and the notification reads "New message".
 
 Set up the homeserver (examples use `chat.example.com`):
 
@@ -1003,7 +1003,7 @@ Set up the homeserver (examples use `chat.example.com`):
 
 Access application paths include everything below them, so answer 404 for anything under the public advert path.
 Before moving an existing homeserver behind Access, delete its pushers for the app (app ID `chat.mindroom.app`) that point at the public push gateway, for example with the homeserver's admin tools.
-The app does not remove earlier registrations, and they would keep sending message content outside the organization.
+Registrations made before the move send full message content, and the app does not replace them.
 Accounts that were signed in before the move need to sign out and in again.
 
 ## Reporting Issues
