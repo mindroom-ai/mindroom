@@ -2297,6 +2297,32 @@ class TestConfigValidate:
             ("azure", "AZURE_OPENAI_API_KEY", ("dashboard",)),
         ]
 
+    @pytest.mark.parametrize("service", ["openai", "OPENAI_API_KEY"])
+    def test_validate_takes_a_shared_key_saved_in_the_dashboard(self, tmp_path: Path, service: str) -> None:
+        """A shared key the dashboard saved, under the provider's name or its variable's, supplies that route only."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            service,
+            {"api_key": "sk-dashboard", "_source": "ui"},
+        )
+        endpoint = {"azure_endpoint": "https://own.openai.azure.com"}
+        config = Config(
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+                "azure": ModelConfig(provider="azure", id="deployment", extra_kwargs=endpoint),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        assert config_cli._find_missing_env_keys(config, runtime_paths) == [
+            ("azure", "AZURE_OPENAI_API_KEY", ("azure",)),
+        ]
+        assert missing_model_api_key_provider(config, runtime_paths, "default") is None
+
     @pytest.mark.parametrize("provider", ["gemini", "Gemini"])
     def test_validate_names_the_google_key_for_a_gemini_model(
         self,
