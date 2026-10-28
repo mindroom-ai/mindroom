@@ -152,6 +152,113 @@ async def test_a_cancelled_synchronous_call_finishes_before_its_toolkit_closes(c
     assert events == ["connect", "query finished", "close"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow", ["connect", "close"])
+async def test_a_blocking_toolkit_connect_or_close_does_not_stall_other_calls_in_the_runner(slow: str) -> None:
+    """A slow database connect or close runs off the event loop, so the worker's other calls keep running meanwhile."""
+    slow_step_started = threading.Event()
+    other_call_ran = threading.Event()
+    slow_step_saw_other_call: list[bool] = []
+
+    def wait_for_other_call() -> None:
+        slow_step_started.set()
+        # On the event loop, this wait would hold the other call back until it timed out.
+        slow_step_saw_other_call.append(other_call_ran.wait(5))
+
+    class _SlowDatabaseToolkit(Toolkit):
+        _requires_connect = True
+
+        def connect(self) -> None:
+            if slow == "connect":
+                wait_for_other_call()
+
+        def close(self) -> None:
+            if slow == "close":
+                wait_for_other_call()
+
+    def query() -> str:
+        return "rows"
+
+    async def other_call() -> str:
+        other_call_ran.set()
+        return "other"
+
+    slow_call = asyncio.create_task(
+        sandbox_runner_module._run_toolkit_entrypoint(_SlowDatabaseToolkit(name="slow"), query, [], {}),
+    )
+    assert await asyncio.to_thread(slow_step_started.wait, 5)
+    other = asyncio.create_task(
+        sandbox_runner_module._run_toolkit_entrypoint(Toolkit(name="other"), other_call, [], {}),
+    )
+
+    assert await asyncio.gather(slow_call, other) == ["rows", "other"]
+    assert slow_step_saw_other_call == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_during_a_blocking_connect_closes_what_it_connected() -> None:
+    """A connect thread cannot be stopped, so a cancelled call waits for it, skips its tool, and closes."""
+    events: list[str] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    class _SlowDatabaseToolkit(Toolkit):
+        _requires_connect = True
+
+        def connect(self) -> None:
+            started.set()
+            release.wait(10)
+            events.append("connect")
+
+        def close(self) -> None:
+            events.append("close")
+
+    def query() -> str:
+        events.append("query")
+        return "rows"
+
+    call = asyncio.create_task(
+        sandbox_runner_module._run_toolkit_entrypoint(_SlowDatabaseToolkit(name="slow"), query, [], {}),
+    )
+    assert await asyncio.to_thread(started.wait, 10)
+    call.cancel()
+    done, _pending = await asyncio.wait({call}, timeout=0.25)
+    release.set()
+
+    assert not done
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert events == ["connect", "close"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["connect", "query"])
+async def test_a_connected_toolkit_closes_when_its_connect_or_its_call_fails(failing: str) -> None:
+    """A connect that fails partway may still hold a connection, so the call closes its toolkit either way."""
+    events: list[str] = []
+
+    class _FailingDatabaseToolkit(Toolkit):
+        _requires_connect = True
+
+        def connect(self) -> None:
+            events.append("connect")
+            if failing == "connect":
+                msg = "connect failed"
+                raise RuntimeError(msg)
+
+        def close(self) -> None:
+            events.append("close")
+
+    def query() -> str:
+        events.append("query")
+        msg = "query failed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match=f"{failing} failed"):
+        await sandbox_runner_module._run_toolkit_entrypoint(_FailingDatabaseToolkit(name="db"), query, [], {})
+    assert events == (["connect", "close"] if failing == "connect" else ["connect", "query", "close"])
+
+
 @pytest.mark.parametrize("run_as_job", [False, True])
 def test_a_job_request_runs_its_tool_as_part_of_that_job(
     runner: TestClient,
