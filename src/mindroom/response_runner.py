@@ -269,14 +269,6 @@ def _paused_with_committed_presentation(
     )
 
 
-def _require_frozen_tool_visibility(show_tool_calls: bool | None) -> bool:
-    """Return one turn's policy snapshot or reject an unfrozen approval handoff."""
-    if show_tool_calls is None:
-        msg = "Approval suspension requires turn-frozen tool visibility"
-        raise RuntimeError(msg)
-    return show_tool_calls
-
-
 def _interruption_note_landed(handle: SpanHandle | None) -> bool:
     """Return whether a cancellation ended its turn with the interruption note.
 
@@ -3467,8 +3459,8 @@ class ResponseRunner:
         user_id: str | None,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-        approval_suspension_handler: Callable[[PausedAttempt], Awaitable[FinalDeliveryOutcome]] | None = None,
-        show_tool_calls: bool | None = None,
+        approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]]
+        | None = None,
         participation: ParticipationGate | None = None,
         reply_session: ReplySession | None = None,
     ) -> str | None:
@@ -3496,16 +3488,8 @@ class ResponseRunner:
             except ResponsePausedForApproval as error:
                 if approval_suspension_handler is None:
                     raise
-                frozen_show_tool_calls = _require_frozen_tool_visibility(show_tool_calls)
                 try:
-                    progress.settle(
-                        await approval_suspension_handler(
-                            _paused_with_committed_presentation(
-                                error,
-                                show_tool_calls=frozen_show_tool_calls,
-                            ),
-                        ),
-                    )
+                    progress.settle(await approval_suspension_handler(error))
                 except Exception as suspension_error:
                     self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
                     progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
@@ -4125,8 +4109,8 @@ class ResponseRunner:
                 user_id=request.user_id,
                 build_post_response_outcome=build_post_response_outcome,
                 post_response_deps=dispatched.post_response_deps,
-                approval_suspension_handler=lambda paused: self._suspend_for_approval(
-                    paused,
+                approval_suspension_handler=lambda pause: self._suspend_for_approval(
+                    _paused_with_committed_presentation(pause, show_tool_calls=dispatched.runtime.show_tool_calls),
                     request=request,
                     target=dispatched.response_target,
                     execution_identity=dispatched.execution_identity,
@@ -4136,7 +4120,6 @@ class ResponseRunner:
                     team_member_names=dispatched.team_member_names,
                     team_mode=dispatched.team_mode,
                 ),
-                show_tool_calls=dispatched.runtime.show_tool_calls,
                 participation=dispatched.runtime.participation,
                 reply_session=ReplySession(dispatched.history_scope, dispatched.runtime.tool_dispatch),
             )

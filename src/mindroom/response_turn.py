@@ -394,7 +394,7 @@ class ResponseTurnContext:
 
 @dataclass(frozen=True)
 class TurnSinks:
-    """Mutable turn outputs owned by the caller and updated by the driver."""
+    """What a turn reports back to its caller, and whether and where it stores an interruption."""
 
     # The turn's record, which the driver writes and the caller reads once the turn ended; a turn whose caller passes
     # none keeps its own.
@@ -1143,7 +1143,8 @@ async def stream_response_turn[ChunkT](
 ) -> AsyncGenerator[ChunkT | str, None]:
     """Own the whole response while binding context only during pulls and close.
 
-    A failed turn's reply is a bare string, the chunk delivery and the OpenAI-compatible API read as a failed run's.
+    A failed turn's reply is a bare string, never the adapter's text chunk: for an agent, whose text is ``TextDelta``,
+    that is how delivery and the OpenAI-compatible API tell a failed run's reply from its answer.
     """
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(

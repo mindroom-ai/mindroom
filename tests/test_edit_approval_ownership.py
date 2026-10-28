@@ -628,7 +628,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     progress = _DeliveryProgress()
     pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
-    async def fail_handoff(_paused: PausedAttempt) -> None:
+    async def fail_handoff(_pause: ResponsePausedForApproval) -> None:
         message = "Approval handoff failed"
         raise RuntimeError(message)
 
@@ -652,7 +652,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
                 post_response_deps=PostResponseEffectsDeps(logger=runner.deps.logger),
                 approval_suspension_handler=fail_handoff,
-                show_tool_calls=False,
             )
     assert progress.delivery_outcome is not None
     assert progress.delivery_outcome.terminal_status == "error"

@@ -6444,8 +6444,9 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
         coordinator.deps.runtime.config.agents[coordinator.deps.agent_name].show_tool_calls = reloaded_visibility
         raise error
 
-    async def suspend(paused: PausedAttempt) -> FinalDeliveryOutcome:
-        handed_off.append(paused)
+    async def suspend(pause: ResponsePausedForApproval) -> FinalDeliveryOutcome:
+        # The turn's handler builds the pause with the visibility its turn froze, not the reloaded one.
+        handed_off.append(response_runner._paused_with_committed_presentation(pause, show_tool_calls=turn_visibility))
         return FinalDeliveryOutcome(
             terminal_status="suspended",
             event_id="$response",
@@ -6468,7 +6469,6 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             approval_suspension_handler=suspend,
-            show_tool_calls=turn_visibility,
         )
 
     assert len(handed_off) == 1
