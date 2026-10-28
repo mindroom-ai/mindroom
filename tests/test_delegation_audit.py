@@ -289,6 +289,42 @@ async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_a
     assert stored.handover_content == "Restarted"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "result"),
+    [
+        (RunStatus.completed, ("completed", "Agent completed the task but returned no content.")),
+        (RunStatus.cancelled, ("cancelled", "Delegation cancelled.")),
+        (RunStatus.error, ("failed", "Delegation failed.")),
+    ],
+)
+async def test_a_child_run_that_ends_without_text_settles_with_a_note_for_how_it_ended(
+    tmp_path: Path,
+    status: RunStatus,
+    result: tuple[str, str],
+) -> None:
+    """A child run that ends with nothing to hand over settles with a note naming how it ended, never a bare status."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+
+    await settle_child_response(
+        child,
+        RunRecord(run_id=child.run_id, session_id=child.session_id, status=status),
+        config=config,
+        runtime_paths=paths,
+    )
+
+    assert (child.status, child.result) == result
+
+
 # The rows v2026.10.633's recovery stored when it cancelled or failed a paused child that had written text, generated
 # by running that release's ``interrupt_child``: each holds the reason as its content and no ``error``.
 _RECOVERED_CHILD_ROWS: dict[str, dict[str, Any]] = json.loads(
