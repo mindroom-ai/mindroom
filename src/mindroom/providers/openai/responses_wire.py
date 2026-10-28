@@ -199,10 +199,13 @@ def responses_replay(
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
     latest = _latest_response(history)
-    explicit = (
-        portable_replay or store is False or (latest is not None and not _continuable(latest[1], history[: latest[0]]))
+    continues = (
+        latest is not None
+        and not portable_replay
+        and store is not False
+        and _continuable(latest[1], history[: latest[0]])
     )
-    chained = None if explicit else latest
+    chained = latest if continues else None
     return ResponsesReplay(
         history=history,
         sent_from=0 if chained is None else chained[0] + 1,
