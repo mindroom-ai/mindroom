@@ -5151,7 +5151,6 @@ class ResponseRunner:
                 knowledge=knowledge_resolution.knowledge,
                 media=runtime.media_inputs,
                 show_tool_calls=show_tool_calls,
-                collect_streamed_response=show_tool_calls,
                 tool_trace_collector=tool_trace,
                 run_metadata_collector=run_metadata_content,
                 execution_identity=runtime.tool_dispatch.execution_identity,

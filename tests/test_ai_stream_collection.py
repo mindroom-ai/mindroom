@@ -246,7 +246,6 @@ async def test_a_collected_reply_starts_a_new_paragraph_after_a_hidden_tool_call
         runtime_paths=test_runtime_paths(tmp_path),
         config=Config(),
         show_tool_calls=False,
-        collect_streamed_response=True,
         tool_trace_collector=trace,
     )
 

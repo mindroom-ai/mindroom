@@ -1560,7 +1560,7 @@ class TestUserIdPassthrough:
                 supports_native_tool_approval=True,
             )
 
-        paused = raised.value.paused
+        paused = _paused_with_committed_presentation(raised.value, show_tool_calls=True)
         assert [(tool.tool_call_id, tool.tool_name, tool.tool_args) for tool in paused.tools] == [
             ("call-1", "dangerous", {"value": 1}),
         ]
@@ -1928,7 +1928,7 @@ class TestUserIdPassthrough:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The blocking path writes each tool the run called into the reply's text and its tool trace."""
+        """The blocking path writes each tool the run called into the reply's text, in order, and its tool trace."""
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
         tool_trace: list[ToolTraceEntry] = []
@@ -1942,8 +1942,7 @@ class TestUserIdPassthrough:
             tool_trace_collector=tool_trace,
         )
 
-        assert response.startswith("Done.\n")
-        assert "`read_file`" in response
+        assert response == "\n\n🔧 `read_file` [1]\n\nDone."
         assert [entry.tool_name for entry in tool_trace] == ["read_file"]
 
     @pytest.mark.asyncio

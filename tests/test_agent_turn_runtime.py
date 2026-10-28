@@ -413,13 +413,12 @@ async def test_a_blocking_reply_runs_the_same_loop_and_returns_the_text(
     monkeypatch: pytest.MonkeyPatch,
     probe: type[_ProbeToolkit],
 ) -> None:
-    """The blocking path runs the same loop and returns the text with the tool trace in it."""
+    """The blocking path collects the streamed turn: the tool call's marker, then the text after it."""
     reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Done.")])
 
     text = await _respond(reply)
 
-    assert text.startswith("Done.")
-    assert "touch" in text
+    assert text == "\n\n🔧 `touch` [1]\n\nDone."
     assert probe.calls == ["a"]
     assert _stored(reply).status is RunStatus.completed
 
@@ -596,6 +595,36 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_a_stopped_reply_records_the_text_and_tool_calls_it_had_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """A blocking reply stopped mid-run records what its run had produced, as a streamed one does."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            [TextDelta("Partial "), Await(_cancel_current_task)],
+        ],
+    )
+
+    task = asyncio.create_task(_stream(reply) if streaming else _respond(reply))
+    [outcome] = await asyncio.gather(task, return_exceptions=True)
+
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert reply.recorder.outcome == "interrupted"
+    assert reply.recorder.original_status is RunStatus.cancelled
+    assert reply.recorder.assistant_text == "Partial "
+    assert [(tool.tool_name, tool.type) for tool in reply.recorder.completed_tools] == [
+        ("touch", "tool_call_completed"),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_text(
     tmp_path: Path,
@@ -734,7 +763,7 @@ async def test_a_reply_keeps_its_live_notice_until_the_response_boundary_finaliz
         assert _notice_markers(_stored(reply).messages) == [True]
         await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
 
-    assert result.startswith("final answer")
+    assert result.endswith("final answer")
     assert _notice_markers(_stored(reply).messages) == ["persisted"]
 
 
