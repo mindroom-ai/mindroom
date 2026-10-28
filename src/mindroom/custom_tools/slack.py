@@ -79,6 +79,8 @@ _NOT_PROJECT_CHANNEL = "Not one of this agent's Slack channels"
 _FILE_NOT_IN_PROJECT = "This file is not in one of this agent's Slack channels"
 _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connection"
 _UNREACHABLE = "Slack could not be reached; try again"
+# Slack may have received the write before the connection failed, so a blind retry could post twice.
+_WRITE_UNANSWERED = "Slack did not answer; the message may have been sent, so check with slack_read before retrying"
 _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
 _NOT_A_MESSAGE = "Use <conversation>:<ts> or a message link to react to a message"
 # A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
@@ -156,22 +158,19 @@ def _search_page(cursor: str | None) -> int:
     return int(cursor)
 
 
-def _conversation_target(target: str) -> tuple[str, SlackTarget]:
-    try:
-        parsed = parse_slack_target(target)
-    except ValueError as exc:
-        raise _SlackRefusalError(str(exc)) from None
-    if parsed.channel_id is None:
-        msg = "Use a Slack conversation ID, <conversation>:<ts>, or a message link"
-        raise _SlackRefusalError(msg)
-    return parsed.channel_id, parsed
-
-
-def _write_target(target: str) -> SlackTarget:
+def _parse_target(target: str) -> SlackTarget:
     try:
         return parse_slack_target(target)
     except ValueError as exc:
         raise _SlackRefusalError(str(exc)) from None
+
+
+def _conversation_target(target: str) -> tuple[str, SlackTarget]:
+    parsed = _parse_target(target)
+    if parsed.channel_id is None:
+        msg = "Use a Slack conversation ID, <conversation>:<ts>, or a message link"
+        raise _SlackRefusalError(msg)
+    return parsed.channel_id, parsed
 
 
 def _refuse_in_watch_turn() -> None:
@@ -365,19 +364,15 @@ class SlackTools(Toolkit):
         token = app.bot_token if self.project_channels is not None else await self._requester_token()
         return _Session(client, token, app)
 
-    async def _run(
-        self,
-        operation: Callable[[_Session], Awaitable[Mapping[str, object]]],
-        *,
-        writes: bool = False,
-    ) -> str:
-        """Run one operation and render its result, connect prompt, or error as the tool's JSON payload.
+    async def _run(self, function: str, operation: Callable[[_Session], Awaitable[Mapping[str, object]]]) -> str:
+        """Run one operation of the named function and render its result, connect prompt, or error as the tool's JSON.
 
-        A write is refused first in a turn a Slack watch started, before any credential or Slack call.
+        A write function is refused first in a turn a Slack watch started, before any credential or Slack call.
         """
         personal = self.project_channels is None
+        write = function in _WRITE_FUNCTIONS
         try:
-            if writes:
+            if write:
                 _refuse_in_watch_turn()
             async with _client_factory() as client:
                 fields = await operation(await self._session(client))
@@ -391,7 +386,7 @@ class SlackTools(Toolkit):
                 return custom_tool_payload(_TOOL_NAME, "error", **oauth_connection_required_payload(required))
             return _error(_api_error_text(exc, personal=personal))
         except httpx.HTTPError:
-            return _error(_UNREACHABLE)
+            return _error(_WRITE_UNANSWERED if write else _UNREACHABLE)
         return custom_tool_payload(_TOOL_NAME, "ok", **fields)
 
     async def _require_project_channel(self, session: _Session, channel_id: str) -> None:
@@ -529,7 +524,7 @@ class SlackTools(Toolkit):
                 "complete": complete,
             }
 
-        return await self._run(operation)
+        return await self._run("slack_search", operation)
 
     async def slack_read(
         self,
@@ -575,7 +570,7 @@ class SlackTools(Toolkit):
                 "next_cursor": next_cursor(body),
             }
 
-        return await self._run(operation)
+        return await self._run("slack_read", operation)
 
     async def slack_download(self, file_id: str) -> str:
         """Download one Slack file, up to 50 MB, into the workspace's slack-downloads directory.
@@ -614,7 +609,7 @@ class SlackTools(Toolkit):
                 "path": str(path),
             }
 
-        return await self._run(operation)
+        return await self._run("slack_download", operation)
 
     async def slack_post(self, target: str, text: str) -> str:
         """Post a message to Slack, or reply in a thread.
@@ -632,7 +627,7 @@ class SlackTools(Toolkit):
         """
 
         async def operation(session: _Session) -> Mapping[str, object]:
-            parsed = _write_target(target)
+            parsed = _parse_target(target)
             if parsed.channel_id is None:
                 if self.project_channels is not None:
                     raise _SlackRefusalError(_PROJECT_POSTS_IN_CHANNELS)
@@ -648,7 +643,7 @@ class SlackTools(Toolkit):
             posted = await session.call("chat.postMessage", channel=channel_id, text=text, thread_ts=root)
             return {"channel_id": channel_id, "ts": posted.get("ts"), "thread_ts": root}
 
-        return await self._run(operation, writes=True)
+        return await self._run("slack_post", operation)
 
     async def slack_react(self, target: str, emoji: str) -> str:
         """Add an emoji reaction to one Slack message.
@@ -660,7 +655,7 @@ class SlackTools(Toolkit):
         """
 
         async def operation(session: _Session) -> Mapping[str, object]:
-            parsed = _write_target(target)
+            parsed = _parse_target(target)
             if parsed.channel_id is None or parsed.ts is None:
                 raise _SlackRefusalError(_NOT_A_MESSAGE)
             await self._require_project_channel(session, parsed.channel_id)
@@ -668,4 +663,4 @@ class SlackTools(Toolkit):
             await session.call("reactions.add", channel=parsed.channel_id, timestamp=parsed.ts, name=name)
             return {"channel_id": parsed.channel_id, "ts": parsed.ts, "emoji": name}
 
-        return await self._run(operation, writes=True)
+        return await self._run("slack_react", operation)

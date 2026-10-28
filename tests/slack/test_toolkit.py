@@ -30,7 +30,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -45,6 +45,7 @@ ROOT_TS = "1714000000.000100"
 REPLY_TS = "1714000100.000200"
 FILE_ID = "F0123ABCD"
 WORKSPACE_URL = "https://example.slack.com/"
+TIMEOUT = "timed out"
 AUTH_TEST = {"ok": True, "url": WORKSPACE_URL, "team_id": "T0123ABCD", "user_id": "U0BOT0000"}
 DANA = {"id": "U0123ABCD", "name": "dana", "real_name": "Dana Example", "profile": {"display_name": "Dana"}}
 
@@ -783,6 +784,17 @@ async def test_write_target_must_be_a_slack_target(
     assert fake.requests == []
 
 
+# One call per write function; a write function without an entry fails `test_every_write_function_has_a_watch_guard_case`.
+_WRITE_CALLS: dict[str, Callable[[SlackTools], Awaitable[str]]] = {
+    "slack_post": lambda tools: tools.slack_post(CHANNEL, "hello"),
+    "slack_react": lambda tools: tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"),
+}
+
+
+def test_every_write_function_has_a_watch_guard_case() -> None:
+    assert set(_WRITE_CALLS) == slack_toolkit._WRITE_FUNCTIONS
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("hook_source", ["slack-watch/w-1", "slack-watch/"])
 async def test_writes_refused_during_watch_turn(
@@ -795,18 +807,17 @@ async def test_writes_refused_during_watch_turn(
         {"chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS}, "reactions.add": {"ok": True}},
     ).install(monkeypatch)
     tools = _tools(paths)
+    writes = [_WRITE_CALLS[name] for name in sorted(slack_toolkit._WRITE_FUNCTIONS)]
 
     with tool_runtime_context(_turn_context(paths, hook_source)):
-        post = json.loads(await tools.slack_post(CHANNEL, "hello"))
-        react = json.loads(await tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"))
+        refusals = [json.loads(await write(tools))["message"] for write in writes]
 
-    assert post["message"] == react["message"] == "Ask me in a new message to post to Slack"
+    assert refusals == ["Ask me in a new message to post to Slack"] * len(writes)
     assert fake.requests == []
 
     for context in (None, _turn_context(paths, None), _turn_context(paths, "plugin:message_received")):
         with tool_runtime_context(context):
-            assert json.loads(await tools.slack_post(CHANNEL, "hello"))["status"] == "ok"
-            assert json.loads(await tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"))["status"] == "ok"
+            assert [json.loads(await write(tools))["status"] for write in writes] == ["ok"] * len(writes)
     assert fake.methods() == ["chat.postMessage", "reactions.add"] * 3
 
 
@@ -823,3 +834,31 @@ async def test_watch_turn_refusal_comes_before_credentials_are_read(
     assert result["message"] == "Ask me in a new message to post to Slack"
     assert "oauth_connection_required" not in result
     assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_unanswered_write_warns_it_may_have_been_sent_and_a_read_does_not(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+
+    def timed_out(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout(TIMEOUT, request=request)
+
+    fake = FakeSlack(
+        {"chat.postMessage": timed_out, "reactions.add": timed_out, "conversations.history": timed_out},
+    ).install(monkeypatch)
+    tools = _tools(paths)
+
+    results = [
+        json.loads(await write(tools))["message"] for write in (_WRITE_CALLS[name] for name in sorted(_WRITE_CALLS))
+    ]
+    read = json.loads(await tools.slack_read(CHANNEL))["message"]
+
+    assert (
+        results
+        == ["Slack did not answer; the message may have been sent, so check with slack_read before retrying"] * 2
+    )
+    assert read == "Slack could not be reached; try again"
+    assert fake.methods() == ["chat.postMessage", "reactions.add", "conversations.history"]

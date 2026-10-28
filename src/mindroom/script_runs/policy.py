@@ -37,6 +37,8 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
         "memory",
         "self_config",
         "skill_manage",
+        # A script's calls rebuild the tool context without the turn's hook source, which Slack's write guard reads.
+        "slack",
     },
 )
 
