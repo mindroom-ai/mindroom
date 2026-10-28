@@ -1,8 +1,9 @@
-"""Production approval resumes continue the pre-resume dumps into the rows Agno stored, and refuse what they must.
+"""Production approval resumes continue runs Agno stored paused into completed runs, and refuse what they must.
 
-Each test loads a paused run from its pre-resume dump (``tests.approval_resume_helpers``) and continues it through
-``AgentApprovalExecution`` with the decisions the capture took. The stored rows are compared with the ones Agno wrote
-after the same resume; ``tests/test_ai_run_metadata_goldens.py`` compares the run metadata each resume publishes.
+Each test loads a paused run from its pre-resume dump (``tests.approval_resume_helpers``), so a run paused before the
+upgrade resumes after it, and continues it through ``AgentApprovalExecution`` with the decisions the capture took.
+The stored records are asserted as typed values; ``tests/test_ai_run_metadata_goldens.py`` compares the run metadata
+each resume publishes.
 """
 
 from __future__ import annotations
@@ -13,39 +14,88 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.delegation.state import DelegationState, child_execution_identity
+from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.event_journal import approval_arguments_digest
+from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun
-from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.approval_continuation_helpers import receipt_call_ids
-from tests.approval_resume_helpers import AGENT_RESUMES, ROOM, CodeResume, resume_case, setup_case, setup_resume
-from tests.teams.squad import comparable, golden_run, scripted
+from tests.approval_resume_helpers import AGENT_RESUMES, CodeResume, resume_case, setup_case, setup_resume
+from tests.run_record_helpers import (
+    PRODUCT,
+    approved_call,
+    as_stored,
+    denied_call,
+    result,
+    resumed,
+    settled,
+    waiting_call,
+)
+from tests.teams.squad import scripted
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from mindroom.llm.usage import MessageMetrics
+    from tests.fakes.scripted_model import ScriptStep
 
 pytestmark = pytest.mark.asyncio
 
 
+def _answered(script: Sequence[ScriptStep]) -> tuple[str, MessageMetrics]:
+    """Return the text and usage of the reply a scripted model answers with."""
+    [step] = [step for step in script if isinstance(step, TurnCompleted)]
+    assert isinstance(step.message.content, str)
+    return step.message.content, step.message.metrics
+
+
+def _without_published_metadata(record: RunRecord, *keys: str) -> dict[str, object]:
+    """Return ``record``'s run metadata without ``keys`` and what the reply publishes, which the metadata goldens pin."""
+    left_out = {AI_RUN_METADATA_KEY, *keys}
+    return {key: value for key, value in (record.metadata or {}).items() if key not in left_out}
+
+
 @pytest.mark.parametrize("run_id", ["run-approved", "run-rejected"])
-async def test_a_paused_approval_resumes_into_its_golden_rows(
+async def test_a_paused_approval_resumes_into_a_completed_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     run_id: str,
 ) -> None:
-    """Approving or denying the paused ``multiply`` continues the run into the rows its golden holds."""
+    """Approving the paused ``multiply`` runs it, denying it answers it with the reason, and the run completes."""
     case = AGENT_RESUMES[run_id]
     run = await setup_case(case, tmp_path, monkeypatch)
     before = run.paused.to_dict()
 
-    result = await resume_case(case, run)
+    outcome = await resume_case(case, run)
 
-    assert isinstance(result, CompletedApprovalRun)
+    assert isinstance(outcome, CompletedApprovalRun)
     assert run.executed == ([(6, 7)] if case.approve else [])
-    expected = comparable(golden_run("agent_code", create_session_id(ROOM, case.thread), run_id))
-    assert comparable(run.stored().to_dict()) == expected
+    call, waiting = waiting_call(run.paused)
+    if case.approve:
+        expected = resumed(
+            run.paused,
+            decided=approved_call(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=_answered(case.code),
+            confirmation=True,
+        )
+    else:
+        reason = "Alice declined the multiplication."
+        expected = resumed(
+            run.paused,
+            decided=denied_call(waiting, reason),
+            added=[result(call, reason, is_error=True)],
+            answered=_answered(case.code),
+            confirmation=False,
+            confirmation_note=reason,
+        )
+    expected = as_stored(expected)
+    stored = run.stored()
+    assert settled(replace(stored, metadata=None)) == settled(replace(expected, metadata=None))
+    assert _without_published_metadata(stored) == _without_published_metadata(run.paused)
     assert run.paused.to_dict() == before
     # The resumed request carries the stored prompt, the turn, the decided call's result, then the receipt once.
     [request] = run.code.requests
@@ -65,19 +115,64 @@ async def test_a_paused_delegation_resumes_its_child_and_then_the_parent(
     assert [(call.invoking_agent, call.tool_name, call.toolkit_name) for call in run.calls()] == [
         ("helper", "multiply", "calculator"),
     ]
-
-    result = await resume_case(case, run)
-
-    assert isinstance(result, CompletedApprovalRun)
-    assert run.executed == [(6, 7)]
-    session_id = create_session_id(ROOM, "$delegation-approved")
-    expected = comparable(golden_run("agent_code", session_id, "run-delegation-approved"))
-    assert comparable(run.stored().to_dict()) == expected
     child_store = create_session_storage("helper", run.config, run.paths, child_execution_identity(child))
+    paused_child = child_store.get_run(child.run_id)
+    assert isinstance(paused_child, RunRecord)
+
+    outcome = await resume_case(case, run)
+
+    assert isinstance(outcome, CompletedApprovalRun)
+    assert run.executed == [(6, 7)]
+    # The child runs its approved call and answers, as a resumed run does.
+    child_call, child_waiting = waiting_call(paused_child)
+    assert case.helper is not None
     child_record = child_store.get_run(child.run_id)
     assert isinstance(child_record, RunRecord)
-    expected_child = comparable(golden_run("agent_helper", child.session_id, child.run_id))
-    assert comparable(child_record.to_dict()) == expected_child
+    assert settled(child_record) == settled(
+        as_stored(
+            resumed(
+                paused_child,
+                decided=approved_call(child_waiting, PRODUCT),
+                added=[result(child_call, PRODUCT)],
+                answered=_answered(case.helper),
+                confirmation=True,
+            ),
+        ),
+    )
+    # The parent's delegation is answered with the child's answer and its record, as an externally executed result.
+    handed_over = (
+        f"42\n\nDelegation {child.delegation_id} record: helper:.mindroom/delegations/2027-01-15/{child.delegation_id}"
+        f"\nSubagent ID: {child.subagent_id}"
+    )
+    call, waiting = waiting_call(run.paused)
+    expected = as_stored(
+        resumed(
+            run.paused,
+            decided=replace(waiting, result=handed_over, external_execution_required=False),
+            added=[result(call, handed_over, is_error=None)],
+            answered=_answered(case.code),
+            external_execution_result=handed_over,
+        ),
+    )
+    stored = run.stored()
+    assert settled(replace(stored, metadata=None)) == settled(replace(expected, metadata=None))
+    # The parent's delegation state settles the child with its answer, ran its after-call hook, and waits on nothing;
+    # the rest of its run metadata stays.
+    paused_state = DelegationState.from_metadata(run.paused.metadata)
+    assert DelegationState.from_metadata(stored.metadata) == replace(
+        paused_state,
+        children=[replace(child, status="completed", result="42")],
+        hooks={call_id: replace(hook, after_called=True) for call_id, hook in paused_state.hooks.items()},
+        pending_tools=[],
+        pending_tool_sources={},
+        pending_requirements=[],
+        pending_child_id=None,
+        pending_agent_name=None,
+    )
+    assert _without_published_metadata(stored, DELEGATION_STATE_KEY) == _without_published_metadata(
+        run.paused,
+        DELEGATION_STATE_KEY,
+    )
     # The parent reads the child's answer where it read the pause, on its own stored request, then the receipt.
     [request] = run.code.requests
     assert [message.role for message in request.messages] == ["system", "user", "assistant", "tool", "user"]

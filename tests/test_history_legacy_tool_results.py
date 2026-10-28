@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
-from mindroom.history.summary_input import messages_for_runs
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
@@ -17,7 +16,7 @@ from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.schema import TableNames
-from tests.history_helpers import replay_settings
+from tests.history_helpers import replay_settings, summary_tool_work
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
 from tests.providers.golden_support import Wire, hide_provider_environment
 from tests.session_storage.agno_layout import converted_store
@@ -126,11 +125,10 @@ def test_a_paused_team_runs_members_store_each_combined_result(tmp_path: Path) -
 def test_compaction_reads_each_combined_result_as_its_own_tool_result(tmp_path: Path) -> None:
     settings = replay_settings(max_tool_calls_from_history=1)
 
-    messages = messages_for_runs([_stored_run(tmp_path)], settings)
+    calls, results = summary_tool_work([_stored_run(tmp_path)], settings)
 
-    assistant = next(message for message in messages if message.tool_calls)
-    assert [call["id"] for call in assistant.tool_calls or []] == ["call_oslo"]
-    assert [(m.tool_call_id, m.content) for m in messages if m.role == "tool"] == [("call_oslo", "rainy")]
+    assert [call["id"] for call in calls] == ["call_oslo"]
+    assert results == [("call_oslo", "rainy")]
 
 
 def _chat_results(body: dict[str, Any]) -> list[Any]:

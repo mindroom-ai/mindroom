@@ -39,17 +39,33 @@ class RunStatus(StrEnum):
     """Lifecycle state of a run; the values are the stored ``status`` strings.
 
     The members have lower-case names because ``.name`` is persisted too (``mindroom_original_status`` in run metadata
-    holds ``"cancelled"``, not ``"CANCELLED"``). MindRoom never writes ``PENDING`` or ``REGENERATED``; they are members
-    so a stored row written with them still reads.
+    holds ``"cancelled"``, not ``"CANCELLED"``).
     """
 
-    pending = "PENDING"
     running = "RUNNING"
     completed = "COMPLETED"
     paused = "PAUSED"
     cancelled = "CANCELLED"
     error = "ERROR"
-    regenerated = "REGENERATED"
+
+
+# LEGACY_COMPAT: Run rows stored with Agno's PENDING or REGENERATED status.
+# Legacy format: a stored run ``status`` of ``PENDING``, which Agno 3.0.9's ``Agent`` and ``Team`` gave a run started
+# with ``arun(background=True)`` or continued with ``acontinue_run(background=True)`` until it ran, or
+# ``REGENERATED``, which their ``continue_run(regenerate=True)`` gave the run a regenerated one replaced, and which
+# Agno's history skipped.
+# Last legacy release: none; no MindRoom release wrote either, since MindRoom never started or continued an Agno run
+# in the background or continued one with ``regenerate=True``, and v2026.10.499 through v2026.10.627 modeled both only
+# to read such a row. A stored one is unversioned external input.
+# Handling: either status reads as ``ERROR``, a run that did not finish, which never replays as history and settles a
+# delegation as failed; every other status reads as stored.
+# Coverage: tests/llm/test_codecs.py::test_run_record_reads_every_status_agno_could_store,
+#   tests/session_storage/test_codec_rows.py::test_a_row_stored_with_an_agno_only_status_decodes_as_a_run_that_did_not_finish
+_UNFINISHED_AGNO_STATUSES = frozenset({"PENDING", "REGENERATED"})
+
+
+def _stored_status(value: str) -> RunStatus:
+    return RunStatus.error if value in _UNFINISHED_AGNO_STATUSES else RunStatus(value)
 
 
 # The stored keys of the tool-execution fields whose names differ from them.
@@ -356,7 +372,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "session_id": data.get("session_id"),
         "parent_run_id": data.get("parent_run_id"),
         "user_id": data.get("user_id"),
-        "status": RunStatus(data.get("status", RunStatus.running.value)),
+        "status": _stored_status(data.get("status", RunStatus.running.value)),
         "content": data.get("content"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),

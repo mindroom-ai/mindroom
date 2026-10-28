@@ -635,7 +635,6 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
     )
     support = HookContextSupport(
         runtime=runtime,
-        logger=get_logger("tests.hook_matrix_admin"),
         runtime_paths=runtime_paths_for(config),
         agent_name="router",
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
@@ -662,7 +661,6 @@ def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tm
     )
     support = HookContextSupport(
         runtime=runtime,
-        logger=get_logger("tests.hook_matrix_admin"),
         runtime_paths=runtime_paths_for(config),
         agent_name="router",
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
@@ -692,7 +690,6 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
     )
     support = HookContextSupport(
         runtime=runtime,
-        logger=get_logger("tests.hook_matrix_admin"),
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
@@ -717,7 +714,6 @@ def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path:
     )
     support = HookContextSupport(
         runtime=runtime,
-        logger=get_logger("tests.hook_matrix_admin"),
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
