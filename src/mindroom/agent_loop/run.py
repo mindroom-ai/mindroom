@@ -314,10 +314,9 @@ async def drive_run[R: AnyRunRecord](
     ``spec`` supplies the model, the tools (its ``functions``), and the tool-call limit; ``record`` is the agent
     or team run the loop fills; ``entry`` is work the run does before the loop (a team resume's paused members), and
     ``resumed`` holds a resume's decided requirements, which the loop answers before its first request. The spec's
-    toolkits that
-    hold a connection for one run are connected before ``entry`` and closed after the run reports its end, once the
-    consumer reads past ``RunFinished`` or closes the stream; a run that fails or is cancelled closes them once its
-    record is stored.
+    toolkits that hold a connection for one run are connected before ``entry`` and closed after the run reports its
+    end, once the consumer reads past ``RunFinished`` or closes the stream; a run that fails or is cancelled closes
+    them once its record is stored.
     """
     # The clock reading the run's duration counts from: a resume continues the paused run's duration, and however this
     # leg ends, once or again after a terminal store fails, its duration is the time since then.
@@ -378,8 +377,8 @@ async def _store_interrupted[R: AnyRunRecord](
 
     Cancellation wins over a pause: unresolved requirements leave and paused tool entries stop waiting. A failed
     run records its ``failure_text`` in ``error``, redacted, which is what its caller reports, and keeps in its content
-    what its model wrote. The store finishes even if the waiter is
-    cancelled again, so a record the caller writes for the same run afterwards is never overwritten by this one.
+    what its model wrote. The store finishes even if the waiter is cancelled again, so a record the caller writes for
+    the same run afterwards is never overwritten by this one.
     """
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
