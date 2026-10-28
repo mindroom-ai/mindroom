@@ -183,6 +183,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 
 The new agent joins no room by itself.
 The owner invites its Matrix ID to a room to talk to it, and the agent accepts because the invitation comes from an owner.
+Authored config cannot reference a created agent, so a `delegate_to` list or a team that names one fails to load.
 
 > [!WARNING]
 > **A created agent has its creator's tools, knowledge bases, skills, and model.**
