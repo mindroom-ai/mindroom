@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
@@ -21,7 +22,8 @@ from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.memory import _MemoryLLMConfig
+from mindroom.config.memory import _MemoryEmbedderConfig, _MemoryLLMConfig
+from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_failure_is_transient, openai_embedder_error
@@ -40,7 +42,7 @@ from mindroom.memory import (
 )
 from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
-from mindroom.memory.config import _Mem0StrictOpenAIEmbedder
+from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder
 from mindroom.redaction import REDACTED, REDACTION_FAILED
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -170,7 +172,8 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
 
     class FailingMemory:
         async def add(self, *_args: object, **_kwargs: object) -> None:
-            raise error
+            # Mem0's embedder is MindRoom's, which raises the classified error at its boundary.
+            raise openai_embedder_error(error) from error
 
     async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
         return FailingMemory()
@@ -219,7 +222,7 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
 
     class SwallowingMemory:
         def __init__(self) -> None:
-            self.embedding_model = _Mem0StrictOpenAIEmbedder(FailingEmbedder())
+            self.embedding_model = _Mem0Embedder(_Mem0StrictOpenAIEmbedder(FailingEmbedder()), openai_embedder_error)
 
         async def add(self, messages: list[dict], **_kwargs: object) -> dict[str, list]:
             try:
@@ -253,13 +256,88 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
         capture_embedder_health_recorder().record(None)
 
 
+class _OllamaServerThatFailsAfterExtraction:
+    """Answer Mem0's own Ollama clients offline; once the memory model has extracted its facts, the server is down."""
+
+    def __init__(self, facts: list[str]) -> None:
+        self.facts = facts
+        self.extracted = False
+
+    def client(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(list=self.list_models, embed=self.embed, chat=self.chat)
+
+    def list_models(self) -> dict[str, list[dict[str, str]]]:
+        return {"models": [{"model": "nomic-embed-text:latest"}]}
+
+    def embed(self, *, model: str, input: str | list[str]) -> dict[str, list[list[float]]]:  # noqa: A002 - Ollama's name
+        del model
+        if self.extracted:
+            msg = "Failed to connect to Ollama. Please check that Ollama is downloaded and running."
+            raise ConnectionError(msg)
+        return {"embeddings": [[1.0, 0.0, 0.0, 0.0]] * (len(input) if isinstance(input, list) else 1)}
+
+    def chat(self, **_request: object) -> OllamaChatResponse:
+        self.extracted = True
+        content = json.dumps({"memory": [{"text": fact} for fact in self.facts]})
+        return OllamaChatResponse(model="extractor", message=OllamaMessage(role="assistant", content=content))
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("classified", [False, True], ids=["raw_sdk_error", "embedder_error"])
-async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(
+async def test_a_memory_whose_ollama_embedding_fails_after_extraction_is_not_saved_silently(
     storage_path: Path,
     config: Config,
-    classified: bool,
 ) -> None:
+    """Mem0 drops the extracted facts it cannot embed and reports the add as done, so the save raises the failure."""
+    config.memory.backend = "mem0"
+    config.memory.embedder = _MemoryEmbedderConfig(provider="ollama", config=EmbedderConfig(model="nomic-embed-text"))
+    config.memory.llm = _MemoryLLMConfig(provider="ollama", config={"model": "extractor"})
+    server = _OllamaServerThatFailsAfterExtraction(["Atlas ships Friday"])
+    runtime_paths = runtime_paths_for(config)
+
+    try:
+        with (
+            patch("mem0.embeddings.ollama.Client", server.client),
+            patch("mem0.llms.ollama.Client", server.client),
+            pytest.raises(EmbedderRequestError) as excinfo,
+        ):
+            await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths)
+        assert get_embedder_failure() == "embedder endpoint unreachable"
+    finally:
+        capture_embedder_health_recorder().record(None)
+
+    assert (str(excinfo.value), excinfo.value.retryable) == ("embedder endpoint unreachable", True)
+    with patch("mem0.embeddings.ollama.Client", server.client), patch("mem0.llms.ollama.Client", server.client):
+        assert await list_all_agent_memories("general", storage_path, config, runtime_paths) == []
+
+
+@pytest.mark.asyncio
+async def test_a_failure_of_mem0_s_memory_model_is_not_an_embedder_failure(storage_path: Path, config: Config) -> None:
+    """A rejected memory LLM key propagates as the model's error and leaves the embedder's health alone."""
+    config.memory.backend = "mem0"
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(401, request=request, json={"error": {"message": "Incorrect API key provided"}})
+    rejected = AuthenticationError("Incorrect API key provided", response=response, body=None)
+
+    class FailingMemory:
+        async def add(self, *_args: object, **_kwargs: object) -> None:
+            # Mem0's own model calls raise the raw SDK error.
+            raise rejected
+
+    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
+        return FailingMemory()
+
+    capture_embedder_health_recorder().record(None)
+    with (
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+        pytest.raises(AuthenticationError),
+    ):
+        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+
+    assert get_embedder_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(storage_path: Path, config: Config) -> None:
     """A failed Mem0 write raises the classified error with its retry flag and hint, and without the raw error."""
     config.memory.backend = "mem0"
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
@@ -268,10 +346,7 @@ async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(
 
     class FailingMemory:
         async def add(self, *_args: object, **_kwargs: object) -> None:
-            # Mem0's own model calls raise the raw SDK error; MindRoom's embedder raises the classified one.
-            if classified:
-                raise openai_embedder_error(raw_error) from raw_error
-            raise raw_error
+            raise openai_embedder_error(raw_error) from raw_error
 
     async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
         return FailingMemory()
@@ -800,7 +875,7 @@ def _mem0_memory_reporting_usage(
                 msg = "the vector store rejected the extracted facts"
                 raise RuntimeError(msg)
 
-        return SimpleNamespace(llm=mem0_llm, add=add)
+        return SimpleNamespace(llm=mem0_llm, add=add, vector_store=MagicMock())
 
     return from_config
 

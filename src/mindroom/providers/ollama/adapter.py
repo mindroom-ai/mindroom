@@ -9,36 +9,25 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from pathlib import Path
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from uuid import uuid4
 
 from ollama import AsyncClient
 
 from mindroom.credentials.sync import get_ollama_api_key, get_ollama_host
-from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import tool_result_view, with_joined_system
-from mindroom.llm.provider import (
-    Capabilities,
-    ModelIdentity,
-    StreamProgress,
-    TextDelta,
-    ToolCallReady,
-    TurnCompleted,
-    UsageReported,
-)
+from mindroom.llm.provider import Capabilities, ModelIdentity, ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import ThinkTagSplitter, finished_assistant_message, output_started
+from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.media_files import read_media_file
 from mindroom.providers.ollama.errors import provider_error
-from mindroom.providers.ollama.settings import OllamaSettings
-from mindroom.providers.remote_media import download_media
+from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
 from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
@@ -50,18 +39,14 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest, ReasoningDelta, StopReason, StreamEvent, ToolSpec
-
-logger = get_logger(__name__)
+    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
 
 _PROVIDER = "Ollama"
-# Remote images are downloaded up to this size; a larger one is left to the media fallback's note.
-_IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(slots=True)
 class _OllamaReply:
-    """What one streamed reply produced so far; a model's inline ``<think>`` block becomes its reasoning."""
+    """What one streamed reply produced so far; a model's ``thinking`` and its inline ``<think>`` block are reasoning."""
 
     content: str = ""
     reasoning: str = ""
@@ -72,7 +57,7 @@ class _OllamaReply:
     think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
 
     def add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[TextDelta | ReasoningDelta]:
-        """Record the reply text and inline reasoning the think-tag splitter released, and return them."""
+        """Record the reply text and reasoning of ``deltas``, and return them."""
         for delta in deltas:
             if isinstance(delta, TextDelta):
                 self.content += delta.text
@@ -107,15 +92,13 @@ class OllamaProvider:
         model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
-        started = time.monotonic()
-        first_output_at: float | None = None
+        timer = TurnTimer()
         try:
             client = self._sdk_client()
             chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
             async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                 async for chunk in responses:
-                    for event in _read_chunk(reply, chunk) or [StreamProgress()]:
-                        first_output_at = output_started(first_output_at, event)
+                    for event in timer.chunk(_read_chunk(reply, chunk)):
                         yield event
         except Exception as error:
             # Any exception that is not a provider failure propagates as it is.
@@ -125,18 +108,16 @@ class OllamaProvider:
         if not reply.done:
             # The stream ended before its done chunk, so the turn did not finish.
             return
-        message = finished_assistant_message(
+        for event in finished_turn(
             self.identity,
+            timer,
             content=reply.content or None,
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
             usage=reply.usage,
-            started=started,
-            first_output_at=first_output_at,
-        )
-        if reply.usage is not None:
-            yield UsageReported(message.metrics)
-        yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
+            stop_reason=_stop_reason(reply),
+        ):
+            yield event
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         """Return the chat parameters of one request; authored ``request_params`` override the settings and tools.
@@ -147,7 +128,12 @@ class OllamaProvider:
         options = dict(settings.options or {})
         if request.overrides.temperature is not None:
             options["temperature"] = request.overrides.temperature
-        authored = {"format": settings.format, "options": options or None, "keep_alive": settings.keep_alive}
+        authored = {
+            "format": settings.format,
+            "options": options or None,
+            "keep_alive": settings.keep_alive,
+            "think": settings.think,
+        }
         kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
         if tools := _format_tools(request.tools):
             kwargs["tools"] = tools
@@ -161,16 +147,15 @@ class OllamaProvider:
 
     def _sdk_client(self) -> AsyncClient:
         if self._client is None:
-            self._client = AsyncClient(**self._client_params())
+            self._client = AsyncClient(**self.client_options())
         return self._client
 
-    def _client_params(self) -> dict[str, Any]:
+    def client_options(self) -> dict[str, Any]:
+        """Return the Ollama SDK client options every request of this model goes out with, as doctor checks them."""
         settings = self.settings
-        params: dict[str, Any] = {"host": self.identity.endpoint}
+        params = ollama_client_options(self.identity.endpoint, settings.api_key)
         if settings.timeout is not None:
             params["timeout"] = settings.timeout
-        if settings.api_key:
-            params["headers"] = {"authorization": f"Bearer {settings.api_key}"}
         return {**params, **(settings.client_params or {})}
 
 
@@ -219,7 +204,7 @@ def _typed_property(schema: Any) -> Any:  # noqa: ANN401 - any JSON schema node
 
 
 async def _format_message(message: Message, provider: str) -> dict[str, Any]:
-    """Return one chat message; images are read off the event loop or downloaded.
+    """Return one chat message; images are read off the event loop, and the pipeline downloaded those at a URL.
 
     A tool result names the tool that answered, as the API documents. An image that cannot be read raises
     ``InvalidRequest``, so the media fallback replaces it with its note.
@@ -245,27 +230,14 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
 
 
 async def _image_bytes(image: Image, provider: str) -> bytes | None:
-    if image.url is not None:
-        data, _ = await download_media(image.url, kind="image", limit_bytes=_IMAGE_LIMIT_BYTES, provider=provider)
-        return data
     if image.filepath is None:
         return image.content
-    return await asyncio.to_thread(_read_image, Path(image.filepath), provider)
-
-
-def _read_image(path: Path, provider: str) -> bytes:
-    try:
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        return path.read_bytes()
-    except OSError as error:
-        logger.warning("ollama_media_file_unreadable", path=str(path), error=str(error))
-        msg = "The image attachment could not be read"
-        raise InvalidRequest(msg, provider=provider) from error
+    _, data = await asyncio.to_thread(partial(read_media_file, image.filepath, kind="image", provider=provider))
+    return data
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
-    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls.
+    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then reasoning, text, and calls.
 
     The done chunk ends the reply, so it also releases the text the think-tag splitter held back.
     """
@@ -276,6 +248,8 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         reply.usage = _usage(chunk)
         events.append(UsageReported(reply.usage, final=False))
     message = chunk.message
+    if message.thinking:
+        events.extend(reply.add_text([ReasoningDelta(message.thinking)]))
     if message.content:
         events.extend(reply.add_text(reply.think.add(message.content)))
     if chunk.done:

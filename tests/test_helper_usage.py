@@ -25,7 +25,13 @@ from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
-from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
+from mindroom.helper_usage import (
+    HelperUsageOwner,
+    get_helper_usage_owner,
+    helper_usage_context,
+    record_helper_usage,
+    record_run_usage,
+)
 from mindroom.history.session_context import (
     load_bound_scope_session,
     load_scope_session,
@@ -35,6 +41,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.llm import usage as llm_usage
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
 from mindroom.llm.provider import UsageReported
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, TokenCounts
@@ -293,7 +300,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     tool_trace_collector=[],
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-        execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+        execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
         return await execution.continue_run(
             approval_continuation(
                 approval_id="sample-approval",
@@ -708,3 +715,68 @@ async def test_returned_helper_usage_write_finishes_after_cancellation(tmp_path:
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=3)
     assert collect_admin_usage(config=config, runtime_paths=paths).totals.total_tokens == 22
+
+
+@pytest.mark.asyncio
+async def test_a_helper_run_lists_each_answer_of_its_own_model_as_a_request(tmp_path: Path) -> None:
+    """A helper that ran as a whole run records its time and its model's own answers, not history or summed retries."""
+    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=_session("session"))
+    provenance = model_provenance("helper-model", "test-provider")
+
+    def metrics(input_tokens: int) -> llm_usage.MessageMetrics:
+        return llm_usage.MessageMetrics(tokens=TokenCounts(input_tokens=input_tokens, total_tokens=input_tokens))
+
+    run = RunRecord(
+        run_id="review",
+        model="helper-model",
+        model_provider="test-provider",
+        created_at=1_700_000_000,
+        metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=30, total_tokens=30)),
+        messages=[
+            # A reply the run's input carried from the thread, with the usage its own run counted.
+            Message(
+                role="assistant",
+                content="Earlier.",
+                from_history=True,
+                metrics=metrics(100),
+                provider_data=provenance,
+            ),
+            Message(role="user", content="Review the conversation."),
+            Message(
+                role="assistant",
+                content="First.",
+                created_at=1_700_000_001,
+                metrics=metrics(10),
+                provider_data=provenance,
+            ),
+            Message(
+                role="assistant",
+                content="Retried.",
+                created_at=1_700_000_002,
+                metrics=metrics(20),
+                provider_data={AGGREGATE_USAGE_KEY: True, **provenance},
+            ),
+        ],
+    )
+
+    await record_run_usage(
+        run,
+        owner=HelperUsageOwner(
+            storage_factory=partial(create_session_storage, "test_agent", config, paths, execution_identity=None),
+            session_id="session",
+        ),
+        kind="skill_learning",
+        requester_id=None,
+    )
+
+    [(_session_id, stored)] = _usage_rows(storage)
+    row = json.loads(stored)
+    assert row["created_at"] == 1_700_000_000
+    assert row["requests"] == [
+        {
+            "created_at": 1_700_000_001,
+            "metrics": {"input_tokens": 10, "total_tokens": 10},
+            "model": "helper-model",
+            "model_provider": "test-provider",
+        },
+    ]

@@ -1,14 +1,14 @@
-"""The ``squad`` and ``panel`` teams of the storage goldens, and the comparison with the rows Agno stored.
+"""The ``squad`` and ``panel`` teams of the storage goldens, and the helpers that run and resume them.
 
 The capture ran ``Team-writer-checker`` with a scripted ``Synthetic`` provider: the writer has MindRoom's calculator,
 the checker the same calculator with ``multiply`` under the approval policy, and the leader only the delegation tool.
+``pre_resume_runs`` reads a team run Agno stored paused, which the resume tests continue.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import re
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -19,21 +19,22 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.config.main import Config
 from mindroom.custom_tools.calculator import CalculatorTools
-from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal.approval_calls import ApprovalCall, approval_arguments_digest
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
-from mindroom.teams.members import BuiltTeam
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import TeamDecisions, continue_team, run_team
-from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
-from tests.llm.agno_dict_helpers import expected_run_dict
+from tests.run_record_helpers import PROVIDER
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.run import ApprovedCall, Persist
     from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRecord
@@ -46,18 +47,8 @@ SQUAD_APPROVED = "!room:example.org:$squad-approved"
 PANEL = "!room:example.org:$panel"
 REQUESTER = "@alice:example.org"
 TEAM_LABEL = "Team (Writer, Checker)"
-PROVIDER = "Synthetic"
 # The checker's piece of a collaborate result while the checker is paused.
 CHECKER_PAUSED_PIECE = "Agent Checker: Requires human input before continuing."
-
-_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
-
-
-def golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
-    """Return one run of the storage goldens as loaded from the store Agno wrote."""
-    sessions = json.loads((STORAGE / "loaded_sessions.json").read_text(encoding="utf-8"))[store]
-    [run] = [run for run in sessions[session_id]["runs"] if run["run_id"] == run_id]
-    return run
 
 
 def pre_resume_runs(dump: str) -> dict[str, dict[str, Any]]:
@@ -102,7 +93,7 @@ def member(
     *toolkits: AdaptedToolkit,
     system: str | None = None,
 ) -> TeamMember:
-    """Return one squad member; ``system`` defaults to a short prompt (completed rows store none)."""
+    """Return one squad member; ``system`` defaults to a short prompt."""
     spec = AgentSpec(
         id=agent_id,
         name=name,
@@ -110,7 +101,23 @@ def member(
         system_messages=(Message(role="system", content=system or f"You are {name}."),),
         toolkits=toolkits,
     )
-    return TeamMember(spec=spec, role=f"{name} role.", new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST)
+    build = MemberBuild(spec=spec, new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST, toolkit_owners={})
+    return TeamMember(id=agent_id, name=name, role=f"{name} role.", build=lambda: build)
+
+
+def resolved_members(display_names: Mapping[str, str], *, model_name: str = "default") -> ResolvedExactTeamMembers:
+    """Return the resolved set of these members, display names by config name, on ``model_name``; none ever builds."""
+
+    def build(agent_name: str, model_name: str) -> AgentBuild:
+        msg = f"member {agent_name!r} on {model_name!r} is built only by a team turn"
+        raise AssertionError(msg)
+
+    return ResolvedExactTeamMembers(
+        requested_agent_names=list(display_names),
+        display_names=list(display_names.values()),
+        model_names=dict.fromkeys(display_names, model_name),
+        build=build,
+    )
 
 
 def team_spec(
@@ -152,8 +159,6 @@ def squad(
     *,
     mode: TeamMode = TeamMode.COORDINATE,
     team_id: str = "squad",
-    system: str = "You lead the squad.",
-    checker_system: str | None = None,
     leader_toolkits: Sequence[AdaptedToolkit] = (),
     writer_toolkits: Sequence[AdaptedToolkit] | None = None,
     checker_toolkits: Sequence[AdaptedToolkit] | None = None,
@@ -165,10 +170,10 @@ def squad(
         team_id,
         TEAM_LABEL,
         leader,
-        system,
+        "You lead the squad.",
         (
             member("writer", "Writer", writer, *writer_tools),
-            member("checker", "Checker", checker, *checker_tools, system=checker_system),
+            member("checker", "Checker", checker, *checker_tools),
         ),
         mode=mode,
         toolkits=leader_toolkits,
@@ -180,29 +185,9 @@ def run_context(run_id: str, session_id: str, metadata: dict[str, Any] | None = 
     return RunContext(run_id=run_id, session=UnstoredSession(session_id), user_id=REQUESTER, metadata=metadata)
 
 
-def stored_as_owned(row: dict[str, Any]) -> dict[str, Any]:
-    """Return a run row Agno stored as the owned runtime stores it: a member run holds none of the team's metadata.
-
-    Agno stored the team run's metadata on every member run; the owned runtime stores it on the team's row alone. A
-    team row's paused member runs ride along in ``member_responses`` and drop it too.
-    """
-    result = dict(row)
-    if row.get("parent_run_id") is not None:
-        result.pop("metadata", None)
-    if "member_responses" in row:
-        result["member_responses"] = [stored_as_owned(member) for member in row["member_responses"]]
-    return result
-
-
-def golden_metadata(team_row: dict[str, Any]) -> dict[str, Any]:
-    """Return the run metadata the turn started with: the stored metadata minus what MindRoom added afterwards."""
-    return {key: value for key, value in team_row["metadata"].items() if key != "io.mindroom.ai_run"}
-
-
-def prompt(team_row: dict[str, Any]) -> list[Message]:
-    """Return the leader's run input: the stored turn's user message."""
-    [user] = [message for message in team_row["messages"] if message["role"] == "user"]
-    return [Message(role="user", content=user["content"])]
+def prompt(text: str) -> list[Message]:
+    """Return the leader's run input: one user message holding ``text``."""
+    return [Message(role="user", content=text)]
 
 
 def approval(call_id: str, name: str, arguments: dict[str, Any], *, agent: str) -> ApprovalCall:
@@ -276,7 +261,14 @@ def resume_team(
     persist: Persist[AnyRunRecord] = no_store,
     request_template: ModelRequest = EMPTY_REQUEST,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Resume ``paused`` (``continue_team``) with the test's decisions under no hooks, storing nothing unless asked."""
+    """Resume ``paused`` (``continue_team``) with the test's decisions under no hooks, storing nothing unless asked.
+
+    The members whose paused runs the resume continues are built first, as a saved approval's resume builds them.
+    """
+    paused_members = {requirement.member_agent_id for requirement in paused.requirements or ()}
+    for member in team.members:
+        if member.id in paused_members and member.built is None:
+            member.built = member.build()
     return continue_team(
         team,
         paused,
@@ -296,53 +288,3 @@ async def collect(stream: AsyncIterator[TeamRunEvent]) -> tuple[list[TeamRunEven
     assert isinstance(finished, RunFinished)
     assert isinstance(finished.record, TeamRunRecord)
     return events, finished.record
-
-
-def comparable(run: dict[str, Any]) -> dict[str, Any]:
-    """Return a stored run dict as one comparison sees it: Agno-only keys out, ids renumbered, clocks as sentinels.
-
-    Prompt-role messages leave completed rows, as the store strips them; random ids become ``<id-n>`` in
-    first-appearance order; every timestamp and duration becomes a sentinel, so its presence is compared but not its
-    value; the run metadata MindRoom adds after the turn (``io.mindroom.ai_run``) goes, the rest of the metadata is
-    compared.
-    """
-    text = json.dumps(_stored_shape(expected_run_dict(run)), sort_keys=True)
-    ids: dict[str, str] = {}
-    text = _UUID.sub(lambda match: ids.setdefault(match.group(), f"<id-{len(ids) + 1}>"), text)
-    return _with_clock_sentinels(json.loads(text))
-
-
-def _stored_shape(run: dict[str, Any]) -> dict[str, Any]:
-    result = dict(run)
-    if run["status"] != "PAUSED":
-        result["messages"] = [message for message in run["messages"] if message["role"] != "system"]
-    if "member_responses" in run:
-        result["member_responses"] = [_stored_shape(item) for item in run["member_responses"]]
-    return result
-
-
-_CLOCK = "<clock>"
-_METADATA_ADDED_AFTER_THE_TURN = frozenset({"io.mindroom.ai_run"})
-
-
-def _clocked(values: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
-    """Return ``values`` with every clock reading among ``keys`` replaced by the sentinel, presence kept."""
-    return {key: (_CLOCK if key in keys and value is not None else value) for key, value in values.items()}
-
-
-def _with_clock_sentinels(run: dict[str, Any]) -> dict[str, Any]:
-    result = _clocked(run, frozenset({"created_at"}))
-    if result.get("metadata") is not None:
-        result["metadata"] = {
-            key: value for key, value in result["metadata"].items() if key not in _METADATA_ADDED_AFTER_THE_TURN
-        }
-    result["messages"] = [_clocked(message, frozenset({"id", "created_at"})) for message in run["messages"]]
-    if "metrics" in result and result["metrics"] is not None:
-        # The duration is a clock reading. The first-token time is left out altogether: Agno's own timer stamped it
-        # even on a tool-call-only request whose message carried none, where the owned loop records only what the
-        # provider reported, so even its presence differs.
-        metrics = _clocked(result["metrics"], frozenset({"duration"}))
-        result["metrics"] = {key: value for key, value in metrics.items() if key != "time_to_first_token"}
-    if "member_responses" in result:
-        result["member_responses"] = [_with_clock_sentinels(item) for item in result["member_responses"]]
-    return result

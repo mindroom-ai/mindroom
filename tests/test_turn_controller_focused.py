@@ -519,7 +519,6 @@ def _build_harness(
     )
     hook_context = HookContextSupport(
         runtime=runtime,
-        logger=logger,
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
@@ -618,7 +617,6 @@ def _build_harness(
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
                 complete_turn=AsyncMock(),
-                hold_conversation=lambda _continuation: None,
                 approval_ended=lambda _ended: None,
             ),
         ),

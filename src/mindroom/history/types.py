@@ -108,6 +108,11 @@ class ResolvedHistorySettings:
     has_authored_compaction_config: bool
 
     @property
+    def automatic_compaction(self) -> bool:
+        """Return whether compaction runs on its own before and during a reply; a manual request compacts regardless."""
+        return self.has_authored_compaction_config and self.compaction_config.enabled
+
+    @property
     def replays_whole_history(self) -> bool:
         """Return whether no authored run, message, or tool-call limit drops older history from replay."""
         return self.policy.mode == "all" and self.max_tool_calls_from_history is None
@@ -146,7 +151,7 @@ class HistoryScopeState:
 class ResolvedHistoryExecutionPlan:
     """Single source of truth for history-budget policy in one run scope."""
 
-    authored_compaction_enabled: bool
+    automatic_compaction: bool
     text_compaction_available: bool
     explicit_compaction_model: bool
     compaction_model_name: str

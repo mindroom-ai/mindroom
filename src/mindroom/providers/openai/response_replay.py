@@ -1,8 +1,9 @@
-"""Replay a stored Responses turn's ordered output items in place of the formatter's reconstruction.
+"""Replay a stored assistant message on a Responses request: from its checkpoint, its recorded output, or a rebuild.
 
-A turn that produced reasoning keeps its complete ordered output under ``RESPONSE_OUTPUT_KEY`` and hosted
-tool-search items under ``TOOL_SEARCH_ITEMS_KEY`` in the assistant message's ``provider_data``; both keys are
-part of the stored run format.
+Every Responses reply keeps its response's ordered output items under ``RESPONSE_OUTPUT_KEY`` in its
+``provider_data``, which is part of the stored run format. A reply whose output carries encrypted reasoning goes as
+recorded, so the reasoning stays attached to the items it produced; any other message, another provider's included,
+is rebuilt from its canonical text and calls.
 """
 
 from __future__ import annotations
@@ -10,69 +11,97 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.native_compaction import checkpoint_items
+from mindroom.providers.openai.legacy_response_replay import legacy_tool_search_items
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from mindroom.llm.messages import Message
 
-__all__ = ["RESPONSE_OUTPUT_KEY", "TOOL_SEARCH_ITEMS_KEY", "formatted_input_with_provider_items"]
+__all__ = ["RESPONSE_OUTPUT_KEY", "assistant_replay_items", "recorded_output"]
 
-TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
 RESPONSE_OUTPUT_KEY = "mindroom_response_output"
+_TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 
 
-def formatted_input_with_provider_items(
-    messages: Sequence[Message],
-    formatted_input: list[Any],
-    *,
-    native_route: str | None,
-    replay_reasoning: bool,
-) -> list[Any]:
-    """Replace each replayed assistant span once, preserving canonical tool edits.
+def recorded_output(message: Message) -> list[dict[str, Any]] | None:
+    """Return the ordered output items the response behind ``message`` recorded, or None when it recorded none."""
+    items = (message.provider_data or {}).get(RESPONSE_OUTPUT_KEY)
+    return items if isinstance(items, list) else None
 
-    One cursor owns checkpoint, reasoning, and hosted-search insertion; the formatter still owns message
-    conversion, media, call-ID mapping, and tool results. Callers supply only the messages after any
-    stored-response continuation.
+
+def assistant_replay_items(message: Message, native_route: str | None) -> list[dict[str, Any]]:
+    """Return the input items that replay one assistant message, whose calls carry the request's tool-call ids.
+
+    A checkpoint on ``native_route`` stands for the message, and a recorded output carrying encrypted reasoning goes
+    as recorded while canonical history still holds what it records; any other message is rebuilt.
     """
-    prepared_input = list(formatted_input)
-    cursor = 0
-    for message in messages:
-        if message.role != "assistant":
-            continue
-        anchor = _anchor_index(prepared_input, cursor, message)
-        if anchor is None:
-            continue
-        data = message.provider_data or {}
-        # The formatter emits a turn's function calls, or its one message item.
-        size = len(message.tool_calls) if message.tool_calls else 1
-        replacement = checkpoint_items(message, native_route) or _canonical_response_output(
-            message,
-            prepared_input[anchor : anchor + size],
-        )
-        if replacement is None:
-            span = prepared_input[anchor : anchor + size]
-            # A span goes as formatted only after the continued response or when no message records one, and only a
-            # Responses reply, which always records its response ID, records search items.
-            replacement = (
-                _reconstructed_response_input(message, data.get(TOOL_SEARCH_ITEMS_KEY) or [], span)
-                if replay_reasoning
-                else span
-            )
-        prepared_input[anchor : anchor + size] = replacement
-        cursor = anchor + len(replacement)
-    return prepared_input
+    if checkpoint := checkpoint_items(message, native_route):
+        return checkpoint
+    calls = _function_call_items(message)
+    output = recorded_output(message)
+    if output is None:
+        return _rebuilt(message, legacy_tool_search_items(message), calls)
+    if (replayed := _as_recorded(message, output, calls)) is not None:
+        return replayed
+    return _rebuilt(message, [item for item in output if item.get("type") in _TOOL_SEARCH_ITEM_TYPES], calls)
 
 
-def _reconstructed_response_input(
+def _function_call_items(message: Message) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function_call",
+            "id": call.get("id"),
+            "call_id": call.get("call_id", call.get("id")),
+            "name": call["function"]["name"],
+            "arguments": call["function"]["arguments"],
+            "status": "completed",
+        }
+        for call in message.tool_calls or ()
+    ]
+
+
+def _as_recorded(
+    message: Message,
+    output: list[dict[str, Any]],
+    calls: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Return ``output`` with the turn's canonical calls in place of the recorded ones, or None when it cannot go.
+
+    It goes only when all its reasoning carries encrypted content: output without reasoning holds nothing a rebuild
+    loses, and a reasoning item without encrypted content, as a stored response returns it, cannot be resent. Output
+    whose text differs from the canonical text, or that lacks one of the canonical calls, no longer matches the turn,
+    so the turn is rebuilt. A recorded call canonical history no longer holds stays out.
+    """
+    reasoning = [item for item in output if item.get("type") == "reasoning"]
+    if not reasoning or not all(item.get("encrypted_content") for item in reasoning):
+        return None
+    text = "".join(
+        part.get("text", "")
+        for item in output
+        if item.get("type") == "message"
+        for part in item.get("content", [])
+        if part.get("type") == "output_text"
+    )
+    if text != (message.content or ""):
+        return None
+    by_call_id = {call["call_id"]: call for call in calls}
+    if not by_call_id.keys() <= {item.get("call_id") for item in output if item.get("type") == "function_call"}:
+        return None
+    return [
+        by_call_id[item.get("call_id")] if item.get("type") == "function_call" else item
+        for item in output
+        if item.get("type") != "function_call" or item.get("call_id") in by_call_id
+    ]
+
+
+def _rebuilt(
     message: Message,
     search_items: list[dict[str, Any]],
-    formatted_span: list[Any],
+    calls: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Build valid input from canonical content when original output cannot be reused.
+    """Rebuild a message from its canonical text and calls, after the hosted tool searches its response ran.
 
-    The span goes without the reasoning that produced it, so no item keeps its provider item ID: the provider rejects
-    a function call's or a hosted search item's ID sent without the reasoning item that preceded it, stored or not.
+    The rebuild sends no reasoning, so no item keeps its provider item ID: the provider rejects a function call's or a
+    hosted search item's ID sent without the reasoning item that preceded it, stored or not.
     """
     content = message.content
     if isinstance(content, list):
@@ -85,61 +114,8 @@ def _reconstructed_response_input(
             for part in content
         ]
     if message.tool_calls:
-        # The formatter's span is the turn's function calls; their text goes ahead of them.
-        span = [{"role": "assistant", "content": content}, *formatted_span] if content else list(formatted_span)
+        # A turn's text goes ahead of its calls.
+        text = [{"role": "assistant", "content": content}] if content else []
     else:
-        # The formatter's span is the turn's message item.
-        span = [{**formatted_span[0], "content": content if content is not None else ""}]
-    return [{key: value for key, value in item.items() if key != "id"} for item in (*search_items, *span)]
-
-
-def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:
-    """Replay original ordering using only the text and calls still in canonical history."""
-    items = (message.provider_data or {}).get(RESPONSE_OUTPUT_KEY)
-    if not isinstance(items, list):
-        return None
-    text = "".join(
-        part.get("text", "")
-        for item in items
-        if item.get("type") == "message"
-        for part in item.get("content", [])
-        if part.get("type") == "output_text"
-    )
-    if text != (message.content or ""):
-        return None
-    calls = {
-        item.get("call_id"): item
-        for item in formatted_span
-        if isinstance(item, dict) and item.get("type") == "function_call"
-    }
-    captured_call_ids = {item.get("call_id") for item in items if item.get("type") == "function_call"}
-    if not calls.keys() <= captured_call_ids:
-        return None
-    return [
-        calls[item.get("call_id")] if item.get("type") == "function_call" else item
-        for item in items
-        if item.get("type") != "function_call" or item.get("call_id") in calls
-    ]
-
-
-def _anchor_index(formatted_input: list[Any], start: int, message: Message) -> int | None:
-    """Return the formatted-input index where one message's items belong."""
-    if message.tool_calls:
-        anchor_ids = {tool_call.get("id") for tool_call in message.tool_calls}
-        anchor_ids |= {tool_call.get("call_id") for tool_call in message.tool_calls}
-        anchor_ids.discard(None)
-        for index in range(start, len(formatted_input)):
-            item = formatted_input[index]
-            if (
-                isinstance(item, dict)
-                and item.get("type") == "function_call"
-                and (item.get("id") in anchor_ids or item.get("call_id") in anchor_ids)
-            ):
-                return index
-        return None
-    content = message.content if message.content is not None else ""
-    for index in range(start, len(formatted_input)):
-        item = formatted_input[index]
-        if isinstance(item, dict) and item.get("role") == "assistant" and item.get("content") == content:
-            return index
-    return None
+        text = [{"role": "assistant", "content": content if content is not None else ""}]
+    return [{key: value for key, value in item.items() if key != "id"} for item in (*search_items, *text, *calls)]

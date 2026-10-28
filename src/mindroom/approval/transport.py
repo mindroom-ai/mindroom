@@ -183,7 +183,7 @@ class ApprovalMatrixTransport:
                 delivery_event_type=claimed.event_type,
             )
 
-        delivery_id = await store.enqueue_unavailable_approval_notice(
+        delivery_id = await store.approvals.enqueue_unavailable_approval_notice(
             approval_id=continuation.approval_id,
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,

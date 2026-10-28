@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,40 +12,52 @@ import nio
 import pytest
 
 from mindroom.approval.inbound import parse_approval_response_event
-from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
 from mindroom.approval.receipt import build_approval_receipt
-from mindroom.approval.response import ApprovalResponseCoordinator, plan_approval_calls
+from mindroom.approval.response import plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.approval.transport import ApprovalMatrixTransport, _approval_delivery_content
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalCall,
+    ApprovalCardView,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     BackgroundApprovalDecision,
+    CallKey,
     DeliveryStage,
     EventClass,
     EventJournalStore,
     EventKind,
     InboundEvent,
     MatrixDelivery,
-    StoredApprovalCard,
+    approval_calls,
+    approval_grants,
 )
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import AUTO_APPROVE_OPTIONS, ApprovalOperation, grant_operation
+from tests.approval_card_helpers import (
+    card_content,
+    card_is_terminal,
+    pending_card,
+    resolve_card_event,
+    wait_for_pending_card,
+)
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import handle_card_response_for_test, test_runtime_paths
+from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
 
 
 @pytest.mark.asyncio
@@ -65,11 +79,11 @@ async def test_terminal_wire_edits_preserve_thread_scope_for_grant_and_revocatio
                 revoked.set()
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
-        grant = await journal.principal("router@shared").approval_grant_for_card(
+        grant = await journal.principal("router@shared").approvals.approval_grant_for_card(
             room_id="!room:test",
             card_event_id=card,
         )
@@ -110,7 +124,7 @@ async def test_origin_expiring_during_decision_does_not_advertise_a_nonexistent_
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         monkeypatch.setattr("time.time_ns", lambda: 9_000_000_000_000_000_000)
@@ -119,7 +133,10 @@ async def test_origin_expiring_during_decision_does_not_advertise_a_nonexistent_
         assert final.payload["status"] == "expired"
         assert "auto_approval" not in final.payload
         assert (
-            await journal.principal("router@shared").approval_grant_for_card(room_id="!room:test", card_event_id=card)
+            await journal.principal("router@shared").approvals.approval_grant_for_card(
+                room_id="!room:test",
+                card_event_id=card,
+            )
             is None
         )
     finally:
@@ -140,15 +157,7 @@ async def test_only_policy_pause_offers_timed_approval(
     monkeypatch.setattr("mindroom.approval.manager._MANAGER", manager)
     responder = journal.principal("agent@code")
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
-    coordinator = ApprovalResponseCoordinator(
-        config=lambda: config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        store=responder,
-        delivery_gateway=MagicMock(spec=DeliveryGateway),
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=AsyncMock(return_value=True),
-        release_approval=AsyncMock(return_value=True),
-    )
+    runtime_paths = test_runtime_paths(tmp_path)
     tool = ToolExecution(
         tool_call_id="call-authored",
         tool_name="shell",
@@ -158,8 +167,8 @@ async def test_only_policy_pause_offers_timed_approval(
     )
     plan = await plan_approval_calls(
         ((tool, "code"),),
-        config=coordinator.config(),
-        runtime_paths=coordinator.runtime_paths,
+        config=config,
+        runtime_paths=runtime_paths,
         requester_id="@human:test",
         toolkit_owners={("code", "shell"): "test_toolkit"},
         room_id="!room:test",
@@ -191,9 +200,13 @@ async def test_only_policy_pause_offers_timed_approval(
     )
     assert await paused_for_approval(responder, continuation) is not None
     try:
-        await coordinator.publish_generation(
+        await publish_generation(
             continuation,
             plan,
+            config=config,
+            runtime_paths=runtime_paths,
+            store=responder.approvals,
+            retry_sources=lambda _room, _sources: None,
             target=MessageTarget(
                 room_id="!room:test",
                 source_thread_id="$thread",
@@ -203,17 +216,22 @@ async def test_only_policy_pause_offers_timed_approval(
             ),
             failure_reason="publication failed",
         )
-        card = await journal.principal("router@shared").pending_approval_card(
+        card = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id="$authored-0-0",
         )
         assert card is not None
         if approval_type == "mindroom_policy":
-            assert card.card["content"]["auto_approve_options"] == [300, 600, 1800]
+            assert (await card_content(journal.principal("router@shared"), card))["auto_approve_options"] == [
+                300,
+                600,
+                1800,
+            ]
         else:
-            assert "auto_approve_options" not in card.card["content"]
+            assert "auto_approve_options" not in (await card_content(journal.principal("router@shared"), card))
             await _approve(manager, "$authored-0-0")
-            current = await responder.approval_continuation("authored")
+            current = await responder.approvals.approval_continuation("authored")
             assert current is not None
             assert current.calls[0].decision is None
     finally:
@@ -232,22 +250,14 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
     monkeypatch.setattr("mindroom.approval.manager._MANAGER", manager)
     responder = journal.principal("agent@code")
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
-    coordinator = ApprovalResponseCoordinator(
-        config=lambda: config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        store=responder,
-        delivery_gateway=MagicMock(spec=DeliveryGateway),
-        retry_sources=lambda _room, _sources: None,
-        finish_approval=AsyncMock(return_value=True),
-        release_approval=AsyncMock(return_value=True),
-    )
+    runtime_paths = test_runtime_paths(tmp_path)
     sent = []
 
     async def send(delivery: MatrixDelivery) -> str:
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         for name in ("origin", "reuse"):
             tool = ToolExecution(
@@ -259,8 +269,8 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
             )
             plan = await plan_approval_calls(
                 ((tool, "code"),),
-                config=coordinator.config(),
-                runtime_paths=coordinator.runtime_paths,
+                config=config,
+                runtime_paths=runtime_paths,
                 requester_id="@human:test",
                 toolkit_owners={("code", "shell"): "test_toolkit"},
                 room_id="!room:test",
@@ -296,9 +306,13 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 ),
             )
             assert continuation is not None
-            await coordinator.publish_generation(
+            await publish_generation(
                 continuation,
                 plan,
+                config=config,
+                runtime_paths=runtime_paths,
+                store=responder.approvals,
+                retry_sources=lambda _room, _sources: None,
                 target=MessageTarget(
                     room_id="!room:test",
                     source_thread_id="$thread",
@@ -316,7 +330,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 assert len(sent) == 1
                 assert sent[0].payload["status"] == "approved"
                 assert sent[0].payload["approvable"] is False
-                stored = await responder.approval_continuation(name)
+                stored = await responder.approvals.approval_continuation(name)
                 assert stored is not None
                 assert stored.state == "ready"
                 receipt = build_approval_receipt(stored.calls)
@@ -342,7 +356,7 @@ async def test_grant_batch_terminal_edits_fit_after_large_inline_argument_cards(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first", command="x" * 40_000)
         await _card(journal, manager, "sibling", command="y" * 40_000)
@@ -380,7 +394,7 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
@@ -397,24 +411,28 @@ async def test_subsequent_granted_call_publishes_exact_terminal_receipt(
         assert "auto_approval" not in receipt.payload
         assert "auto_approve_options" not in receipt.payload
         assert (
-            await journal.principal("router@shared").pending_approval_card(
+            await pending_card(
+                journal.principal("router@shared").approvals,
                 room_id="!room:test",
                 card_event_id="$card-subsequent",
             )
             is None
         )
-        continuation = await journal.principal("agent@code").approval_continuation("subsequent")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.state == "ready"
         assert continuation.calls[0].decision.value == "approved"
         audit = await journal.backend.read(
             lambda transaction: transaction.fetchone(
-                "SELECT continuation_id, tool_call_id, grant_id FROM approval_grant_cards WHERE delivery_id = ?",
+                "SELECT cards.owner_id, cards.tool_call_id, calls.grant_id FROM approval_cards AS cards "
+                "JOIN approval_calls AS calls ON calls.owner_id = cards.owner_id "
+                "AND calls.generation = cards.generation AND calls.tool_call_id = cards.tool_call_id "
+                "WHERE cards.delivery_id = ?",
                 ("card-subsequent",),
             ),
         )
         assert audit is not None
-        assert audit["continuation_id"] == "subsequent"
+        assert audit["owner_id"] == "subsequent"
         assert audit["tool_call_id"] == "call-subsequent"
         assert audit["grant_id"]
     finally:
@@ -443,13 +461,13 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
                 msg = "Matrix accepted the receipt but its response was lost"
                 raise TimeoutError(msg)
 
-            manager.send_delivery = lose_acknowledgement
+            manager.transport.send_approval_delivery = lose_acknowledgement
         receipt_event_id = await _card(journal, manager, "subsequent")
 
         async def resolve_receipt(room_id: str, event_id: str) -> str | None:
             return "card-subsequent" if (room_id, event_id) == ("!room:test", receipt_event_id) else None
 
-        manager.resolve_action_delivery = resolve_receipt
+        manager.transport.resolve_approval_action_delivery = resolve_receipt
         delivery = await owner.load_matrix_delivery(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
         assert delivery is not None
         assert delivery.acknowledged_event_id == (None if lost_acknowledgement else receipt_event_id)
@@ -466,14 +484,18 @@ async def test_automatic_receipt_reply_is_consumed_before_maintenance(
         )
         assert result.consumed is True
         before_consume.assert_awaited_once()
-        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
-        assert not await owner.is_terminal_approval_card(room_id="!other:test", card_event_id=receipt_event_id)
-        assert not await owner.is_terminal_approval_card(room_id="!room:test", card_event_id="$unknown")
-        continuation = await journal.principal("agent@code").approval_continuation("subsequent")
+        assert await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=receipt_event_id)
+        assert not await card_is_terminal(
+            owner.approvals,
+            room_id="!other:test",
+            card_event_id=receipt_event_id,
+        )
+        assert not await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id="$unknown")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
-        await owner.maintain_automatic_approvals()
-        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=receipt_event_id)
+        await owner.approvals.maintain_automatic_approvals()
+        assert await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=receipt_event_id)
     finally:
         await manager.shutdown()
 
@@ -490,7 +512,7 @@ async def test_republished_receipt_aliases_remain_terminal(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
-    manager.sending_device = lambda: "original-device"
+    manager.transport.transport_device_id = lambda: "original-device"
     owner = journal.principal("router@shared")
     try:
         first = await _card(journal, manager, "first")
@@ -500,17 +522,17 @@ async def test_republished_receipt_aliases_remain_terminal(
             msg = "Matrix accepted the receipt but its response was lost"
             raise TimeoutError(msg)
 
-        manager.send_delivery = lose_acknowledgement
+        manager.transport.send_approval_delivery = lose_acknowledgement
         old_event_id = await _card(journal, manager, "subsequent")
-        manager.sending_device = lambda: "replacement-device"
-        manager.resolve_delivery = AsyncMock(return_value=None)
-        manager.send_delivery = AsyncMock(return_value="$replacement-receipt")
+        manager.transport.transport_device_id = lambda: "replacement-device"
+        manager.transport.resolve_approval_delivery = AsyncMock(return_value=None)
+        manager.transport.send_approval_delivery = AsyncMock(return_value="$replacement-receipt")
         assert (
             await manager._worker().flush(delivery_id="card-subsequent", stage=DeliveryStage.INITIAL)
             == "$replacement-receipt"
         )
         if retire_before_reply:
-            await owner.maintain_automatic_approvals()
+            await owner.approvals.maintain_automatic_approvals()
 
         async def get_event(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
             response = nio.RoomGetEventResponse()
@@ -535,7 +557,7 @@ async def test_republished_receipt_aliases_remain_terminal(
             client=MagicMock(user_id="@router:test", room_get_event=AsyncMock(side_effect=get_event)),
         )
         transport = ApprovalMatrixTransport(bot_provider=lambda name: router if name == "router" else None)
-        manager.resolve_action_delivery = transport.resolve_approval_action_delivery
+        manager.transport.resolve_approval_action_delivery = transport.resolve_approval_action_delivery
         for event_id in ("$untrusted-receipt", "$unknown-delivery"):
             result = await handle_card_response_for_test(
                 manager,
@@ -547,7 +569,7 @@ async def test_republished_receipt_aliases_remain_terminal(
                 authorize_responder=lambda _agent: True,
             )
             assert result.consumed is False
-            assert not await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=event_id)
+            assert not await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=event_id)
         for event_id in (old_event_id, "$replacement-receipt"):
             before_consume = AsyncMock()
             result = await handle_card_response_for_test(
@@ -562,10 +584,14 @@ async def test_republished_receipt_aliases_remain_terminal(
             )
             assert result.consumed is True
             before_consume.assert_awaited_once()
-        await owner.maintain_automatic_approvals()
-        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id=old_event_id)
-        assert await owner.is_terminal_approval_card(room_id="!room:test", card_event_id="$replacement-receipt")
-        continuation = await journal.principal("agent@code").approval_continuation("subsequent")
+        await owner.approvals.maintain_automatic_approvals()
+        assert await card_is_terminal(owner.approvals, room_id="!room:test", card_event_id=old_event_id)
+        assert await card_is_terminal(
+            owner.approvals,
+            room_id="!room:test",
+            card_event_id="$replacement-receipt",
+        )
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("subsequent")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
     finally:
@@ -586,7 +612,7 @@ async def test_approval_receipts_preserve_scope_and_original_timed_decision(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first")
         await _card(journal, manager, "sibling")
@@ -638,7 +664,7 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
     """A failed receipt send survives recovery and leaves an approval-only tombstone."""
     journal = journal_database()
     manager = _manager(journal, tmp_path)
-    manager.sending_device = lambda: "test-device"
+    manager.transport.transport_device_id = lambda: "test-device"
     delivered: list[MatrixDelivery] = []
     try:
         first = await _card(journal, manager, "first")
@@ -648,9 +674,9 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
             msg = "Matrix is temporarily unavailable"
             raise TimeoutError(msg)
 
-        manager.send_delivery = fail_send
+        manager.transport.send_approval_delivery = fail_send
         await _card(journal, manager, "deferred", command="original command")
-        await manager.cards.maintain_automatic_approvals()
+        await manager.cards.approvals.maintain_automatic_approvals()
         pending = await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL)
         assert pending is not None
         assert pending.payload["arguments"] == {"command": "original command"}
@@ -663,13 +689,13 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
         delivered.append(delivery)
         return "$receipt-deferred"
 
-    manager.send_delivery = recover_send
-    manager.sending_device = lambda: recovery_device
+    manager.transport.send_approval_delivery = recover_send
+    manager.transport.transport_device_id = lambda: recovery_device
 
     async def no_receipt_in_history(_delivery: MatrixDelivery) -> str | None:
         return None
 
-    manager.resolve_delivery = no_receipt_in_history
+    manager.transport.resolve_approval_delivery = no_receipt_in_history
     try:
         await manager.recover_cards_on_startup()
         assert len(delivered) == 1
@@ -677,13 +703,14 @@ async def test_automatic_receipt_recovery_retires_only_acknowledged_payload(
         assert (
             await manager.cards.load_matrix_delivery(delivery_id="card-deferred", stage=DeliveryStage.INITIAL) is None
         )
-        assert await manager.cards.is_terminal_approval_card(
+        assert await card_is_terminal(
+            manager.cards.approvals,
             room_id="!room:test",
             card_event_id="$receipt-deferred",
         )
         await manager.recover_cards_on_startup()
         assert len(delivered) == 1
-        continuation = await journal.principal("agent@code").approval_continuation("deferred")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("deferred")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
     finally:
@@ -705,17 +732,18 @@ async def test_transport_refused_arguments_cannot_receive_automatic_approval(
         async def refuse_arguments(_room: str, _thread: str | None, content: dict) -> dict:
             return {**content, "approvable": False}
 
-        manager.prepare_event = refuse_arguments
+        manager.transport.prepare_approval_event = refuse_arguments
         await _card(journal, manager, "refused")
-        continuation = await journal.principal("agent@code").approval_continuation("refused")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("refused")
         assert continuation is not None
         assert continuation.calls[0].decision is None
-        stored = await journal.principal("router@shared").pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id="$card-refused",
         )
         assert stored is not None
-        assert "auto_approve_options" not in stored.card["content"]
+        assert "auto_approve_options" not in (await card_content(journal.principal("router@shared"), stored))
     finally:
         await manager.shutdown()
 
@@ -730,17 +758,22 @@ async def test_redacted_arguments_keep_timed_approval(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "redacted", command="api_key=" + "sk-" + "Ab3Z" * 6)
-        stored = await journal.principal("router@shared").pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["arguments"] == {"command": "api_key=\u27e6secret-1\u27e7"}
-        assert stored.card["content"].get("approvable", True) is True
-        assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+        assert (await card_content(journal.principal("router@shared"), stored))["arguments"] == {
+            "command": "api_key=\u27e6secret-1\u27e7",
+        }
+        assert (await card_content(journal.principal("router@shared"), stored)).get("approvable", True) is True
+        assert (await card_content(journal.principal("router@shared"), stored))["auto_approve_options"] == list(
+            AUTO_APPROVE_OPTIONS,
+        )
 
         assert (await _approve(manager, card)).consumed
-        grant = await journal.principal("router@shared").approval_grant_for_card(
+        grant = await journal.principal("router@shared").approvals.approval_grant_for_card(
             room_id="!room:test",
             card_event_id=card,
         )
@@ -772,13 +805,14 @@ async def test_approval_card_shows_commands_as_written(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "visible", command=command)
-        stored = await journal.principal("router@shared").pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["arguments"] == {"command": shown}
-        assert stored.card["content"].get("approvable", True) is True
+        assert (await card_content(journal.principal("router@shared"), stored))["arguments"] == {"command": shown}
+        assert (await card_content(journal.principal("router@shared"), stored)).get("approvable", True) is True
     finally:
         await manager.shutdown()
 
@@ -796,20 +830,21 @@ async def test_arguments_beyond_redaction_depth_cannot_be_approved(
     manager = _manager(journal, tmp_path)
     try:
         card = await _card(journal, manager, "nested", command=nested)
-        stored = await journal.principal("router@shared").pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id="!room:test",
             card_event_id=card,
         )
         assert stored is not None
-        assert stored.card["content"]["approvable"] is False
-        assert "full_arguments" not in stored.card["content"]
-        assert "auto_approve_options" not in stored.card["content"]
+        assert (await card_content(journal.principal("router@shared"), stored))["approvable"] is False
+        assert "full_arguments" not in (await card_content(journal.principal("router@shared"), stored))
+        assert "auto_approve_options" not in (await card_content(journal.principal("router@shared"), stored))
 
         result = await _approve(manager, card, seconds=None)
 
         assert result.consumed
         assert result.error_reason is not None
-        continuation = await journal.principal("agent@code").approval_continuation("nested")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("nested")
         assert continuation is not None
         assert continuation.calls[0].decision is not None
         assert continuation.calls[0].decision.value == "denied"
@@ -829,13 +864,13 @@ async def test_departure_and_changed_binding_invalidate_grants(
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
         await _card(journal, manager, "binding-changed", operation="new-binding:shell")
-        continuation = await journal.principal("agent@code").approval_continuation("binding-changed")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("binding-changed")
         assert continuation is not None
         assert continuation.calls[0].decision is None
         await admit_room_membership(journal.principal("agent@code"), "!room:test", "leave")
         await admit_room_membership(journal.principal("agent@code"), "!room:test", "join")
         await _card(journal, manager, "rejoined")
-        continuation = await journal.principal("agent@code").approval_continuation("rejoined")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("rejoined")
         assert continuation is not None
         assert continuation.calls[0].decision is None
     finally:
@@ -857,22 +892,24 @@ async def test_terminal_calls_win_over_grants(
         second = await _card(journal, manager, "second")
         responder = journal.principal("agent@code")
         if terminal == "failing":
-            await responder.request_approval_failure(
+            await responder.approvals.request_approval_failure(
                 "second",
-                "execution binding changed",
+                ApprovalFailure(ApprovalFailureKind.ERROR, "execution binding changed"),
                 expected_state="waiting",
                 expected_generation=0,
                 expected_runtime_generation=None,
             )
         else:
-            await journal.principal("router@shared").resolve_continuation_approval_card(
+            await resolve_card_event(
+                journal.principal("router@shared").approvals,
+                room_id="!room:test",
                 card_event_id=second,
                 requested_status=terminal,
                 reason="human declined",
                 metadata=ApprovalDecisionMetadata(),
             )
         await _approve(manager, first)
-        continuation = await responder.approval_continuation("second")
+        continuation = await responder.approvals.approval_continuation("second")
         assert continuation is not None
         assert continuation.calls[0].decision.value == ("denied" if terminal == "failing" else terminal)
     finally:
@@ -899,11 +936,14 @@ async def test_changed_binding_refuses_originating_timed_action(
             current_binding="new-binding",
             authorize_responder=lambda _agent: True,
         )
-        continuation = await journal.principal("agent@code").approval_continuation("first")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("first")
         assert continuation is not None
         assert continuation.calls[0].decision is None
         assert (
-            await journal.principal("router@shared").approval_grant_for_card(room_id="!room:test", card_event_id=card)
+            await journal.principal("router@shared").approvals.approval_grant_for_card(
+                room_id="!room:test",
+                card_event_id=card,
+            )
             is None
         )
     finally:
@@ -1000,11 +1040,11 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
         delivered.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
-        grant = await manager.cards.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
         assert grant is not None
         await manager.handle_grant_revocation(
             room_id="!room:test",
@@ -1026,7 +1066,7 @@ async def test_revocation_ack_waits_for_original_edit_and_recovers_after_restart
         delivered.append(delivery)
         return "$recovered-" + delivery.delivery_id
 
-    manager.send_delivery = recovered_send
+    manager.transport.send_approval_delivery = recovered_send
     try:
         await manager.recover_cards_on_startup()
         assert len(delivered) == 2
@@ -1049,7 +1089,7 @@ async def test_matching_card_does_not_advertise_a_revoke_target_it_does_not_own(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         first = await _card(journal, manager, "first")
         await _card(journal, manager, "second")
@@ -1079,7 +1119,7 @@ async def test_two_store_reservation_and_grant_race_cannot_strand_pending_call(
     try:
         first = await _card(journal, manager, "first")
         await asyncio.gather(_approve(manager, first), _card(second_journal, second_manager, "racing"))
-        continuation = await journal.principal("agent@code").approval_continuation("racing")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("racing")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
     finally:
@@ -1112,7 +1152,7 @@ async def test_grant_maintenance_removes_unused_retired_card_scope(
         await manager.recover_cards_on_startup()
         scopes = await journal.backend.read(
             lambda transaction: transaction.fetchall(
-                "SELECT delivery_id FROM approval_grant_cards WHERE principal_id = ?",
+                "SELECT delivery_id FROM approval_card_scopes WHERE principal_id = ?",
                 ("router@shared",),
             ),
         )
@@ -1137,7 +1177,7 @@ async def test_grant_maintenance_releases_inactive_payload_but_keeps_identity(
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
-        grant = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        grant = await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
         assert grant is not None
         await manager.recover_cards_on_startup()
         assert '"command": "first"' in await _grant_payload(journal, grant.grant_id)
@@ -1147,9 +1187,9 @@ async def test_grant_maintenance_releases_inactive_payload_but_keeps_identity(
             await admit_room_membership(journal.principal(terminal), "!room:test", "leave")
         await manager.recover_cards_on_startup()
         assert await _grant_payload(journal, grant.grant_id) == ""
-        assert await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card) == grant
+        assert await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card) == grant
         assert (
-            await owner.revoke_approval_grant(
+            await owner.approvals.revoke_approval_grant(
                 room_id="!room:test",
                 card_event_id=card,
                 sender_id="@human:test",
@@ -1182,13 +1222,13 @@ async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
         delivered.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     try:
         card = await _card(journal, manager, "first")
         await _approve(manager, card)
-        grant = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        grant = await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
         assert grant is not None
-        delivery_id = await owner.revoke_approval_grant(
+        delivery_id = await owner.approvals.revoke_approval_grant(
             room_id="!room:test",
             card_event_id=card,
             sender_id="@human:test",
@@ -1208,7 +1248,7 @@ async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
         assert await owner.load_matrix_delivery(delivery_id=delivery_id.delivery_id, stage=DeliveryStage.FINAL) is None
         sent_count = len(delivered)
         assert (
-            await owner.revoke_approval_grant(
+            await owner.approvals.revoke_approval_grant(
                 room_id="!room:test",
                 card_event_id=card,
                 sender_id="@human:test",
@@ -1218,9 +1258,65 @@ async def test_grant_maintenance_preserves_revocation_debt_until_acknowledged(
         )
         await manager.recover_cards_on_startup()
         assert len(delivered) == sent_count
-        retained = await owner.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        retained = await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
         assert retained is not None
         assert retained.revoked_at_ns is not None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_second_delivery_pass_waits_for_an_in_flight_send_instead_of_repeating_it(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline sweep and an explicit pass in one process send each delivery once."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    owner = journal.principal("router@shared")
+    revocation_sending = asyncio.Event()
+    release_revocation = asyncio.Event()
+    second_pass_listed = asyncio.Event()
+    revocations: list[MatrixDelivery] = []
+
+    async def send(delivery: MatrixDelivery) -> str:
+        if delivery.delivery_id.startswith("approval-grant-revoked:"):
+            revocations.append(delivery)
+            revocation_sending.set()
+            await release_revocation.wait()
+        return "$" + delivery.delivery_id
+
+    list_unacknowledged = type(owner).unacknowledged_matrix_deliveries
+
+    async def list_and_report(self: object, **kwargs: object) -> object:
+        batch = await list_unacknowledged(self, **kwargs)
+        # Set before this pass continues to its next await, so the test resumes only once the pass is
+        # either waiting for the in-flight send or claiming the same delivery itself.
+        if revocation_sending.is_set():
+            second_pass_listed.set()
+        return batch
+
+    manager.transport.send_approval_delivery = send
+    try:
+        card = await _card(journal, manager, "first")
+        await _approve(manager, card)
+        grant = await owner.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=card)
+        assert grant is not None
+        assert await owner.approvals.revoke_approval_grant(
+            room_id="!room:test",
+            card_event_id=card,
+            sender_id="@human:test",
+            grant_id=grant.grant_id,
+        )
+        monkeypatch.setattr(type(owner), "unacknowledged_matrix_deliveries", list_and_report)
+        first_pass = asyncio.create_task(manager.recover_cards_on_startup())
+        await revocation_sending.wait()
+        second_pass = asyncio.create_task(manager.recover_cards_on_startup())
+        await second_pass_listed.wait()
+        release_revocation.set()
+        await asyncio.gather(first_pass, second_pass)
+        assert len(revocations) == 1
     finally:
         await manager.shutdown()
 
@@ -1246,6 +1342,7 @@ async def _card(
     thread: str | None = "$thread",
     operation: str | None = "binding:shell",
     command: object = None,
+    expires_at_ns: int = 9_000_000_000_000_000_000,
 ) -> str:
     responder = journal.principal("agent@" + agent)
     await responder.admit(
@@ -1275,14 +1372,14 @@ async def _card(
                 tool_call_id="call-" + name,
                 tool_name="shell",
                 invoking_agent=agent,
-                expires_at_ns=9_000_000_000_000_000_000,
+                expires_at_ns=expires_at_ns,
             ),
         ),
         state="waiting",
         runtime_generation="runtime",
     )
     assert await paused_for_approval(responder, continuation) is not None
-    card = await manager.prepare_detached_approval(
+    card = await manager.prepare_reply_card(
         approval_id="card-" + name,
         continuation_id=name,
         continuation_generation=0,
@@ -1294,7 +1391,7 @@ async def _card(
         room_id="!room:test",
         requester_id=requester,
         approver_user_id=requester,
-        expires_at_ns=9_000_000_000_000_000_000,
+        expires_at_ns=expires_at_ns,
         agent_name=agent,
         thread_id=thread,
         grant_operation=ApprovalOperation(operation, "shell") if operation is not None else None,
@@ -1316,13 +1413,13 @@ def _manager(journal: EventJournalStore, tmp_path: Path) -> ApprovalManager:
     async def send(delivery: MatrixDelivery) -> str:
         return "$" + delivery.delivery_id + ("-edit" if delivery.stage is DeliveryStage.FINAL else "")
 
-    return ApprovalManager(
+    return approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=journal.principal("router@shared"),
-        prepare_event=prepare,
-        send_delivery=send,
-        transport_sender=lambda: "@router:test",
-        responder_principal=lambda entity_name: "agent@" + entity_name,
+        prepare_approval_event=prepare,
+        send_approval_delivery=send,
+        transport_sender_id=lambda: "@router:test",
+        responder_principal_id=lambda entity_name: "agent@" + entity_name,
     )
 
 
@@ -1361,14 +1458,14 @@ async def test_grant_batches_pending_calls_and_survives_restart_with_fixed_expir
         await _card(journal, manager, "other-requester", requester="@other:test")
         assert (await _approve(manager, first)).consumed
         for name in ("first", "second"):
-            continuation = await journal.principal("agent@code").approval_continuation(name)
+            continuation = await journal.principal("agent@code").approvals.approval_continuation(name)
             assert continuation is not None
             assert continuation.calls[0].decision.value == "approved"
         for name, agent in (("other-agent", "helper"), ("other-operation", "code"), ("other-requester", "code")):
-            continuation = await journal.principal("agent@" + agent).approval_continuation(name)
+            continuation = await journal.principal("agent@" + agent).approvals.approval_continuation(name)
             assert continuation is not None
             assert continuation.calls[0].decision is None
-        grant = await manager.cards.approval_grant_for_card(room_id="!room:test", card_event_id=first)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=first)
         assert grant is not None
         assert grant.expires_at_ns == 2_000_000_600_000_000_000
     finally:
@@ -1379,13 +1476,13 @@ async def test_grant_batches_pending_calls_and_survives_restart_with_fixed_expir
     try:
         monkeypatch.setattr("time.time_ns", lambda: 2_000_000_599_000_000_000)
         await _card(journal, manager, "later")
-        continuation = await journal.principal("agent@code").approval_continuation("later")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("later")
         assert continuation is not None
         assert continuation.calls[0].decision.value == "approved"
         await _approve(manager, first)
         monkeypatch.setattr("time.time_ns", lambda: 2_000_000_600_000_000_000)
         await _card(journal, manager, "expired")
-        continuation = await journal.principal("agent@code").approval_continuation("expired")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("expired")
         assert continuation is not None
         assert continuation.calls[0].decision is None
     finally:
@@ -1436,7 +1533,7 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
     try:
         first = await _card(journal, manager, "first")
         await _approve(manager, first)
-        grant = await manager.cards.approval_grant_for_card(room_id="!room:test", card_event_id=first)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=first)
         assert grant is not None
         result = await manager.handle_grant_revocation(
             room_id="!room:test",
@@ -1458,10 +1555,10 @@ async def test_revoke_survives_card_retirement_and_replay_cannot_regrant(
         assert result.consumed
         await _approve(manager, first)
         await _card(journal, manager, "after")
-        continuation = await journal.principal("agent@code").approval_continuation("after")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("after")
         assert continuation is not None
         assert continuation.calls[0].decision is None
-        grant = await manager.cards.approval_grant_for_card(room_id="!room:test", card_event_id=first)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=first)
         assert grant.revoked_at_ns == 2_000_000_000_000_000_000
     finally:
         await manager.shutdown()
@@ -1489,9 +1586,35 @@ async def test_ineligible_timed_request_leaves_call_pending(
     try:
         card = await _card(journal, manager, "first", thread=thread, operation=operation)
         await _approve(manager, card, sender=sender)
-        continuation = await journal.principal("agent@code").approval_continuation("first")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("first")
         assert continuation is not None
         assert continuation.calls[0].decision is None
+    finally:
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_a_timed_approval_past_the_deadline_records_the_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late "approve for N minutes" click expires the call and its card at once and grants nothing."""
+    monkeypatch.setattr("time.time_ns", lambda: 2_000_000_000_000_000_000)
+    journal = EventJournalStore.open_sqlite(tmp_path / "grants.db")
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "late", expires_at_ns=2_000_000_060_000_000_000)
+        monkeypatch.setattr("time.time_ns", lambda: 2_000_000_060_000_000_000)
+
+        assert (await _approve(manager, card)).consumed
+
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("late")
+        assert continuation is not None
+        assert continuation.calls[0].decision.value == "expired"
+        router = journal.principal("router@shared").approvals
+        assert await router.approval_grant_for_card(room_id="!room:test", card_event_id=card) is None
+        assert await card_is_terminal(router, room_id="!room:test", card_event_id=card)
     finally:
         await manager.shutdown()
         await journal.close()
@@ -1520,15 +1643,15 @@ async def test_timed_action_delivers_its_scope_without_startup_recovery(
             sent.append(delivery)
             return "$" + delivery.delivery_id
 
-        manager.send_delivery = send
+        manager.transport.send_approval_delivery = send
         await _approve(manager, first)
         recover.assert_not_awaited()
         assert {item.delivery_id for item in sent} == {"card-selected", "card-matching"}
         assert all(item.stage is DeliveryStage.FINAL for item in sent)
-        unrelated = await journal.principal("agent@code").approval_continuation("unrelated")
+        unrelated = await journal.principal("agent@code").approvals.approval_continuation("unrelated")
         assert unrelated is not None
         assert unrelated.calls[0].decision is None
-        grant = await manager.cards.approval_grant_for_card(room_id="!room:test", card_event_id=first)
+        grant = await manager.cards.approvals.approval_grant_for_card(room_id="!room:test", card_event_id=first)
         assert grant is not None
         sent.clear()
         await manager.handle_grant_revocation(
@@ -1567,6 +1690,7 @@ def _job_call(
     """Ask about one gated call the way a background job does, through a card the job owns."""
     return asyncio.create_task(
         manager.request_background_approval(
+            owner_kind="job",
             origin=BackgroundScriptToolOrigin(
                 run_id="tool-job:" + name,
                 call_id="call-" + name,
@@ -1588,15 +1712,12 @@ def _job_call(
     )
 
 
-async def _posted_job_card(journal: EventJournalStore, name: str) -> StoredApprovalCard:
-    cards = journal.principal("router@shared")
-    for _attempt in range(1000):
-        stored = await cards.pending_approval_card(room_id="!room:test", card_event_id=_job_card_event_id(name))
-        if stored is not None:
-            return stored
-        await asyncio.sleep(0.001)
-    message = f"Job card {name!r} was not posted."
-    raise AssertionError(message)
+async def _posted_job_card(journal: EventJournalStore, name: str) -> ApprovalCardView:
+    return await wait_for_pending_card(
+        journal.principal("router@shared").approvals,
+        room_id="!room:test",
+        card_event_id=_job_card_event_id(name),
+    )
 
 
 async def _stop(tasks: list[asyncio.Task[BackgroundApprovalDecision]]) -> None:
@@ -1619,7 +1740,7 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     journal = journal_database()
     manager = _manager(journal, tmp_path)
     if ineligible == "unknown responder":
-        manager.responder_principal = lambda _entity_name: None
+        manager.transport.responder_principal_id = lambda _entity_name: None
     call = {
         "room-level conversation": {"thread": None},
         "tool's own confirmation": {"operation": None},
@@ -1627,7 +1748,7 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
     }.get(ineligible or "", {})
     waiting = [_job_call(manager, "first", **call)]
     try:
-        content = (await _posted_job_card(journal, "first")).card["content"]
+        content = await card_content(journal.principal("router@shared"), await _posted_job_card(journal, "first"))
         if ineligible is None:
             assert content["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
             scope = content["approval_scope"]
@@ -1642,9 +1763,8 @@ async def test_job_card_offers_timed_approval_when_a_paused_reply_card_would(
             assert "approval_scope" not in content
             approver = str(call.get("approver", "@human:test"))
             assert not (await _approve(manager, _job_card_event_id("first"), sender=approver)).consumed
-            decision = await journal.principal("router@shared").background_approval_decision(
-                run_id="tool-job:first",
-                call_id="call-first",
+            decision = await journal.principal("router@shared").approvals.detached_decision(
+                CallKey.detached("tool-job:first", "call-first"),
             )
             assert decision is None
     finally:
@@ -1666,13 +1786,13 @@ async def test_timed_approval_on_a_job_card_covers_later_job_and_reply_calls(
         sent.append(delivery)
         return "$" + delivery.delivery_id
 
-    manager.send_delivery = send
+    manager.transport.send_approval_delivery = send
     first = _job_call(manager, "first")
     try:
         await _posted_job_card(journal, "first")
         assert (await _approve(manager, _job_card_event_id("first"))).consumed
         assert (await asyncio.wait_for(first, _JOB_DECISION_WAIT_SECONDS)).status == "approved"
-        grant = await journal.principal("router@shared").approval_grant_for_card(
+        grant = await journal.principal("router@shared").approvals.approval_grant_for_card(
             room_id="!room:test",
             card_event_id=_job_card_event_id("first"),
         )
@@ -1694,7 +1814,8 @@ async def test_timed_approval_on_a_job_card_covers_later_job_and_reply_calls(
         assert receipt.payload["approval_provenance"]["grant_id"] == grant.grant_id
         assert "auto_approve_options" not in receipt.payload
         assert (
-            await journal.principal("router@shared").pending_approval_card(
+            await pending_card(
+                journal.principal("router@shared").approvals,
                 room_id="!room:test",
                 card_event_id=_job_card_event_id("later"),
             )
@@ -1702,7 +1823,7 @@ async def test_timed_approval_on_a_job_card_covers_later_job_and_reply_calls(
         )
         # So is a later call that pauses a reply in the same conversation.
         await _card(journal, manager, "reply")
-        continuation = await journal.principal("agent@code").approval_continuation("reply")
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("reply")
         assert continuation is not None
         assert continuation.calls[0].decision is not None
         assert continuation.calls[0].decision.value == "approved"
@@ -1745,7 +1866,10 @@ async def test_job_call_outside_an_active_grant_still_asks(
     manager = _manager(journal, tmp_path)
     first = await _card(journal, manager, "first")
     await _approve(manager, first)
-    grant = await journal.principal("router@shared").approval_grant_for_card(room_id="!room:test", card_event_id=first)
+    grant = await journal.principal("router@shared").approvals.approval_grant_for_card(
+        room_id="!room:test",
+        card_event_id=first,
+    )
     assert grant is not None
     if outside == "revoked":
         revoked = await manager.handle_grant_revocation(
@@ -1770,9 +1894,8 @@ async def test_job_call_outside_an_active_grant_still_asks(
         await _posted_job_card(journal, "asking")
         assert not asking.done()
         assert (
-            await journal.principal("router@shared").background_approval_decision(
-                run_id="tool-job:asking",
-                call_id="call-asking",
+            await journal.principal("router@shared").approvals.detached_decision(
+                CallKey.detached("tool-job:asking", "call-asking"),
             )
             is None
         )
@@ -1793,20 +1916,231 @@ async def test_ended_job_denies_its_open_timed_card(
     later = None
     try:
         stored = await _posted_job_card(journal, "ended")
-        assert stored.card["content"]["auto_approve_options"] == list(AUTO_APPROVE_OPTIONS)
+        assert (await card_content(journal.principal("router@shared"), stored))["auto_approve_options"] == list(
+            AUTO_APPROVE_OPTIONS,
+        )
         await _stop([ended])
         assert await manager.settle_pending_background_approvals("tool-job:ended", reason="The job ended.") == 1
         await _approve(manager, _job_card_event_id("ended"))
         cards = journal.principal("router@shared")
-        assert await cards.background_approval_decision(run_id="tool-job:ended", call_id="call-ended") == (
+        assert await cards.approvals.detached_decision(CallKey.detached("tool-job:ended", "call-ended")) == (
             BackgroundApprovalDecision(status="denied", reason="The job ended.")
         )
         assert (
-            await cards.approval_grant_for_card(room_id="!room:test", card_event_id=_job_card_event_id("ended")) is None
+            await cards.approvals.approval_grant_for_card(
+                room_id="!room:test",
+                card_event_id=_job_card_event_id("ended"),
+            )
+            is None
         )
         later = _job_call(manager, "later")
         await _posted_job_card(journal, "later")
         assert not later.done()
     finally:
         await _stop([ended] if later is None else [ended, later])
+        await manager.shutdown()
+
+
+async def _call_row(journal: EventJournalStore, name: str) -> tuple[object, ...]:
+    row = await journal.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT decision, resolved_by FROM approval_calls WHERE owner_id = ?",
+            (name,),
+        ),
+    )
+    assert row is not None
+    return row["decision"], row["resolved_by"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fence",
+    [
+        "UPDATE approval_continuations SET state = 'ready' WHERE approval_id = 'fenced'",
+        "UPDATE approval_continuations SET generation = 1 WHERE approval_id = 'fenced'",
+    ],
+    ids=["no-longer-waiting", "another-generation"],
+)
+async def test_a_call_is_decided_only_while_its_paused_reply_waits_at_its_generation(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    fence: str,
+) -> None:
+    """A decision cannot land on a paused reply that moved past the state or generation its card was posted for."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "fenced")
+        await journal.backend.write(lambda transaction: transaction.execute(fence))
+        recorded = await resolve_card_event(
+            journal.principal("router@shared").approvals,
+            room_id="!room:test",
+            card_event_id=card,
+            requested_status="approved",
+            reason=None,
+            metadata=ApprovalDecisionMetadata(resolved_by="@human:test"),
+        )
+        assert recorded.recorded is False
+        assert await _call_row(journal, "fenced") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_deadline_overrode_names_no_decider(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late approval records the expiry, not the person whose approval came too late."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "late")
+        monkeypatch.setattr("time.time_ns", lambda: 9_000_000_000_000_000_000)
+        await resolve_card_event(
+            journal.principal("router@shared").approvals,
+            room_id="!room:test",
+            card_event_id=card,
+            requested_status="approved",
+            reason=None,
+            metadata=ApprovalDecisionMetadata(resolved_by="@human:test"),
+        )
+        assert await _call_row(journal, "late") == ("expired", None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_only_a_receipt_takes_another_event_as_its_alias(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A transport-verified copy of a request card is not a second actionable card."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        await _card(journal, manager, "aliased")
+        approvals = journal.principal("router@shared").approvals
+        await approvals.remember_terminal_approval_alias(
+            room_id="!room:test",
+            card_event_id="$copy-of-card",
+            delivery_id="card-aliased",
+        )
+        assert await approvals.approval_card(room_id="!room:test", card_event_id="$copy-of-card") is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_a_card_whose_membership_is_fenced_is_not_consumed(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """While the router's membership of the room is fenced for departure, its cards decide nothing."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "fenced-room")
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE room_membership SET departure_fenced = 1 WHERE principal_id = ? AND room_id = ?",
+                ("router@shared", "!room:test"),
+            ),
+        )
+        view = await journal.principal("router@shared").approvals.approval_card(
+            room_id="!room:test",
+            card_event_id=card,
+        )
+        assert isinstance(view, ApprovalCardView)
+        assert view.current is False
+        assert (await _approve(manager, card, seconds=None)).consumed is False
+        assert await _call_row(journal, "fenced-room") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_active_grant_does_not_approve_a_call_already_past_its_deadline(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A call reserved after its deadline gets its own card, which the deadline then expires."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        assert (await _approve(manager, await _card(journal, manager, "granted"))).consumed
+        late = await _card(journal, manager, "past-deadline", expires_at_ns=1)
+        card = await pending_card(
+            journal.principal("router@shared").approvals,
+            room_id="!room:test",
+            card_event_id=late,
+        )
+        assert card is not None
+        assert card.kind == "request"
+        assert card.offers_timed_approval
+        # The grant never approves it; the deadline sweep the card's publication woke may already have expired it.
+        assert await _call_row(journal, "past-deadline") in {(None, None), ("expired", None)}
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_grant_receipt_and_its_decision_judge_the_deadline_at_one_instant(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call the grant covered just before its deadline is approved, even when the decision is written after it."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        assert (await _approve(manager, await _card(journal, manager, "granted"))).consumed
+        deadline = time.time_ns() + 60 * 1_000_000_000
+        monkeypatch.setattr(approval_grants, "time", SimpleNamespace(time_ns=lambda: deadline - 1))
+        monkeypatch.setattr(approval_calls, "time", SimpleNamespace(time_ns=lambda: deadline + 1))
+        await _card(journal, manager, "at-deadline", expires_at_ns=deadline)
+        assert await _call_row(journal, "at-deadline") == ("approved", "@human:test")
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_only_the_requester_can_open_a_timed_grant_on_a_card(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The journal refuses a grant from anyone but the requester the card's consent names."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "consent")
+        decisions = await journal.principal("router@shared").approvals.create_approval_grant(
+            room_id="!room:test",
+            card_event_id=card,
+            sender_id="@intruder:test",
+            seconds=600,
+            metadata=ApprovalDecisionMetadata(resolved_by="@intruder:test"),
+        )
+        assert decisions == ()
+        assert await _call_row(journal, "consent") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Failure settlement expires only the cards of the paused reply that failed."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        await _card(journal, manager, "failed")
+        await _card(journal, manager, "still-waiting")
+        assert await manager.expire_continuation_cards("failed", "The reply was stopped.")
+        assert (await _call_row(journal, "failed"))[0] == "expired"
+        assert await _call_row(journal, "still-waiting") == (None, None)
+    finally:
         await manager.shutdown()

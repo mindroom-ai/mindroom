@@ -44,7 +44,7 @@ from mindroom.session_storage.schema import (
     owner_scope_key,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
-from mindroom.usage.storage import project_usage, quote_identifier, usage_upsert_sql
+from mindroom.usage.storage import project_helper_usage, project_usage, quote_identifier, usage_upsert_sql
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord, RunRecord
+    from mindroom.llm.usage import HelperUsage
     from mindroom.session_storage.types import SessionKind
     from mindroom.usage.storage import IndependentUsageKind
 
@@ -456,25 +457,15 @@ class ConversationStore:
         usage_id: str,
         kind: IndependentUsageKind,
         requester_id: str | None,
-        run: Mapping[str, object],
+        usage: HelperUsage,
         initial_session: ConversationSession | None = None,
     ) -> None:
-        """Upsert content-free helper usage, owned by a conversation and a requester, beside the run log.
+        """Upsert helper usage as ``usage_id``, owned by a conversation and a requester, beside the run log.
 
         ``initial_session`` creates the conversation's row when no run has yet. Helper usage is not part of the
         session totals.
         """
-        snapshot = project_usage(
-            {
-                **run,
-                "run_id": usage_id,
-                "user_id": requester_id,
-                "metadata": None,
-                "parent_run_id": None,
-                "team_id": None,
-            },
-        )
-        snapshot["kind"] = kind
+        snapshot = project_helper_usage(usage, usage_id=usage_id, kind=kind, requester_id=requester_id)
         created = None
         with self.transaction(write=True) as connection:
             if initial_session is not None and ensure_session_row(connection, self.names, initial_session) is not None:

@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, cast
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embeddings.errors import EmbedderRequestError, embedder_request_error, openai_embedder_error
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
@@ -24,6 +27,7 @@ from mindroom.timing import timed
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mem0 import AsyncMemory
@@ -31,36 +35,25 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder, EmbeddingPurpose
+    from mindroom.llm.errors import ProviderError
+
+_T = TypeVar("_T")
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
-# Chroma publishes each store's shared system before starting it, so a build that overlaps the first build of the same
-# store can reach the unstarted system, and both builds fail. Builds of one store take turns; Chroma keys that shared
-# state by store path, so different stores still build in parallel.
-_STORE_BUILD_LOCKS: dict[str, threading.Lock] = {}
+# The calls into one Chroma store take turns, from building a memory on. Chroma publishes each store's shared system
+# before starting it, so a build that overlaps the first build of the same store can reach the unstarted system, and
+# both builds fail. A query that overlaps a new collection's first write can fail with "Error creating hnsw segment
+# reader: Nothing found on disk", as a first memory search beside the first save into a store did. Chroma keys that
+# shared state by store path, so different stores still work in parallel.
+_STORE_LOCKS: dict[str, threading.Lock] = {}
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Mem0StrictOpenAIEmbedder:
-    """Adapt MindRoom's strict OpenAI embedder to Mem0's embedding interface."""
+    """Adapt MindRoom's strict OpenAI embedder, which raises typed embedder errors, to Mem0's embedding interface."""
 
     embedder: Embedder
-    _operation_failure: Exception | None = field(default=None, init=False, repr=False)
-
-    def _remember_operation_failure(self, exc: Exception) -> None:
-        if self._operation_failure is None:
-            self._operation_failure = exc
-
-    def begin_operation(self) -> None:
-        """Start tracking failures that Mem0 may swallow during one operation."""
-        self._operation_failure = None
-
-    def raise_for_operation_failure(self) -> None:
-        """Raise a safe error when Mem0 swallowed an embedding failure."""
-        failure = self._operation_failure
-        self._operation_failure = None
-        if failure is not None:
-            raise failure
 
     def embed(
         self,
@@ -76,11 +69,93 @@ class _Mem0StrictOpenAIEmbedder:
     ) -> list[list[float]]:
         # Stored memories are documents; anything else, including the entities of a search query, is a query.
         purpose: EmbeddingPurpose = "document" if memory_action in {"add", "update"} else "query"
+        return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose=purpose)
+
+
+def _ollama_failure(error: Exception) -> ProviderError | None:
+    """Return the typed provider error of an Ollama SDK or transport failure, as MindRoom's Ollama embedder maps it."""
+    from mindroom.providers.ollama.errors import provider_error  # noqa: PLC0415 - loads the Ollama SDK
+
+    return provider_error(error, provider="ollama")
+
+
+def _ollama_embedder_error(error: Exception) -> EmbedderRequestError:
+    """Return the typed embedder error of a failure of Mem0's own Ollama embedder."""
+    return embedder_request_error(error, _ollama_failure(error))
+
+
+# The embedder failures of the Mem0 operation in progress, including those Mem0 catches: it drops the extracted facts
+# it could not embed and reports the add as done. Mem0 embeds in worker threads, which inherit this context.
+_operation_failures: ContextVar[list[EmbedderRequestError] | None] = ContextVar("mem0_embedder_failures", default=None)
+
+
+@contextmanager
+def recorded_embedder_failures() -> Iterator[list[EmbedderRequestError]]:
+    """Collect every embedder failure of the Mem0 operation run inside, in order."""
+    failures: list[EmbedderRequestError] = []
+    token = _operation_failures.set(failures)
+    try:
+        yield failures
+    finally:
+        _operation_failures.reset(token)
+
+
+def _recorded(error: EmbedderRequestError) -> EmbedderRequestError:
+    if (failures := _operation_failures.get()) is not None:
+        failures.append(error)
+    return error
+
+
+@dataclass(frozen=True)
+class _Mem0Embedder:
+    """The embedder every Mem0 memory calls, which raises typed embedder errors and records each failure.
+
+    ``embedder`` is Mem0's own embedder, whose requests go out unchanged so stored memories keep matching their
+    searches, or MindRoom's strict OpenAI embedder; ``classify`` returns the typed error of one failure of its SDK.
+    """
+
+    embedder: Any
+    classify: Callable[[Exception], EmbedderRequestError]
+
+    def embed(self, text: str, memory_action: Literal["add", "search", "update"] | None = None) -> list[float]:
+        return self._send(self.embedder.embed, text, memory_action)
+
+    def embed_batch(
+        self,
+        texts: list[str],
+        memory_action: Literal["add", "search", "update"] | None = "add",
+    ) -> list[list[float]]:
+        return self._send(self.embedder.embed_batch, texts, memory_action)
+
+    def _send(self, call: Callable[..., _T], *args: object) -> _T:
         try:
-            return self.embedder.embed([text.replace("\n", " ") for text in texts], purpose=purpose)
-        except Exception as exc:
-            self._remember_operation_failure(exc)
+            return call(*args)
+        except EmbedderRequestError as error:
+            _recorded(error)
             raise
+        except Exception as exc:
+            raise _recorded(self.classify(exc)) from exc
+
+
+def _hold_store_lock(vector_store: Any, lock: threading.Lock) -> None:  # noqa: ANN401 - Mem0's Chroma vector store
+    """Make each call Mem0 sends its vector store, from a worker thread, hold the store's lock.
+
+    The entity store Mem0 builds on first use keeps unlocked calls; Mem0 catches their failures.
+    """
+
+    def locked(call: Callable[..., _T]) -> Callable[..., _T]:
+        def locked_call(*args: object, **kwargs: object) -> _T:
+            with lock:
+                return call(*args, **kwargs)
+
+        return locked_call
+
+    vector_store.search = locked(vector_store.search)
+    vector_store.insert = locked(vector_store.insert)
+    vector_store.update = locked(vector_store.update)
+    vector_store.delete = locked(vector_store.delete)
+    vector_store.get = locked(vector_store.get)
+    vector_store.list = locked(vector_store.list)
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -101,6 +176,19 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
+def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the server an Ollama memory LLM reaches, the default one included, as Mem0 is configured.
+
+    The saved Ollama host wins over ``memory.llm.config.host``. An ``ollama`` memory LLM without ``host`` reaches its
+    ``ollama_base_url``, and without that the Ollama SDK's own default (None).
+    """
+    memory_llm = config.memory.llm
+    if memory_llm is not None and "host" not in memory_llm.config:
+        return memory_llm.config.get("ollama_base_url")
+    configured = None if memory_llm is None else memory_llm.config["host"]
+    return get_ollama_host(runtime_paths=runtime_paths) or configured or OLLAMA_HOST_DEFAULT
+
+
 def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Build the Mem0 LLM config from ``memory.llm``, defaulting to local Ollama."""
     memory_llm = config.memory.llm
@@ -110,7 +198,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
             "provider": "ollama",
             "config": {
                 "model": MEMORY_OLLAMA_LLM,
-                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
+                "ollama_base_url": mem0_ollama_host(config, runtime_paths),
                 "temperature": 0.1,
                 "top_p": 1,
             },
@@ -121,9 +209,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
     # Copy config but handle provider-specific field names
     for key, value in memory_llm.config.items():
         if key == "host" and llm_provider == "ollama":
-            llm_provider_config["ollama_base_url"] = (
-                get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
-            )
+            llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
         elif key != "host":  # Skip host for other fields
             llm_provider_config[key] = value
 
@@ -231,6 +317,7 @@ async def create_memory_instance(
     """
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     store_path = config_dict["vector_store"]["config"]["path"]
+    store_lock = _STORE_LOCKS.setdefault(store_path, threading.Lock())
 
     def build_memory() -> AsyncMemory:
         # Mem0 and its Chroma store install on first use, and Mem0's huggingface embedder, which both local providers
@@ -240,10 +327,17 @@ async def create_memory_instance(
         ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
         if config_dict["embedder"]["provider"] == "huggingface":
             ensure_sentence_transformers_dependencies(runtime_paths)
-        with _STORE_BUILD_LOCKS.setdefault(store_path, threading.Lock()), optional_dependency_environment():
+        with store_lock, optional_dependency_environment():
             from mem0 import AsyncMemory  # noqa: PLC0415
 
-            return AsyncMemory.from_config(config_dict)
+            try:
+                return AsyncMemory.from_config(config_dict)
+            except Exception as exc:
+                # Mem0's Ollama embedder asks the server for its model while the memory is built, the only request
+                # building it sends, so an Ollama failure here is the embedder's.
+                if config_dict["embedder"]["provider"] != "ollama" or (failure := _ollama_failure(exc)) is None:
+                    raise
+                raise embedder_request_error(exc, failure) from exc
 
     memory = await asyncio.to_thread(build_memory)
     memory_llm = config.memory.llm
@@ -260,13 +354,20 @@ async def create_memory_instance(
         # reasoning-model request instead, unless the config sets ``is_reasoning_model`` itself.
         llm_config.is_reasoning_model = True
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
-    if config.memory.embedder.provider == "openai":
+    embedder_provider = config.memory.embedder.provider
+    if embedder_provider == "openai":
         # Mem0's own OpenAI embedder indexes response.data[0] without validation
         # and can expose raw provider errors. Reuse MindRoom's strict boundary.
         from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
-        strict_embedder = create_configured_embedder(config, runtime_paths)
-        cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
+        mem0_embedder = _Mem0StrictOpenAIEmbedder(create_configured_embedder(config, runtime_paths))
+    else:
+        mem0_embedder = memory.embedding_model
+    # Mem0's Ollama embedder fails through the Ollama SDK, and the embedders only Mem0 provides mostly use the OpenAI SDK;
+    # MindRoom's strict embedder raises typed errors itself.
+    classify = _ollama_embedder_error if embedder_provider == "ollama" else openai_embedder_error
+    cast("Any", memory).embedding_model = _Mem0Embedder(mem0_embedder, classify)
+    _hold_store_lock(memory.vector_store, store_lock)
 
     logger.info("created_memory_instance", path=store_path)
     return memory

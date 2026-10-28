@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -10,17 +10,16 @@ from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     EMPTY_RESPONSE_NOTICE,
     discard_empty_completed_run,
-    is_empty_completed_run,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timing import DispatchPipelineTiming
@@ -92,33 +91,6 @@ async def _stream(config: Config, **kwargs: object) -> list[AIStreamChunk]:
             **kwargs,
         )
     ]
-
-
-def test_is_empty_completed_run_detects_contentless_completed_runs() -> None:
-    """Completed runs with no tool calls and no visible content are empty."""
-    assert is_empty_completed_run(_completed_run("r1", None))
-    assert is_empty_completed_run(_completed_run("r1", ""))
-    assert is_empty_completed_run(_completed_run("r1", "  \n"))
-
-
-def test_is_empty_completed_run_ignores_runs_with_content_tools_or_other_status() -> None:
-    """Real responses, tool-only runs, and non-completed statuses are not empty."""
-    assert not is_empty_completed_run(_completed_run("r1", "hello"))
-
-    tool_run = _completed_run("r1", None)
-    tool_run.tools = [
-        ToolExecution(
-            tool_call_id="call-run_shell_command",
-            tool_name="run_shell_command",
-            tool_args={"cmd": "pwd"},
-            result="/app",
-        ),
-    ]
-    assert not is_empty_completed_run(tool_run)
-
-    errored = _completed_run("r1", None)
-    errored.status = RunStatus.error
-    assert not is_empty_completed_run(errored)
 
 
 def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage(tmp_path: Path) -> None:
@@ -259,10 +231,31 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
 
     result = await _respond(config)
 
-    assert result == EMPTY_RESPONSE_NOTICE
+    # The retry's blank text streamed before the notice, as a streamed reply shows it.
+    assert result == f"  {EMPTY_RESPONSE_NOTICE}"
     assert len(model.requests) == 2
     # The retry's empty run is discarded too; the notice is delivery-only.
     assert stored_runs(config, runtime_paths_for(config), "session-1") == []
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_streamed_one_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking reply whose retry is empty too publishes its run as failed, as the streamed reply does."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer(""), answer(""), answer("")])})
+    blocking: dict[str, Any] = {}
+    streamed: dict[str, Any] = {}
+
+    result = await _respond(config, run_metadata_collector=blocking)
+    chunks = await _stream(config, run_metadata_collector=streamed)
+
+    assert result == EMPTY_RESPONSE_NOTICE
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
+    assert blocking[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert streamed[AI_RUN_METADATA_KEY]["status"] == "error"
 
 
 @pytest.mark.asyncio

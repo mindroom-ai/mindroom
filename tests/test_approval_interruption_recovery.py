@@ -9,7 +9,9 @@ import pytest
 import pytest_asyncio
 
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.event_journal import ApprovalFailure
 from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
@@ -34,7 +36,7 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
     bot = _bot(tmp_path)
     initialize_approval_store_for_test(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-recovery",
@@ -46,8 +48,8 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
     # The next instance takes the replies over and recovers the resume the stopped one left.
     restarted = _bot(tmp_path)
     initialize_approval_store_for_test(restarted.runtime_paths, cards=restarted.journal_principal())
-    await restarted._reply_runtime.start()
-    left = await restarted.journal_principal().approval_continuation(continuation.approval_id)
+    await restarted._take_over_replies()
+    left = await restarted.journal_principal().approvals.approval_continuation(continuation.approval_id)
     assert left is not None
     assert left.state == "claimed"
     unique_room_send_responses(restarted.client)
@@ -64,7 +66,7 @@ def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
 async def _settle(bot: AgentBot, claimed: ApprovalContinuation) -> None:
     """Settle an active restart cancellation of the claimed approval."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await runner._settle_failed_approval_outcome(
+    await runner._approvals._settle_failed_approval_outcome(
         claimed,
         FinalDeliveryOutcome(
             terminal_status="cancelled",
@@ -82,7 +84,7 @@ async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: Approva
     assert str(note["body"]).rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
     store = bot.journal_principal()
-    assert await store.approval_continuation(claimed.approval_id) is None
+    assert await store.approvals.approval_continuation(claimed.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -101,7 +103,10 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    failing = await runner._approval_responses.request_failure(claimed, "sync_restart_cancelled")
+    failing = await runner._approvals._request_failure(
+        claimed,
+        ApprovalFailure(ApprovalFailureKind.RESTART),
+    )
     assert failing is not None
     await bot._journal_store.backend.write(lambda tx: tx.execute("DELETE FROM approval_continuations"))
     sends = bot.client.room_send.await_count

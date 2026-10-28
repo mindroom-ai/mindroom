@@ -9,6 +9,7 @@ from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
+from itertools import product
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import yaml
@@ -29,7 +30,7 @@ from mindroom.config.main import (
 from mindroom.config.personal_agents import (
     expand_personal_agents,
     personal_agent_roster_lock_path,
-    read_personal_agent_roster,
+    read_personal_agent_roster_file,
 )
 from mindroom.config.yaml_includes import (
     load_yaml_config_source_with_digests,
@@ -389,7 +390,7 @@ def _save_raw_config_source_to_file(
     runtime_paths: constants.RuntimePaths,
     authored_payload: dict[str, Any],
 ) -> None:
-    """Save raw config source text to the active config path unless a personal agent took one of its names first.
+    """Save raw config source text to the active config path unless a generated agent took one of its names first.
 
     Provisioning reads the saved config and reserves a name under the roster
     lock, so checking and writing under it keeps a save validated before a
@@ -399,9 +400,15 @@ def _save_raw_config_source_to_file(
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
         try:
-            expand_personal_agents(authored_payload, read_personal_agent_roster(runtime_paths))
+            roster = read_personal_agent_roster_file(runtime_paths)
+            expand_personal_agents(authored_payload, roster.entries)
         except ValueError as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
+        # Loading would skip the created agent, so the authored entity would take over its Matrix account.
+        for created, section in product(roster.created, ("agents", "teams", "personal_agents")):
+            if created.agent_name in (authored_payload.get(section) or {}):
+                msg = f"{section}.{created.agent_name} collides with the agent {created.creator} created for {created.owner}"
+                raise ConfigRuntimeValidationError(msg)
         tmp_path.write_text(source, encoding="utf-8")
         constants.safe_replace(tmp_path, config_path)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -26,6 +26,7 @@ from mindroom.history.compaction import (
     summarize_runs,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.history.storage import (
     _with_scope_state,
     append_compaction_chunk,
@@ -33,7 +34,7 @@ from mindroom.history.storage import (
     read_scope_state,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
-from mindroom.history.summary_input import build_summary_input, messages_for_runs
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     HistoryScope,
@@ -44,10 +45,13 @@ from mindroom.hooks import (
     EVENT_COMPACTION_AFTER,
     EVENT_COMPACTION_BEFORE,
     CompactionHookContext,
+    EnrichmentItem,
     HookRegistry,
     HookRegistryState,
+    TranscriptLine,
     build_hook_matrix_admin,
     hook,
+    render_enrichment_block,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
@@ -56,6 +60,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.errors import classify_provider_error
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
@@ -975,9 +980,11 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
     active_states: list[bool] = []
+    correlation_ids: list[str] = []
 
     @hook(EVENT_COMPACTION_BEFORE, priority=10)
     async def before_first(ctx: CompactionHookContext) -> None:
+        correlation_ids.append(ctx.correlation_id)
         active_states.append(ctx.is_active())
         registry_state.registry = HookRegistry.empty()
         active_states.append(ctx.is_active())
@@ -989,7 +996,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
             (
                 ctx.event_name,
                 ctx.scope.key,
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
                 ctx.token_count_before,
                 ctx.token_count_after,
                 ctx.compaction_summary,
@@ -1002,11 +1009,12 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
 
     @hook(EVENT_COMPACTION_AFTER)
     async def after(ctx: CompactionHookContext) -> None:
+        correlation_ids.append(ctx.correlation_id)
         observed.append(
             (
                 ctx.event_name,
                 ctx.scope.key,
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
                 ctx.token_count_before,
                 ctx.token_count_after,
                 ctx.compaction_summary,
@@ -1067,6 +1075,98 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
     assert observed[0][3] == completed_outcome(lifecycle).before_tokens
     assert observed[2][3] == completed_outcome(lifecycle).before_tokens
     assert active_states == [True, False]
+    # The hooks of one compaction share the turn's correlation ID.
+    assert correlation_ids == ["corr-compaction", "corr-compaction"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_hooks_see_who_said_each_line_without_what_mindroom_added(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each line names its sender, without the context hooks attached, MindRoom's notices, or tool calls."""
+    memory = render_enrichment_block([EnrichmentItem(key="memory", text="Alice prefers short answers.")])
+    asked = RunRecord(
+        run_id="run-1",
+        agent_id="test_agent",
+        status=RunStatus.completed,
+        metadata={"requester_id": "@alice:localhost"},
+        messages=[
+            Message(role="user", content=f"When does Atlas ship?\n\n{memory}"),
+            Message(
+                role="assistant",
+                tool_calls=[{"id": "c1", "type": "function", "function": {"name": "get_issue", "arguments": "{}"}}],
+            ),
+            Message(role="tool", tool_call_id="c1", tool_name="get_issue", content="Issue 42: Friday"),
+            Message(role="assistant", content="Friday."),
+        ],
+    )
+    relayed = RunRecord(
+        run_id="run-2",
+        agent_id="test_agent",
+        status=RunStatus.completed,
+        metadata={"requester_id": "@alice:localhost"},
+        messages=[
+            Message(
+                role="user",
+                content=render_msg_tag(sender="@carol:localhost", display_name="Carol", body="It slipped a week."),
+            ),
+            Message(
+                role="user",
+                content="A newer message is waiting.",
+                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER},
+            ),
+            Message(role="assistant", content="Noted: next Friday."),
+        ],
+    )
+    observed: list[tuple[str, tuple[TranscriptLine, ...]]] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(ctx: CompactionHookContext) -> None:
+        # Every hook shares the same lines, so none can change them for the next.
+        with pytest.raises(FrozenInstanceError):
+            ctx.transcript[0].text = "changed"  # type: ignore[misc]
+        observed.append((ctx.event_name, ctx.transcript))
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(ctx: CompactionHookContext) -> None:
+        observed.append((ctx.event_name, ctx.transcript))
+
+    session = _session("session-1", runs=[asked, relayed])
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    config, runtime_paths, storage, _scope, runtime_context = _forced_compaction_context(
+        tmp_path,
+        session=session,
+        registry=registry,
+    )
+
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with (
+        tool_runtime_context(runtime_context),
+        patch(
+            "mindroom.history.compaction.generate_compaction_summary",
+            new=AsyncMock(return_value="merged summary"),
+        ),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert prepared.compaction_reply_outcome == "success"
+    transcript = (
+        TranscriptLine(role="user", sender="@alice:localhost", display_name=None, text="When does Atlas ship?"),
+        TranscriptLine(role="assistant", sender=None, display_name=None, text="Friday."),
+        TranscriptLine(role="user", sender="@carol:localhost", display_name="Carol", text="It slipped a week."),
+        TranscriptLine(role="assistant", sender=None, display_name=None, text="Noted: next Friday."),
+    )
+    assert observed == [("compaction:before", transcript), ("compaction:after", transcript)]
 
 
 @pytest.mark.asyncio
@@ -1076,7 +1176,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     *,
     second_chunk_stored: bool,
 ) -> None:
-    """Every chunk exposes its raw messages before it is stored; compaction:after sees only the stored chunks'."""
+    """Every chunk exposes its transcript before it is stored; compaction:after sees only the stored chunks'."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1131,7 +1231,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             (
                 ctx.event_name,
                 [run.run_id for run in persisted.runs],
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
             ),
         )
 
@@ -1143,7 +1243,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             (
                 ctx.event_name,
                 [run.run_id for run in persisted.runs],
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
             ),
         )
 
@@ -1188,11 +1288,11 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
     assert outcome is not None
     assert appended == [True, second_chunk_stored]
-    stored_messages = ["u" * 200, "a" * 200, "v" * 200, "b" * 200] if second_chunk_stored else ["u" * 200, "a" * 200]
+    stored_lines = ["u" * 200, "a" * 200, "v" * 200, "b" * 200] if second_chunk_stored else ["u" * 200, "a" * 200]
     assert observed == [
         ("compaction:before", ["run-1", "run-2"], ["u" * 200, "a" * 200]),
         ("compaction:before", ["run-2"], ["v" * 200, "b" * 200]),
-        ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_messages),
+        ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_lines),
     ]
 
 
@@ -1245,7 +1345,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_does_not_collect_compaction_messages_without_hooks(
+async def test_prepare_history_for_run_does_not_build_the_compaction_transcript_without_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1271,8 +1371,8 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             new=AsyncMock(return_value="merged summary"),
         ),
         patch(
-            "mindroom.history.compaction.messages_for_runs",
-            side_effect=AssertionError("compaction messages should not be collected without hooks"),
+            "mindroom.history.compaction.utterances",
+            side_effect=AssertionError("the compaction transcript should not be built without hooks"),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1370,9 +1470,11 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     seed_session(storage, session)
 
     observed: list[str] = []
+    correlation_ids: list[str] = []
 
     @hook(EVENT_COMPACTION_BEFORE, agents=["test_agent"], rooms=["!room:localhost"])
     async def matching(ctx: CompactionHookContext) -> None:
+        correlation_ids.append(ctx.correlation_id)
         observed.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
 
     @hook(EVENT_COMPACTION_BEFORE, agents=["other_agent"], rooms=["!room:localhost"])
@@ -1384,11 +1486,14 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
         observed.append(f"wrong-room:{ctx.room_id}")
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching, wrong_agent, wrong_room])])
-    runtime_context = _hook_runtime_context(
-        config=config,
-        runtime_paths=runtime_paths,
-        registry=registry,
-        session_id="session-1",
+    runtime_context = replace(
+        _hook_runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            registry=registry,
+            session_id="session-1",
+        ),
+        correlation_id=None,
     )
 
     install_model_providers(monkeypatch, {"default": summary_model()})
@@ -1412,6 +1517,9 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
 
     assert prepared.compaction_reply_outcome == "success"
     assert observed == ["agent:test_agent:test_agent:!room:localhost:$thread"]
+    # A turn without a correlation ID gets one naming the event and the session.
+    [correlation_id] = correlation_ids
+    assert correlation_id.startswith("compaction:before:session-1:")
 
 
 @pytest.mark.asyncio
@@ -1455,7 +1563,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=HistoryScope(kind="team", scope_id="team_general"),
-            messages=[Message(role="user", content="hello")],
+            transcript=(),
             session_id="session-1",
             token_count_before=10,
             token_count_after=None,
@@ -1577,28 +1685,6 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path, mon
 
     assert prepared.compaction_reply_outcome == "success"
     assert observed == ["failed", "fast:session-1"]
-
-
-def test_the_compaction_hook_input_keeps_stored_thinking() -> None:
-    """Hooks read the stored messages as copies, thinking and signatures included; the Claude wire decides what to send."""
-    old_assistant = Message(
-        role="assistant",
-        content="old answer",
-        reasoning_content="old thinking",
-        provider_data={
-            "signature": "sig-old",
-            "content_blocks": [{"type": "thinking", "thinking": "old thinking", "signature": "sig-old"}],
-        },
-    )
-    messages = [Message(role="user", content="old question"), old_assistant, Message(role="user", content="now")]
-
-    copied = messages_for_runs([_completed_run("old-run", messages=messages)], _ALL_HISTORY_SETTINGS)
-
-    assert copied[1] is not old_assistant
-    assert (copied[1].reasoning_content, copied[1].provider_data) == (
-        old_assistant.reasoning_content,
-        old_assistant.provider_data,
-    )
 
 
 @pytest.mark.asyncio

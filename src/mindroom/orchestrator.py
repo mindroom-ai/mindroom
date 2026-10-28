@@ -124,6 +124,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.backends.docker_projection import publish_generated_agents
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
@@ -791,20 +792,11 @@ class _MultiAgentOrchestrator:
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
-        transport = self._approval_transport
         initialize_approval_store(
             self.runtime_paths,
-            prepare_event=transport.prepare_approval_event,
-            send_delivery=transport.send_approval_delivery,
-            resolve_delivery=transport.resolve_approval_delivery,
-            resolve_action_delivery=transport.resolve_approval_action_delivery,
+            transport=self._approval_transport,
             cards=self._approval_cards(),
-            transport_sender=transport.transport_sender_id,
-            sending_device=transport.transport_device_id,
-            continuation_ready=transport.wake_continuation_sources,
             recovery=self._approval_recovery,
-            responder_principal=transport.responder_principal_id,
-            router_missing=transport.router_missing,
         )
 
     async def _ensure_user_account(self, config: Config) -> None:
@@ -1216,6 +1208,11 @@ class _MultiAgentOrchestrator:
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
 
+    def _commit_config(self, config: Config) -> None:
+        """Run on `config` from now on, and give Docker worker configs the generated agents it built."""
+        self.config = config
+        publish_generated_agents(self.runtime_paths, config.generated_agent_data())
+
     def _preflight_account_provisioning(
         self,
         config: Config,
@@ -1384,7 +1381,7 @@ class _MultiAgentOrchestrator:
             new_config,
             changed_server_ids,
         )
-        self.config = new_config
+        self._commit_config(new_config)
         if reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         new_hook_registry = apply_prepared_plugin_reload(
@@ -1476,7 +1473,7 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self.config = config
+        self._commit_config(config)
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
@@ -1817,7 +1814,7 @@ class _MultiAgentOrchestrator:
         )
         await self._prepare_user_account(new_config, update_runtime_state=not self.running)
         await self._prepare_entity_accounts(new_config, entity_names)
-        self.config = new_config
+        self._commit_config(new_config)
         warn_about_config_risks(new_config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
         self._activate_hook_registry(hook_registry)
@@ -1861,11 +1858,8 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         context = ConfigReloadedContext(
             event_name=EVENT_CONFIG_RELOADED,
-            plugin_name="",
-            settings={},
             config=new_config,
             runtime_paths=self.runtime_paths,
-            logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
             runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
             message_sender=self.hook_message_sender(),
@@ -2181,7 +2175,7 @@ class _MultiAgentOrchestrator:
                     plan.changed_mcp_servers,
                 )
                 # Only apply the new config after validation and account checks succeed.
-                self.config = new_config
+                self._commit_config(new_config)
                 if reply_membership_policy_changed:
                     self.invalidate_agent_reply_memberships(reason="config_reload")
                 self.plugin_watch.sync_roots(new_config)
@@ -2495,6 +2489,8 @@ class _MultiAgentOrchestrator:
             msg = "Another MindRoom runtime is already using this event journal"
             raise PermanentStartupError(msg)
         self._journal_held = True
+        # Every bot follows the paused replies of its principal from these on.
+        await store.load_approval_signals()
 
     async def event_journal_still_held(self) -> bool:
         """Return whether this runtime still holds the journal it claimed; true before it claims one."""

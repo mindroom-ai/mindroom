@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.history.message_content import image_content_for_token_estimation
 from mindroom.llm.messages import is_own_model_message
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
-from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
+from mindroom.providers.openai.response_replay import recorded_output
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
@@ -43,12 +43,17 @@ def estimate_responses_replay_tokens(
     model_id: str,
     cache_system_prompt: bool,
     explicit_breakpoint: bool,
+    provider: str,
 ) -> int:
-    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``."""
+    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``.
+
+    An attachment file that cannot be read raises ``InvalidRequest`` naming ``provider``, as the request would.
+    """
     replayed = responses_input(
         responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=cache_system_prompt,
         explicit_breakpoint=explicit_breakpoint,
+        provider=provider,
     )
     formatted = [_without_reasoning_ciphertext(item) for item in replayed]
     reasoning_tokens = _earlier_reasoning_tokens(messages, replayed)
@@ -101,9 +106,7 @@ def _earlier_reasoning_tokens(messages: Sequence[Message], replayed: list[Any]) 
 
 def _reasoning_ids(message: Message) -> set[object]:
     """Return the ids of the reasoning items in a stored answer's ordered output, the only reasoning replay sends."""
-    output = (message.provider_data or {}).get(RESPONSE_OUTPUT_KEY)
-    items = output if isinstance(output, list) else []
-    return {item.get("id") for item in items if isinstance(item, dict) and item.get("type") == "reasoning"}
+    return {item.get("id") for item in recorded_output(message) or () if item.get("type") == "reasoning"}
 
 
 def _image_tokens(block: dict[str, Any], model_id: str) -> int:

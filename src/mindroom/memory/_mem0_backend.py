@@ -5,13 +5,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
 from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
 )
-from mindroom.embeddings.errors import as_embedder_error, classified_embedder_error
+from mindroom.embeddings.errors import EmbedderRequestError, classified_embedder_error
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage, record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
@@ -38,6 +38,7 @@ from ._shared import (
     ScopedMemoryWriter,
     new_memory_id,
 )
+from .config import recorded_embedder_failures
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -61,13 +62,6 @@ _MIN_COSINE_SIMILARITY = 0.1
 _MEM0_SEARCH_THRESHOLD = 1 / (1 + 2 * (1 - _MIN_COSINE_SIMILARITY))
 
 
-@runtime_checkable
-class _OperationTrackedEmbedder(Protocol):
-    def begin_operation(self) -> None: ...
-
-    def raise_for_operation_failure(self) -> None: ...
-
-
 def _record_classified_embedder_failure(
     exc: BaseException,
     health_recorder: EmbedderHealthRecorder,
@@ -82,13 +76,13 @@ async def _run_mem0_embedder_mutation(
     operation: Callable[[], Awaitable[_T]],
     health_recorder: EmbedderHealthRecorder,
 ) -> _T:
-    """Run a Mem0 write without allowing raw provider exceptions to escape."""
+    """Run a Mem0 write, recording a classified embedder failure as embedder health and raising it alone.
+
+    A raw provider failure, such as one from Mem0's memory model, propagates as raised and records no embedder health.
+    """
     try:
         result = await operation()
-    except Exception as exc:
-        error = as_embedder_error(exc)
-        if error is None:
-            raise
+    except EmbedderRequestError as error:
         health_recorder.record(str(error))
         # Raise the classified error itself, so it keeps its retry judgment, without the raw provider exception.
         raise error from None
@@ -103,13 +97,11 @@ async def _strict_mem0_add(
     user_id: str,
     metadata: dict[str, object],
 ) -> object:
-    """Add through Mem0 and surface embedding failures it catches internally."""
-    embedder = getattr(memory, "embedding_model", None)
-    if isinstance(embedder, _OperationTrackedEmbedder):
-        embedder.begin_operation()
-    result = await memory.add(messages, user_id=user_id, metadata=metadata)
-    if isinstance(embedder, _OperationTrackedEmbedder):
-        embedder.raise_for_operation_failure()
+    """Add through Mem0 and raise the add's first embedding failure, which Mem0 may have caught."""
+    with recorded_embedder_failures() as failures:
+        result = await memory.add(messages, user_id=user_id, metadata=metadata)
+    if failures:
+        raise failures[0]
     return result
 
 

@@ -14,17 +14,18 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
+from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
     finished_run_text,
     format_team_header,
-    format_team_response,
     render_team_member_slots,
     strip_team_display,
     url_safe_member_id,
 )
 from mindroom.teams.runtime import MemberEvent
+from tests.teams.squad import resolved_members, scripted, team_spec
 
 
 def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
@@ -160,10 +161,6 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
     )
 
     assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
-    team = TeamRunRecord(run_id="team-run", content="Five in all.", ended_member_runs=[scout], team_id=None)
-    assert format_team_response(team, TeamStreamPresentation.new(["scout"], ["Scout"], show_tool_calls=False)) == (
-        "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
-    )
 
 
 _RAW_FAILURE = "checker provider down: api_key=example-secret"
@@ -186,11 +183,22 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
         error=reason if source == "live" else None,
     )
 
-    document = format_team_response(
-        TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
-        TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False),
+    presentation = TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False)
+    attempt = TeamAttempt(
+        run_id="team-run",
+        members=resolved_members({"checker": "Checker"}),
+        team=team_spec("squad", "Squad", scripted("leader-model"), "You lead the squad.", ()),
+        presentation=presentation,
+        team_name="squad",
+        runtime_model_name="default",
+        prepared_history=None,
     )
+    apply_team_event(presentation, TextDelta("Unchecked."))
 
+    attempt.show_failure_reasons(
+        TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
+    )
+    document = presentation.text_without_tool_markers(finished=True)
     assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
     assert "example-secret" not in document
 

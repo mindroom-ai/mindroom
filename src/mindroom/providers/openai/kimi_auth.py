@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -69,8 +68,7 @@ def _kimi_credentials_path(*, kimi_home: str | Path | None) -> Path:
 
 
 def _kimi_home_path(*, kimi_home: str | Path | None) -> Path:
-    configured_home = kimi_home if kimi_home is not None else os.environ.get("KIMI_CODE_HOME", "~/.kimi-code")
-    return Path(configured_home).expanduser()
+    return Path(kimi_home if kimi_home is not None else "~/.kimi-code").expanduser()
 
 
 def _read_kimi_credentials(credentials_path: Path) -> dict[str, Any]:

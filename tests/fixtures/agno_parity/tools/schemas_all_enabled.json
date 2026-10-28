@@ -16,7 +16,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "The URL of the website to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -48,7 +49,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "The URL of the website to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -173,10 +175,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search arXiv for."
             },
             "num_articles": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of articles to return. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -211,10 +215,12 @@
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "description": "(list, str) The list of `id` of the papers to add to the knowledge base.\nShould be of the format: [\"2103.03404v1\", \"2103.03404v2\"]"
             },
             "pages_to_read": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of pages to read from the paper.\nNone means read all pages. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -284,10 +290,12 @@
           "type": "object",
           "properties": {
             "function_name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the Lambda function to invoke."
             },
             "payload": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The JSON payload to send to the function. Defaults to \"{}\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -379,13 +387,16 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Search keyword"
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Maximum number of results to return, default 5"
             },
             "language": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Search language, default Chinese"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -428,7 +439,8 @@
           "type": "object",
           "properties": {
             "identifier": {
-              "type": "string"
+              "type": "string",
+              "description": "Options are you can use: Domain (nike.com), Brand ID (id_0dwKPKT), ISIN (US6541061031), Stock Ticker (NKE)"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -460,7 +472,8 @@
           "type": "object",
           "properties": {
             "name": {
-              "type": "string"
+              "type": "string",
+              "description": "Brand name to search for (e.g., 'Google', 'Apple')"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -505,7 +518,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) URL to scrape"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -537,7 +551,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) URL to screenshot"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -569,19 +584,24 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Search query"
             },
             "engine": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Search engine - 'google', 'bing', or 'yandex'"
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of results to return"
             },
             "language": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Two-letter language code"
             },
             "country_code": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Two-letter country code"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -613,13 +633,16 @@
           "type": "object",
           "properties": {
             "source_type": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')"
             },
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) URL of the web resource to retrieve data from"
             },
             "num_of_reviews": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(Optional[int]) Number of reviews to retrieve"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -665,10 +688,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to navigate to"
             },
             "connect_url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The connection URL from an existing session"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -700,13 +725,16 @@
           "type": "object",
           "properties": {
             "path": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Where to save the screenshot"
             },
             "full_page": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) Whether to capture the full page"
             },
             "connect_url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The connection URL from an existing session"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -738,7 +766,8 @@
           "type": "object",
           "properties": {
             "connect_url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The connection URL from an existing session"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -809,10 +838,12 @@
           "type": "object",
           "properties": {
             "start_date": {
-              "type": "string"
+              "type": "string",
+              "description": "Start date in YYYY-MM-DD format"
             },
             "end_date": {
-              "type": "string"
+              "type": "string",
+              "description": "End date in YYYY-MM-DD format"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -845,13 +876,16 @@
           "type": "object",
           "properties": {
             "start_time": {
-              "type": "string"
+              "type": "string",
+              "description": "Start time in YYYY-MM-DDTHH:MM:SSZ format"
             },
             "name": {
-              "type": "string"
+              "type": "string",
+              "description": "Attendee's name"
             },
             "email": {
-              "type": "string"
+              "type": "string",
+              "description": "Attendee's email"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -885,7 +919,8 @@
           "type": "object",
           "properties": {
             "email": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Attendee's email [Optional]"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -915,13 +950,16 @@
           "type": "object",
           "properties": {
             "booking_uid": {
-              "type": "string"
+              "type": "string",
+              "description": "Booking UID to reschedule"
             },
             "new_start_time": {
-              "type": "string"
+              "type": "string",
+              "description": "New start time in YYYY-MM-DDTHH:MM:SSZ format"
             },
             "reason": {
-              "type": "string"
+              "type": "string",
+              "description": "Reason for rescheduling"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -955,10 +993,12 @@
           "type": "object",
           "properties": {
             "booking_uid": {
-              "type": "string"
+              "type": "string",
+              "description": "Booking UID to cancel"
             },
             "reason": {
-              "type": "string"
+              "type": "string",
+              "description": "Reason for cancellation"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1003,19 +1043,24 @@
           "type": "object",
           "properties": {
             "name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The desired name for the new localized voice."
             },
             "description": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The description for the new localized voice."
             },
             "language": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The target language code (e.g., 'fr', 'es')."
             },
             "original_speaker_gender": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The gender of the original speaker (\"male\" or \"female\")."
             },
             "voice_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(optional) The ID of an existing voice to use as the base. If None, uses the default voice ID configured in the tool. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1050,10 +1095,12 @@
           "type": "object",
           "properties": {
             "transcript": {
-              "type": "string"
+              "type": "string",
+              "description": "The text to convert to speech"
             },
             "voice_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(optional) The ID of the voice to use for the text-to-speech. If None, uses the default voice ID configured in the tool. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1192,7 +1239,8 @@
               "enum": [
                 "members",
                 "computer"
-              ]
+              ],
+              "description": "'computer' for your worker browser, or 'members' (the default) for this room's members."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1229,7 +1277,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Short single-line panel title; when updating, omit it to keep the canvas's first title."
             },
             "html": {
               "anyOf": [
@@ -1239,7 +1288,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Self-contained HTML with inline CSS and JavaScript. Give html or path."
             },
             "path": {
               "anyOf": [
@@ -1249,7 +1299,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Workspace-relative path of an HTML file you wrote, shown instead of html."
             },
             "canvas_event_id": {
               "anyOf": [
@@ -1259,10 +1310,12 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Event ID of an earlier canvas from this conversation to update in place."
             },
             "share_state": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Let read_canvas_state read what the user does in this new canvas; updates keep the choice."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1292,7 +1345,8 @@
           "type": "object",
           "properties": {
             "canvas_event_id": {
-              "type": "string"
+              "type": "string",
+              "description": "Event ID of a canvas from this conversation shown with share_state=True."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1399,10 +1453,12 @@
           "type": "object",
           "properties": {
             "csv_name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the csv file to read without the extension."
             },
             "row_limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(Optional[int]) The number of rows to return. None returns all rows. Defaults to None."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1461,7 +1517,8 @@
           "type": "object",
           "properties": {
             "csv_name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the csv file to get the columns from without the extension."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1493,10 +1550,12 @@
           "type": "object",
           "properties": {
             "csv_name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the csv file to query"
             },
             "sql_query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The SQL Query to run on the csv file."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1665,10 +1724,12 @@
           "type": "object",
           "properties": {
             "channel_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the channel to send the message to."
             },
             "message": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The text of the message to send."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1701,10 +1762,12 @@
           "type": "object",
           "properties": {
             "channel_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the channel to fetch messages from."
             },
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The maximum number of messages to fetch. Defaults to 100."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1736,7 +1799,8 @@
           "type": "object",
           "properties": {
             "channel_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the channel to get information about."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1768,7 +1832,8 @@
           "type": "object",
           "properties": {
             "guild_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the server to list channels from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1800,10 +1865,12 @@
           "type": "object",
           "properties": {
             "channel_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the channel containing the message."
             },
             "message_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the message to delete."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1846,10 +1913,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(optional, default=5) The maximum number of results to return."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1881,10 +1950,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(optional, default=5) The maximum number of results to return."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1955,10 +2026,12 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Description of the sound effect"
             },
             "duration_seconds": {
-              "type": "number"
+              "type": "number",
+              "description": "(Optional[float]) Duration in seconds to generate audio from. Has to be between 0.5 and 22."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1990,7 +2063,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Text to generate audio from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2086,13 +2160,16 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of results to return. Defaults to 5."
             },
             "category": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) The category to filter search results.\nOptions are \"company\", \"research paper\", \"news\", \"pdf\", \"github\",\n\"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2127,7 +2204,8 @@
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "description": "(list(str)) A list of URLs from which to fetch content."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2159,10 +2237,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL for which to find similar links."
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of similar links to return. Defaults to 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2194,10 +2274,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The question or query to answer."
             },
             "text": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) Include full text from citation. Default is False."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2229,7 +2311,8 @@
           "type": "object",
           "properties": {
             "instructions": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Research instructions."
             },
             "output_schema": {
               "type": "object",
@@ -2240,7 +2323,8 @@
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
-              }
+              },
+              "description": "(Optional[Dict[str, Any]]) JSON schema for structured output. If not provided, the API will auto-infer an appropriate schema."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2283,7 +2367,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text describing the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2315,7 +2400,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text describing the desired changes."
             },
             "image_url": {
               "anyOf": [
@@ -2325,7 +2411,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "URL of the image to edit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2715,10 +2802,12 @@
                 {
                   "type": "string"
                 }
-              ]
+              ],
+              "description": "The data to write to the JSON file. Can be a dictionary, list, or JSON string."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2775,16 +2864,19 @@
                 {
                   "type": "string"
                 }
-              ]
+              ],
+              "description": "The data to write to the CSV file. Can be a list of lists, list of dictionaries, or CSV string."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
             },
             "headers": {
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "description": "Optional headers for the CSV. Used when data is a list of lists."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2816,13 +2908,16 @@
           "type": "object",
           "properties": {
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "The text content to write to the PDF file."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional title for the PDF document."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2854,13 +2949,16 @@
           "type": "object",
           "properties": {
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "The text content to write to the DOCX file."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional title for the DOCX document."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2892,10 +2990,12 @@
           "type": "object",
           "properties": {
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "The text content to write to the file."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2927,10 +3027,12 @@
           "type": "object",
           "properties": {
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "A complete, valid HTML5 document (including doctype, html, head, and body tags)."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If not provided, a UUID will be used."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2962,13 +3064,16 @@
           "type": "object",
           "properties": {
             "code": {
-              "type": "string"
+              "type": "string",
+              "description": "The source code to write to the file."
             },
             "language": {
-              "type": "string"
+              "type": "string",
+              "description": "Programming language (e.g. \"python\", \"typescript\", \"go\"). Determines the\nfile extension. If not provided, the extension is taken from `filename` when\npresent; otherwise the file is written as plain text."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional filename for the generated file. If it has no extension, the\nlanguage's extension is appended. If not provided, a UUID-based name is used."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3013,7 +3118,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3045,10 +3151,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to crawl."
             },
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The maximum number of pages to crawl. Defaults to the limit set on the toolkit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3080,7 +3188,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to map."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3112,10 +3221,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The maximum number of results to return. Defaults to the limit set on the toolkit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3185,7 +3296,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The text prompt to generate the video from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3227,7 +3339,8 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) A text description of the required gif."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3295,7 +3408,8 @@
           "type": "object",
           "properties": {
             "table_id": {
-              "type": "string"
+              "type": "string",
+              "description": "Table name inside the configured dataset."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3327,7 +3441,8 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "A single SELECT or WITH statement."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3368,13 +3483,16 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Optional Drive query to filter results"
             },
             "page_size": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of files to return (default 10)"
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Token from a previous response to fetch the next page"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3404,13 +3522,16 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Drive query expression (see instructions for syntax)"
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of files to return (default 10)"
             },
             "page_token": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Token from a previous response to fetch the next page"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3752,10 +3873,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(optional, default=5) The maximum number of results to return."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3787,10 +3910,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(optional, default=5) The maximum number of results to return."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3834,7 +3959,8 @@
           "type": "object",
           "properties": {
             "audio_source": {
-              "type": "string"
+              "type": "string",
+              "description": "An http(s) URL, or a local file path; with ``file_access: workspace`` the file must be inside the agent workspace."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3866,7 +3992,8 @@
           "type": "object",
           "properties": {
             "audio_source": {
-              "type": "string"
+              "type": "string",
+              "description": "An http(s) URL, or a local file path; with ``file_access: workspace`` the file must be inside the agent workspace."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3898,7 +4025,8 @@
           "type": "object",
           "properties": {
             "text_input": {
-              "type": "string"
+              "type": "string",
+              "description": "The text to synthesize into speech."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3941,7 +4069,8 @@
           "type": "object",
           "properties": {
             "num_stories": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of stories to return. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3971,7 +4100,8 @@
           "type": "object",
           "properties": {
             "username": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Username of the user to get details for."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4299,13 +4429,16 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Query to search for."
             },
             "depth": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) (deep|standard) Depth of the search. Defaults to 'standard'."
             },
             "output_type": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) (sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4410,16 +4543,20 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text description of the desired video"
             },
             "start_image_url": {
-              "type": "string"
+              "type": "string",
+              "description": "URL of the starting image"
             },
             "end_image_url": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional URL of the ending image"
             },
             "loop": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Whether the video should loop"
             },
             "aspect_ratio": {
               "type": "string",
@@ -4431,7 +4568,8 @@
                 "3:4",
                 "21:9",
                 "9:21"
-              ]
+              ],
+              "description": "Aspect ratio of the output video"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4490,7 +4628,8 @@
                     "type": "string"
                   }
                 }
-              ]
+              ],
+              "description": "(Union[str, Dict[str, str]]) The facts that should be stored."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4620,10 +4759,12 @@
           "type": "object",
           "properties": {
             "video_path": {
-              "type": "string"
+              "type": "string",
+              "description": "Path to the video file; with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "output_path": {
-              "type": "string"
+              "type": "string",
+              "description": "Path where the audio will be saved; with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4656,10 +4797,12 @@
           "type": "object",
           "properties": {
             "transcription": {
-              "type": "string"
+              "type": "string",
+              "description": "Text transcription in SRT format"
             },
             "output_path": {
-              "type": "string"
+              "type": "string",
+              "description": "Path where the SRT file will be saved; with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4692,10 +4835,12 @@
           "type": "object",
           "properties": {
             "video_path": {
-              "type": "string"
+              "type": "string",
+              "description": "Path to the input video file; with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "srt_path": {
-              "type": "string"
+              "type": "string",
+              "description": "Path to the SRT caption file; with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "output_path": {
               "anyOf": [
@@ -4705,19 +4850,24 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Path for the output video (optional); with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "font_size": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Size of caption text"
             },
             "font_color": {
-              "type": "string"
+              "type": "string",
+              "description": "Color of caption text"
             },
             "stroke_color": {
-              "type": "string"
+              "type": "string",
+              "description": "Color of text outline"
             },
             "stroke_width": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Width of text outline"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4844,7 +4994,8 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The Cypher query string to execute."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4886,7 +5037,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL of the article."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4930,13 +5082,16 @@
           "type": "object",
           "properties": {
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The title of the page"
             },
             "tag": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The tag/category for the page (e.g., travel, tech, general-blogs, fashion, documents)"
             },
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The content to add to the page"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4970,10 +5125,12 @@
           "type": "object",
           "properties": {
             "page_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The ID of the page to update"
             },
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The content to append to the page"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5006,7 +5163,8 @@
           "type": "object",
           "properties": {
             "tag": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The tag to search for"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5050,7 +5208,8 @@
           "type": "object",
           "properties": {
             "audio_path": {
-              "type": "string"
+              "type": "string",
+              "description": "Path to the audio file; with ``file_access: workspace`` it must be inside the agent workspace"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5082,7 +5241,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The text prompt to generate the image from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5114,7 +5274,8 @@
           "type": "object",
           "properties": {
             "text_input": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The text to synthesize into speech."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5160,7 +5321,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5192,7 +5354,8 @@
           "type": "object",
           "properties": {
             "company_name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the company."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5224,10 +5387,12 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
             },
             "num_stories": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of news stories to return. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5259,7 +5424,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5291,7 +5457,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol or list of stock symbols.\nEg: \"AAPL\" or \"AAPL,MSFT,GOOGL\""
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5336,7 +5503,8 @@
           "type": "object",
           "properties": {
             "location": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5368,10 +5536,12 @@
           "type": "object",
           "properties": {
             "location": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
             },
             "days": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of days for forecast (max 5). Default is 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5403,7 +5573,8 @@
           "type": "object",
           "properties": {
             "location": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5435,10 +5606,12 @@
           "type": "object",
           "properties": {
             "location": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the city, e.g., \"London\", \"Paris\", \"New York\"."
             },
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Maximum number of location results. Default is 1."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5646,16 +5819,20 @@
           "type": "object",
           "properties": {
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "A concise title for this step"
             },
             "thought": {
-              "type": "string"
+              "type": "string",
+              "description": "Your detailed thought for this step"
             },
             "action": {
-              "type": "string"
+              "type": "string",
+              "description": "What you'll do based on this thought"
             },
             "confidence": {
-              "type": "number"
+              "type": "number",
+              "description": "How confident you are about this thought (0.0 to 1.0)"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5688,19 +5865,24 @@
           "type": "object",
           "properties": {
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "A concise title for this analysis step"
             },
             "result": {
-              "type": "string"
+              "type": "string",
+              "description": "The outcome of the previous action"
             },
             "analysis": {
-              "type": "string"
+              "type": "string",
+              "description": "Your analysis of the results"
             },
             "next_action": {
-              "type": "string"
+              "type": "string",
+              "description": "What to do next (\"continue\", \"validate\", or \"final_answer\")"
             },
             "confidence": {
-              "type": "number"
+              "type": "number",
+              "description": "How confident you are in this analysis (0.0 to 1.0)"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5744,7 +5926,8 @@
           "type": "object",
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "Text describing the media to generate."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5840,10 +6023,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to scrape."
             },
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Natural language prompt describing what to extract."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5876,7 +6061,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to convert."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5908,7 +6094,8 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The search query."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5940,10 +6127,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to crawl."
             },
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Natural language prompt describing what to extract."
             },
             "schema": {
               "type": "object",
@@ -5954,13 +6143,16 @@
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
-              }
+              },
+              "description": "(Dict[str, Any]) JSON schema for extraction."
             },
             "max_depth": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Max crawl depth. Defaults to 2."
             },
             "max_pages": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Max number of pages to crawl. Defaults to 2."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5994,7 +6186,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6037,10 +6230,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of results to return."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6072,7 +6267,8 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search for."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6117,10 +6313,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The search query to search for on Google."
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of search results to retrieve."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6152,10 +6350,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The search query for news articles."
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of news results to retrieve."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6187,10 +6387,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The search query for academic papers."
             },
             "num_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of academic papers to retrieve."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6222,10 +6424,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL of the webpage to scrape."
             },
             "markdown": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) Return content in markdown format (default: False)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6380,10 +6584,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to search the web with."
             },
             "max_results": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6415,7 +6621,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL of the webpage to scrape."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6447,10 +6654,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL of the webpage to crawl."
             },
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The maximum number of pages to crawl. Defaults to 10."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6521,7 +6730,8 @@
           "type": "object",
           "properties": {
             "table_name": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The name of the table to get the schema for."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6553,10 +6763,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The query to run."
             },
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of rows to return. Defaults to 10. Use `None` to show all results."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6600,7 +6812,8 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Query to search for."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6632,7 +6845,8 @@
           "type": "object",
           "properties": {
             "urls": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Single URL or multiple comma-separated URLs to extract content from.\nExample: \"https://example.com\" or \"https://example.com,https://another.com\""
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6686,7 +6900,8 @@
           "type": "object",
           "properties": {
             "message": {
-              "type": "string"
+              "type": "string",
+              "description": "The message text to send."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6720,10 +6935,12 @@
             "photo": {
               "type": "object",
               "properties": {},
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "The photo as bytes."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional caption for the photo."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6757,13 +6974,16 @@
             "document": {
               "type": "object",
               "properties": {},
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "The document as bytes."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "The filename for the document."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional caption for the document."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6798,10 +7018,12 @@
             "video": {
               "type": "object",
               "properties": {},
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "The video as bytes."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional caption for the video."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6835,13 +7057,16 @@
             "audio": {
               "type": "object",
               "properties": {},
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "The audio as bytes."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional caption for the audio."
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional title for the audio track."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6875,10 +7100,12 @@
             "animation": {
               "type": "object",
               "properties": {},
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "The animation as bytes."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional caption for the animation."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6912,7 +7139,8 @@
             "sticker": {
               "type": "object",
               "properties": {},
-              "additionalProperties": false
+              "additionalProperties": false,
+              "description": "The sticker as bytes."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6944,10 +7172,12 @@
           "type": "object",
           "properties": {
             "text": {
-              "type": "string"
+              "type": "string",
+              "description": "The new message text."
             },
             "message_id": {
-              "type": "integer"
+              "type": "integer",
+              "description": "The ID of the message to edit."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6980,7 +7210,8 @@
           "type": "object",
           "properties": {
             "message_id": {
-              "type": "integer"
+              "type": "integer",
+              "description": "The ID of the message to delete."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7012,10 +7243,12 @@
           "type": "object",
           "properties": {
             "message_id": {
-              "type": "integer"
+              "type": "integer",
+              "description": "The ID of the message to react to."
             },
             "emoji": {
-              "type": "string"
+              "type": "string",
+              "description": "The emoji to react with."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7048,10 +7281,12 @@
           "type": "object",
           "properties": {
             "message_id": {
-              "type": "integer"
+              "type": "integer",
+              "description": "The ID of the message to pin."
             },
             "disable_notification": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "If True, no notification is sent to chat members."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7110,7 +7345,8 @@
           "type": "object",
           "properties": {
             "file_id": {
-              "type": "string"
+              "type": "string",
+              "description": "The file_id from a Telegram message (photo, document, etc.)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7156,10 +7392,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to extract content from."
             },
             "output_format": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7191,10 +7429,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The URL to extract metadata from."
             },
             "as_json": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) Whether to return metadata as JSON string."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7226,10 +7466,12 @@
           "type": "object",
           "properties": {
             "html_content": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The HTML content to convert."
             },
             "clean": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) Whether to remove potentially undesirable elements."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7264,7 +7506,8 @@
               "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "description": "(List[str]) List of URLs to extract content from."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7296,10 +7539,12 @@
           "type": "object",
           "properties": {
             "homepage_url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The starting URL (preferably homepage) to crawl from."
             },
             "extract_content": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) Whether to extract content from discovered URLs."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7343,13 +7588,16 @@
           "type": "object",
           "properties": {
             "to": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number (E.164 format)"
             },
             "from_": {
-              "type": "string"
+              "type": "string",
+              "description": "Sender phone number (must be a Twilio number)"
             },
             "body": {
-              "type": "string"
+              "type": "string",
+              "description": "Message content"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7383,7 +7631,8 @@
           "type": "object",
           "properties": {
             "call_sid": {
-              "type": "string"
+              "type": "string",
+              "description": "The SID of the call to lookup"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7415,7 +7664,8 @@
           "type": "object",
           "properties": {
             "limit": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Maximum number of messages to return"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7458,19 +7708,24 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "The search query string (e.g., \"mountain sunset\", \"office workspace\")."
             },
             "per_page": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Number of results per page (1-30). Default: 10."
             },
             "page": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Page number to retrieve. Default: 1."
             },
             "orientation": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter by orientation: \"landscape\", \"portrait\", or \"squarish\"."
             },
             "color": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter by color: \"black_and_white\", \"black\", \"white\", \"yellow\",\n\"orange\", \"red\", \"purple\", \"magenta\", \"green\", \"teal\", \"blue\"."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7502,7 +7757,8 @@
           "type": "object",
           "properties": {
             "photo_id": {
-              "type": "string"
+              "type": "string",
+              "description": "The unique identifier of the photo."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7534,13 +7790,16 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional search query to filter random photos."
             },
             "orientation": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter by orientation: \"landscape\", \"portrait\", or \"squarish\"."
             },
             "count": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Number of random photos to return (1-30). Default: 1."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7570,7 +7829,8 @@
           "type": "object",
           "properties": {
             "photo_id": {
-              "type": "string"
+              "type": "string",
+              "description": "The unique identifier of the photo being downloaded."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7611,7 +7871,8 @@
           "type": "object",
           "properties": {
             "include_daily": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7641,7 +7902,8 @@
           "type": "object",
           "properties": {
             "include_daily": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Include retained token totals and per-model breakdowns by UTC date."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7671,7 +7933,8 @@
           "type": "object",
           "properties": {
             "include_daily": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7749,19 +8012,24 @@
                 {
                   "type": "string"
                 }
-              ]
+              ],
+              "description": "Dictionary with categories as keys and values as numbers,\nor list of dictionaries, or JSON string"
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Title of the chart"
             },
             "x_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for x-axis"
             },
             "y_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for y-axis"
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Custom filename for the chart image"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7827,19 +8095,24 @@
                 {
                   "type": "string"
                 }
-              ]
+              ],
+              "description": "Dictionary with x-values as keys and y-values as numbers,\nor list of dictionaries, or JSON string"
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Title of the chart"
             },
             "x_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for x-axis"
             },
             "y_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for y-axis"
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Custom filename for the chart image"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7905,13 +8178,16 @@
                 {
                   "type": "string"
                 }
-              ]
+              ],
+              "description": "Dictionary with categories as keys and values as numbers,\nor list of dictionaries, or JSON string"
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Title of the chart"
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Custom filename for the chart image"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7953,7 +8229,8 @@
                     "type": "number"
                   }
                 ]
-              }
+              },
+              "description": "List of x-values (can also use 'x' parameter)"
             },
             "y_data": {
               "type": "array",
@@ -7966,19 +8243,24 @@
                     "type": "number"
                   }
                 ]
-              }
+              },
+              "description": "List of y-values (can also use 'y' parameter)"
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Title of the chart"
             },
             "x_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for x-axis"
             },
             "y_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for y-axis"
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Custom filename for the chart image"
             },
             "x": {
               "type": "array",
@@ -8046,7 +8328,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Alternative format - list of [x,y] pairs or dict with 'x' and 'y' keys"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8086,22 +8369,28 @@
                     "type": "number"
                   }
                 ]
-              }
+              },
+              "description": "List of numeric values to plot"
             },
             "bins": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) Number of bins for the histogram"
             },
             "title": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Title of the chart"
             },
             "x_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for x-axis"
             },
             "y_label": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) Label for y-axis"
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "(Optional[str]) Custom filename for the chart image"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8143,10 +8432,12 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) http or https URL to open"
             },
             "new_window": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "(bool) If True, open in a new window, otherwise open in a new tab. Default is False."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8189,10 +8480,12 @@
           "type": "object",
           "properties": {
             "room_id": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The Room ID to send the message to."
             },
             "text": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The text of the message to send."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8269,13 +8562,16 @@
           "type": "object",
           "properties": {
             "text": {
-              "type": "string"
+              "type": "string",
+              "description": "The text message to send."
             },
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient's WhatsApp ID or phone number (e.g., \"+1234567890\"). Uses default if not provided."
             },
             "preview_url": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Whether to show link previews."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8307,13 +8603,16 @@
           "type": "object",
           "properties": {
             "template_name": {
-              "type": "string"
+              "type": "string",
+              "description": "Name of the approved template."
             },
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient's WhatsApp ID or phone number. Uses default if not provided."
             },
             "language_code": {
-              "type": "string"
+              "type": "string",
+              "description": "Language code for the template (e.g., \"en_US\")."
             },
             "components": {
               "type": "array",
@@ -8327,7 +8626,8 @@
                   "properties": {},
                   "additionalProperties": false
                 }
-              }
+              },
+              "description": "Optional list of template components (header, body, buttons)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8359,7 +8659,8 @@
           "type": "object",
           "properties": {
             "body_text": {
-              "type": "string"
+              "type": "string",
+              "description": "The message body text (max 1024 chars)."
             },
             "buttons": {
               "type": "array",
@@ -8383,16 +8684,20 @@
                 ],
                 "title": "ReplyButton",
                 "type": "object"
-              }
+              },
+              "description": "List of ReplyButton objects, each with 'id' and 'title'. Max 3 buttons, title max 20 chars."
             },
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number. Uses default if not provided."
             },
             "header": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional header text."
             },
             "footer": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional footer text."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8425,10 +8730,12 @@
           "type": "object",
           "properties": {
             "body_text": {
-              "type": "string"
+              "type": "string",
+              "description": "The message body text."
             },
             "button_text": {
-              "type": "string"
+              "type": "string",
+              "description": "Text on the list button (max 20 chars)."
             },
             "sections": {
               "type": "array",
@@ -8486,16 +8793,20 @@
                 ],
                 "title": "ListSection",
                 "type": "object"
-              }
+              },
+              "description": "List of ListSection objects, each with a 'title' and 'rows' list. Each row has 'id', 'title', optional 'description'."
             },
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number. Uses default if not provided."
             },
             "header": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional header text."
             },
             "footer": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional footer text."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8529,16 +8840,20 @@
           "type": "object",
           "properties": {
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number. Uses default if not provided."
             },
             "image_url": {
-              "type": "string"
+              "type": "string",
+              "description": "Public URL of the image. Provide either image_url or media_id."
             },
             "media_id": {
-              "type": "string"
+              "type": "string",
+              "description": "WhatsApp media ID from a previous upload. Provide either image_url or media_id."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional image caption."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8568,19 +8883,24 @@
           "type": "object",
           "properties": {
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number. Uses default if not provided."
             },
             "document_url": {
-              "type": "string"
+              "type": "string",
+              "description": "Public URL of the document. Provide either document_url or media_id."
             },
             "media_id": {
-              "type": "string"
+              "type": "string",
+              "description": "WhatsApp media ID from a previous upload. Provide either document_url or media_id."
             },
             "filename": {
-              "type": "string"
+              "type": "string",
+              "description": "Display filename for the document."
             },
             "caption": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional document caption."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8617,7 +8937,8 @@
                 {
                   "type": "number"
                 }
-              ]
+              ],
+              "description": "Latitude of the location (string or number)."
             },
             "longitude": {
               "anyOf": [
@@ -8627,16 +8948,20 @@
                 {
                   "type": "number"
                 }
-              ]
+              ],
+              "description": "Longitude of the location (string or number)."
             },
             "name": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional name of the location."
             },
             "address": {
-              "type": "string"
+              "type": "string",
+              "description": "Optional address text."
             },
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number. Uses default if not provided."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8669,13 +8994,16 @@
           "type": "object",
           "properties": {
             "message_id": {
-              "type": "string"
+              "type": "string",
+              "description": "The WhatsApp message ID of the message to react to."
             },
             "emoji": {
-              "type": "string"
+              "type": "string",
+              "description": "The emoji to react with (e.g., thumbs up)."
             },
             "recipient": {
-              "type": "string"
+              "type": "string",
+              "description": "Recipient phone number. Uses default if not provided."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8768,7 +9096,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8800,7 +9129,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8832,7 +9162,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8864,7 +9195,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8896,7 +9228,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8928,7 +9261,8 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8960,10 +9294,12 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "num_stories": {
-              "type": "integer"
+              "type": "integer",
+              "description": "(int) The number of news stories to return. Defaults to 3."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -8995,10 +9331,12 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "period": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The time period for which to retrieve technical indicators.\nValid periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max. Defaults to 3mo."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9030,13 +9368,16 @@
           "type": "object",
           "properties": {
             "symbol": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The stock symbol."
             },
             "period": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The period for which to retrieve historical prices. Defaults to \"1mo\".\nValid periods: 1d,5d,1mo,3mo,6mo,1y,2y,5y,10y,ytd,max"
             },
             "interval": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The interval between data points. Defaults to \"1d\".\nValid intervals: 1d,5d,1wk,1mo,3mo"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9080,7 +9421,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "The URL of the YouTube video."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9112,7 +9454,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "The URL of the YouTube video."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9144,7 +9487,8 @@
           "type": "object",
           "properties": {
             "url": {
-              "type": "string"
+              "type": "string",
+              "description": "The URL of the YouTube video."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9181,7 +9525,7 @@
     "functions": [
       {
         "name": "search_zendesk",
-        "description": "Searches for articles in Zendesk Help Center that match the given search string.\nParameters:\nsearch_string (str): The search query to look for in Zendesk articles.\n\nReturns:\nstr: A JSON-formatted string containing the list of articles without HTML tags.\n\nRaises:\nConnectionError: If the API request fails due to connection-related issues.\n\nArgs:\n    mindroom_output_path: Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools.",
+        "description": "Searches for articles in Zendesk Help Center that match the given search string.\nParameters:\nsearch_string (str): The search query to look for in Zendesk articles.\n\nReturns:\nstr: A JSON-formatted string containing the list of articles without HTML tags.\n\nRaises:\nConnectionError: If the API request fails due to connection-related issues.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -9230,10 +9574,12 @@
           "type": "object",
           "properties": {
             "role": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The role of the message sender (e.g., 'user', 'assistant', 'system')."
             },
             "content": {
-              "type": "string"
+              "type": "string",
+              "description": "(str) The text content of the message."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9266,7 +9612,8 @@
           "type": "object",
           "properties": {
             "memory_type": {
-              "type": "string"
+              "type": "string",
+              "description": "The type of memory to retrieve ('context', 'messages')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -9296,10 +9643,12 @@
           "type": "object",
           "properties": {
             "query": {
-              "type": "string"
+              "type": "string",
+              "description": "The search term to find relevant facts or nodes."
             },
             "search_scope": {
-              "type": "string"
+              "type": "string",
+              "description": "The scope of the search to perform. Can be \"edges\" (for facts) or \"nodes\"."
             },
             "mindroom_output_path": {
               "anyOf": [

@@ -197,6 +197,8 @@ async def test_custom_stt_uses_submitted_model_without_guessing_provider(
     assert "audio_total_tokens" not in stored[0]["metrics"]
     assert "audio_input_tokens" not in stored[0]["requests"][0]["metrics"]
     assert "audio_total_tokens" not in stored[0]["requests"][0]["metrics"]
+    assert "model" not in stored[0]["requests"][0]
+    assert "model_provider" not in stored[0]["requests"][0]
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 5
     assert report.request_breakdown == ()

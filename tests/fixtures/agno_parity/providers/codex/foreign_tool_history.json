@@ -144,6 +144,21 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Add a warm layer.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ],
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },
@@ -174,7 +189,6 @@
         },
         {
           "type": "function_call",
-          "id": "fc_00000000",
           "call_id": "call_00000000",
           "name": "get_weather",
           "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",

@@ -1,8 +1,10 @@
-"""The error classification and ``extra_kwargs`` parsing every provider family shares."""
+"""The error classification, ``extra_kwargs`` parsing, and turn timing every provider family shares."""
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -17,7 +19,16 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.providers.errors import classify_provider_error, is_context_window_error, provider_failure
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.provider import ModelIdentity, ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, UsageReported
+from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn
+from mindroom.providers.errors import (
+    classify_provider_error,
+    is_context_window_error,
+    provider_failure,
+    retry_after_seconds,
+)
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
 
@@ -47,7 +58,10 @@ from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
         ),
         (400, "API key not valid. Please pass a valid API key.", None, AuthenticationFailed, False),
         (503, "authentication service overloaded", None, ProviderUnavailable, True),
-        (520, "origin error", None, ProviderError, False),
+        (520, "origin error", None, ProviderUnavailable, True),
+        (524, "A timeout occurred", None, ProviderUnavailable, True),
+        (501, "not implemented", None, ProviderUnavailable, True),
+        (418, "teapot", None, ProviderError, False),
     ],
 )
 def test_statuses_and_wording_classify_the_same_for_every_family(
@@ -61,8 +75,43 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
     error = classify_provider_error(message, provider="Test", status_code=status, code=code)
 
     assert type(error) is expected
-    assert (error.retryable, error.status_code, error.code, error.provider) == (retryable, status, code, "Test")
+    assert (error.retryable, error.status_code, error.provider_code, error.provider) == (
+        retryable,
+        status,
+        code,
+        "Test",
+    )
+    assert error.code is None
     assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    ("headers", "seconds"),
+    [
+        ({"retry-after": "2.5"}, 2.5),
+        ({"Retry-After": " 7 "}, 7.0),
+        ({"retry-after-ms": "30000", "retry-after": "1"}, 30.0),
+        ({"Retry-After-Ms": "250"}, 0.25),
+        ({"retry-after-ms": "soon", "retry-after": "4"}, 4.0),
+        ({"retry-after": "0"}, 0.0),
+        ({"retry-after": "-1"}, None),
+        ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, 30.0),
+        ({"Retry-After": "Wed, 21 Oct 2026 07:27:00 GMT"}, 0.0),
+        ({"retry-after": "next Tuesday"}, None),
+        ({}, None),
+    ],
+)
+def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str], seconds: float | None) -> None:
+    """Azure's ``retry-after-ms`` wins, an HTTP date counts the seconds until it, and an unreadable value is no hint."""
+    now = datetime(2026, 10, 21, 7, 27, 30, tzinfo=UTC)
+    assert retry_after_seconds(headers, now=now) == seconds
+
+
+def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
+    """A server that names its failure ``timeout`` sent no transport timeout, which only MindRoom's marker reports."""
+    error = classify_provider_error("upstream busy", provider="Test", status_code=500, code=TRANSPORT_TIMEOUT)
+
+    assert (type(error), error.code, error.provider_code) == (ProviderUnavailable, None, TRANSPORT_TIMEOUT)
 
 
 @pytest.mark.parametrize(
@@ -106,7 +155,7 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
     error = classify_provider_error(message, provider="Test", code=code, error_type=error_type)
 
     assert type(error) is expected
-    assert (error.status_code, error.code) == (None, code)
+    assert (error.status_code, error.code, error.provider_code) == (None, None, code)
 
 
 def test_context_window_detection_reads_the_code_and_the_wording() -> None:
@@ -241,3 +290,34 @@ def test_authored_containers_are_copied_and_opaque_values_kept() -> None:
     assert settings.stop == ["x"]
     assert settings.stop is not authored["stop"]
     assert settings_from_extra_kwargs(_Settings, None, provider="test") == _Settings()
+
+
+_CALL = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [TextDelta("Hi"), ReasoningDelta("Hmm"), ToolCallReady(_CALL)],
+    ids=["text", "reasoning", "tool_call"],
+)
+def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelta | ToolCallReady) -> None:
+    """Text, reasoning, and a complete tool call are output; usage, progress, and later output leave the time alone.
+
+    A provider chunk without events passes on as progress.
+    """
+    timer = TurnTimer()
+    usage = UsageReported(MessageMetrics(), final=False)
+
+    assert [*timer.chunk([usage]), *timer.chunk([])] == [usage, StreamProgress()]
+    assert timer.first_output_at is None
+    assert list(timer.chunk([output])) == [output]
+    first_output_at = timer.first_output_at
+    assert first_output_at is not None
+    assert timer.output(TextDelta("more")) == TextDelta("more")
+    message = Message(role="assistant", content="Hi")
+    stamp_finished_turn(message, ModelIdentity(id="m", provider="P", provider_name="P"), timer)
+
+    assert timer.first_output_at == first_output_at
+    assert message.metrics.time_to_first_token == first_output_at - timer.started
+    assert 0 <= message.metrics.time_to_first_token <= message.metrics.duration <= time.monotonic() - timer.started
+    assert message.provider_data == model_provenance("m", "P")

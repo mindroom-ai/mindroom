@@ -210,11 +210,11 @@ async def test_a_paused_call_the_stream_already_announced_is_not_announced_again
 
 
 @pytest.mark.asyncio
-async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
+async def test_a_collected_reply_starts_a_new_paragraph_after_a_hidden_tool_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Explicit stream collection should still work when inline tool markers are hidden."""
+    """A hidden tool call separates the text around it, as a streamed reply shows it and the run stores it."""
     seen_kwargs: dict[str, object] = {}
 
     async def fake_stream_agent_response(_ctx: object, **kwargs: object) -> AsyncGenerator[object, None]:
@@ -235,7 +235,7 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
                 result="content",
             ).call,
         )
-        yield TextDelta(" After.")
+        yield TextDelta("After.")
 
     monkeypatch.setattr("mindroom.ai.stream_agent_response", fake_stream_agent_response)
 
@@ -246,12 +246,11 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(
         runtime_paths=test_runtime_paths(tmp_path),
         config=Config(),
         show_tool_calls=False,
-        collect_streamed_response=True,
         tool_trace_collector=trace,
     )
 
-    assert body == "Before. After."
-    assert trace == []
+    assert body == "Before.\n\nAfter."
+    assert [(entry.type, entry.tool_name) for entry in trace] == [("tool_call_completed", "read_file")]
     assert seen_kwargs["show_tool_calls"] is False
 
 

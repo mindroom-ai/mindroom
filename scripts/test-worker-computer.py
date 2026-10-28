@@ -24,7 +24,6 @@ from urllib.parse import quote, urlsplit
 import httpx
 import uvicorn
 import yaml
-from agno.tools.function import ToolResult
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,6 +38,7 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
@@ -304,12 +304,12 @@ class Fixture:
         assert body["ok"], body
         return json.loads(body["result"])
 
-    async def native(self, tool_function: str, **kwargs: Any) -> ToolResult:  # noqa: ANN401 - native tool JSON
+    async def native(self, tool_function: str, **kwargs: Any) -> ToolValue:  # noqa: ANN401 - native tool JSON
         """Call the actual native entrypoint and retain a bounded text transcript."""
         body = await self.execute("browser_mcp", tool_function, kwargs)
         assert body["ok"], body
         result = decode_media_result(body["result"])
-        assert isinstance(result, ToolResult), result
+        assert isinstance(result, ToolValue), result
         with (self.args.output / "native-transcript.jsonl").open("a") as transcript:
             transcript.write(
                 json.dumps({"function": tool_function, "arguments": kwargs, "text": result.content}) + "\n",
@@ -354,14 +354,14 @@ class Fixture:
                 await asyncio.sleep(0.05)
         assert await self.evaluate("()=>window.uploadName") == "native-upload.txt"
         image = await self.primary_native("browser_take_screenshot", type="png", scale="css")
-        assert isinstance(image, ToolResult)
+        assert isinstance(image, ToolValue)
         assert image.images
         assert image.images[0].mime_type == "image/png"
         data = image.images[0].content
         assert isinstance(data, bytes)
         assert data.startswith(b"\x89PNG\r\n\x1a\n")
         text = await self.primary_native("browser_snapshot")
-        assert isinstance(text, ToolResult)
+        assert isinstance(text, ToolValue)
         assert "Remote text" in text.content
         named = await self.native("browser_take_screenshot", filename="browser/native.png", type="png", scale="css")
         assert not named.images

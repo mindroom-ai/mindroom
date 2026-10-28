@@ -9,7 +9,6 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
-import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from functools import partial
@@ -20,12 +19,13 @@ from google.genai.errors import APIError
 from google.genai.types import HttpOptions
 from pydantic import ValidationError
 
+from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.llm.errors import InvalidRequest, ProviderError
-from mindroom.llm.provider import Capabilities, ModelIdentity, StreamProgress, TurnCompleted, UsageReported
+from mindroom.llm.provider import Capabilities, ModelIdentity
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.errors import classify_provider_error, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.gemini.files import uploaded_file_uri
 from mindroom.providers.gemini.settings import GeminiSettings
@@ -56,6 +56,8 @@ if TYPE_CHECKING:
 
 _PROVIDER = "Google"
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
+# How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
+_NO_API_KEY_ERROR = "No API key was provided."
 
 
 @dataclass(slots=True, kw_only=True)
@@ -78,14 +80,19 @@ class GeminiProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
+        Media uploads happen first, so their SDK and transport errors are normalized too.
         """
-        started = time.monotonic()
+        timer = TurnTimer()
         reply = GeminiReply()
-        first_output_at: float | None = None
-        # Client construction reads credentials from disk; its failures are configuration errors, not transient.
-        client = self._sdk_client()
         provider = self.identity.provider_name
+        # Client construction reads credentials from disk; its failures are configuration errors, not transient.
+        try:
+            client = self._sdk_client()
+        except ValueError as error:
+            # A Gemini API client finds no key in the config, the dashboard, or the variables the SDK reads.
+            if not str(error).startswith(_NO_API_KEY_ERROR):
+                raise
+            raise missing_api_key_error(PROVIDER_ENV_KEYS["google"], provider=provider) from error
         # The client, which ``client_params`` can switch to Vertex AI, names the route; Vertex AI has no Files API.
         upload = None if client.vertexai else partial(uploaded_file_uri, client, provider=provider)
         try:
@@ -96,9 +103,7 @@ class GeminiProvider:
             chunks = await client.aio.models.generate_content_stream(**call)
             async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
                 async for chunk in responses:
-                    # A chunk without output, such as grounding or code-execution progress, is still activity.
-                    for event in read_chunk(reply, chunk) or [StreamProgress()]:
-                        first_output_at = output_started(first_output_at, event)
+                    for event in timer.chunk(read_chunk(reply, chunk)):
                         yield event
         except ProviderError:
             # Media and chunk failures arrive normalized.
@@ -108,25 +113,23 @@ class GeminiProvider:
         if not reply.finished:
             # The stream ended before Gemini ended the reply, so the turn did not finish.
             return
-        for event in self._finished_turn(reply, started=started, first_output_at=first_output_at):
+        for event in self._finished_turn(reply, timer):
             yield event
 
-    def _finished_turn(self, reply: GeminiReply, *, started: float, first_output_at: float | None) -> list[StreamEvent]:
-        """Return the final usage report and the finished turn of a reply Gemini ended, or raise its malformed call."""
+    def _finished_turn(self, reply: GeminiReply, timer: TurnTimer) -> list[StreamEvent]:
+        """Return the events that end a reply Gemini ended, or raise its malformed call."""
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
             raise malformed
-        message = finished_assistant_message(
+        return finished_turn(
             self.identity,
+            timer,
             content=reply.content or None,
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
             provider_data=reply_provider_data(reply),
             usage=reply.usage,
-            started=started,
-            first_output_at=first_output_at,
+            stop_reason=stop_reason(reply),
         )
-        usage = [] if reply.usage is None else [UsageReported(message.metrics)]
-        return [*usage, TurnCompleted(message=message, stop_reason=stop_reason(reply))]
 
     def _request_config(
         self,
@@ -136,12 +139,7 @@ class GeminiProvider:
         """Return the generation config of one request."""
         settings = self.settings
         overrides = request.overrides
-        # TODO(simplify): an authored ``generation_config`` key that has a dedicated field, such as temperature, is
-        # dropped when that field is unset. Let a dedicated field replace the key only when it is set. Operators and
-        # models would notice.
-        config: dict[str, Any] = {
-            **(settings.generation_config or {}),
-            **(settings.generative_model_kwargs or {}),
+        dedicated = {
             "safety_settings": settings.safety_settings,
             "temperature": settings.temperature if overrides.temperature is None else overrides.temperature,
             "top_p": settings.top_p,
@@ -153,6 +151,12 @@ class GeminiProvider:
             "frequency_penalty": settings.frequency_penalty,
             "seed": settings.seed,
             "cached_content": settings.cached_content,
+        }
+        # A dedicated setting replaces the authored ``generation_config`` key of the same name only when it is set.
+        config: dict[str, Any] = {
+            **(settings.generation_config or {}),
+            **(settings.generative_model_kwargs or {}),
+            **{key: value for key, value in dedicated.items() if value is not None},
         }
         if system_instruction is not None:
             config["system_instruction"] = system_instruction
@@ -179,9 +183,9 @@ class GeminiProvider:
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}
-        if overrides.caller_retries:
-            # The SDK retries only as ``http_options.retry_options`` authors it; one attempt overrides that here.
-            config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
+        # The request pipeline retries a failed request, so one attempt also overrides SDK retries that the generation
+        # config's ``http_options`` authors.
+        config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
         if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config
@@ -210,7 +214,12 @@ class GeminiProvider:
         params["vertexai"] = settings.vertexai
         if settings.timeout is not None:
             params["http_options"] = {"timeout": int(settings.timeout * 1000)}
-        return {**params, **(settings.client_params or {})}
+        params = {**params, **(settings.client_params or {})}
+        # The request pipeline retries a failed request, so one attempt overrides any SDK retries ``client_params``
+        # authors, for the Files API calls of an attachment too large to inline as for generation. google-genai still
+        # retries an upload's transfer a fixed number of times, which no option turns off.
+        params["http_options"] = {**(params.get("http_options") or {}), "retry_options": {"attempts": 1}}
+        return params
 
 
 def _provider_error(error: Exception, *, provider: str) -> ProviderError:
@@ -259,6 +268,8 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
         capabilities=Capabilities(
             structured_output="native",
+            # Gemini fetches Cloud Storage and HTTPS files and video links itself.
+            url_media=frozenset({"file", "video"}),
             provider_default_sampling=model_config.id.casefold().endswith(
                 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
             ),

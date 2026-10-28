@@ -35,11 +35,12 @@ from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifet
 from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, TurnToolRegistry
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval import receipt_readers as approval_receipt
+from mindroom.approval import response as approval_response
 from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -76,12 +77,12 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.event_journal import (
-    INTERRUPTED_FAILURE_REASON,
     ApprovalCall,
     ApprovalCardReservation,
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalDecisionMetadata,
+    ApprovalFailure,
     DeliveryStage,
     EventClass,
     EventKind,
@@ -107,7 +108,6 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import SpanHandle, current_span
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, response_lifecycle_reservation_context
@@ -121,8 +121,8 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
     _prepare_memory_and_model_context,
-    _response_typing_indicator,
     _ResponseGenerationOutcome,
+    response_typing_indicator,
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import (
@@ -134,7 +134,6 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
-    run_blocking_response_turn,
     stream_response_turn,
 )
 from mindroom.room_model_overrides import set_room_model_override
@@ -165,16 +164,19 @@ from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, f
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
+from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import (
     advance_continuation,
     approval_continuation,
     claim_continuation,
+    dispatch_approval,
     freeze_resume_final,
     resumed_approval,
 )
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    FakeApprovalTransport,
     initialize_approval_store_for_test,
     install_model_providers,
     live_turn_tools_for_test,
@@ -202,10 +204,11 @@ from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
     _AdapterLog,
-    _blocking_adapter,
+    _collected_turn,
     _continuation,
     _ctx,
     _model_switch_execution,
+    _resolving_adapter,
     _streaming_adapter,
 )
 from tests.tool_approval_helpers import gated_functions
@@ -220,6 +223,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.reply_scope import SpanHandle
     from mindroom.response_lifecycle import _QueuedMessageState
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -356,7 +360,7 @@ async def test_response_typing_supplies_complete_attribution(monkeypatch: pytest
     logger = MagicMock()
     monkeypatch.setattr(typing_module, "logger", logger)
 
-    async with _response_typing_indicator(
+    async with response_typing_indicator(
         client,
         request,
         response_run_id="response-run-1",
@@ -988,10 +992,9 @@ async def test_recovery_proofs_wait_until_every_response_is_terminal() -> None:
 async def test_process_shutdown_drains_four_owned_response_lifecycles(
     tmp_path: Path,
 ) -> None:
-    """Process stop must unwind every tracked response before terminal cleanup can resist cancellation."""
+    """Process stop must unwind every tracked response without settling it, so restart recovery still owns each."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     all_attempts_started = asyncio.Event()
-    release_settlement = asyncio.Event()
     started_count = 0
 
     async def blocked_attempt(*_args: object, **_kwargs: object) -> None:
@@ -1000,13 +1003,6 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
         if started_count == 4:
             all_attempts_started.set()
         await asyncio.Event().wait()
-
-    async def cancellation_resistant_settlement(**_kwargs: object) -> None:
-        while not release_settlement.is_set():
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                continue
 
     async def owned_response(index: int) -> None:
         await coordinator.generate_response(
@@ -1030,7 +1026,7 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
         patch.object(
             coordinator,
             "_settle_missing_delivery_outcome",
-            new=AsyncMock(side_effect=cancellation_resistant_settlement),
+            wraps=coordinator._settle_missing_delivery_outcome,
         ) as settle,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
@@ -1046,25 +1042,27 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
             )
             for index in range(4)
         ]
-        await asyncio.wait_for(all_attempts_started.wait(), timeout=1.0)
+        # Each attempt opens its session store first, and concurrent opens of one state root queue on a polled lock.
+        await asyncio.wait_for(all_attempts_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         coordinator.begin_process_shutdown()
         try:
+            # The drain returns once the cancelled attempts unwind. One that kept running would exhaust both windows
+            # and raise; the outer bound stays above them, so it only reports a drain that ignores its windows.
             assert (
                 await asyncio.wait_for(
-                    coordinator.drain_inbox_responses(cancel_after_seconds=0.01),
-                    timeout=0.2,
+                    coordinator.drain_inbox_responses(cancel_after_seconds=2.0),
+                    timeout=SETTLE_TIMEOUT_SECONDS,
                 )
                 is True
             )
         finally:
-            release_settlement.set()
             for task in tasks:
                 if not task.done():
                     task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)
 
-    settle.assert_not_awaited()
+    settle.assert_not_called()
     assert coordinator.pending_inbox_response_count == 0
     assert not coordinator._inbox_response_tasks
 
@@ -1400,7 +1398,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
     ):
         first = asyncio.create_task(runner.generate_response(first_request))
         await asyncio.wait_for(first_started.wait(), timeout=2)
-        assert await runner._request_remains_authorized(second_request)
+        assert await runner.request_remains_authorized(second_request)
         second = asyncio.create_task(runner.generate_response(second_request))
         leave = nio.RoomMemberEvent.from_dict(
             {
@@ -1596,7 +1594,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
 async def test_failing_continuation_recovers_frozen_success_before_failure_settlement(tmp_path: Path) -> None:
     """A failure fence racing a generated answer cannot retire that answer as a denial."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-failing-final",
@@ -1608,9 +1606,9 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         runtime_generation=runner.deps.approval_runtime_generation,
     )
     assert claimed is not None
-    failing = await store.request_approval_failure(
+    failing = await store.approvals.request_approval_failure(
         claimed.approval_id,
-        "entity removed",
+        ApprovalFailure(rl.ApprovalFailureKind.ERROR, "entity removed"),
         expected_state="claimed",
         expected_generation=claimed.generation,
         expected_runtime_generation=claimed.runtime_generation,
@@ -1631,31 +1629,31 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     )
     lifecycle = MagicMock(finalize=AsyncMock())
 
-    with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
-        recovered, event_id = await runner._recover_nonready_approval(
+    with patch.object(runner, "build_lifecycle", return_value=lifecycle):
+        event_id = await dispatch_approval(
+            runner._approvals,
             failing,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert recovered
     assert event_id == "$waiting"
     lifecycle.finalize.assert_awaited_once()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure_reason",
-    [None, INTERRUPTED_FAILURE_REASON],
+    "failure",
+    [None, ApprovalFailure(rl.ApprovalFailureKind.SHUTDOWN)],
     ids=["stale_claim", "handoff_fence"],
 )
 async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
     tmp_path: Path,
-    failure_reason: str | None,
+    failure: ApprovalFailure | None,
 ) -> None:
     """An approved run a restart cut short ends its cards and leaves its reply and source for replay to continue."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-stale-claim",
@@ -1667,10 +1665,10 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
         runtime_generation="previous-runtime",
     )
     assert owned is not None
-    if failure_reason is not None:
-        owned = await store.request_approval_failure(
+    if failure is not None:
+        owned = await store.approvals.request_approval_failure(
             continuation.approval_id,
-            failure_reason,
+            failure,
             expected_state="claimed",
             expected_runtime_generation="previous-runtime",
         )
@@ -1685,16 +1683,19 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
             return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
-        recovered, event_id = await runner._recover_nonready_approval(
+        event_id = await dispatch_approval(
+            runner._approvals,
             owned,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert recovered
     assert event_id is None
     edit_text.assert_not_awaited()
-    expire_cards.assert_awaited_once_with(continuation.approval_id)
-    assert await store.approval_continuation(continuation.approval_id) is None
+    expire_cards.assert_awaited_once_with(
+        continuation.approval_id,
+        ApprovalFailure(rl.ApprovalFailureKind.SHUTDOWN).reason,
+    )
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert await store.is_pending("$source")
 
 
@@ -1702,7 +1703,7 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
 async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Path) -> None:
     """A hand-back whose cards did not expire waits for the next pass instead of settling the reply."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-retry-cards",
@@ -1721,33 +1722,36 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
             return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
-        first = await runner._recover_nonready_approval(claimed, target=target)
-        waiting = await store.approval_continuation(continuation.approval_id)
+        first = await dispatch_approval(runner._approvals, claimed, target=target)
+        waiting = await store.approvals.approval_continuation(continuation.approval_id)
         assert waiting is not None
-        second = await runner._recover_nonready_approval(waiting, target=target)
+        second = await dispatch_approval(runner._approvals, waiting, target=target)
 
-    assert first == (True, None)
+    assert first is None
     assert waiting.state == "failing"
-    assert second == (True, None)
+    assert second is None
     edit_text.assert_not_awaited()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert await store.is_pending("$source")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("handed_off", "failure_reason"),
-    [(True, INTERRUPTED_FAILURE_REASON), (False, "sync_restart_cancelled")],
+    ("handed_off", "failure"),
+    [
+        (True, ApprovalFailure(rl.ApprovalFailureKind.SHUTDOWN)),
+        (False, ApprovalFailure(rl.ApprovalFailureKind.RESTART)),
+    ],
     ids=["handed_to_successor", "cancelled_in_place"],
 )
 async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
     tmp_path: Path,
     handed_off: bool,
-    failure_reason: str,
+    failure: ApprovalFailure,
 ) -> None:
     """A run handed to a successor runtime is fenced as restart-interrupted; any other cancellation keeps its provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-restart-cancelled",
@@ -1766,11 +1770,10 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
         await asyncio.Event().wait()
 
     with (
-        patch.object(runner, "_run_claimed_approval_lifecycle", new=run_until_cancelled),
-        patch.object(runner, "_recover_frozen_approval_final", new=AsyncMock(return_value=(False, None))),
+        patch.object(runner._approvals, "_run_claimed_approval_lifecycle", new=run_until_cancelled),
     ):
         task = asyncio.create_task(
-            runner._run_owned_approval_continuation(
+            runner._approvals._run_owned_approval_continuation(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             ),
@@ -1780,38 +1783,42 @@ async def test_cancelled_claimed_approval_records_whether_a_successor_takes_it(
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    failing = await store.approval_continuation(continuation.approval_id)
+    failing = await store.approvals.approval_continuation(continuation.approval_id)
     assert failing is not None
     assert failing.state == "failing"
-    assert failing.failure_reason == failure_reason
+    assert failing.failure == failure
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_reason", ["cancelled_by_user", "suppressed_by_hook"])
+@pytest.mark.parametrize(
+    ("failure_reason", "suppressed", "failure"),
+    [
+        ("cancelled_by_user", False, ApprovalFailure(rl.ApprovalFailureKind.USER_STOP)),
+        ("suppressed_by_hook", True, ApprovalFailure(rl.ApprovalFailureKind.ERROR, "suppressed_by_hook")),
+    ],
+)
 async def test_claimed_approval_non_interruption_uses_ordinary_settlement(
     tmp_path: Path,
     failure_reason: str,
+    suppressed: bool,
+    failure: ApprovalFailure,
 ) -> None:
     """User stops and hook suppression must not be relabeled as interruptions."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    continuation = MagicMock(spec=ApprovalContinuation)
+    continuation = approval_continuation(state="claimed", runtime_generation=runner.deps.approval_runtime_generation)
     settle_failure = AsyncMock()
-    restart_recovery = AsyncMock()
     outcome = FinalDeliveryOutcome(
         terminal_status="cancelled",
         event_id="$waiting",
         failure_reason=failure_reason,
+        suppressed=suppressed,
         is_visible_response=True,
     )
 
-    with (
-        patch.object(runner._approval_responses, "settle_failure", new=settle_failure),
-        patch.object(runner, "_settle_interrupted_approval_recovery", new=restart_recovery),
-    ):
-        await runner._settle_failed_approval_outcome(continuation, outcome)
+    with patch.object(runner._approvals, "_settle", new=settle_failure):
+        await runner._approvals._settle_failed_approval_outcome(continuation, outcome)
 
-    settle_failure.assert_awaited_once_with(continuation, failure_reason)
-    restart_recovery.assert_not_awaited()
+    settle_failure.assert_awaited_once_with(continuation, failure)
 
 
 def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(tmp_path: Path) -> None:
@@ -1845,7 +1852,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     """A generic cancellation preserves its provenance instead of claiming a restart."""
     runner_bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(runner_bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-interrupted",
@@ -1857,9 +1864,9 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
     # The next instance takes the replies over and settles the interrupted resume.
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
-    await bot._reply_runtime.start()
-    claimed = await store.approval_continuation(continuation.approval_id)
+    store = runner.deps.replies.store
+    await bot._take_over_replies()
+    claimed = await store.approvals.approval_continuation(continuation.approval_id)
     assert claimed is not None
     unique_room_send_responses(bot.client)
     outcome = FinalDeliveryOutcome(
@@ -1872,9 +1879,9 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         "mindroom.approval.response.approval_manager.get_approval_store",
         return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
     ):
-        await runner._settle_failed_approval_outcome(claimed, outcome)
+        await runner._approvals._settle_failed_approval_outcome(claimed, outcome)
 
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     note = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]
     assert note["body"] == f"committed partial\n\n{INTERRUPTED_RESPONSE_NOTE}"
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
@@ -1896,7 +1903,7 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
 ) -> None:
     """A FINAL its resume wrote as a failure or cancellation is recovered as one, never as a completed answer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     await store.enqueue_matrix_delivery(
         delivery_id="$source",
@@ -1921,7 +1928,7 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
         patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=outcome))),
         patch.object(ReplyStore, "load", AsyncMock(return_value=reply)),
     ):
-        restored = await runner._approval_outcome_from_delivery(
+        restored = await runner._approvals._approval_outcome_from_delivery(
             replace(frozen, span_id="span-resume", reply_id="reply-1"),
         )
     assert restored.terminal_status == status
@@ -1931,7 +1938,7 @@ async def test_a_frozen_approval_final_reports_how_its_span_ended(
 async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_path: Path) -> None:
     """A final transform reshaped the answer the FINAL showed; recovered after-response work sees that, not the raw answer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     await store.enqueue_matrix_delivery(
         delivery_id="$source",
@@ -1958,7 +1965,7 @@ async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_pat
         patch.object(ReplyStore, "load", AsyncMock(return_value=reply)),
         patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=rl.SpanOutcome.COMPLETED))),
     ):
-        restored = await runner._approval_outcome_from_delivery(
+        restored = await runner._approvals._approval_outcome_from_delivery(
             replace(frozen, reply_id="reply-1", span_id="span-resume"),
         )
     assert restored.final_visible_body == "transformed"
@@ -1968,7 +1975,7 @@ async def test_a_recovered_approval_answer_reports_what_its_final_showed(tmp_pat
 async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: Path) -> None:
     """A crash between a resume's failure and its fence leaves nothing for a replay to continue: the approval fails."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     claimed = approval_continuation(
         approval_id="approval-resume-failed",
         state="claimed",
@@ -1978,10 +1985,11 @@ async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: 
     release_to_replay = AsyncMock(return_value=True)
     with (
         patch.object(ReplyStore, "span", AsyncMock(return_value=MagicMock(outcome=rl.SpanOutcome.FAILED))),
-        patch.object(runner._approval_responses, "settle_failure", settle_failure),
-        patch.object(runner._approval_responses, "release_to_replay", release_to_replay),
+        patch.object(runner._approvals, "_settle", settle_failure),
+        patch.object(runner._approvals, "_release_to_replay", release_to_replay),
     ):
-        event_id = await runner._recover_claimed_approval_lifecycle(
+        event_id = await dispatch_approval(
+            runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
@@ -2066,23 +2074,23 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
     """A failed outbox read cannot hide a same-runtime claim until restart."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id=f"approval-recovery-error-{cancelled}",
     )
     assert await paused_for_approval(store, continuation) is not None
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     failure = asyncio.CancelledError() if cancelled else RuntimeError("Agno continuation failed")
 
     with (
-        patch.object(runner, "_run_claimed_approval_lifecycle", new=AsyncMock(side_effect=failure)),
-        patch.object(
-            runner._approval_responses,
-            "final_delivery",
-            new=AsyncMock(side_effect=RuntimeError("outbox temporarily unavailable")),
+        patch.object(runner._approvals, "_run_claimed_approval_lifecycle", new=AsyncMock(side_effect=failure)),
+        # The dispatch reads the ready continuation's final answer; the outbox fails once its resume ends.
+        patch(
+            "mindroom.approval.continuation_runner.read_final",
+            new=AsyncMock(side_effect=[(None, None), RuntimeError("outbox temporarily unavailable")]),
         ),
-        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=False)),
+        patch.object(runner._approvals, "_settle", new=AsyncMock(return_value=False)),
     ):
         if cancelled:
             with pytest.raises(asyncio.CancelledError):
@@ -2103,7 +2111,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
                 is None
             )
 
-    retained = await store.approval_continuation(continuation.approval_id)
+    retained = await store.approvals.approval_continuation(continuation.approval_id)
     assert retained is not None
     assert retained.state == "failing"
 
@@ -2245,7 +2253,7 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
 
     with patch.object(runner._lifecycle_coordinator, "run_locked_response", new=blocked_lifecycle):
         task = asyncio.create_task(
-            runner._run_locked_response_lifecycle(
+            runner.run_locked_response_lifecycle(
                 request,
                 response_kind="agent",
                 locked_operation=AsyncMock(),
@@ -2290,7 +2298,7 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
         raise proximate_error
 
     with pytest.raises(PostLockRequestPreparationError) as exc_info:
-        await runner._run_locked_response_lifecycle(
+        await runner.run_locked_response_lifecycle(
             _plain_request(_target()),
             response_kind="agent",
             locked_operation=fail_after_placeholder,
@@ -2317,7 +2325,7 @@ async def test_silent_schedule_does_not_signal_queued_human_activity(tmp_path: P
     run_locked_response = AsyncMock(return_value=None)
 
     with patch.object(runner._lifecycle_coordinator, "run_locked_response", new=run_locked_response):
-        await runner._run_locked_response_lifecycle(
+        await runner.run_locked_response_lifecycle(
             request,
             response_kind="agent",
             locked_operation=AsyncMock(return_value=None),
@@ -2331,7 +2339,7 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
     """A crash after suspension persistence must not execute the inbound source a second time."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-replay",
         run_id="run-paused",
@@ -2360,7 +2368,7 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
         ),
         state="waiting",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     locked_operation = AsyncMock(return_value="$duplicate")
 
     event_id = await runner._run_owned_or_locked_response(
@@ -2380,15 +2388,15 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread", reply_to_event_id="$follow-up")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-resume",
         run_id="run-paused",
         room_id=target.room_id,
         thread_id=target.resolved_thread_id,
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
-    await bot._reply_runtime.start()
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    await bot._take_over_replies()
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
@@ -2401,7 +2409,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         return "$follow-up-response"
 
     follow_up = asyncio.create_task(
-        runner._run_locked_response_lifecycle(
+        runner.run_locked_response_lifecycle(
             _plain_request(target, source_event_id="$follow-up"),
             response_kind="ai",
             locked_operation=active_follow_up,
@@ -2412,7 +2420,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     resume_entered = asyncio.Event()
     begin_response_turn_notice = lifecycle._begin_response_turn_notice
-    run_approval_continuation = AsyncMock(return_value="$waiting")
+    run_approval_continuation = AsyncMock(return_value=("$waiting", False))
 
     def observe_response_turn_start(
         *,
@@ -2434,12 +2442,12 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     with (
         patch.object(lifecycle, "_begin_response_turn_notice", new=observe_response_turn_start),
         patch.object(
-            runner,
+            runner._approvals,
             "_run_owned_approval_continuation",
             new=run_approval_continuation,
         ),
     ):
-        resume = asyncio.create_task(runner._resume_approval_source("$source"))
+        resume = asyncio.create_task(runner._approvals._resume_approval_source("$source"))
         await asyncio.wait_for(resume_entered.wait(), timeout=1.0)
 
         pending_human_messages = {message.event_id for message in queued_signal.pending_message_snapshot()}
@@ -2462,14 +2470,14 @@ async def test_ready_approval_replay_rechecks_current_authorization(
     """A ready continuation must fail safely instead of executing after revocation."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-revoked",
         run_id="run-paused",
         room_id=request.room_id,
         thread_id=request.thread_id,
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     if revoked_layer in {"room", "pending"}:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
             current_room_members=True,
@@ -2484,21 +2492,14 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             )
     else:
         runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(users=[])
-    failing = replace(
-        continuation,
-        state="failing",
-        failure_reason="Current authorization no longer permits this tool approval continuation.",
-    )
-
     with (
         patch.object(
-            runner._approval_responses,
-            "request_failure",
-            new=AsyncMock(return_value=failing),
-        ) as request_failure,
-        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=True)) as settle_failure,
+            runner._approvals,
+            "_settle",
+            new=AsyncMock(return_value=True),
+        ) as settle_failure,
         patch.object(
-            runner,
+            runner._approvals,
             "_run_claimed_approval_lifecycle",
             new=AsyncMock(side_effect=AssertionError("revoked continuation executed")),
         ) as execute,
@@ -2512,8 +2513,7 @@ async def test_ready_approval_replay_rechecks_current_authorization(
                     locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
                 )
             assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
-            assert await runner.deps.approval_store.is_pending("$source")
-            request_failure.assert_not_awaited()
+            assert await runner.deps.replies.store.is_pending("$source")
             settle_failure.assert_not_awaited()
             execute.assert_not_awaited()
             # The same owned source becomes a definitive denial after refresh.
@@ -2530,10 +2530,13 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         )
 
     assert event_id == "$waiting"
-    request_failure.assert_awaited_once()
+    # The settlement fences the ready continuation the recheck refused.
     settle_failure.assert_awaited_once_with(
-        failing,
-        "Current authorization no longer permits this tool approval continuation.",
+        continuation,
+        ApprovalFailure(
+            rl.ApprovalFailureKind.ERROR,
+            "Current authorization no longer permits this tool approval continuation.",
+        ),
     )
     execute.assert_not_awaited()
 
@@ -2544,7 +2547,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     """A ready team continuation must not resume after one member loses access."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-team-member-revoked",
         run_id="run-paused",
@@ -2554,7 +2557,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
         team_member_names=("general", "worker"),
         team_mode="coordinate",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) == continuation
+    assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     runner.deps.runtime.config.agents["general"].access = ResponderAccessConfig(
         users=[continuation.requester_id],
     )
@@ -2567,14 +2570,17 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     failing = replace(
         continuation,
         state="failing",
-        failure_reason="Current authorization no longer permits this tool approval continuation.",
+        failure=ApprovalFailure(
+            rl.ApprovalFailureKind.ERROR,
+            "Current authorization no longer permits this tool approval continuation.",
+        ),
     )
 
     with (
-        patch.object(runner._approval_responses, "request_failure", new=AsyncMock(return_value=failing)),
-        patch.object(runner._approval_responses, "settle_failure", new=AsyncMock(return_value=True)),
+        patch.object(runner._approvals, "_request_failure", new=AsyncMock(return_value=failing)),
+        patch.object(runner._approvals, "_settle", new=AsyncMock(return_value=True)),
         patch.object(
-            runner,
+            runner._approvals,
             "_run_claimed_approval_lifecycle",
             new=AsyncMock(side_effect=AssertionError("revoked team continuation executed")),
         ) as execute,
@@ -2596,7 +2602,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     continuation = approval_continuation(
         approval_id="approval-incomplete-failure",
         run_id="run-paused",
@@ -2612,8 +2618,8 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
             ),
         ),
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
-    await bot._reply_runtime.start()
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    await bot._take_over_replies()
     incomplete = FinalDeliveryOutcome(
         terminal_status="error",
         event_id="$waiting",
@@ -2622,7 +2628,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     )
 
     with patch.object(
-        runner,
+        runner._approvals,
         "_run_claimed_approval_lifecycle",
         new=AsyncMock(return_value=incomplete),
     ):
@@ -2637,7 +2643,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     assert event_id is None
     assert retained is not None
     assert retained.state == "claimed"
-    assert await runner.deps.approval_store.is_pending("$source")
+    assert await runner.deps.replies.store.is_pending("$source")
 
 
 @pytest.mark.asyncio
@@ -2645,7 +2651,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
     """A crash before row creation replays because the paused tool has not executed."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
 
     paused = _ordered_pause(
         PausedAttempt(
@@ -2665,7 +2671,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
         session_id=paused.session_id,
     )
     with (
-        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-cancel")),
+        patch("mindroom.approval.continuation_runner.uuid4", return_value=MagicMock(hex="approval-cancel")),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
         patch.object(
@@ -2676,7 +2682,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
         pytest.raises(RuntimeError, match="crash before continuation commit"),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None):
-            await runner._suspend_for_approval(
+            await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -2687,7 +2693,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
             )
 
     assert await runner.deps.approval_store.approval_continuation("approval-cancel") is None
-    pending = await runner.deps.approval_store.pending(runtime_generation=runner.deps.approval_runtime_generation)
+    pending = await runner.deps.replies.store.pending(runtime_generation=runner.deps.approval_runtime_generation)
     assert [event.event_id for event in pending] == ["$source"]
 
 
@@ -2696,7 +2702,7 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     """Approval pause must retain the member aliases selected at turn start."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -2718,12 +2724,12 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     )
 
     with (
-        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-team-models")),
+        patch("mindroom.approval.continuation_runner.uuid4", return_value=MagicMock(hex="approval-team-models")),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None) as (_edit_text, _send_text):
-            await runner._suspend_for_approval(
+            await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -2745,7 +2751,7 @@ async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names
     """A reply resumed after approval keeps the identity its tools saw before the pause."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread", reply_to_event_id="$question"), source_event_id="$source")
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -2765,12 +2771,12 @@ async def test_approval_pause_keeps_the_reply_correlation_when_the_request_names
     )
 
     with (
-        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-reply-correlation")),
+        patch("mindroom.approval.continuation_runner.uuid4", return_value=MagicMock(hex="approval-reply-correlation")),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None) as (_edit_text, _send_text):
-            await runner._suspend_for_approval(
+            await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -2851,7 +2857,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         patch("mindroom.approval.execution.create_agent", side_effect=create_from_live_config),
         pytest.raises(RuntimeError, match="live config observed"),
     ):
-        await runner._approval_execution.continue_run(
+        await runner._approvals._approval_execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
             tool_dispatch=ToolDispatchContext(execution_identity=identity),
@@ -2883,8 +2889,8 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
             thread_id="$thread",
         )
 
-    assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
-    assert plan.calls[0].reason == "No approval recipient is configured; the tool was denied safely."
+    assert plan.calls[0].decision is ApprovalDecision.DENIED
+    assert plan.calls[0].reason == NO_APPROVER_REASON
     assert plan.calls[0].human_approval_required is True
 
 
@@ -2914,7 +2920,7 @@ async def test_missing_router_denies_a_gated_call_so_the_agent_can_invite_it(
         )
 
     if router_missing:
-        assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
+        assert plan.calls[0].decision is ApprovalDecision.DENIED
         assert plan.calls[0].reason is not None
         assert "call `invite_router`" in plan.calls[0].reason
         assert plan.waiting_text is None
@@ -2996,25 +3002,28 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         state="waiting",
     )
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
         return_value=approval_store,
     ):
-        await runner._approval_responses._publish_cards(
+        await approval_response._publish_cards(
             continuation,
             plan,
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
+            store=runner.deps.approval_store,
             target=_target(thread_id="$thread"),
             failure_reason="card failed",
         )
 
     assert plan.waiting_text == "Waiting for approval: `conditional_write`"
     assert [call.decision for call in plan.calls] == [ApprovalDecision.APPROVED, None]
-    approval_store.prepare_detached_approval.assert_awaited_once()
-    assert approval_store.prepare_detached_approval.await_args.kwargs["tool_name"] == "conditional_write"
+    approval_store.prepare_reply_card.assert_awaited_once()
+    assert approval_store.prepare_reply_card.await_args.kwargs["tool_name"] == "conditional_write"
     approval_store.reserve_and_publish.assert_awaited_once()
 
 
@@ -3055,24 +3064,27 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
         state="waiting",
     )
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
         return_value=approval_store,
     ):
-        await runner._approval_responses._publish_cards(
+        await approval_response._publish_cards(
             continuation,
             plan,
+            config=runner.deps.runtime.config,
+            runtime_paths=runner.deps.runtime_paths,
+            store=runner.deps.approval_store,
             target=_target(thread_id="$thread"),
             failure_reason="card failed",
         )
 
     assert plan.waiting_text == "Waiting for approval: `dangerous_one`, `dangerous_two`"
     assert [call.decision for call in plan.calls] == [None, None]
-    assert [awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list] == [
+    assert [awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list] == [
         "dangerous_one",
         "dangerous_two",
     ]
@@ -3092,7 +3104,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
         update={"rules": [ApprovalRuleConfig(match="conditional_tool", script=str(script_path))]},
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
@@ -3118,14 +3130,14 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
         user_id=request.user_id,
     )
     retry_sources = Mock()
-    runner._approval_responses.retry_sources = retry_sources
+    runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)
 
     with patch(
         "mindroom.approval.response.resolve_tool_approval_approver",
         return_value="@user:localhost",
     ):
         async with _in_reply_span(runner, request) as (edit_text, send_text):
-            outcome = await runner._suspend_for_approval(
+            outcome = await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -3158,7 +3170,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
         update={"rules": [ApprovalRuleConfig(match="dangerous", action="require_approval")]},
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     start_auto_approve(
         runner.deps.runtime_paths,
@@ -3180,11 +3192,11 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
         user_id=request.user_id,
     )
     retry_sources = Mock()
-    runner._approval_responses.retry_sources = retry_sources
+    runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
 
     with (
@@ -3195,7 +3207,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
         patch("mindroom.approval.response.approval_manager.get_approval_store", return_value=approval_store),
     ):
         async with _in_reply_span(runner, request):
-            outcome = await runner._suspend_for_approval(
+            outcome = await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -3206,10 +3218,10 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
             )
 
     if card_expected:
-        approval_store.prepare_detached_approval.assert_awaited_once()
+        approval_store.prepare_reply_card.assert_awaited_once()
         assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING}
     else:
-        approval_store.prepare_detached_approval.assert_not_awaited()
+        approval_store.prepare_reply_card.assert_not_awaited()
         retry_sources.assert_called_once_with(request.room_id, ("$source",))
         assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
@@ -3218,7 +3230,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
 async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_path: Path) -> None:
     """A direct automatic pause sends the presentation its continuation will extend."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
@@ -3233,7 +3245,7 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
         user_id=request.user_id,
     )
     retry_sources = Mock()
-    runner._approval_responses.retry_sources = retry_sources
+    runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)
 
     with (
         patch(
@@ -3246,7 +3258,7 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
         ),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None) as (_edit_text, send_text):
-            outcome = await runner._suspend_for_approval(
+            outcome = await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -3278,7 +3290,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
 ) -> None:
     """Approval publication cannot reinterpret a committed stream after config reload."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     trace = ToolTraceEntry(
         type="tool_call_started",
@@ -3305,7 +3317,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
             "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
-        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+        patch.object(runner._approvals, "_publish_generation", new=AsyncMock()),
     ):
         # The turn's span froze the visibility it claimed with.
         async with _in_reply_span(
@@ -3314,7 +3326,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
             placeholder_event_id="$stream",
             show_tool_calls=turn_visibility,
         ) as (edit_text, _send_text):
-            outcome = await runner._suspend_for_approval(
+            outcome = await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -3338,7 +3350,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
 async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Path) -> None:
     """Suspension must not replace a rendered question with its canonical fenced JSON."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     raw_interactive = (
         '```interactive\n{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
@@ -3379,10 +3391,10 @@ async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Pat
             "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
-        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+        patch.object(runner._approvals, "_publish_generation", new=AsyncMock()),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id="$stream") as (edit_text, _send_text):
-            await runner._suspend_for_approval(
+            await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -3400,7 +3412,7 @@ async def test_pause_republishes_the_acknowledged_interactive_body(tmp_path: Pat
 async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path) -> None:
     """The approval coordinator must not repair or persist an unacknowledged tool start."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
@@ -3433,10 +3445,10 @@ async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path
             "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
-        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+        patch.object(runner._approvals, "_publish_generation", new=AsyncMock()),
         pytest.raises(RuntimeError, match="ordered presentation"),
     ):
-        await runner._suspend_for_approval(
+        await runner._approvals.suspend_for_approval(
             handed_off,
             request=request,
             target=request.response_envelope.target,
@@ -3457,7 +3469,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
 ) -> None:
     """A first team tool must be acknowledged in its member slot before approval publication."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={})
     requirement = RunRequirement(tool_execution=tool)
@@ -3497,10 +3509,10 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
             "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(True, 60.0)),
         ),
-        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+        patch.object(runner._approvals, "_publish_generation", new=AsyncMock()),
         pytest.raises(RuntimeError, match="ordered presentation"),
     ):
-        await runner._suspend_for_approval(
+        await runner._approvals.suspend_for_approval(
             handed_off,
             request=request,
             target=request.response_envelope.target,
@@ -3689,11 +3701,11 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
         ),
     )
     with (
-        patch.object(runner, "_continue_entity_call", new=continue_call),
+        patch.object(runner._approvals, "_continue_entity_call", new=continue_call),
         patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
         patch.object(runner, "_show_tool_calls", return_value=False),
     ):
-        await runner._execute_claimed_approval(
+        await runner._approvals._execute_claimed_approval(
             continuation,
             request=request,
             target=target,
@@ -3713,9 +3725,9 @@ async def _resumed_streamable_approval(
 ) -> AsyncIterator[ApprovalContinuation]:
     """Claim one ready agent or team continuation, whose requester is online or away, with its resume span."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
-    client = runner._client()
+    client = runner.client()
     client.get_presence.return_value.presence = "online" if requester_online else "offline"
     sent = count(1)
     client.room_send.side_effect = lambda **_kwargs: nio.RoomSendResponse(
@@ -3775,16 +3787,16 @@ async def test_approval_continuation_streams_into_its_reply_only_for_streaming_r
         tool_trace_collector.append(completed)
         return CompletedApprovalRun(response_text=body, metadata_content={})
 
-    with patch.object(runner, "_continue_entity_call", new=continue_call):
+    with patch.object(runner._approvals, "_continue_entity_call", new=continue_call):
         async with _resumed_streamable_approval(bot, requester_online=requester_online) as claimed:
-            outcome = await runner._run_claimed_approval_lifecycle(
+            outcome = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
 
     assert outcome.terminal_status == "completed"
     progress_edits = [(STREAM_STATUS_STREAMING, body)] if requester_online else []
-    assert _approval_reply_edits(runner._client()) == [*progress_edits, (STREAM_STATUS_COMPLETED, body)]
+    assert _approval_reply_edits(runner.client()) == [*progress_edits, (STREAM_STATUS_COMPLETED, body)]
 
 
 @pytest.mark.asyncio
@@ -3803,16 +3815,16 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
 
     async with _resumed_streamable_approval(bot, requester_online=True, entity_kind="team") as claimed:
         with (
-            patch("mindroom.response_runner.continue_paused_team_run", new=continue_team),
+            patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continue_team),
             patch("mindroom.response_runner.typing_indicator", _noop_typing),
         ):
-            outcome = await runner._run_claimed_approval_lifecycle(
+            outcome = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
 
     assert outcome.terminal_status == "completed"
-    assert _approval_reply_edits(runner._client()) == [(STREAM_STATUS_STREAMING, body), (STREAM_STATUS_COMPLETED, body)]
+    assert _approval_reply_edits(runner.client()) == [(STREAM_STATUS_STREAMING, body), (STREAM_STATUS_COMPLETED, body)]
 
 
 @pytest.mark.asyncio
@@ -3856,16 +3868,16 @@ async def test_streamed_approval_continuation_that_pauses_again_ends_on_its_new_
 
     async with _resumed_streamable_approval(bot, requester_online=True) as claimed:
         with (
-            patch.object(runner, "_continue_entity_call", new=continue_call),
-            patch.object(runner._approval_responses, "_publish_cards", new=publish_cards),
+            patch.object(runner._approvals, "_continue_entity_call", new=continue_call),
+            patch("mindroom.approval.response._publish_cards", new=publish_cards),
         ):
-            outcome = await runner._run_claimed_approval_lifecycle(
+            outcome = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
 
     assert outcome.terminal_status == "suspended"
-    assert _approval_reply_edits(runner._client()) == [
+    assert _approval_reply_edits(runner.client()) == [
         (STREAM_STATUS_STREAMING, "Checked the report."),
         (STREAM_STATUS_APPROVAL_PENDING, paused.response_text),
     ]
@@ -3887,7 +3899,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
             conversation_target=_target(thread_id="$thread", reply_to_event_id="$source"),
         ),
     )
-    client = runner._client()
+    client = runner.client()
     progress_edited = asyncio.Event()
 
     async def continue_call(
@@ -3904,7 +3916,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
 
     async with _resumed_streamable_approval(bot, requester_online=True) as claimed:
         with (
-            patch.object(runner, "_continue_entity_call", new=continue_call),
+            patch.object(runner._approvals, "_continue_entity_call", new=continue_call),
             patch(
                 "mindroom.approval.response.approval_manager.get_approval_store",
                 return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
@@ -3919,7 +3931,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
 
             client.room_send.side_effect = record_send
             lifecycle = asyncio.create_task(
-                runner._run_claimed_approval_lifecycle(
+                runner._approvals._run_claimed_approval_lifecycle(
                     claimed,
                     target=_target(thread_id="$thread", reply_to_event_id="$source"),
                 ),
@@ -3942,7 +3954,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
 async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_path: Path) -> None:
     """Fail-closed automatic denial must not claim that a nonexistent recipient can approve it."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
@@ -3957,7 +3969,7 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
         user_id=request.user_id,
     )
     retry_sources = Mock()
-    runner._approval_responses.retry_sources = retry_sources
+    runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)
 
     with (
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value=None),
@@ -3967,7 +3979,7 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
         ),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id="$thinking") as (edit_text, _send_text):
-            outcome = await runner._suspend_for_approval(
+            outcome = await runner._approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -4031,7 +4043,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             requester_id="@user:localhost",
             duration=timedelta(minutes=5),
         )
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-chain",
@@ -4066,12 +4078,12 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         },
     )
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     retry_sources = Mock()
-    runner._approval_responses.retry_sources = retry_sources
+    runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)
 
     async def evaluate(_config: object, _paths: object, tool_name: str, *_args: object) -> tuple[bool, float]:
         return tool_name in gated_tools, 60.0
@@ -4091,17 +4103,9 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     ):
         # The resume span of the paused reply runs the next generation.
         async with resumed_approval(bot, continuation) as current:
-            handle = current_span()
-            assert handle is not None
-            presentation = await runner._approval_responses.advance_pause(
-                current,
-                paused,
-                target=target,
-                pending_text="Thinking...",
-                reply_pause=partial(runner._advance_reply_pause, handle, target),
-            )
+            presentation = await runner._approvals._advance_pause(current, paused, target=target)
 
-    persisted = await store.approval_continuation(continuation.approval_id)
+    persisted = await store.approvals.approval_continuation(continuation.approval_id)
     assert persisted is not None
     assert persisted.generation == 1
     assert persisted.state == expected_state
@@ -4116,13 +4120,13 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
     }
     assert [
-        awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list
+        awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list
     ] == expected_cards
     if expected_state == "ready":
         retry_sources.assert_called_once_with(current.room_id, ("$source",))
         restarted = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
         claimed = await claim_continuation(
-            restarted.deps.approval_store,
+            restarted.deps.replies.store,
             continuation.approval_id,
             runtime_generation=restarted.deps.approval_runtime_generation,
         )
@@ -4143,7 +4147,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
 async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_path: Path) -> None:
     """Every chained pending call must have one exact visible trace slot before journal advance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-chain-invalid",
@@ -4172,18 +4176,13 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
         ),
         toolkit_owners={("general", "first"): "test_toolkit", ("general", "second"): "test_toolkit"},
     )
-    reply_pause = AsyncMock()
+    with (
+        patch.object(runner._approvals, "_advance_reply_pause", new=AsyncMock()) as reply_pause,
+        pytest.raises(RuntimeError, match="ordered presentation"),
+    ):
+        await runner._approvals._advance_pause(current, paused, target=_target(thread_id="$thread"))
 
-    with pytest.raises(RuntimeError, match="ordered presentation"):
-        await runner._approval_responses.advance_pause(
-            current,
-            paused,
-            target=_target(thread_id="$thread"),
-            pending_text="Thinking...",
-            reply_pause=reply_pause,
-        )
-
-    persisted = await store.approval_continuation(continuation.approval_id)
+    persisted = await store.approvals.approval_continuation(continuation.approval_id)
     assert persisted is not None
     assert persisted.state == "claimed"
     assert persisted.generation == 0
@@ -4317,7 +4316,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
 async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_path: Path) -> None:
     """An attempted FINAL is recovered and completed without resuming the run twice."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-acked",
@@ -4356,10 +4355,11 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
 
     with (
         patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock(side_effect=acknowledge_frozen_final)),
-        patch.object(runner, "_continue_entity_call", new=AsyncMock()) as continue_entity,
-        patch.object(runner, "_build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle,
+        patch.object(runner._approvals, "_continue_entity_call", new=AsyncMock()) as continue_entity,
+        patch.object(runner, "build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle,
     ):
-        event_id = await runner._recover_claimed_approval_lifecycle(
+        event_id = await dispatch_approval(
+            runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
@@ -4367,7 +4367,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
     assert event_id == "$waiting"
     continue_entity.assert_not_awaited()
     build_lifecycle.return_value.finalize.assert_awaited_once()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -4375,7 +4375,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
 async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_path: Path) -> None:
     """Restart recovery must replay semantic final facts, not rendered Matrix HTML."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-semantic",
@@ -4414,8 +4414,9 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
     )
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
 
-    with patch.object(runner, "_build_lifecycle", return_value=lifecycle):
-        event_id = await runner._recover_claimed_approval_lifecycle(
+    with patch.object(runner, "build_lifecycle", return_value=lifecycle):
+        event_id = await dispatch_approval(
+            runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
@@ -4432,12 +4433,12 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
 async def test_original_owner_recovery_retires_acknowledged_failure_without_success_effects(tmp_path: Path) -> None:
     """A frozen failure FINAL must not be replayed through the successful response lifecycle."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-failure-final",
         state="failing",
-        failure_reason="Tool approval continuation failed safely.",
+        failure=ApprovalFailure(rl.ApprovalFailureKind.ERROR),
     )
     assert await paused_for_approval(store, continuation) == continuation
     await store.enqueue_matrix_delivery(
@@ -4456,11 +4457,11 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         delivered_projections=(),
     )
 
-    with patch.object(runner, "_build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle:
+    with patch.object(runner, "build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle:
         assert await runner.recover_approval_final(continuation.approval_id)
 
     build_lifecycle.assert_not_called()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -4468,7 +4469,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
 async def test_permanently_refused_approval_final_releases_its_sources(tmp_path: Path) -> None:
     """An oversized frozen FINAL is terminal failure, not immortal approval debt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-oversized-final",
@@ -4504,14 +4505,15 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
             return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
         ),
     ):
-        event_id = await runner._recover_claimed_approval_lifecycle(
+        event_id = await dispatch_approval(
+            runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
     assert event_id == "$waiting"
     edit_text.assert_not_awaited()
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
     failed = await store.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
     assert failed is not None
@@ -4523,7 +4525,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     """A visible successful FINAL must complete even if the live caller is cancelled afterward."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-cancelled-return",
@@ -4531,7 +4533,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     assert await paused_for_approval(store, continuation) is not None
 
     async def acknowledge_then_cancel(*_args: object, **_kwargs: object) -> tuple[object, object]:
-        current = await store.approval_continuation(continuation.approval_id)
+        current = await store.approvals.approval_continuation(continuation.approval_id)
         assert current is not None
         await freeze_resume_final(store, current, text="plain final", payload={"body": "plain final"})
         assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
@@ -4546,18 +4548,18 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
     async with resumed_approval(bot, continuation) as claimed:
         with (
-            patch.object(runner, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
-            patch.object(runner, "_build_lifecycle", return_value=lifecycle),
-            patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+            patch.object(runner._approvals, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
+            patch.object(runner, "build_lifecycle", return_value=lifecycle),
+            patch.object(runner._approvals, "_approval_post_response_outcome", return_value=ResponseOutcome()),
         ):
-            outcome = await runner._run_claimed_approval_lifecycle(
+            outcome = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
 
     assert outcome.terminal_status == "completed"
     assert outcome.event_id == "$waiting"
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
     assert [item.terminal_status for item in finalized] == ["completed"]
 
@@ -4567,14 +4569,14 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     """Late lifecycle cancellation must adopt the visible success before failure fencing."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-late-cancel",
     )
     assert await paused_for_approval(store, continuation) is not None
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
 
     async def acknowledge_then_cancel(claimed: ApprovalContinuation, **_kwargs: object) -> None:
         await freeze_resume_final(store, claimed, text="plain final", payload={"body": "plain final"})
@@ -4590,9 +4592,9 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
 
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
     with (
-        patch.object(runner, "_run_claimed_approval_lifecycle", side_effect=acknowledge_then_cancel),
-        patch.object(runner, "_build_lifecycle", return_value=lifecycle),
-        patch.object(runner, "_approval_post_response_outcome", return_value=ResponseOutcome()),
+        patch.object(runner._approvals, "_run_claimed_approval_lifecycle", side_effect=acknowledge_then_cancel),
+        patch.object(runner, "build_lifecycle", return_value=lifecycle),
+        patch.object(runner._approvals, "_approval_post_response_outcome", return_value=ResponseOutcome()),
     ):
         event_id = await runner._run_owned_or_locked_response(
             request,
@@ -4602,7 +4604,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         )
 
     assert event_id == "$waiting"
-    assert await store.approval_continuation(continuation.approval_id) is None
+    assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -4610,7 +4612,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
 async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: Path) -> None:
     """An inconclusive FINAL retry must retain the exact paused-run ownership."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-final-unacknowledged",
@@ -4642,12 +4644,13 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     with patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()):
-        event_id = await runner._recover_claimed_approval_lifecycle(
+        event_id = await dispatch_approval(
+            runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    retained = await store.approval_continuation(continuation.approval_id)
+    retained = await store.approvals.approval_continuation(continuation.approval_id)
     assert event_id is None
     assert retained is not None
     assert retained.state == "claimed"
@@ -4664,7 +4667,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     """A resumed team must rebuild members from the turn's pinned aliases."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     target = _target(thread_id="$thread")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4687,7 +4690,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         team_member_model_names=(("general", "large"),),
         team_mode="coordinate",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     continued = create_autospec(
         continue_paused_team_run,
         return_value=CompletedApprovalRun(response_text="done", metadata_content={}),
@@ -4699,11 +4702,11 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
             "build_dispatch_context",
             return_value=ToolDispatchContext(execution_identity=identity),
         ),
-        patch("mindroom.response_runner.continue_paused_team_run", new=continued),
+        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
         async with resumed_approval(bot, continuation) as claimed:
-            result = await runner._continue_entity_call(
+            result = await runner._approvals._continue_entity_call(
                 claimed,
                 request=_plain_request(target, source_event_id="$source"),
                 target=target,
@@ -4720,7 +4723,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
 async def test_approval_request_restores_exact_hook_envelope_after_store_reload(tmp_path: Path) -> None:
     """Resume hooks must observe the same ingress identity and correlation as suspension."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     original_envelope = replace(
         _envelope(_target(thread_id="$thread"), source_event_id="$source"),
@@ -4740,10 +4743,10 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
         correlation_id="correlation-original",
     )
     assert await paused_for_approval(store, continuation) == continuation
-    reloaded = await store.approval_continuation(continuation.approval_id)
+    reloaded = await store.approvals.approval_continuation(continuation.approval_id)
     assert reloaded is not None
 
-    restored = runner._approval_response_request(
+    restored = runner._approvals._approval_response_request(
         reloaded,
         target=_target(thread_id="$thread", reply_to_event_id="$source"),
     )
@@ -4784,7 +4787,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
     """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -4809,7 +4812,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         execution_identity=identity,
         correlation_id="correlation-original",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     request = replace(
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
@@ -4844,7 +4847,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         ),
     ):
         async with resumed_approval(bot, continuation) as claimed:
-            await runner._continue_entity_call(
+            await runner._approvals._continue_entity_call(
                 claimed,
                 request=request,
                 target=request.response_envelope.target,
@@ -4872,7 +4875,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     """
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -4919,7 +4922,10 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
         calls=second_calls,
     )
     assert advanced is not None
-    second = await store.activate_approval_continuation(first.approval_id, expected_generation=advanced.generation)
+    second = await store.approvals.activate_approval_continuation(
+        first.approval_id,
+        expected_generation=advanced.generation,
+    )
     assert second is not None
     assert (second.state, second.generation, second.calls) == ("ready", 1, second_calls)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
@@ -4940,7 +4946,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
         patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
     ):
         async with resumed_approval(bot, second) as resumed:
-            await runner._continue_entity_call(
+            await runner._approvals._continue_entity_call(
                 resumed,
                 request=request,
                 target=request.response_envelope.target,
@@ -4984,7 +4990,7 @@ async def test_suspension_rejects_missing_requester_before_persistence(tmp_path:
     )
 
     with pytest.raises(RuntimeError, match="requester identity"):
-        await runner._suspend_for_approval(
+        await runner._approvals.suspend_for_approval(
             paused,
             request=request,
             target=_target(),
@@ -5452,7 +5458,7 @@ async def test_agent_turn_finds_its_rooms_redactions_in_the_journal(tmp_path: Pa
     """The turn driver's redaction lookup reads the tombstones the bot's own journal recorded for the room."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    store = coordinator.deps.approval_store
+    store = coordinator.deps.replies.store
     await _admit_approval_source(store, event_id="$older")
     await store.admit(
         InboundEvent(
@@ -6719,7 +6725,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         _plain_request(_target()),
         source_handoff=asyncio.Event(),
     )
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     post_effects = AsyncMock()
     build_post_outcome = MagicMock(return_value=ResponseOutcome())
 
@@ -6731,8 +6737,8 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         await response_function("$response")  # type: ignore[operator]
         return "$response"
 
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     lifecycle.deps = replace(
@@ -6749,7 +6755,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         patch.object(lifecycle, "finalize", new=finalize),
         patch_response_runner_module(apply_post_response_effects=post_effects),
     ):
-        result = await coordinator._run_and_settle_locked_response(
+        result = await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -6818,13 +6824,13 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
             is_visible_response=True,
         )
 
-    progress = response_runner._DeliveryProgress()
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    progress = response_runner.DeliveryProgress()
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     with patch.object(coordinator, "_run_cancellable_response", new=pause_after_reload):
-        await coordinator._run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -6857,12 +6863,12 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
         delivery_kind="edited",
         failure_reason="sync_restart_cancelled",
     )
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
     post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     finalize = AsyncMock(wraps=lifecycle.finalize)
@@ -6878,7 +6884,7 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
             patch_response_runner_module(apply_post_response_effects=post_effects),
             pytest.raises(asyncio.CancelledError, match="sync_restart"),
         ):
-            await coordinator._run_and_settle_locked_response(
+            await coordinator.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -6902,8 +6908,8 @@ async def test_process_shutdown_propagates_from_visible_response_hooks(
     """Orderly stop must not suppress hook cancellation and continue post-response effects."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     hook_started = asyncio.Event()
@@ -6942,9 +6948,9 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
     """Orderly stop must not wait on Matrix cleanup after durable response cancellation."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
-    progress = response_runner._DeliveryProgress()
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    progress = response_runner.DeliveryProgress()
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     attempt_started = asyncio.Event()
@@ -6972,7 +6978,7 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
         ) as settle,
     ):
         task = asyncio.create_task(
-            coordinator._run_and_settle_locked_response(
+            coordinator.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -7005,7 +7011,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(
         FinalDeliveryOutcome(
@@ -7016,8 +7022,8 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             failure_reason="sync_restart_cancelled",
         ),
     )
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
@@ -7031,7 +7037,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
         patch_response_runner_module(apply_post_response_effects=post_effects),
         pytest.raises(asyncio.CancelledError, match="sync_restart"),
     ):
-        await coordinator._run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -7050,7 +7056,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
     """A failed cancellation cleanup must preserve replay instead of deduping the stale placeholder."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.settle(
         FinalDeliveryOutcome(
             terminal_status="error",
@@ -7060,8 +7066,8 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             failure_reason="failed to redact cancelled placeholder",
         ),
     )
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
 
@@ -7073,7 +7079,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
     ):
-        result = await coordinator._run_and_settle_locked_response(
+        result = await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -7109,14 +7115,14 @@ async def test_terminal_send_cancellation_preserves_source_replay(
         content_sent={"body": "partial answer"},
     )
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=delivered)):
-        assert await streaming._send_or_edit_message(coordinator._client(), is_final=False)
+        assert await streaming._send_or_edit_message(coordinator.client(), is_final=False)
 
     with patch(
         "mindroom.streaming.edit_message_result",
         new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
     ):
         transport_outcome = await streaming.finalize(
-            coordinator._client(),
+            coordinator.client(),
             error=RuntimeError("generation failed") if terminal_error else None,
         )
 
@@ -7125,15 +7131,15 @@ async def test_terminal_send_cancellation_preserves_source_replay(
             target=target,
             stream_transport_outcome=transport_outcome,
             initial_delivery_kind="sent",
-            identity=coordinator._response_identity(request, response_kind="ai"),
+            identity=coordinator.response_identity(request, response_kind="ai"),
             tool_trace=None,
             extra_content=None,
         ),
     )
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.settle(final_outcome)
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     with (
@@ -7144,7 +7150,7 @@ async def test_terminal_send_cancellation_preserves_source_replay(
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
     ):
-        result = await coordinator._run_and_settle_locked_response(
+        result = await coordinator.run_and_settle_locked_response(
             request,
             target=target,
             lifecycle=lifecycle,
@@ -7167,7 +7173,7 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     target = _target(thread_id="$thread")
     request = _plain_request(target)
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.settle(
         FinalDeliveryOutcome(
             terminal_status="cancelled",
@@ -7177,8 +7183,8 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
             failure_reason="sync_restart_cancelled",
         ),
     )
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
 
@@ -7190,7 +7196,7 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
     ):
-        result = await coordinator._run_and_settle_locked_response(
+        result = await coordinator.run_and_settle_locked_response(
             request,
             target=target,
             lifecycle=lifecycle,
@@ -7223,7 +7229,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id=thread_id))
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.settle(
         FinalDeliveryOutcome(
             terminal_status="cancelled",
@@ -7234,8 +7240,8 @@ async def test_landed_terminal_interruption_settles_the_turn(
             failure_reason=failure_reason,
         ),
     )
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
 
@@ -7248,7 +7254,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
             ),
             patch_response_runner_module(apply_post_response_effects=AsyncMock()),
         ):
-            result = await coordinator._run_and_settle_locked_response(
+            result = await coordinator.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -7285,12 +7291,12 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     order: list[str] = []
     request = _plain_request(_target())
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.note_delivery_started("$response")
     progress.settle(delivery_outcome)
     post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     finalize = AsyncMock(wraps=lifecycle.finalize)
@@ -7305,7 +7311,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
         patch_response_runner_module(apply_post_response_effects=post_effects),
         pytest.raises(asyncio.CancelledError, match="sync_restart"),
     ):
-        await coordinator._run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -7328,11 +7334,11 @@ async def test_terminal_settlement_rethrows_generation_error_after_post_effects(
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target())
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     post_effects = AsyncMock()
     build_post_outcome = MagicMock(return_value=ResponseOutcome())
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
+    lifecycle = coordinator.build_lifecycle(
+        identity=coordinator.response_identity(request, response_kind="ai"),
         request=request,
     )
     finalize = AsyncMock(wraps=lifecycle.finalize)
@@ -7347,7 +7353,7 @@ async def test_terminal_settlement_rethrows_generation_error_after_post_effects(
         patch_response_runner_module(apply_post_response_effects=post_effects),
         pytest.raises(RuntimeError, match="generation failed"),
     ):
-        await coordinator._run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -7908,7 +7914,7 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
 ) -> None:
     """A live CLI waiter gets the same one-attempt claim before any effects."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tools = tuple(
@@ -7936,27 +7942,27 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
         user_id=request.user_id,
     )
     waiter = asyncio.Event()
-    runner._cli_approval_waits.waiters["$source"] = waiter
+    runner._approvals._cli_approval_waits.waiters["$source"] = waiter
 
     async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
-        await store.activate_approval_continuation(continuation.approval_id, expected_generation=0)
+        await store.approvals.activate_approval_continuation(continuation.approval_id, expected_generation=0)
         assert await runner.handoff_approval_source("$source") is False
         assert waiter.is_set()
 
     with (
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
-        patch.object(runner._approval_responses, "publish_generation", new=publish),
-        patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=authorized)),
+        patch.object(runner._approvals, "_publish_generation", new=publish),
+        patch.object(runner, "request_remains_authorized", new=AsyncMock(return_value=authorized)),
     ):
         async with _in_reply_span(runner, request) as (_edit_text, _send_text):
-            operation = runner._cli_approval_waits.wait(
+            operation = runner._approvals._cli_approval_waits.wait(
                 paused,
                 waiter=waiter,
                 source=request.response_envelope.source_event_id,
                 target=request.response_envelope.target,
                 publish=partial(
-                    runner._suspend_for_approval,
+                    runner._approvals.suspend_for_approval,
                     request=request,
                     target=request.response_envelope.target,
                     execution_identity=identity,
@@ -7964,20 +7970,20 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
                     entity_kind="agent",
                     show_tool_calls=True,
                 ),
-                authorize=lambda: runner._request_remains_authorized(request),
+                authorize=lambda: runner.request_remains_authorized(request),
             )
             if authorized:
                 resolved = await operation
                 assert len(resolved) == call_count
                 assert all(item.confirmation is True for item in resolved)
-                current = await store.approval_continuation_for_source("$source")
+                current = await store.approvals.approval_continuation_for_source("$source")
                 assert current.state == "claimed"
                 assert current.cli_call == paused.cli_call
                 assert await claim_continuation(store, current.approval_id, runtime_generation="rival") is None
             else:
                 with pytest.raises(PermissionError):
                     await operation
-                current = await store.approval_continuation_for_source("$source")
+                current = await store.approvals.approval_continuation_for_source("$source")
                 assert current.state != "claimed"
 
 
@@ -7985,7 +7991,7 @@ async def test_cli_approval_claims_native_owner_and_wakes_without_source_lock(
 async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
     """A CLI caller sees why its approval card failed, not a generic ownership loss."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     tool = ToolExecution(
         tool_call_id="inner",
@@ -8011,17 +8017,17 @@ async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
     with (
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
-        patch.object(runner._approval_responses, "publish_generation", new=publish),
+        patch.object(runner._approvals, "_publish_generation", new=publish),
         pytest.raises(RuntimeError, match="approval card send failed"),
     ):
         async with _in_reply_span(runner, request) as (_edit_text, _send_text):
-            await runner._cli_approval_waits.wait(
+            await runner._approvals._cli_approval_waits.wait(
                 paused,
                 waiter=asyncio.Event(),
                 source="$source",
                 target=request.response_envelope.target,
                 publish=partial(
-                    runner._suspend_for_approval,
+                    runner._approvals.suspend_for_approval,
                     request=request,
                     target=request.response_envelope.target,
                     execution_identity=runner.deps.tool_runtime.build_execution_identity(
@@ -8041,7 +8047,7 @@ async def test_cli_wait_reports_failed_card_publication(tmp_path: Path) -> None:
 async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, cancel_source: str) -> None:
     """The real response task, not its spawned tool task, owns cancellation provenance."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
@@ -8059,7 +8065,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         cli_call={"kind": "agent_cli"},
     )
     assert await paused_for_approval(store, continuation) is not None
-    runtime = response_runner._PreparedResponseRuntime(
+    runtime = response_runner.PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
@@ -8076,10 +8082,10 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         raise AssertionError
 
     async def response() -> None:
-        async with runner._cli_approval_scope(
+        async with runner._approvals.cli_approval_scope(
             runtime,
             request=request,
-            progress=response_runner._DeliveryProgress(),
+            progress=response_runner.DeliveryProgress(),
             history_scope=runner.deps.state_writer.history_scope(),
         ) as scoped:
             context = response_runner.runtime_context_from_dispatch_context(scoped.tool_dispatch)
@@ -8087,7 +8093,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
             assert context.cli_approval_handler is not None
             await context.cli_approval_handler(cast("PausedAttempt", None))
 
-    with patch.object(runner._cli_approval_waits, "wait", new=wait_for_decision):
+    with patch.object(runner._approvals._cli_approval_waits, "wait", new=wait_for_decision):
         task = asyncio.create_task(response())
         await started.wait()
         if cancel_source == "shutdown":
@@ -8095,16 +8101,19 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         else:
             task.cancel(cancel_source)
         await asyncio.gather(task, return_exceptions=True)
-    current = await store.approval_continuation("cli-wait")
+    current = await store.approvals.approval_continuation("cli-wait")
     assert current is not None
     assert current.state == (
         "claimed" if cancel_source == "rival" else "waiting" if cancel_source == "shutdown" else "failing"
     )
     assert (
-        current.failure_reason
-        == {"shutdown": None, "rival": None, "user_stop": "cancelled_by_user", "interrupted": "interrupted"}[
-            cancel_source
-        ]
+        current.failure
+        == {
+            "shutdown": None,
+            "rival": None,
+            "user_stop": ApprovalFailure(rl.ApprovalFailureKind.USER_STOP),
+            "interrupted": ApprovalFailure(rl.ApprovalFailureKind.INTERRUPTED),
+        }[cancel_source]
     )
 
 
@@ -8114,7 +8123,7 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    runtime = response_runner._PreparedResponseRuntime(
+    runtime = response_runner.PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
@@ -8123,14 +8132,14 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
         show_tool_calls=False,
         tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
     )
-    progress = response_runner._DeliveryProgress()
+    progress = response_runner.DeliveryProgress()
     progress.settle(FinalDeliveryOutcome(terminal_status="suspended", event_id="$response", is_visible_response=True))
     with patch.object(
-        type(runner._cli_approval_waits.store),
+        type(runner._approvals._cli_approval_waits.store),
         "approval_continuation_for_source",
         new=AsyncMock(side_effect=AssertionError("standard responses own no CLI approval state")),
     ):
-        async with runner._cli_approval_scope(
+        async with runner._approvals.cli_approval_scope(
             runtime,
             request=request,
             progress=progress,
@@ -8149,11 +8158,11 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
 ) -> None:
     """Expiry leaves the same durable card unclaimed and detaches the live waiter."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    runtime = response_runner._PreparedResponseRuntime(
+    runtime = response_runner.PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
         session_id=target.session_id,
@@ -8186,12 +8195,12 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     )
     published = []
     retry = MagicMock()
-    runner._cli_approval_waits.retry_sources = retry
+    runner.deps = replace(runner.deps, retry_approval_sources=retry)
 
     async def publish(continuation, plan, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
         published.append(continuation.approval_id)
         if live:
-            assert await store.reserve_approval_card_deliveries(
+            assert await store.approvals.reserve_reply_cards(
                 continuation_principal_id=store.principal_id,
                 continuation_id=continuation.approval_id,
                 expected_generation=0,
@@ -8200,6 +8209,8 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                         delivery_id="expiry-card",
                         tool_call_id="inner",
                         event_type="io.mindroom.tool_approval",
+                        approver_user_id="@user:example.org",
+                        approvable=True,
                         payload={
                             "approval_id": "expiry-card",
                             "continuation_id": continuation.approval_id,
@@ -8225,14 +8236,14 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                 delivered_projections=(),
             )
         elif ready:
-            await store.activate_approval_continuation(continuation.approval_id, expected_generation=0)
+            await store.approvals.activate_approval_continuation(continuation.approval_id, expected_generation=0)
 
     clock = SimpleNamespace(now=cli_approval_waits.time.time_ns())
     original_timeout = asyncio.timeout
     entered = asyncio.Event()
     stopped = asyncio.Event()
     observed = []
-    real_read = store.approval_continuation_for_source
+    real_read = store.approvals.approval_continuation_for_source
     raced = []
 
     @asynccontextmanager
@@ -8244,9 +8255,11 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
             yield timeout
 
     async def read_source(_store, source):  # noqa: ANN001, ANN202
-        if live and ready and published and not runner._cli_approval_waits.waiters and not raced:
+        if live and ready and published and not runner._approvals._cli_approval_waits.waiters and not raced:
             raced.append(True)
-            decision = await store.resolve_continuation_approval_card(
+            decision = await resolve_card_event(
+                store.approvals,
+                room_id=_target().room_id,
                 card_event_id="$card",
                 requested_status="approved",
                 reason=None,
@@ -8259,14 +8272,14 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     with (
         patch.object(cli_approval_waits, "time", SimpleNamespace(time_ns=lambda: clock.now)),
         patch.object(asyncio, "timeout", observe_timeout),
-        patch.object(type(store), "approval_continuation_for_source", read_source),
+        patch.object(type(store.approvals), "approval_continuation_for_source", read_source),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch(
             "mindroom.approval.response.evaluate_tool_approval",
             new=AsyncMock(return_value=(live or not ready, 60.0)),
         ),
-        patch.object(runner._approval_responses, "publish_generation", new=publish),
-        patch.object(runner._approval_responses, "request_failure", new=AsyncMock()) as fail,
+        patch.object(runner._approvals, "_publish_generation", new=publish),
+        patch.object(runner._approvals, "_request_failure", new=AsyncMock()) as fail,
     ):
         async with _in_reply_span(runner, request) as (_edit_text, _send_text):
             async with response_cli_lifetime() as lifetime:
@@ -8284,10 +8297,10 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                 registry = TurnToolRegistry()
                 lifetime.register(owner, registry)
                 grant = owner.issue(now_ns=clock.now, expires_at_ns=clock.now + 86400 * 10**9)
-                async with runner._cli_approval_scope(
+                async with runner._approvals.cli_approval_scope(
                     runtime,
                     request=request,
-                    progress=response_runner._DeliveryProgress(),
+                    progress=response_runner.DeliveryProgress(),
                     history_scope=runner.deps.state_writer.history_scope(),
                 ) as bound:
                     context = response_runner.runtime_context_from_dispatch_context(bound.tool_dispatch)
@@ -8328,7 +8341,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                         with pytest.raises(ResponsePausedForApproval) as caught:
                             await asyncio.wait_for(context.cli_approval_handler(paused), timeout=1)
                     assert caught.value.paused.cli_call == paused.cli_call
-                    outcome = await runner._suspend_for_approval(
+                    outcome = await runner._approvals.suspend_for_approval(
                         caught.value.paused,
                         request=request,
                         target=target,
@@ -8340,13 +8353,13 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     assert outcome.terminal_status == "suspended"
             with pytest.raises(CliAuthenticationError):
                 registry.resolve("Bearer " + grant.raw_token, now_ns=grant.expires_at_ns - 1)
-            current = await store.approval_continuation_for_source("$source")
+            current = await store.approvals.approval_continuation_for_source("$source")
             assert current is not None
             assert current.approval_id == published[0]
             assert len(published) == 1
             assert current.state == ("ready" if ready else "waiting")
             assert current.cli_call == paused.cli_call
-            assert not runner._cli_approval_waits.waiters
+            assert not runner._approvals._cli_approval_waits.waiters
             fail.assert_not_awaited()
             assert retry.called is ready
             assert bool(raced) is (live and ready)
@@ -8365,7 +8378,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
 ) -> None:
     """A live hidden approval checkpoint retains the parent's consumed continuation attempt."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
@@ -8396,13 +8409,13 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
         lifetime = current_cli_lifetime()
         assert lifetime is not None
         lifetime.grant_expires_at_ns = 1
-        await runner._cli_approval_waits.wait(
+        await runner._approvals._cli_approval_waits.wait(
             paused,
             waiter=asyncio.Event(),
             source=request.response_envelope.source_event_id,
             target=target,
             publish=partial(
-                runner._suspend_for_approval,
+                runner._approvals.suspend_for_approval,
                 request=request,
                 target=target,
                 execution_identity=dispatch.execution_identity,
@@ -8410,7 +8423,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
                 entity_kind="agent",
                 show_tool_calls=False,
             ),
-            authorize=lambda: runner._request_remains_authorized(request),
+            authorize=lambda: runner.request_remains_authorized(request),
         )
         pytest.fail("expired live approval must suspend")
 
@@ -8427,9 +8440,9 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
             ):
                 pass
         else:
-            await run_blocking_response_turn(
+            await _collected_turn(
                 _ctx(),
-                _blocking_adapter(_AdapterLog(), attempt),
+                _resolving_adapter(_AdapterLog(), attempt),
                 TurnSinks(),
                 continuation=_continuation(),
             )
@@ -8437,13 +8450,13 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     with (
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
-        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+        patch.object(runner._approvals, "_publish_generation", new=AsyncMock()),
         pytest.raises(ResponsePausedForApproval) as raised,
     ):
         async with _in_reply_span(runner, request) as (_edit_text, _send_text):
             await execute()
     assert len(attempts) == spent + 1
-    stored = await store.approval_continuation_for_source("$source")
+    stored = await store.approvals.approval_continuation_for_source("$source")
     assert stored is not None
     assert stored.continuation_count == spent
     assert raised.value.paused.continuation_count == spent
@@ -8455,7 +8468,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
     """Recovered execution advances the native claim and preserves a new pending pause."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     target = _target(thread_id="$thread")
     request = _plain_request(target, source_event_id="$source")
@@ -8481,7 +8494,10 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
 
         async def decide() -> None:
             await asyncio.sleep(0)
-            await store.activate_approval_continuation(current.approval_id, expected_generation=current.generation)
+            await store.approvals.activate_approval_continuation(
+                current.approval_id,
+                expected_generation=current.generation,
+            )
             bot.retry_approval_sources(current.room_id, current.source_event_ids)
 
         decision = asyncio.create_task(decide())
@@ -8520,9 +8536,9 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         return CompletedApprovalRun(response_text="finished both approvals", metadata_content={})
 
     with (
-        patch.object(type(runner._approval_execution), "continue_run", new=recover),
-        patch.object(runner._approval_responses, "publish_generation", new=publish),
-        patch.object(runner, "_request_remains_authorized", new=AsyncMock(return_value=True)),
+        patch.object(type(runner._approvals._approval_execution), "continue_run", new=recover),
+        patch.object(runner._approvals, "_publish_generation", new=publish),
+        patch.object(runner, "request_remains_authorized", new=AsyncMock(return_value=True)),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(False, 60.0))),
         patch.object(
@@ -8535,7 +8551,9 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         async with resumed_approval(bot, continuation) as claimed:
 
             async def recover_owned() -> None:
-                completed.append(await runner._execute_claimed_approval(claimed, request=request, target=target))
+                completed.append(
+                    await runner._approvals._execute_claimed_approval(claimed, request=request, target=target),
+                )
 
             recovery = runner.track_inbox_response(
                 recover_owned(),
@@ -8549,7 +8567,7 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         result, current = completed[0]
     assert result.terminal_status == ("suspended" if suspend else "completed")
     assert published == ([1] if suspend else [1, 2])
-    saved = await store.approval_continuation(continuation.approval_id)
+    saved = await store.approvals.approval_continuation(continuation.approval_id)
     # A new pause stays ready; completion is left for the lifecycle owner to settle after post-response effects.
     assert (saved.state, saved.cli_call["call_id"]) == (("ready", "next-0") if suspend else ("claimed", "next-1"))
     assert current.generation == (1 if suspend else 2)
@@ -8654,7 +8672,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
         sources=ResponseSources(("$resume",), ("$resume",)),
     )
     target = _target(thread_id="$root", reply_to_event_id="$resume")
-    original = runner._approval_response_request(continuation, target=target)
+    original = runner._approvals._approval_response_request(continuation, target=target)
     refreshed = ThreadHistoryResult(
         [
             make_visible_message(sender="@user:localhost", body="Thirty sleeps", event_id="$root"),
@@ -8674,10 +8692,10 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     with (
         queued_message_signal_context(None, mid_turn_gate=gate),
         patch.object(runner.deps.resolver, "fetch_thread_history", new=AsyncMock(return_value=refreshed)),
-        patch.object(runner, "_build_lifecycle", side_effect=RuntimeError("stop before generation")) as build_lifecycle,
+        patch.object(runner, "build_lifecycle", side_effect=RuntimeError("stop before generation")) as build_lifecycle,
     ):
         with pytest.raises(RuntimeError, match="stop before generation"):
-            await runner._run_claimed_approval_lifecycle(continuation, target=target)
+            await runner._approvals._run_claimed_approval_lifecycle(continuation, target=target)
         assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
     assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
@@ -8733,7 +8751,7 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
             conversation_target=_target(thread_id="$thread", reply_to_event_id="$source"),
         ),
     )
-    client = runner._client()
+    client = runner.client()
     progress_started = asyncio.Event()
     settlement_started = asyncio.Event()
     exiting = asyncio.Event()
@@ -8773,14 +8791,14 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
         send = client.room_send.side_effect
         client.room_send.side_effect = slow_progress_send
         with (
-            patch.object(runner, "_continue_entity_call", new=continue_call),
+            patch.object(runner._approvals, "_continue_entity_call", new=continue_call),
             patch(
                 "mindroom.approval.response.approval_manager.get_approval_store",
                 return_value=MagicMock(expire_continuation_cards=AsyncMock(return_value=True)),
             ),
         ):
             lifecycle = asyncio.create_task(
-                runner._run_claimed_approval_lifecycle(
+                runner._approvals._run_claimed_approval_lifecycle(
                     claimed,
                     target=_target(thread_id="$thread", reply_to_event_id="$source"),
                 ),
@@ -9019,7 +9037,7 @@ def test_a_finished_approval_continuation_tells_automations_its_source_events(tm
         execution_identity=identity,
     )
 
-    deps = coordinator._approval_post_response_deps(continuation)
+    deps = coordinator._approvals._approval_post_response_deps(continuation)
     assert deps.notify_response_finished is not None
     deps.notify_response_finished()
 
@@ -9062,7 +9080,7 @@ async def test_a_finished_approval_continuation_links_its_reply_event_onto_the_r
     ]
     seed_session(storage, session)
 
-    deps = coordinator._approval_post_response_deps(continuation)
+    deps = coordinator._approvals._approval_post_response_deps(continuation)
     assert deps.persist_response_event_id is not None
     await deps.persist_response_event_id("run-1", "$reply")
 
@@ -9116,7 +9134,7 @@ def test_an_automation_turn_is_not_queued_for_memory(hook_source: str | None, fl
     runner = ResponseRunner(deps=MagicMock())
     runner.deps.runtime.config.resolve_entity.return_value.memory_backend = "mem0"
 
-    queue = runner._memory_persistence(
+    queue = runner.memory_persistence(
         agent_name="mind",
         session_id="session",
         execution_identity=MagicMock(),

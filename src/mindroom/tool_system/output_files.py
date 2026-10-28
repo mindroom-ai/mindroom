@@ -20,9 +20,8 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, ToolResult
+from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, read_tool_value
 from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
-from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if sys.version_info >= (3, 14):
@@ -357,15 +356,11 @@ def _normalize_json_value(value: object) -> object:  # noqa: PLR0911 - One branc
     raise TypeError(msg)
 
 
-def _has_tool_result_media(result: ToolResult | ToolValue) -> bool:
-    return bool(result.images or result.videos or result.audios or result.files)
-
-
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    if isinstance(result, ToolResult | ToolValue):
-        if _has_tool_result_media(result):
-            return "ToolResult media artifacts cannot be redirected to workspace files."
-        serialized = _SerializedToolOutput(payload=result.content.encode("utf-8"), format="text")
+    if (value := read_tool_value(result)) is not None:
+        if any(value.media()):
+            return "Tool media results cannot be redirected to workspace files."
+        serialized = _SerializedToolOutput(payload=value.content.encode("utf-8"), format="text")
     elif isinstance(result, str):
         serialized = _SerializedToolOutput(payload=result.encode("utf-8"), format="text")
     elif isinstance(result, bytes | bytearray | memoryview):
@@ -594,12 +589,6 @@ def _copy_annotations_with_output_path(
     wrapper.__annotate__ = annotate
 
 
-def _docstring_with_output_path(original_doc: str | None) -> str:
-    base = (original_doc or "MindRoom wrapped tool entrypoint.").strip()
-    output_arg_doc = f"Args:\n    {OUTPUT_PATH_ARGUMENT}: {_OUTPUT_PATH_ARGUMENT_DESCRIPTION}"
-    return f"{base}\n\n{output_arg_doc}"
-
-
 def prepare_tool_output_file(
     policy: ToolOutputFilePolicy,
     *,
@@ -660,7 +649,8 @@ def _wrap_entrypoint(
         wrapper = sync_wrapper
 
     wrapper.__name__ = getattr(entrypoint, "__name__", "tool_entrypoint")
-    wrapper.__doc__ = _docstring_with_output_path(getattr(entrypoint, "__doc__", None))
+    # The schema finisher describes the output path, so the docstring, whose Args describe the other arguments, stays.
+    wrapper.__doc__ = entrypoint.__doc__
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)

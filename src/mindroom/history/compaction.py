@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.failure_text import failure_text
+from mindroom.history.conversation_text import utterances
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
     FoldBasis,
@@ -25,7 +25,6 @@ from mindroom.history.storage import (
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
 from mindroom.history.summary_input import (
     build_summary_input,
-    messages_for_runs,
     minimum_summary_input_tokens,
     whole_run_input_tokens,
 )
@@ -38,7 +37,8 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
     ScopeSummary,
 )
-from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
+from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, TranscriptLine, emit
+from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_summary, replay_basis
@@ -55,7 +55,7 @@ from mindroom.token_budget import (
 from mindroom.tool_system.runtime_context import (
     current_requester_id,
     get_tool_runtime_context,
-    resolve_tool_runtime_hook_bindings,
+    scope_hook_context_kwargs,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +65,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
     from mindroom.history.summary_rows import Fold
-    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
@@ -272,11 +271,25 @@ async def clear_manual_compaction_request(
     )
 
 
+def _transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
+    """Return what was said in ``runs``, oldest first, as compaction hooks read it."""
+    return tuple(
+        TranscriptLine(
+            role="user" if said.kind == "said" else "assistant",
+            sender=said.sender,
+            display_name=said.display_name,
+            text=said.unredacted,
+        )
+        for run in runs
+        for said in utterances(run)
+    )
+
+
 async def _emit_compaction_hook(
     *,
     event_name: str,
     scope: HistoryScope,
-    messages: Sequence[Message],
+    transcript: Sequence[TranscriptLine],
     session_id: str,
     token_count_before: int,
     token_count_after: int | None = None,
@@ -286,35 +299,23 @@ async def _emit_compaction_hook(
     if runtime_context is None or not runtime_context.hook_registry.has_hooks(event_name):
         return
 
-    bindings = resolve_tool_runtime_hook_bindings(runtime_context)
-    correlation_id = runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}"
     context = CompactionHookContext(
-        event_name=event_name,
-        plugin_name="",
-        settings={},
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-        logger=logger.bind(event_name=event_name, session_id=session_id),
-        correlation_id=correlation_id,
-        message_sender=bindings.message_sender,
-        matrix_admin=bindings.matrix_admin,
-        room_state_querier=bindings.room_state_querier,
-        room_state_putter=bindings.room_state_putter,
-        agent_name=scope.scope_id if scope.kind == "team" else runtime_context.agent_name,
-        scope=scope,
-        room_id=runtime_context.room_id,
-        thread_id=runtime_context.resolved_thread_id,
-        messages=list(messages),
-        session_id=session_id,
+        **scope_hook_context_kwargs(
+            runtime_context,
+            event_name=event_name,
+            correlation_id=runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}",
+            scope=scope,
+            session_id=session_id,
+        ),
+        transcript=tuple(transcript),
         token_count_before=token_count_before,
         token_count_after=token_count_after,
         compaction_summary=compaction_summary,
-        _hook_registry_state=runtime_context.hook_registry_state,
     )
     await emit(runtime_context.hook_registry, event_name, context)
 
 
-def _should_collect_compaction_hook_messages() -> bool:
+def _compaction_hooks_registered() -> bool:
     runtime_context = get_tool_runtime_context()
     return runtime_context is not None and any(
         runtime_context.hook_registry.has_hooks(event_name)
@@ -353,21 +354,21 @@ async def compact_scope_history(
 
     mode = state.compaction_mode
     working_session = deepcopy(session)
-    collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
-    compacted_messages: list[Message] = []
+    hooks_registered = _compaction_hooks_registered()
+    compacted_transcript: list[TranscriptLine] = []
 
     async def before_persist(included_runs: Sequence[AnyRunRecord]) -> None:
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
-            messages=messages_for_runs(included_runs, history_settings) if collect_compaction_hook_messages else (),
+            transcript=_transcript(included_runs) if hooks_registered else (),
             session_id=session.session_id,
             token_count_before=before_tokens,
         )
 
     async def after_persist(chunk: _SummaryChunk, compacted_run_count: int, runs_remaining: int) -> None:
-        if collect_compaction_hook_messages:
-            compacted_messages.extend(messages_for_runs(chunk.included_runs, history_settings))
+        if hooks_registered:
+            compacted_transcript.extend(_transcript(chunk.included_runs))
         if progress is None or not scope_visible_runs(working_session, scope):
             return
         after_tokens = await asyncio.to_thread(
@@ -446,7 +447,12 @@ async def compact_scope_history(
             compacted_at=compacted_at,
             history_budget_tokens=available_history_budget,
         )
-        return await _report_committed(outcome, scope=scope, messages=compacted_messages, complete=complete)
+        return await _report_committed(
+            outcome,
+            scope=scope,
+            transcript=compacted_transcript,
+            complete=complete,
+        )
 
     # Persistence has committed; finish reporting before releasing this request owner.
     return await run_coroutine_until_complete(report())
@@ -578,7 +584,6 @@ async def compact_running_turn(
     basis: FoldBasis,
     fold: Fold,
     snapshots: Sequence[AnyRunRecord],
-    folded_messages: Sequence[Message],
     summarizer: Summarizer,
     before_tokens: int,
     replay_window_tokens: int | None,
@@ -598,16 +603,19 @@ async def compact_running_turn(
     changed since ``basis`` was read.
     """
     runs = [*basis.runs, *snapshots]
-    collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
-    # Hooks see the folded messages themselves, not the per-call units the summarizer reads.
-    hook_runs = [*basis.runs, RunRecord(run_id="", messages=list(folded_messages))]
-    messages = (
-        tuple(messages_for_runs(hook_runs, summarizer.history_settings)) if collect_compaction_hook_messages else ()
+    # Hooks see the folded messages themselves, not the per-call units the summarizer reads, under the running turn's
+    # requester and metadata, which decide who said each message.
+    folded_run = RunRecord(
+        run_id="",
+        user_id=fold.run.user_id,
+        messages=list(fold.messages),
+        metadata=fold.run.metadata,
     )
+    transcript = _transcript([*basis.runs, folded_run]) if _compaction_hooks_registered() else ()
     await _emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,
         scope=scope,
-        messages=messages,
+        transcript=transcript,
         session_id=session.session_id,
         token_count_before=before_tokens,
     )
@@ -649,7 +657,12 @@ async def compact_running_turn(
             compacted_at=_iso_utc_now(),
             history_budget_tokens=available_history_budget,
         )
-        return await _report_committed(outcome, scope=scope, messages=messages, complete=complete)
+        return await _report_committed(
+            outcome,
+            scope=scope,
+            transcript=transcript,
+            complete=complete,
+        )
 
     # A stop that lands once the append started still lets a stored fold apply and report, so it never reads as failed.
     return await run_coroutine_until_complete(commit_and_report())
@@ -659,14 +672,14 @@ async def _report_committed(
     outcome: CompactionOutcome,
     *,
     scope: HistoryScope,
-    messages: Sequence[Message],
+    transcript: Sequence[TranscriptLine],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
 ) -> CompactionOutcome:
     """Tell compaction:after hooks, then the reply's lifecycle, about a stored compaction."""
     await _emit_compaction_hook(
         event_name=EVENT_COMPACTION_AFTER,
         scope=scope,
-        messages=messages,
+        transcript=transcript,
         session_id=outcome.session_id,
         token_count_before=outcome.before_tokens,
         token_count_after=outcome.after_tokens,
@@ -803,7 +816,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
                 error=failure_text(exc),
             )
-            if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
+            if (
+                fallback_model is not None
+                and attempt < retry_policy.max_attempts
+                and isinstance(exc, ModelSafeguardRefusal)
+            ):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
                 fits_fallback = (
                     await asyncio.to_thread(fallback_token_estimator, summary_input)

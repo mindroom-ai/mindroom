@@ -17,7 +17,7 @@ from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedAttempt, TurnSinks, run_blocking_response_turn
+from mindroom.response_turn import CompletedAttempt, TurnSinks
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     _FOLLOW_UP_LIMIT,
@@ -39,7 +39,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
-from tests.test_response_turn import _AdapterLog, _blocking_adapter
+from tests.test_response_turn import _AdapterLog, _collected_turn, _resolving_adapter
 from tests.test_response_turn import _continuation as _turn_continuation
 from tests.test_response_turn import _ctx as _turn_ctx
 from tests.tool_job_helpers import (
@@ -409,7 +409,7 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
 async def test_a_follow_up_runs_a_model_turn_that_posts_its_reply(tmp_path: Path) -> None:
     """The follow-up's turn reaches the model with its prompt and posts what the model answers."""
     bot = _bot(tmp_path)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -485,7 +485,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
 async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path) -> None:
     """A follow-up posts nothing while a message waits for its conversation, whose reply reports the jobs instead."""
     bot = _bot(tmp_path)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -678,9 +678,9 @@ async def test_a_reply_never_waits(tmp_path: Path) -> None:
 
         try:
             with tool_runtime_context(context):
-                text = await run_blocking_response_turn(
+                text = await _collected_turn(
                     _turn_ctx(background_tool_jobs=True),
-                    _blocking_adapter(_AdapterLog(), attempt),
+                    _resolving_adapter(_AdapterLog(), attempt),
                     TurnSinks(),
                     continuation=_turn_continuation(),
                 )
@@ -711,9 +711,9 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
     try:
         await _ended(runtime, "ready", BackgroundOutcome("completed", "done"), owner=owner)
         with tool_runtime_context(context):
-            text = await run_blocking_response_turn(
+            text = await _collected_turn(
                 _turn_ctx(background_tool_jobs=True),
-                _blocking_adapter(_AdapterLog(), attempt),
+                _resolving_adapter(_AdapterLog(), attempt),
                 TurnSinks(),
                 continuation=_turn_continuation(),
             )

@@ -38,7 +38,16 @@ from mindroom.history.types import (
     CompactionOutcome,
     HistoryScopeState,
 )
-from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, HookRegistry, hook
+from mindroom.hooks import (
+    EVENT_COMPACTION_AFTER,
+    EVENT_COMPACTION_BEFORE,
+    CompactionHookContext,
+    EnrichmentItem,
+    HookRegistry,
+    TranscriptLine,
+    hook,
+    render_enrichment_block,
+)
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
@@ -51,6 +60,8 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import message_context_tokens
+from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
@@ -528,7 +539,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     if provider == "openai":
         replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
         provider_data: dict[str, Any] = {
-            "tool_search_items": [
+            RESPONSE_OUTPUT_KEY: [
                 {
                     "type": "tool_search_call",
                     "id": "ts_1",
@@ -544,7 +555,8 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
                     "execution": "server",
                     "status": "completed",
                     "tools": [
-                        {"type": "function", "name": "big_tool", "description": "d" * 80_000, "parameters": {}},
+                        # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.
+                        {"type": "function", "name": "big_tool", "description": "word " * 20_000, "parameters": {}},
                     ],
                 },
             ],
@@ -1492,12 +1504,100 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
         )
 
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
-    # The hooks see the running turn's folded tool work, not only the earlier runs.
-    assert any(message.role == "tool" for message in observed[0].messages)
-    # They see each folded message once, not the per-call copies the summarizer reads.
-    assert len({message.id for message in observed[0].messages}) == len(observed[0].messages)
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_builds_no_transcript_without_hooks(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold no compaction hook observes never reads who said what."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    hook_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=paths,
+        registry=HookRegistry.empty(),
+        session_id="session-1",
+    )
+
+    def unexpected(_record: object) -> Never:
+        msg = "the compaction transcript should not be built without hooks"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(compaction, "utterances", unexpected)
+    with tool_runtime_context(hook_context):
+        await _run(
+            _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
+            "Do the task",
+        )
+
+    assert summary_calls.inputs
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("summary_calls")
+async def test_mid_turn_compaction_hooks_see_who_said_each_line_without_what_mindroom_added(tmp_path: Path) -> None:
+    """The stored runs and the running turn's folded part each name their senders, without enrichment or tool calls."""
+    config, paths = _config(tmp_path)
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    asked = RunRecord(
+        run_id="run-1",
+        agent_id="test_agent",
+        status=RunStatus.completed,
+        user_id="@alice:localhost",
+        messages=[
+            Message(
+                role="user",
+                content=render_msg_tag(sender="@alice:localhost", display_name="Alice", body="When does Atlas ship?"),
+            ),
+            Message(role="assistant", content="Friday."),
+        ],
+    )
+    seed_session(storage, _session("session-1", runs=[asked]))
+    memory = render_enrichment_block([EnrichmentItem(key="memory", text="Alice prefers short answers.")])
+    observed: list[CompactionHookContext] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def before(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def after(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [before, after])])
+    hook_context = _hook_runtime_context(config=config, runtime_paths=paths, registry=registry, session_id="session-1")
+
+    with tool_runtime_context(hook_context):
+        await _run(
+            _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage),
+            # The turn carries a message the scope has not stored, which the fold takes with the turn's work.
+            [
+                Message(role="user", content=f"It slipped a week.\n\n{memory}"),
+                Message(role="user", content="Do the task"),
+            ],
+            user_id="@bob:localhost",
+        )
+
+    transcript = observed[0].transcript
+    # The stored run, then the running turn: its unstored message is its requester's, and each folded step a reply.
+    assert transcript[:3] == (
+        TranscriptLine(role="user", sender="@alice:localhost", display_name="Alice", text="When does Atlas ship?"),
+        TranscriptLine(role="assistant", sender=None, display_name=None, text="Friday."),
+        TranscriptLine(role="user", sender="@bob:localhost", display_name=None, text="It slipped a week."),
+    )
+    steps = transcript[3:]
+    assert steps
+    assert steps == tuple(
+        TranscriptLine(role="assistant", sender=None, display_name=None, text=f"step {number}")
+        for number in range(1, len(steps) + 1)
+    )
+    assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert observed[1].transcript == transcript
 
 
 @pytest.mark.asyncio

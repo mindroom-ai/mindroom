@@ -100,10 +100,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -131,10 +133,12 @@
             "type": "object",
             "properties": {
               "subagent_id": {
-                "type": "string"
+                "type": "string",
+                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
               },
               "message": {
-                "type": "string"
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -162,10 +166,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Numerator."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Denominator."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -193,10 +199,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Base."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Exponent."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -224,7 +232,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -273,7 +282,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -300,10 +310,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -446,7 +458,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -473,10 +486,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -562,10 +577,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -593,10 +610,12 @@
             "type": "object",
             "properties": {
               "subagent_id": {
-                "type": "string"
+                "type": "string",
+                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
               },
               "message": {
-                "type": "string"
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -624,10 +643,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Numerator."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Denominator."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -655,10 +676,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Base."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Exponent."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -686,7 +709,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -735,7 +759,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -762,10 +787,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -908,7 +935,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -935,10 +963,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1053,10 +1083,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1084,10 +1116,12 @@
             "type": "object",
             "properties": {
               "subagent_id": {
-                "type": "string"
+                "type": "string",
+                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
               },
               "message": {
-                "type": "string"
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1115,10 +1149,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Numerator."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Denominator."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1146,10 +1182,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Base."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Exponent."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1177,7 +1215,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1226,7 +1265,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1253,10 +1293,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1399,7 +1441,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1426,10 +1469,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1669,10 +1714,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1700,10 +1747,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Numerator."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Denominator."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1731,10 +1780,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Base."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Exponent."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1762,7 +1813,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1789,7 +1841,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1816,10 +1869,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1847,7 +1902,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1874,10 +1930,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [

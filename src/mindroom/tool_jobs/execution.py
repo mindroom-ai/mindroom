@@ -34,7 +34,7 @@ from mindroom.tool_jobs.background_after import (
     application_arguments,
     read_background_after,
 )
-from mindroom.tool_jobs.consumption import consume_tool_job, job_failure_text, session_state_delta
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
@@ -50,7 +50,6 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import BackgroundOutcome, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
-from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -430,8 +429,7 @@ async def _run_managed_call(
                 returned_inline=True,
             )
             retained = True
-            # Every outcome but completion tells the model why, such as the reason an approval was denied.
-            error = None if waited.job.status == "completed" else job_failure_text(value, payload)
+            error = job_failure(waited.job, value, payload)
         # A released wait's call returned its job handle, which names the job a restart's account points to. A
         # failed call is recorded as failed, with the text the model reads.
         await record_return(value if error is None else ToolOutcome(content=error, is_error=True))
@@ -502,10 +500,9 @@ async def _run_job_call(
         returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
     except Exception as error:
         return None, failure_text(error)
-    value = read_tool_value(returned)
-    if isinstance(value, ToolOutcome) and value.is_error:
-        return None, value.content
-    return (returned if value is None else value), None
+    if isinstance(returned, ToolOutcome) and returned.is_error:
+        return None, returned.content
+    return returned, None
 
 
 def _saved_outcome(

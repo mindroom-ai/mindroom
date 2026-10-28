@@ -1293,8 +1293,7 @@ class DockerWorkerBackend:
                 if response is not None and 200 <= response.status_code < 300:
                     compatibility_error = worker_health_compatibility_error(
                         response,
-                        backend_label="Docker",
-                        image=self.config.image,
+                        worker=f"Docker worker image '{self.config.image}'",
                     )
                     if compatibility_error is not None:
                         raise _WorkerImageIncompatibleError(compatibility_error)

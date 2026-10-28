@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.provider import NativeCompactionReplay, StreamProgress, TurnCompleted, UsageReported
+from mindroom.llm.errors import InvalidRequest
+from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.native_compaction import native_compaction_route
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
 from mindroom.providers.openai.errors import provider_error, sdk_failures
@@ -101,14 +101,22 @@ class ResponsesAdapter:
         """Return whether replayed images are priced by their visual patches."""
         return responses_replay_uses_visual_tokens(self.identity.id)
 
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        """Count the input an explicitly replayed request sends for ``messages``, for history budgets."""
-        return estimate_responses_replay_tokens(
-            messages,
-            model_id=self.identity.id,
-            cache_system_prompt=self.settings.cache_system_prompt,
-            explicit_breakpoint=self.wire.explicit_breakpoint,
-        )
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:
+        """Count the input an explicitly replayed request sends for ``messages``, for history budgets.
+
+        Messages with an attachment file that cannot be read are sized canonically: the request replaces that media
+        with the media fallback's note.
+        """
+        try:
+            return estimate_responses_replay_tokens(
+                messages,
+                model_id=self.identity.id,
+                cache_system_prompt=self.settings.cache_system_prompt,
+                explicit_breakpoint=self.wire.explicit_breakpoint,
+                provider=self.identity.provider_name,
+            )
+        except InvalidRequest:
+            return None
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         return responses_request_kwargs(
@@ -116,6 +124,7 @@ class ResponsesAdapter:
             request=request,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
+            provider=self.identity.provider_name,
         )
 
     async def _streamed(
@@ -123,25 +132,21 @@ class ResponsesAdapter:
         client: AsyncOpenAI,
         kwargs: dict[str, Any],
         accumulator: ResponsesStream,
+        timer: TurnTimer,
     ) -> AsyncIterator[StreamEvent]:
         sdk_stream = await client.responses.create(**kwargs, stream=True)
         try:
             async for event in sdk_stream:
                 if (usage := usage_report(event)) is not None:
                     yield usage
-                deltas = accumulator.add(event)
-                for delta in deltas:
+                for delta in timer.chunk(accumulator.add(event)):
                     yield delta
-                if not deltas:
-                    # An event without deltas, such as tool-call arguments, is still activity.
-                    yield StreamProgress()
         finally:
             await sdk_stream.close()
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Responses request and yield its deltas, usage, and finished turn."""
-        started = time.monotonic()
-        first_token: float | None = None
+        timer = TurnTimer()
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         accumulator = ResponsesStream(
             provider=self.identity.provider_name,
@@ -151,11 +156,10 @@ class ResponsesAdapter:
             conversation_digest=conversation_digest(request.messages),
         )
         try:
-            client = await self.clients.client(request.overrides)
-            events = self._streamed(client, kwargs, accumulator)
+            client = await self.clients.client()
+            events = self._streamed(client, kwargs, accumulator, timer)
             async with closing_async_stream(events):
                 async for event in events:
-                    first_token = output_started(first_token, event)
                     yield event
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
@@ -163,17 +167,14 @@ class ResponsesAdapter:
             # The stream stopped before the response ended, so the turn did not finish.
             return
         parts = accumulator.finish()
-        message = finished_assistant_message(
+        for event in finished_turn(
             self.identity,
+            timer,
             content=parts.content,
             reasoning=parts.reasoning,
             tool_calls=parts.tool_calls,
             provider_data=parts.provider_data,
             usage=parts.usage,
-            started=started,
-            first_output_at=first_token,
-        )
-        if parts.usage is not None:
-            yield UsageReported(message.metrics)
-        stop = responses_stop_reason(parts.status, parts.incomplete_reason, tool_calls=bool(parts.tool_calls))
-        yield TurnCompleted(message=message, stop_reason=stop)
+            stop_reason=responses_stop_reason(parts.status, parts.incomplete_reason, tool_calls=bool(parts.tool_calls)),
+        ):
+            yield event

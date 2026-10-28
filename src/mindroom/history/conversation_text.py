@@ -1,8 +1,9 @@
-"""What people and agents said in stored turns, for background model calls.
+"""What people and agents said in stored turns, for background model calls and compaction hooks.
 
-Skill reviews, the knowledge graph, and file-memory auto-flush each send stored turns to a model. This module owns the
-decisions they share: which turns and messages are conversation and who said each message, so a prompt MindRoom wrote
-is never read as someone's words. Each reader renders and redacts the text itself.
+Skill reviews, the knowledge graph, and file-memory auto-flush each send stored turns to a model, and compaction hands
+the turns it folds to plugins. This module owns the decisions they share: which turns and messages are conversation and
+who said each message, so a prompt MindRoom wrote is never read as someone's words. Each reader renders and redacts the
+text itself. A turn's own preparation marks the notes it adds to a thread's context (``thread_context_note``).
 """
 
 from __future__ import annotations
@@ -17,12 +18,16 @@ from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import is_model_history_visible_run, is_queued_notice_message
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import strip_enrichment_blocks
+from mindroom.llm.messages import Message
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
+
+# The ``provider_data`` key marking a note MindRoom adds to a thread's context: that earlier messages were omitted, that
+# the agent's previous reply is still being delivered, or that reply's unfinished text. The note is stored with its turn.
+_THREAD_CONTEXT_NOTE_KEY = "mindroom_thread_context_note"
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,15 @@ class Utterance:
     unredacted: str
     # The stored message, for its tool calls, its tool name, and whether its tool call failed.
     message: Message
+
+
+def thread_context_note(content: str) -> Message:
+    """Return a user message holding a note MindRoom adds to a thread's context, marked so no reader quotes it."""
+    return Message(role="user", content=content, provider_data={_THREAD_CONTEXT_NOTE_KEY: True})
+
+
+def _is_thread_context_note(message: Message) -> bool:
+    return (message.provider_data or {}).get(_THREAD_CONTEXT_NOTE_KEY) is True
 
 
 def one_line(text: str) -> str:
@@ -72,7 +86,8 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     """Return what was said in one stored turn, oldest first.
 
     Only turns the agent's own history shows count. A prompt MindRoom wrote is nobody's words: an automation's turn is
-    left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary is left out.
+    left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary and the notes
+    a turn's preparation added to its thread context are left out.
     A stopped turn's answer is a rendered summary that can quote tool previews, so it is left out too. ``agent_work``
     keeps all of these, plus tool calls and results, for a reviewer of how the agent worked.
     """
@@ -93,6 +108,7 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
             or is_queued_notice_message(message)
             or is_compaction_summary(message)
             or is_media_follow_up(message)
+            or _is_thread_context_note(message)
         )
         if message.role == "user" and (agent_work or not mindroom_wrote):
             said.extend(_prompt_utterances(message, content, requester, mindroom_wrote=mindroom_wrote))

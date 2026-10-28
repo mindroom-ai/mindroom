@@ -117,7 +117,7 @@ def _message_content(message: Message) -> str | list[Any] | None:
     return tool_result_view(message).content if message.role == "tool" else message.content
 
 
-def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str]) -> dict[str, Any]:
+def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str], provider: str) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
         "content": _message_content(message),
@@ -131,8 +131,12 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
     if (message.images or message.audio) and isinstance(message.content, str):
         formatted["content"] = [
             {"type": "text", "text": message.content},
-            *(part for image in message.images or () if (part := chat_image_part(image)) is not None),
-            *(part for audio in message.audio or () if (part := chat_audio_part(audio)) is not None),
+            *(
+                part
+                for image in message.images or ()
+                if (part := chat_image_part(image, provider=provider)) is not None
+            ),
+            *(part for audio in message.audio or () if (part := chat_audio_part(audio, provider=provider)) is not None),
         ]
     if message.tool_calls is not None and len(message.tool_calls) == 0:
         formatted["tool_calls"] = None
@@ -141,7 +145,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
         parts: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         # Each file's part goes ahead of the text.
         for file in message.files:
-            if (part := chat_file_part(file)) is not None:
+            if (part := chat_file_part(file, provider=provider)) is not None:
                 parts.insert(0, part)
         formatted["content"] = parts
     if message.content is None and message.role != "tool":
@@ -152,7 +156,7 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
     return formatted
 
 
-def _groq_message(message: Message) -> dict[str, Any]:
+def _groq_message(message: Message, provider: str) -> dict[str, Any]:
     values = {
         "role": message.role,
         "content": _message_content(message),
@@ -164,7 +168,7 @@ def _groq_message(message: Message) -> dict[str, Any]:
     if message.images and isinstance(message.content, str):
         formatted["content"] = [
             {"type": "text", "text": message.content},
-            *(part for image in message.images if (part := chat_image_part(image)) is not None),
+            *(part for image in message.images if (part := chat_image_part(image, provider=provider)) is not None),
         ]
     return formatted
 
@@ -193,15 +197,20 @@ def _cerebras_message(message: Message) -> dict[str, Any]:
     return {key: value for key, value in formatted.items() if value is not None}
 
 
-def _chat_messages(messages: Sequence[Message], wire: ChatWire, settings: ChatSettings) -> list[dict[str, Any]]:
+def _chat_messages(
+    messages: Sequence[Message],
+    wire: ChatWire,
+    settings: ChatSettings,
+    provider: str,
+) -> list[dict[str, Any]]:
     messages = with_joined_system(messages)
     if wire.dialect == "groq":
-        return [_groq_message(message) for message in messages]
+        return [_groq_message(message, provider) for message in messages]
     if wire.dialect == "cerebras":
         return [_cerebras_message(message) for message in messages]
     role_map = settings.role_map or {"system": "developer" if wire.route == "openai" else "system"}
     canonical = reformat_tool_call_ids(messages, "chat")
-    return [_openai_message(message, wire, role_map) for message in canonical]
+    return [_openai_message(message, wire, role_map, provider) for message in canonical]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
@@ -358,9 +367,7 @@ def _add_tools(
     settings: ChatSettings,
     wire: ChatWire,
 ) -> None:
-    # TODO(simplify): Groq always receives the tool list, so a request without tools sends `tools: []`. Leave it out,
-    # as the other dialects do. Groq request bodies.
-    if not tool_dicts and wire.dialect != "groq":
+    if not tool_dicts:
         return
     params["tools"] = tool_dicts
     if wire.dialect != "cerebras":
@@ -433,10 +440,12 @@ def chat_request_kwargs(
     structured_output: StructuredOutput,
     settings: ChatSettings,
     wire: ChatWire,
+    provider: str,
 ) -> dict[str, Any]:
     """Return the ``chat.completions.create`` keyword arguments for one streamed request.
 
-    Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``).
+    Fields the SDK names are its keywords and the rest travel in ``extra_body`` (``sdk_call_kwargs``). ``provider``
+    names the adapter in the error for an attachment file that cannot be read.
     """
     response_format = _response_format(output_schema, structured_output, strict=settings.strict_output)
     params = _dialect_params(settings, wire, response_format)
@@ -454,7 +463,7 @@ def chat_request_kwargs(
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
     params = {
         "model": model_id,
-        "messages": _chat_messages(messages, wire, settings),
+        "messages": _chat_messages(messages, wire, settings, provider),
         **disable_tool_selection(params, tool_choice),
     }
     params["stream"] = True

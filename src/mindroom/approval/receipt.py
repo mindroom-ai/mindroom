@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.approval.receipt_readers import take_unsent_receipt
-from mindroom.event_journal import ApprovalCall
-from mindroom.event_journal import ApprovalDecision as ContinuationDecision
+from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
@@ -42,7 +41,7 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
     lines = [_APPROVAL_RECEIPT_HEADER]
     for call in calls:
         call_label = _receipt_call_label(call)
-        if call.decision is ContinuationDecision.APPROVED:
+        if call.decision is ApprovalDecision.APPROVED:
             if call.human_approval_required is True:
                 outcome = (
                     "human approval was required and granted before execution, "
@@ -52,7 +51,7 @@ def build_approval_receipt(calls: tuple[ApprovalCall, ...]) -> str:
                 outcome = "human approval was not required; policy approved execution."
             else:
                 outcome = "approval was granted, but its approval provenance is unavailable."
-        elif call.decision is ContinuationDecision.EXPIRED:
+        elif call.decision is ApprovalDecision.EXPIRED:
             outcome = "human approval expired; the tool was not executed."
         else:
             outcome = "approval was denied; the tool was not executed."

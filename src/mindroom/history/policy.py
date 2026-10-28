@@ -10,6 +10,7 @@ from mindroom.history.types import (
     CompactionAvailabilityReason,
     CompactionDecision,
     ResolvedHistoryExecutionPlan,
+    ResolvedHistorySettings,
 )
 from mindroom.token_budget import compute_compaction_input_budget
 
@@ -21,13 +22,13 @@ if TYPE_CHECKING:
 def resolve_history_execution_plan(
     *,
     config: Config,
-    compaction_config: CompactionConfig,
-    has_authored_compaction_config: bool,
+    history_settings: ResolvedHistorySettings,
     active_model_name: str,
     active_context_window: int | None,
     static_prompt_tokens: int | None,
 ) -> ResolvedHistoryExecutionPlan:
     """Resolve all history-budget policy for one run scope in one place."""
+    compaction_config = history_settings.compaction_config
     compaction_model_name = compaction_config.model or active_model_name
     compaction_context_window = config.get_model_context_window(compaction_model_name)
     if compaction_config.model is None and compaction_context_window is None:
@@ -59,7 +60,7 @@ def resolve_history_execution_plan(
             threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
             replay_budget_tokens = _resolve_replay_budget_tokens(
                 compaction_config=compaction_config,
-                has_authored_compaction_config=has_authored_compaction_config,
+                automatic_compaction=history_settings.automatic_compaction,
                 replay_window_tokens=replay_window_tokens,
                 threshold_tokens=threshold_tokens,
                 static_prompt_tokens=static_prompt_tokens,
@@ -68,7 +69,7 @@ def resolve_history_execution_plan(
             replay_budget_tokens = hard_replay_budget_tokens
 
     return ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=has_authored_compaction_config and compaction_config.enabled,
+        automatic_compaction=history_settings.automatic_compaction,
         text_compaction_available=unavailable_reason is None,
         explicit_compaction_model=compaction_config.model is not None,
         compaction_model_name=compaction_model_name,
@@ -118,7 +119,7 @@ def classify_compaction_decision(  # noqa: PLR0911
             reason="forced",
             fitted_replay_tokens=min(current_history_tokens, hard_budget or 0),
         )
-    if not plan.authored_compaction_enabled:
+    if not plan.automatic_compaction:
         return decision(mode="none", reason="auto_disabled")
     if not plan.text_compaction_available:
         return decision(mode="none", reason="compaction_unavailable")
@@ -223,13 +224,14 @@ def resolve_replay_window(
 def _resolve_replay_budget_tokens(
     *,
     compaction_config: CompactionConfig,
-    has_authored_compaction_config: bool,
+    automatic_compaction: bool,
     replay_window_tokens: int,
     threshold_tokens: int,
     static_prompt_tokens: int,
 ) -> int:
+    """Return the trigger budget after the static prompt, which automatic compaction keeps within the hard budget."""
     ceiling_tokens = threshold_tokens
-    if has_authored_compaction_config:
+    if automatic_compaction:
         ceiling_tokens = min(
             ceiling_tokens,
             context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens),

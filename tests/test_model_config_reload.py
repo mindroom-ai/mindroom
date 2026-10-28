@@ -20,7 +20,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.registry import build_model_provider
-from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
@@ -122,7 +122,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         knowledge=None,
         active_model_name=None,
     )
-    members = materialize_exact_team_members(
+    members = resolve_exact_team_members(
         ["general"],
         config=config,
         runtime_paths=runtime.runtime_paths,
@@ -142,7 +142,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         timezone="UTC",
     )
     router = build_model_provider(config, runtime.runtime_paths, config.router.model)
-    return agent, members.builds[0], team, router
+    return agent, members.build("general", members.model_names["general"]), team, router
 
 
 def _temperature(model: ModelProvider) -> float | None:
@@ -154,12 +154,10 @@ def _temperature(model: ModelProvider) -> float | None:
 
 def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
-    settings = config.resolve_entity(entity_name).history_settings
     model = config.resolve_runtime_model(entity_name=entity_name)
     return resolve_history_execution_plan(
         config=config,
-        compaction_config=settings.compaction_config,
-        has_authored_compaction_config=settings.has_authored_compaction_config,
+        history_settings=config.resolve_entity(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
         static_prompt_tokens=0,

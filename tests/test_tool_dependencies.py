@@ -753,12 +753,15 @@ if mode == 'reader':
 elif mode == 'mem0_reader':
     import asyncio
     from types import ModuleType, SimpleNamespace
+    from unittest.mock import MagicMock
     from mindroom.config.main import Config
     from mindroom.constants import resolve_primary_runtime_paths
     from mindroom.memory import config as memory_config
 
     class Memory:
         llm = SimpleNamespace(config=SimpleNamespace(model='gemma4'), client=SimpleNamespace(chat=lambda **_: None))
+        embedding_model = SimpleNamespace()
+        vector_store = MagicMock()
 
         @classmethod
         def from_config(cls, config):

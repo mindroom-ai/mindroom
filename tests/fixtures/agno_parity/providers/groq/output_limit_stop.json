@@ -59,8 +59,7 @@
           "role": "user",
           "content": "What should I pack for Paris tomorrow?"
         }
-      ],
-      "tools": []
+      ]
     },
     "headers": {
       "accept": "application/json",

@@ -238,7 +238,7 @@ async def prepare_scope_history(
     logger.info(
         "History preparation check",
         scope=scope_context.scope.key,
-        auto_enabled=execution_plan.authored_compaction_enabled and execution_plan.text_compaction_available,
+        auto_enabled=execution_plan.automatic_compaction and execution_plan.text_compaction_available,
         compaction_available=execution_plan.text_compaction_available,
         trigger_budget=execution_plan.replay_budget_tokens,
         hard_budget=execution_plan.hard_replay_budget_tokens,
@@ -590,7 +590,6 @@ async def compact_scope_mid_turn(
     basis: FoldBasis,
     fold: Fold,
     snapshots: Sequence[AnyRunRecord],
-    folded_messages: Sequence[Message],
     before_tokens: int,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -613,7 +612,6 @@ async def compact_scope_mid_turn(
             basis=basis,
             fold=fold,
             snapshots=snapshots,
-            folded_messages=folded_messages,
             summarizer=load_summarizer(
                 resolved_inputs.execution_plan,
                 resolved_inputs.history_settings,
@@ -665,18 +663,17 @@ def finalize_history_preparation(
     history_settings = resolved_inputs.history_settings
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=history_settings.compaction_config,
-        has_authored_compaction_config=history_settings.has_authored_compaction_config,
+        history_settings=history_settings,
         active_model_name=resolved_inputs.active_model_name,
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
     history_budget = (
         execution_plan.hard_replay_budget_tokens
-        if execution_plan.authored_compaction_enabled
+        if execution_plan.automatic_compaction
         else execution_plan.replay_budget_tokens
     )
-    if execution_plan.authored_compaction_enabled and execution_plan.unavailable_reason is not None:
+    if execution_plan.automatic_compaction and execution_plan.unavailable_reason is not None:
         logger.warning(
             "Compaction unavailable for this run",
             compaction_model=execution_plan.compaction_model_name,
@@ -817,8 +814,7 @@ def resolve_entity_preparation_inputs(
         active_context_window=runtime_model.context_window,
         execution_plan=resolve_history_execution_plan(
             config=config,
-            compaction_config=history_settings.compaction_config,
-            has_authored_compaction_config=history_settings.has_authored_compaction_config,
+            history_settings=history_settings,
             active_model_name=runtime_model.model_name,
             active_context_window=runtime_model.context_window,
             static_prompt_tokens=static_prompt_tokens,

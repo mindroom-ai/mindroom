@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from contextlib import closing
@@ -31,6 +32,7 @@ from mindroom.history.storage import (
     first_scope_session,
     read_chunk_basis,
 )
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -66,6 +68,7 @@ from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL
 from mindroom.session_storage.types import ConversationSession
+from mindroom.token_budget import estimate_compaction_input_tokens
 from mindroom.usage.storage import quote_identifier
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -83,6 +86,7 @@ from tests.fakes.summary_model import summary_model
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from mindroom.history.request_messages import TurnMessages
     from mindroom.history.types import ScopeSummary
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
@@ -91,6 +95,17 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+
+def stored_turn(turn: TurnMessages, *, requester: str) -> RunRecord:
+    """Return the run that stores ``turn`` and the answer "Answered.", each message as a load reads it back."""
+    messages = [*turn.in_request_order(), Message(role="assistant", content="Answered.")]
+    return RunRecord(
+        run_id="stored-turn",
+        agent_id="agent",
+        user_id=requester,
+        messages=[Message.from_dict(message.to_dict()) for message in messages],
+    )
 
 
 def replay_settings(
@@ -111,6 +126,23 @@ def replay_settings(
 
 
 _ALL_HISTORY_SETTINGS = replay_settings()
+
+
+def summary_tool_work(
+    runs: Sequence[AnyRunRecord],
+    history_settings: ResolvedHistorySettings,
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    """Return the tool calls, and each tool result's call ID and text, that a compaction summary of ``runs`` reads."""
+    text, _included = build_summary_input(
+        previous_summary=None,
+        compacted_runs=runs,
+        max_input_tokens=100_000,
+        history_settings=history_settings,
+        token_estimator=estimate_compaction_input_tokens,
+    )
+    calls = [call for block in re.findall(r"<tool_calls>\n(.*?)\n</tool_calls>", text) for call in json.loads(block)]
+    results = re.findall(r'<message role="tool"[^>]*? tool_call_id="([^"]*)"[^>]*>\n(.*?)\n</message>', text, re.DOTALL)
+    return calls, results
 
 
 def checkpointed_answer(item: dict[str, object], basis: str) -> Message:

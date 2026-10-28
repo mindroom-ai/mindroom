@@ -281,7 +281,6 @@ def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnSto
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
     return bot
@@ -658,6 +657,34 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id is None
         assert outcome.failure_reason == "silent_no_report"
         assert not await _turn_rows(alice)
+        send.assert_not_awaited()
+
+    async def test_a_silent_schedule_s_empty_reply_with_a_tool_trace_is_suppressed(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A quiet reply whose runs only called tools ends empty; its tool trace does not make it visible."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.response_hooks._apply_before_response = self._hooks()._apply_before_response
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": ""}))
+        request = replace(
+            self._final_request("", source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            tool_trace=[
+                ToolTraceEntry(
+                    type="tool_call_completed",
+                    tool_name="touch",
+                    args_preview="label=noon",
+                    result_preview="done",
+                ),
+            ],
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, request)
+
+        assert outcome.suppressed is True
+        assert outcome.failure_reason == "silent_no_report"
         send.assert_not_awaited()
 
     async def test_silent_schedule_unmatched_tool_marker_no_reply_remains_visible(

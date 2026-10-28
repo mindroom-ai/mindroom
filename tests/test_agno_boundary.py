@@ -1,10 +1,11 @@
 """Only the tool and knowledge-reader boundary under ``src/mindroom`` imports Agno, and Agno's reach only shrinks.
 
-Agno stays MindRoom's tool library: ``Toolkit``, ``Function``, ``@tool``, and ``ToolResult`` remain the tool authoring
-API, and Agno's knowledge readers stay. The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter, the
-skills toolkit, and the knowledge reader module may import Agno; ``logging_config`` may too, because it routes Agno's
-loggers, which vendor toolkits log through. Every other module must take Agno's tool types from
-``mindroom.tool_system.agno_toolkits``.
+Agno stays MindRoom's tool library: vendor toolkits and the MindRoom tools not yet on the owned authoring API
+(``tool_system/authoring.py``) use Agno's ``Toolkit``, ``Function``, and ``@tool``, tools return text or MindRoom's
+``ToolValue`` while a vendor toolkit's ``ToolResult`` is read as one in the adapter, and Agno's knowledge readers stay.
+The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter, the skills toolkit, and the knowledge reader
+module may import Agno; ``logging_config`` may too, because it routes Agno's loggers, which vendor toolkits log through.
+Every other module must take Agno's tool types from ``mindroom.tool_system.agno_toolkits``.
 
 The ratchets below list the modules that still take an Agno type through that re-export and the test modules that
 import Agno. Each list must match the code exactly, so a module that stops leaves its list in the same change, and no
@@ -35,7 +36,6 @@ REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
         "knowledge/search.py",
         "mcp_gateway/toolkits.py",
         "mcp_gateway/tools.py",
-        "media_delivery.py",
         "script_runs/broker.py",
         "script_runs/policy.py",
         "tool_jobs/authorization.py",
@@ -43,16 +43,12 @@ REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
         "tool_jobs/execution_authority.py",
         "tool_system/construction.py",
         "tool_system/google_workspaces.py",
-        "tool_system/media_attachments.py",
-        "tool_system/media_transport.py",
         "tool_system/metadata.py",
         "tool_system/output_files.py",
         "tool_system/registry_state.py",
         "tool_system/sandbox_proxy.py",
         "tool_system/toolkit_aliases.py",
         "tool_system/toolkit_connections.py",
-        "tool_system/worker_media.py",
-        "worker_computer/mcp_provider.py",
     },
 )
 TESTS_ROOT = Path(__file__).resolve().parent
@@ -67,13 +63,10 @@ TEST_AGNO_IMPORTERS = frozenset(
         "agent_loop/test_tools.py",
         "api/test_agent_cli_api.py",
         "api/test_computer_browser_binding.py",
-        "api/test_headless_browser.py",
         "api/test_mcp_external_auth.py",
         "api/test_mcp_gateway_api.py",
         "api/test_sandbox_runner_api.py",
         "api/test_sandbox_runner_streaming.py",
-        "api/test_view_file.py",
-        "api/test_worker_computer.py",
         "conftest.py",
         "delegation_helpers.py",
         "scripted_agent_helpers.py",
@@ -98,7 +91,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_bot_media_dispatch.py",
         "test_browser_mcp.py",
         "test_browser_mcp_outputs.py",
-        "test_browser_tool.py",
         "test_claude_agent_nightly_soak.py",
         "test_claude_agent_tool.py",
         "test_cli_approval_recovery.py",
@@ -125,10 +117,7 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_mcp_gateway_execution.py",
         "test_mcp_gateway_tools.py",
         "test_mcp_manager.py",
-        "test_mcp_results.py",
         "test_mcp_toolkit.py",
-        "test_media_delivery.py",
-        "test_media_transport.py",
         "test_microsoft_files_tool.py",
         "test_microsoft_meetings_tool.py",
         "test_microsoft_onenote_tool.py",
@@ -166,10 +155,7 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_toolkit_aliases.py",
         "test_tools_metadata.py",
         "test_trafilatura_tool.py",
-        "test_view_file_tools.py",
-        "test_worker_computer_acceptance.py",
         "test_worker_media.py",
-        "test_worker_media_proxy.py",
         "test_worker_tool_transport.py",
         "tool_system/agno_parity_support.py",
         "tool_system/test_agno_toolkits.py",

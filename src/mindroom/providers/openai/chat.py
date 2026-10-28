@@ -7,15 +7,14 @@ settings come from ``extra_kwargs``.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import httpx2
 
 from mindroom.llm.messages import system_texts
-from mindroom.llm.provider import StreamProgress, ToolCallReady, TurnCompleted, UsageReported
-from mindroom.providers.assistant_turn import finished_assistant_message, output_started
+from mindroom.llm.provider import ToolCallReady
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings
 from mindroom.providers.openai.chat_wire import ChatStream, ChatWire, chat_request_kwargs, chat_stop_reason
@@ -85,6 +84,7 @@ class ChatAdapter:
             structured_output=self.capabilities.structured_output,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
+            provider=self.identity.provider_name,
         )
         if self.wire.route != "openrouter":
             return kwargs
@@ -100,13 +100,12 @@ class ChatAdapter:
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Chat Completions request and yield its deltas, usage, and finished turn."""
-        started = time.monotonic()
-        first_token: float | None = None
+        timer = TurnTimer()
         # Reading and encoding attachments can be slow, so the body is built off the event loop.
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         accumulator = ChatStream(self.wire)
         try:
-            client = await self.clients.client(request.overrides)
+            client = await self.clients.client()
             sdk_stream = await client.chat.completions.create(**kwargs)
             # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
             # stops decoding at the sentinel, so a body decoded to its end never sent one.
@@ -114,9 +113,7 @@ class ChatAdapter:
             sdk_stream.response.stream = body
             try:
                 async for chunk in sdk_stream:
-                    # A chunk without deltas or usage, such as a tool-call argument piece, is still activity.
-                    for event in accumulator.add(chunk) or [StreamProgress()]:
-                        first_token = output_started(first_token, event)
+                    for event in timer.chunk(accumulator.add(chunk)):
                         yield event
             finally:
                 await sdk_stream.close()
@@ -126,22 +123,19 @@ class ChatAdapter:
         except sdk_failures() as error:
             raise provider_error(error, provider=self.identity.provider_name) from error
         for event in accumulator.finish():
-            first_token = output_started(first_token, event)
-            yield event
+            yield timer.output(event)
         parts = accumulator.parts
         # A stream assembles its tool calls from their pieces, so each is complete only now.
         for call in parts.tool_calls:
-            yield ToolCallReady(call)
-        message = finished_assistant_message(
+            yield timer.output(ToolCallReady(call))
+        for event in finished_turn(
             self.identity,
+            timer,
             content=parts.content,
             reasoning=parts.reasoning,
             tool_calls=parts.tool_calls,
             provider_data=parts.provider_data,
             usage=parts.usage,
-            started=started,
-            first_output_at=first_token,
-        )
-        if parts.usage is not None:
-            yield UsageReported(message.metrics)
-        yield TurnCompleted(message=message, stop_reason=chat_stop_reason(parts.finish_reason))
+            stop_reason=chat_stop_reason(parts.finish_reason),
+        ):
+            yield event

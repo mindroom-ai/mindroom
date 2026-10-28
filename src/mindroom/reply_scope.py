@@ -48,7 +48,6 @@ from mindroom.reply_presentation import (
 from mindroom.response_sources import ResponseSources
 from mindroom.stop import SpanRegistry
 from mindroom.streaming import ProgressPermission, UnfinishedStreamedReply
-from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -57,7 +56,7 @@ from mindroom.tool_system.events import (
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
@@ -232,9 +231,8 @@ class _SpanToolCalls:
             result, is_error = f"{type(result).__name__}: {result}", True
         else:
             # A value that carries text and media is recorded as the text the model reads.
-            value = read_tool_value(result)
-            is_error = isinstance(value, ToolOutcome) and value.is_error
-            result = result if value is None else value.content
+            is_error = isinstance(result, ToolOutcome) and result.is_error
+            result = result.content if isinstance(result, ToolValue) else result
         _, entry = format_tool_combined(tool_name, dict(args), result, is_error=is_error)
         try:
             await self.runtime.store.replies.record_tool_call(
@@ -277,10 +275,8 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Tells the turn ledger about a turn a reply's settlement already recorded answered.
     complete_turn: Callable[[TurnRecord], Awaitable[object]]
-    # Keeps a pending approval's conversation busy, for the approvals a start finds.
-    hold_conversation: Callable[[ApprovalContinuation], None]
-    # Releases the conversation the ended approval held, and settles what its reply owes.
-    approval_ended: Callable[[ApprovalEnded], None]
+    # Settles what the reply of an ended approval owes, given the reply's id.
+    approval_ended: Callable[[str], None]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -296,7 +292,7 @@ class ReplyRuntime:
         Span cancels run last: the acknowledgement that applies a Stop can run
         in the span's own task, whose next await the cancel interrupts. The
         in-memory effects run even when an awaited one fails, so a failed read
-        cannot keep a stopped span running or a conversation held.
+        cannot keep a stopped span running or a claim waiting.
         """
         try:
             for effect in effects:
@@ -308,7 +304,7 @@ class ReplyRuntime:
             for effect in effects:
                 if isinstance(effect, ApprovalEnded):
                     self.claim_may_proceed(effect.reply_id)
-                    self.approval_ended(effect)
+                    self.approval_ended(effect.reply_id)
             for effect in effects:
                 if isinstance(effect, rl.CancelSpan):
                     self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
@@ -337,19 +333,26 @@ class ReplyRuntime:
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
-        return await run_coroutine_until_complete(self._ran(self.store.finish_approval_continuation(approval_id)))
+        return await run_coroutine_until_complete(
+            self._ran(self.store.approvals.finish_approval_continuation(approval_id)),
+        )
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
         """Release an interrupted run's approval as ``rl.approval_released`` decides; return whether it was released."""
         return await run_coroutine_until_complete(
-            self._ran(self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)),
+            self._ran(
+                self.store.approvals.release_approval_continuation(
+                    approval_id,
+                    expected_generation=expected_generation,
+                ),
+            ),
         )
 
     async def _ran(self, ending: Awaitable[tuple[PostCommitEffect, ...] | None]) -> bool:
         """Run what an ended approval's commit left, returning whether it ended.
 
         Callers run it to completion even when they are cancelled, so a
-        committed end always releases the conversation its approval held.
+        committed end always retries the claims that waited for it and settles what its reply owes.
         """
         effects = await ending
         if effects is None:
@@ -359,7 +362,7 @@ class ReplyRuntime:
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
         """Run a fenced approval's failure settlement."""
-        continuation = await self.store.approval_continuation(approval_id)
+        continuation = await self.store.approvals.approval_continuation(approval_id)
         if continuation is None:
             return
         # Its source worker settles it once whatever owns the source lets go of it.
@@ -456,9 +459,6 @@ class ReplyRuntime:
         await self.store.replies.take_deletion_endings()
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
-        # A message to a conversation an approval still holds waits for that approval, after a restart too.
-        for continuation in await self.store.pending_approvals():
-            self.hold_conversation(continuation)
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:
@@ -590,14 +590,14 @@ class ReplyRuntime:
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
         claim = await self._new_request(
-            delivery_id=continuation.source_event_ids[0],
+            delivery_id=continuation.final_delivery_id,
             sources=continuation.sources,
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,
             empty=empty,
         )
         with self._expecting((claim.span_id,)):
-            claimed, applied = await self.store.claim_approval_resume(continuation.approval_id, claim=claim)
+            claimed, applied = await self.store.approvals.claim_approval_resume(continuation.approval_id, claim=claim)
             if applied is not None:
                 applied = await self.committed(applied)
         if applied is None:
@@ -933,7 +933,7 @@ class _NotedEnd:
     note: Segment
 
 
-def interruption_note(cancel_source: CancelSource) -> NoteKind:
+def _interruption_note(cancel_source: CancelSource) -> NoteKind:
     """Return the note a reply shows below what it showed when a restart or another cancellation cut it short."""
     return NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED
 
@@ -964,5 +964,5 @@ def interrupted_end(
         )
     if reply.event_id is None:
         return None
-    note = note_segment(interruption_note(cancel_source))
+    note = note_segment(_interruption_note(cancel_source))
     return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)

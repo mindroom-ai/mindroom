@@ -331,6 +331,20 @@ export function EgressServiceItem({
     (!oauth || (!canConnect && !oauth.connected && !oauth.reset_required));
   const editable = canEdit(serviceEditing, service);
   const addAccount = serviceEditing.addAccount?.(service);
+  // A service just saved with an account of its own asks to sign in to it,
+  // once, when the listing shows it so with that login; one that cannot
+  // connect asks nothing.
+  const { signInNext, onSignInOpened } = serviceEditing;
+  useEffect(() => {
+    if (
+      signInNext?.name !== service.name ||
+      !service.separate_account ||
+      oauth?.provider !== signInNext.provider
+    )
+      return;
+    onSignInOpened?.();
+    if (canConnect) askReuse("read");
+  });
   // Everything but the action that makes the service work, which is a button of its own.
   const actions: RowAction[] = [
     ...(oauth && canManageKey && !showKeyControls && !setKeyFirst
@@ -425,16 +439,6 @@ export function EgressServiceItem({
           },
         ]
       : []),
-    ...(addAccount
-      ? [
-          {
-            label: "Add another account",
-            ariaLabel: `Add another account for ${name}`,
-            disabled: serviceEditing.disabled || serviceEditing.limitDisabled,
-            onSelect: addAccount,
-          },
-        ]
-      : []),
     ...(oauth?.connected && canResetAccount
       ? [
           {
@@ -513,10 +517,22 @@ export function EgressServiceItem({
           {unsetText && (
             <span className="text-xs text-muted-foreground">{unsetText}</span>
           )}
+          {addAccount && oauth && (
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0 text-xs"
+              aria-label={`Add another ${oauth.display_name} account for ${name}`}
+              disabled={serviceEditing.disabled || serviceEditing.limitDisabled}
+              onClick={addAccount}
+            >
+              Add another {oauth.display_name} account
+            </Button>
+          )}
         </div>
       </td>
       <td className={SERVICE_CELL.actions}>
-        <div className="flex flex-wrap items-center gap-1 max-sm:justify-start sm:justify-end">
+        <div className="flex flex-wrap items-center gap-1 max-sm:justify-start sm:flex-nowrap sm:justify-end">
           {busyNote ? (
             <BusyNote>{busyNote}</BusyNote>
           ) : canConnect ? (
@@ -564,10 +580,10 @@ export function EgressServiceItem({
               size="sm"
               variant="outline"
               disabled={busy !== null}
-              aria-label={`Use account for ${name}`}
+              aria-label={`Let commands use ${name}`}
               onClick={() => askReuse("read")}
             >
-              Use account
+              Let commands use it
             </Button>
           ) : (
             setKeyFirst && (
@@ -677,11 +693,14 @@ export function EgressServiceItem({
         {oauth && (
           <AccountReuseDialog
             open={confirm === "reuse"}
-            // An allowed account asks again only to change to read and write.
+            // An allowed account asks again only to change to read and write;
+            // a service's own account not connected yet is another than the tools' one.
             title={
               reuseEnabled
                 ? `Change ${oauth.display_name} to read and write?`
-                : `Use your ${oauth.display_name} account for Agent Keys?`
+                : service.separate_account && !oauth.connected
+                  ? `Sign in to another ${oauth.display_name} account?`
+                  : `Use your ${oauth.display_name} account for Agent Keys?`
             }
             description={accountReuseDescription({
               provider: oauth.display_name,
@@ -702,7 +721,7 @@ export function EgressServiceItem({
               reuseEnabled
                 ? "Change"
                 : oauth.connected
-                  ? "Use account"
+                  ? "Let commands use it"
                   : "Continue"
             }
             access={access}

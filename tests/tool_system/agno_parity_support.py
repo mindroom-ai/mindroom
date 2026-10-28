@@ -6,6 +6,7 @@ for tools that need settings, offline replacements for SDK clients that contact 
 a hidden host environment that refuses network connections.
 The parity tests compare what they build with the goldens through `golden_entry` and `argument_outcome`, and
 `tests.agno_parity.regenerate_goldens` rewrites the goldens through the same two functions.
+`agno_derivation` is Agno's schema derivation, which the owned generator's proof compares with.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from unittest.mock import patch
 
 import httpx
 from agno.tools import Toolkit
+from agno.tools.function import Function
 from packaging.version import Version
 
 from mindroom.agents import build_agent_toolkit
@@ -43,7 +45,7 @@ from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from tests.agno_parity import tool_argument_probes as probes
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from typing import Any
 
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
@@ -58,7 +60,8 @@ ARGUMENTS_PATH = FIXTURE_DIR / "arguments.json"
 UNBUILDABLE = frozenset({"apify", "composio"})
 AGENT_NAME = "golden"
 # Tools are built for one agent of a config shaped like `mindroom config init` output: file memory gives the agent a
-# workspace, so output-file wrapping applies; delegation and the knowledge graph enable the tools that need them.
+# workspace, so output-file wrapping applies; delegation, the knowledge graph and agent creation enable the tools that
+# need them.
 CONFIG = {
     "models": {"default": {"provider": "openai", "id": "golden-model"}},
     "memory": {"backend": "file"},
@@ -68,6 +71,7 @@ CONFIG = {
             "display_name": "Golden",
             "role": "Captures tool schemas.",
             "delegate_to": ["helper"],
+            "created_agents_per_owner": 1,
             "knowledge_graph": True,
             "knowledge_graph_edits": True,
         },
@@ -304,6 +308,13 @@ def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
     normalized = normalize_version(entry)
     assert isinstance(normalized, dict)
     return normalized
+
+
+def agno_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[str, Any]]:
+    """Return the description and parameter schema Agno's entrypoint processing derives for ``entrypoint``."""
+    function = Function(name="derived", entrypoint=entrypoint)
+    function.process_entrypoint(strict=False)
+    return function.description, function.parameters
 
 
 def probe_functions() -> dict[str, ToolFunction]:

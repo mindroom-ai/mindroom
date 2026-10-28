@@ -2,11 +2,12 @@
 """Responses API request bodies and event parsing for the OpenAI and Codex routes.
 
 Stored responses continue with ``previous_response_id`` while the conversation the chain holds is the one the request
-replays before that response. ``store: false`` responses and portable replay send the history explicitly, with
-ordered output items and encrypted reasoning so a later request can replay a tool loop exactly. A changed
-conversation on a stored route without portable replay resends the history rebuilt from its text and calls, without
-reasoning, because those responses record neither ordered output nor reasoning. A turn ends only when
-``response.completed`` or ``response.incomplete`` arrives.
+replays before that response. Any other request sends the history explicitly, each reply as the ordered output its
+response recorded when that carries encrypted reasoning, so a later request can replay a tool loop exactly
+(``response_replay``). ``store: false`` responses and portable replay ask for encrypted reasoning; a reply stored
+without portable replay has none unless the route's ``include`` asks for it, so a changed conversation on its route
+otherwise resends it rebuilt from its text and calls.
+A turn ends only when ``response.completed`` or ``response.incomplete`` arrives.
 """
 
 from __future__ import annotations
@@ -32,11 +33,7 @@ from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
 from mindroom.providers.openai.media import responses_file_part, responses_image_part
-from mindroom.providers.openai.response_replay import (
-    RESPONSE_OUTPUT_KEY,
-    TOOL_SEARCH_ITEMS_KEY,
-    formatted_input_with_provider_items,
-)
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
@@ -46,13 +43,7 @@ from mindroom.providers.tool_policy import disable_tool_selection
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types.responses import (
-        Response,
-        ResponseFunctionToolCall,
-        ResponseOutputItem,
-        ResponseStreamEvent,
-        ResponseUsage,
-    )
+    from openai.types.responses import Response, ResponseFunctionToolCall, ResponseStreamEvent, ResponseUsage
 
     from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
@@ -78,7 +69,6 @@ _ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _ENDED_EVENT_TYPES = frozenset({"response.completed", "response.incomplete"})
 # The events that end a response, a failed one included.
 _TERMINAL_EVENT_TYPES = _ENDED_EVENT_TYPES | {"response.failed"}
-_TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 # The output items the model writes itself; every other item is a hosted tool's call or output.
 _MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
 _STORED_KEY = "mindroom_response_stored"
@@ -110,14 +100,13 @@ class ResponsesReplay:
     """How one request continues its history, decided once for both its parameters and its input.
 
     A request chaining to ``previous_response_id`` sends only ``history[sent_from:]``, the messages after that
-    response; any other request sends all of ``history``, with its stored reasoning when ``replay_reasoning``.
-    ``history`` is already projected to the latest checkpoint on ``native_route``.
+    response; any other request sends all of ``history``. ``history`` is already projected to the latest checkpoint
+    on ``native_route``.
     """
 
     history: list[Message]
     sent_from: int
     previous_response_id: str | None
-    replay_reasoning: bool
     native_route: str | None
 
 
@@ -194,28 +183,28 @@ def responses_replay(
 ) -> ResponsesReplay:
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
-    Portable replay, an unstored request, and a history whose latest response was not stored or holds another
-    conversation send the history explicitly, each reply with the ordered output and reasoning it recorded; a reply
-    stored without portable replay recorded neither, so it is rebuilt without reasoning. A stored request without a
-    stored response sends the history without reasoning.
+    Portable replay, an unstored request, a history without a stored response, and one whose latest response was not
+    stored or holds another conversation send the history explicitly.
     """
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
     latest = _latest_response(history)
-    replay_reasoning = (
-        portable_replay or store is False or (latest is not None and not _continuable(latest[1], history[: latest[0]]))
+    continues = (
+        latest is not None
+        and not portable_replay
+        and store is not False
+        and _continuable(latest[1], history[: latest[0]])
     )
-    chained = None if replay_reasoning else latest
+    chained = latest if continues else None
     return ResponsesReplay(
         history=history,
         sent_from=0 if chained is None else chained[0] + 1,
         previous_response_id=None if chained is None else chained[1]["response_id"],
-        replay_reasoning=replay_reasoning,
         native_route=route,
     )
 
 
-def _prompt_item(message: Message) -> dict[str, Any]:
+def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
     """Return a system or user message as a Responses input message with its images and files."""
     item: dict[str, Any] = {"role": "developer" if message.role == "system" else "user"}
     if message.content is not None:
@@ -223,28 +212,16 @@ def _prompt_item(message: Message) -> dict[str, Any]:
     if message.images and isinstance(message.content, str):
         item["content"] = [
             {"type": "input_text", "text": message.content},
-            *(part for image in message.images if (part := responses_image_part(image)) is not None),
+            *(part for image in message.images if (part := responses_image_part(image, provider=provider)) is not None),
         ]
     if message.files:
         content = item.get("content")
         parts: list[Any] = content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]
-        parts.extend(part for file in message.files if (part := responses_file_part(file)) is not None)
+        parts.extend(
+            part for file in message.files if (part := responses_file_part(file, provider=provider)) is not None
+        )
         item["content"] = parts
     return item
-
-
-def _function_call_items(message: Message) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function_call",
-            "id": call.get("id"),
-            "call_id": call.get("call_id", call.get("id")),
-            "name": call["function"]["name"],
-            "arguments": call["function"]["arguments"],
-            "status": "completed",
-        }
-        for call in message.tool_calls or ()
-    ]
 
 
 def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
@@ -258,25 +235,25 @@ def _call_ids(messages: Sequence[Message]) -> dict[str, str]:
     return call_ids
 
 
-def _input_items(replay: ResponsesReplay) -> list[Any]:
-    """Convert the messages a request sends to Responses input items."""
+def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
+    """Convert the messages a request sends to Responses input items, under the tool-call ids the request sends.
+
+    Another provider's calls carry ids outside the Responses rule, so every message converts after the ids are
+    rewritten (``reformat_tool_call_ids``), its replayed output included.
+    """
     canonical = reformat_tool_call_ids(replay.history, "responses")
     call_ids = _call_ids(canonical)
     items: list[Any] = []
     for message in canonical[replay.sent_from :]:
         if message.role in {"user", "system"}:
-            items.append(_prompt_item(message))
+            items.append(_prompt_item(message, provider))
         elif message.role == "tool":
             result = tool_result_view(message)
             if result.call_id:
                 call_id = call_ids.get(result.call_id, result.call_id)
                 items.append({"type": "function_call_output", "call_id": call_id, "output": result.content})
-        elif message.tool_calls:
-            # A continued response already holds its calls; only their results are sent.
-            if replay.previous_response_id is None:
-                items.extend(_function_call_items(message))
-        elif message.role == "assistant":
-            items.append({"role": "assistant", "content": message.content if message.content is not None else ""})
+        else:
+            items.extend(assistant_replay_items(message, replay.native_route))
     return items
 
 
@@ -295,19 +272,18 @@ def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
     return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
 
 
-def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
+def responses_input(
+    replay: ResponsesReplay,
+    *,
+    cache_system_prompt: bool,
+    explicit_breakpoint: bool,
+    provider: str,
+) -> list[Any]:
     """Return the ``input`` items for one request.
 
-    Explicit replay rebuilds stored tool loops from their ordered output items, so encrypted reasoning
-    stays attached to the calls it produced even when the next response is stored again.
+    ``provider`` names the adapter in the error for an attachment file that cannot be read.
     """
-    # Ordered output is restored only for the spans the request still sends.
-    formatted = formatted_input_with_provider_items(
-        replay.history[replay.sent_from :],
-        _input_items(replay),
-        native_route=replay.native_route,
-        replay_reasoning=replay.replay_reasoning,
-    )
+    formatted = _input_items(replay, provider)
     if cache_system_prompt and explicit_breakpoint:
         formatted = _with_system_prefix_breakpoint(formatted)
     return formatted
@@ -405,6 +381,7 @@ def responses_request_kwargs(
     request: ModelRequest,
     settings: ResponsesSettings,
     wire: ResponsesWire,
+    provider: str,
 ) -> dict[str, Any]:
     """Return the ``responses.create`` keyword arguments for one request.
 
@@ -436,6 +413,7 @@ def responses_request_kwargs(
         replay,
         cache_system_prompt=settings.cache_system_prompt,
         explicit_breakpoint=wire.explicit_breakpoint,
+        provider=provider,
     )
     return sdk_call_kwargs({"model": model_id, "input": formatted_input, **params}, "responses")
 
@@ -468,11 +446,6 @@ class ResponsesTurnParts:
     usage: MessageMetrics | None = None
     status: str | None = None
     incomplete_reason: str | None = None
-
-
-def _record_tool_search_item(parts: ResponsesTurnParts, item: ResponseOutputItem) -> None:
-    if item.type in _TOOL_SEARCH_ITEM_TYPES:
-        parts.provider_data.setdefault(TOOL_SEARCH_ITEMS_KEY, []).append(item.model_dump(exclude_none=True))
 
 
 def _function_call(item: ResponseFunctionToolCall) -> dict[str, Any]:
@@ -548,9 +521,7 @@ class ResponsesStream:
             self._tool_use["function"]["arguments"] += current.delta
         elif event.type == "response.output_item.done":
             events.extend(self._ready_call())
-            _record_tool_search_item(self.parts, current.item)
-            if self.store is False or self.portable_replay:
-                self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
+            self._items[current.output_index] = current.item.model_dump(mode="json", exclude_none=True)
         elif event.type in _ENDED_EVENT_TYPES:
             # A call the response ended in the middle of is kept, as the ended response lists it too.
             events.extend(self._ready_call())
@@ -569,8 +540,10 @@ class ResponsesStream:
         """Record what the ended response says about its turn.
 
         A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
-        status and the incomplete reason. Both record the response id, its storage provenance, and the
-        ``conversation_digest`` of its request when stored; only a completed response's output is recorded for replay.
+        status and the incomplete reason. Both record the response id, its storage provenance, the
+        ``conversation_digest`` of its request when stored, and its ordered output for replay, which is the ended
+        response's or, when that lists none, the streamed items'. Only a completed response records its replay policy
+        and native-compaction state.
         """
         self.ended = True
         parts = self.parts
@@ -583,15 +556,19 @@ class ResponsesStream:
         parts.provider_data[_STORED_KEY] = self.store is not False
         if self.store is not False:
             parts.provider_data[_CONVERSATION_DIGEST_KEY] = self.conversation_digest
-        if response.status != "completed":
-            return
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
+        # A checkpoint is native-compaction state, which only a completed response records.
+        output = [item for item in items if item.get("type") != "compaction"]
+        if response.status != "completed":
+            # An incomplete response's reasoning may lack the item that must follow it, so the turn replays rebuilt
+            # from its text and calls, after the searches it ran.
+            parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in output if item.get("type") != "reasoning"]
+            return
         parts.provider_data[_PORTABLE_KEY] = self.portable_replay
         parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, self.native_compaction)
-        if (self.store is False or self.portable_replay) and any(item.get("type") == "reasoning" for item in items):
-            parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in items if item.get("type") != "compaction"]
+        parts.provider_data[RESPONSE_OUTPUT_KEY] = output
 
     def finish(self) -> ResponsesTurnParts:
         """Return the finished turn after the response ended."""

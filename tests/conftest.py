@@ -29,7 +29,7 @@ from collections.abc import (
 )
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +53,7 @@ from structlog.testing import ReturnLoggerFactory
 from structlog.typing import BindableLogger, Context, Processor, WrappedLogger
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
+import mindroom.approval.continuation_runner as continuation_runner_module
 import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
@@ -68,7 +69,12 @@ from mindroom import ai as mindroom_ai
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import ResponseTurnContext
-from mindroom.approval.manager import ApprovalActionResult, ApprovalManager, initialize_approval_store
+from mindroom.approval.manager import (
+    ApprovalActionResult,
+    ApprovalManager,
+    ToolApprovalTransportError,
+    initialize_approval_store,
+)
 from mindroom.authorization import _ReplyAuthorizationDecision
 from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing.batch import PendingEvent
@@ -160,13 +166,14 @@ from mindroom.response_payload_preparation import (
 )
 from mindroom.response_runner import (
     PostLockRequestPreparationError,
+    PreparedResponseRuntime,
     ResponseRequest,
     ResponseRunner,
     _agent_run_metadata,
-    _PreparedResponseRuntime,
     _ResponseGenerationOutcome,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import CompletedAttempt
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
@@ -180,6 +187,8 @@ from mindroom.user_stop_reconciliation import UserStopReconciler
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle, _reset_visible_voice_echo_barriers
 from mindroom.workers import runtime as workers_runtime_module
+from mindroom.workers.backends import static_runner as static_runner_module
+from mindroom.workers.compatibility import worker_health_payload
 from tests.fakes.scripted_model import estimate_only_model
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
@@ -188,8 +197,9 @@ if TYPE_CHECKING:
     from xdist.workermanage import WorkerController
 
     from mindroom.agent_cli.session import CliTurnOwner
+    from mindroom.approval.recovery import ApprovalRecovery
     from mindroom.dispatch_handoff import DispatchEvent
-    from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.history.request_messages import TurnMessages
     from mindroom.llm.provider import ModelProvider
@@ -463,11 +473,13 @@ _configure_quiet_structlog()
 __all__ = [
     "TEST_ACCESS_TOKEN",
     "TEST_PASSWORD",
+    "FakeApprovalTransport",
     "FakeCredentialsManager",
     "FakeMediaResponse",
     "activate_interactive_prompt",
     "agent_response_should_respond",
     "aioresponse",
+    "approval_manager_for_test",
     "bind_mock_config_event_journal",
     "bind_runtime_paths",
     "build_private_template_dir",
@@ -569,7 +581,7 @@ async def prepare_agent_and_prompt_for_test(
 def agent_turn_recorder_for_test(
     runner: ResponseRunner,
     request: ResponseRequest,
-    runtime: _PreparedResponseRuntime,
+    runtime: PreparedResponseRuntime,
 ) -> TurnRecorder:
     """Return the recorder the runner gives an agent turn of ``request`` under ``runtime``."""
     return runner._build_turn_recorder(
@@ -670,24 +682,68 @@ def live_turn_tools_for_test(
     return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
 
 
-def initialize_approval_store_for_test(runtime_paths: RuntimePaths, **collaborators: Any) -> ApprovalManager:  # noqa: ANN401
-    """Initialize the approval store with the collaborators a test names, and none of the others."""
-    unset = dict.fromkeys(
-        (
-            "prepare_event",
-            "send_delivery",
-            "resolve_delivery",
-            "resolve_action_delivery",
-            "cards",
-            "transport_sender",
-            "sending_device",
-            "continuation_ready",
-            "recovery",
-            "responder_principal",
-            "router_missing",
-        ),
+async def _no_approval_event(_room_id: str, _thread_id: str | None, _content: dict[str, Any]) -> dict[str, Any] | None:
+    return None
+
+
+async def _no_approval_delivery(_delivery: MatrixDelivery) -> str:
+    msg = "This test sends no approval delivery"
+    raise ToolApprovalTransportError(msg)
+
+
+async def _no_delivered_event(*_target: object) -> str | None:
+    return None
+
+
+async def _no_sources_to_wake(_entity_name: str, _room_id: str, _source_event_ids: tuple[str, ...]) -> None:
+    return None
+
+
+@dataclass
+class FakeApprovalTransport:
+    """The approval transport an approval manager uses, with the methods a test sets.
+
+    The others prepare and send nothing, find no earlier delivery, know no sender, device, or responder principal,
+    wake nothing, and find the router in every room.
+    """
+
+    prepare_approval_event: Callable[[str, str | None, dict[str, Any]], Awaitable[dict[str, Any] | None]] = (
+        _no_approval_event
     )
-    return initialize_approval_store(runtime_paths, **(unset | collaborators))
+    send_approval_delivery: Callable[[MatrixDelivery], Awaitable[str]] = _no_approval_delivery
+    resolve_approval_delivery: Callable[[MatrixDelivery], Awaitable[str | None]] = _no_delivered_event
+    resolve_approval_action_delivery: Callable[[str, str], Awaitable[str | None]] = _no_delivered_event
+    transport_sender_id: Callable[[], str | None] = lambda: None
+    transport_device_id: Callable[[], str | None] = lambda: None
+    wake_continuation_sources: Callable[[str, str, tuple[str, ...]], Awaitable[None]] = _no_sources_to_wake
+    responder_principal_id: Callable[[str], str | None] = lambda _entity_name: None
+    router_missing: Callable[[str], bool] = lambda _room_id: False
+
+
+def approval_manager_for_test(
+    runtime_paths: RuntimePaths,
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+    **transport: Any,  # noqa: ANN401
+) -> ApprovalManager:
+    """Build an approval manager over the transport methods a test names, as ``FakeApprovalTransport`` fields."""
+    return ApprovalManager(runtime_paths, transport=FakeApprovalTransport(**transport), cards=cards)
+
+
+def initialize_approval_store_for_test(
+    runtime_paths: RuntimePaths,
+    *,
+    cards: "ApprovalDeliveryView | None" = None,
+    recovery: "ApprovalRecovery | None" = None,
+    **transport: Any,  # noqa: ANN401
+) -> ApprovalManager:
+    """Initialize the approval store over the transport methods a test names, as ``FakeApprovalTransport`` fields."""
+    return initialize_approval_store(
+        runtime_paths,
+        transport=FakeApprovalTransport(**transport),
+        cards=cards,
+        recovery=recovery,
+    )
 
 
 async def handle_card_response_for_test(manager: ApprovalManager, **response: Any) -> ApprovalActionResult:  # noqa: ANN401
@@ -2510,6 +2566,36 @@ def create_mock_room(
     return room
 
 
+def completing(respond: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+    """Return an ``ai_response`` stand-in that answers as ``respond`` does and reports its turn completed.
+
+    A blocking caller reads a turn that reports no completed attempt as failed, so a plain stand-in is a failed turn.
+    """
+
+    async def complete(
+        *args: object,
+        on_completed: Callable[[CompletedAttempt], None] | None = None,
+        **kwargs: object,
+    ) -> str:
+        text = await respond(*args, **kwargs)
+        if on_completed is not None:
+            on_completed(CompletedAttempt(replayable_text=text, has_visible_content=bool(text)))
+        return text
+
+    return complete
+
+
+def completed_ai_response_mock(**kwargs: object) -> AsyncMock:
+    """Return an ``AsyncMock`` ``ai_response`` whose turn completes with its ``return_value``."""
+    mock = AsyncMock(**kwargs)
+
+    async def respond(*_args: object, **_kwargs: object) -> str:
+        return mock.return_value
+
+    mock.side_effect = completing(respond)
+    return mock
+
+
 def make_turn_context(
     entity_label: str = "test_agent",
     *,
@@ -2939,13 +3025,20 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
 
 @contextmanager
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
-    """Patch module-level response coordinator seams on the real current owner."""
+    """Patch module-level response coordinator seams on the real current owners.
+
+    A seam the approval lifecycle also imports is patched there too, so a resumed approval sees the replacement.
+    """
     with ExitStack() as stack:
         for name, replacement in changes.items():
-            module_name = (
-                "mindroom.response_lifecycle" if name == "apply_post_response_effects" else "mindroom.response_runner"
-            )
-            stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
+            if name == "apply_post_response_effects":
+                module_names = ["mindroom.response_lifecycle"]
+            else:
+                module_names = ["mindroom.response_runner"]
+                if name in vars(continuation_runner_module):
+                    module_names.append("mindroom.approval.continuation_runner")
+            for module_name in module_names:
+                stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
 
 
@@ -3285,6 +3378,20 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
         _refuse_connection(httpx.Request("GET", url))
 
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
+
+
+@pytest.fixture
+def current_static_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the static sandbox runner's health probe as a runner of this release, for tests that fake no runner."""
+
+    def current(runner_root: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=asdict(worker_health_payload(mindroom_version="test")),
+            request=httpx.Request("GET", f"{runner_root}/healthz"),
+        )
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", current)
 
 
 # Captured before any test patches them, so the offline clients below still start from the production ones.

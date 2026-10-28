@@ -115,13 +115,8 @@ async def _paused_turn(
     prompt: str,
     *,
     show_tool_calls: bool = True,
-    collect_streamed_response: bool = False,
 ) -> PausedAttempt:
-    """Run one reply of ``general`` as the response runner does and return the pause it suspended on, as it shows.
-
-    ``collect_streamed_response`` collects the run's events into the reply, as a non-streaming reply that shows its
-    tool calls does; without it the reply renders from the run's record.
-    """
+    """Run one reply of ``general`` as the response runner does and return the pause it suspended on, as it shows."""
     ctx = make_turn_context(
         "general",
         session_id=identity.session_id,
@@ -137,7 +132,6 @@ async def _paused_turn(
             runtime_paths=paths,
             execution_identity=identity,
             show_tool_calls=show_tool_calls,
-            collect_streamed_response=collect_streamed_response,
             supports_native_tool_approval=True,
         )
     return _paused_with_committed_presentation(raised.value, show_tool_calls=show_tool_calls)
@@ -176,7 +170,7 @@ async def test_deferred_call_through_call_tool_pauses_under_its_real_name(
             show_tool_calls=show_tool_calls,
             supports_native_tool_approval=True,
         )
-    paused = raised.value.paused
+    paused = _paused_with_committed_presentation(raised.value, show_tool_calls=show_tool_calls)
     assert not model.turns
     assert [(entry.tool_name, entry.tool_args) for entry in paused.tools] == [("add", {"a": 2, "b": 3})]
     assert [entry.tool_name for entry in paused.tool_trace] == ["add"]
@@ -324,7 +318,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         continuation_count=2 if outcome == "immediate_pause" else 0,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     context = execution.tool_runtime.build_context(
         MessageTarget(
             identity.room_id,
@@ -695,7 +689,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         show_tool_calls=True,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     published: list[StructuredStreamChunk] = []
 
     async def progress(chunk: StructuredStreamChunk) -> None:
@@ -789,7 +783,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
         show_tool_calls=False,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     result = await execution.continue_run(
         continuation,
@@ -807,7 +801,6 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("collect_streamed_response", [False, True], ids=["record", "events"])
 @pytest.mark.parametrize(
     ("show_tool_calls", "pause", "reply"),
     [
@@ -819,12 +812,11 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    collect_streamed_response: bool,
     show_tool_calls: bool,
     pause: str,
     reply: str,
 ) -> None:
-    """A blocking reply rendered from its run's record shows its pause and its approved reply as an event-built one does.
+    """A blocking reply shows its pause and its approved reply without the paused notice its run's record holds.
 
     The run paused without text of its own, so its record holds the paused notice as its content, which neither
     reply shows: the approval card says what the pause waits for.
@@ -851,7 +843,6 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         identity,
         "Add them.",
         show_tool_calls=show_tool_calls,
-        collect_streamed_response=collect_streamed_response,
     )
     assert paused.response_text.strip() == pause
     [stored] = stored_runs(config, paths, identity.session_id)
@@ -878,7 +869,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         show_tool_calls=show_tool_calls,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     result = await execution.continue_run(
         continuation,
@@ -939,7 +930,7 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         request_body="Add them.",
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     with queued_message_signal_context(None) as notices:
         result = await execution.continue_run(
@@ -1078,7 +1069,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         show_tool_calls=True,
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
     with pytest.raises(asyncio.CancelledError):
         await execution.continue_run(
