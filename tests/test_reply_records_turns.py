@@ -36,7 +36,6 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
-from mindroom.tool_system.agno_toolkits import AgnoImage, ToolResult
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
@@ -1453,12 +1452,8 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
     async def draw(prompt: str) -> ToolValue:
         return ToolValue(content=f"Drew a {prompt}.", images=(Image(url=picture, mime_type="image/png"),))
 
-    async def render(prompt: str) -> ToolResult:
-        return ToolResult(content=f"Rendered a {prompt}.", images=[AgnoImage(url=picture)])
-
     async def answer(*_args: object, **_kwargs: object) -> str:
         await bridge("draw", draw, {"prompt": "cat"})
-        await bridge("render", render, {"prompt": "dog"})
         return "Drawn."
 
     assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
@@ -1466,10 +1461,9 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
     reply = await _reply(bot)
     recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
     account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
-    assert account.splitlines()[-2:] == [
-        '- The `draw` tool finished with input preview "prompt=cat" and output preview "Drew a cat.".',
-        '- The `render` tool finished with input preview "prompt=dog" and output preview "Rendered a dog.".',
-    ]
+    assert account.splitlines()[-1] == (
+        '- The `draw` tool finished with input preview "prompt=cat" and output preview "Drew a cat.".'
+    )
 
 
 async def test_a_tool_result_stands_when_recording_its_finish_fails(

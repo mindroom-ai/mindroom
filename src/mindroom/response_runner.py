@@ -2784,7 +2784,6 @@ class ResponseRunner:
         async with session_started_on_creation(
             reply_session,
             correlation_id=lifecycle.identity.correlation_id,
-            logger=self.deps.logger,
         ):
             try:
                 # The attempt runs against the event the turn already adopted, which

@@ -179,7 +179,6 @@
         },
         {
           "type": "function_call",
-          "id": "fc_00000000",
           "call_id": "call_00000000",
           "name": "get_weather",
           "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",

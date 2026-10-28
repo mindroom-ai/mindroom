@@ -8,9 +8,7 @@ from itertools import count
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from agno.media import Image
 from agno.tools import Toolkit
-from agno.tools.function import ToolResult
 
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001 - runtime constructor reflection
@@ -42,8 +40,10 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
     desktop_observation_mode,
 )
+from mindroom.llm.media import Image
 from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget  # noqa: TC001 - runtime constructor reflection
 
 if TYPE_CHECKING:
@@ -326,7 +326,7 @@ class DesktopTools(Toolkit):
         timeout_seconds: int | None = None,
         handle: str | None = None,
         force: bool | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         """Run one desktop action: app actions return fresh state and a screenshot, local actions plain results."""
         context = get_tool_runtime_context()
         credential_scope = self._credential_scope(context)
@@ -413,7 +413,7 @@ class DesktopTools(Toolkit):
                 request_id=desktop_command.request_id,
             )
         except DesktopRequestError as exc:
-            return ToolResult(
+            return ToolValue(
                 content=custom_tool_payload(
                     "desktop",
                     "error",
@@ -466,7 +466,7 @@ async def _tool_result_from_response(
     context: ToolRuntimeContext,
     return_attachment: bool,
     request_id: str,
-) -> ToolResult:
+) -> ToolValue:
     if not response.ok:
         return _error_result(action, response.error or "Desktop device rejected the request.")
     if action in _LOCAL_ACTIONS or action == "request_status":
@@ -524,22 +524,22 @@ async def _tool_result_from_response(
             result=response.result,
             **screenshot_attachment_result_fields(attachment),
         )
-    return ToolResult(
+    return ToolValue(
         content=content,
-        images=[Image(content=image_bytes, mime_type=response.screenshot.mime_type)],
+        images=(Image(content=image_bytes, mime_type=response.screenshot.mime_type),),
     )
 
 
-def _result_without_screenshot(action: str, *, response: DesktopResponse, content: str) -> ToolResult:
+def _result_without_screenshot(action: str, *, response: DesktopResponse, content: str) -> ToolValue:
     if action in {"status", "list_apps"}:
-        return ToolResult(content=content)
+        return ToolValue(content=content)
     observation = response.result.get("observation")
     if (
         observation == {"mode": "tree"}
         and isinstance(response.result.get("state"), dict)
         and "warning" not in response.result
     ):
-        return ToolResult(content=content)
+        return ToolValue(content=content)
     if action == "get_app_state" and isinstance(response.result.get("warning"), str):
         return _partial_result(action, result=response.result, message=_partial_warning(response.result))
     action_may_have_run = (
@@ -916,8 +916,8 @@ def _validated_keys(keys: list[str] | None) -> list[str]:
     return list(normalize_key_chord(keys))
 
 
-def _error_result(action: str, message: str) -> ToolResult:
-    return ToolResult(
+def _error_result(action: str, message: str) -> ToolValue:
+    return ToolValue(
         content=custom_tool_payload(
             "desktop",
             "error",
@@ -927,7 +927,7 @@ def _error_result(action: str, message: str) -> ToolResult:
     )
 
 
-def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool) -> ToolResult:
+def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool) -> ToolValue:
     if chat_pairing:
         message = "Desktop setup is required for this requester and agent. Run `!desktop setup` in this Matrix chat."
         if error is not None:
@@ -936,7 +936,7 @@ def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool
         message = "Desktop setup requires a live Matrix agent chat."
         if error is not None:
             message = f"Desktop configuration is invalid: {error}"
-    return ToolResult(
+    return ToolValue(
         content=custom_tool_payload(
             "desktop",
             "setup_required",
@@ -956,8 +956,8 @@ def _partial_warning(result: dict[str, object]) -> str:
     )
 
 
-def _partial_result(action: str, *, result: dict[str, object], message: str, **fields: object) -> ToolResult:
-    return ToolResult(
+def _partial_result(action: str, *, result: dict[str, object], message: str, **fields: object) -> ToolValue:
+    return ToolValue(
         content=custom_tool_payload(
             "desktop",
             "partial",
@@ -976,7 +976,7 @@ async def _local_result(
     response: DesktopResponse,
     timeout_seconds: float,
     request_id: str,
-) -> ToolResult:
+) -> ToolValue:
     """Return folder, shell, and receipt replies as structured text; shell output always arrives in full."""
     result = response.result
     if action == "request_status":
@@ -1002,7 +1002,7 @@ async def _local_result(
     return _ok_result(action, shown)
 
 
-async def _receipt_result(client: nio.AsyncClient, result: dict[str, object], *, timeout_seconds: float) -> ToolResult:
+async def _receipt_result(client: nio.AsyncClient, result: dict[str, object], *, timeout_seconds: float) -> ToolValue:
     """Expand shell output inside a recovered reply exactly as in the original reply."""
     raw_response = result.get("response")
     recorded = DesktopResponse.from_content(raw_response) if raw_response is not None else None
@@ -1042,8 +1042,8 @@ def _without_attachment(result: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in result.items() if key != "output_attachment"}
 
 
-def _ok_result(action: str, result: dict[str, object]) -> ToolResult:
-    return ToolResult(content=custom_tool_payload("desktop", "ok", action=action, result=result))
+def _ok_result(action: str, result: dict[str, object]) -> ToolValue:
+    return ToolValue(content=custom_tool_payload("desktop", "ok", action=action, result=result))
 
 
 __all__ = ["DesktopTools"]

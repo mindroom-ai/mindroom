@@ -1830,11 +1830,8 @@ class _MultiAgentOrchestrator:
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
         context = ConfigReloadedContext(
             event_name=EVENT_CONFIG_RELOADED,
-            plugin_name="",
-            settings={},
             config=new_config,
             runtime_paths=self.runtime_paths,
-            logger=logger.bind(event_name=EVENT_CONFIG_RELOADED),
             correlation_id=f"config-reload:{uuid4().hex}",
             runtime_started_at=(router_bot.runtime_started_at if isinstance(router_bot, AgentBot) else time.time()),
             message_sender=self.hook_message_sender(),

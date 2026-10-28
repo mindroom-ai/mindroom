@@ -12,7 +12,6 @@ from uuid import uuid4
 import httpx
 import pytest
 import pytest_asyncio
-from agno.tools.function import ToolResult
 from fastapi import FastAPI
 
 from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep
@@ -21,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import browser as browser_module
 from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
@@ -223,7 +223,7 @@ async def test_headless_screenshot_preserves_inline_media_and_save_only(
         assert "view_status" not in receipt
     else:
         result = decode_media_result(body["result"])
-        assert isinstance(result, ToolResult)
+        assert isinstance(result, ToolValue)
         assert result.images
         assert result.images[0].content == image_bytes
         receipt = json.loads(result.content)

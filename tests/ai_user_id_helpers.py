@@ -328,7 +328,6 @@ def _build_response_runner(
     )
     hook_context = HookContextSupport(
         runtime=runtime,
-        logger=bot.logger,
         runtime_paths=runtime_paths,
         agent_name=bot.agent_name,
         hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),

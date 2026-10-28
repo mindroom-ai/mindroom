@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.tools.function import ToolResult
 from PIL import Image
 
 from mindroom.attachments.storage import load_attachment, register_local_attachment
@@ -17,6 +16,7 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.tool_system import media_attachments
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from tests.test_attachments_tool import _tool_context
 from tests.test_media_delivery import image_bytes
 
@@ -84,7 +84,7 @@ async def test_view_file_attachment_delivers_authorized_image(tmp_path: Path, en
             if entrypoint == "view_file"
             else await tools.get_attachment(record.attachment_id, view=True)
         )
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     assert result.images
     assert result.images[0].content == image_bytes()
     assert result.images[0].id.startswith("mindroom_viewed_")
@@ -120,18 +120,18 @@ async def test_attachment_image_views_share_preparation(
             else await tools.get_attachment(attachment_id, view=True)
         )
 
-    receipt = json.loads(result.content if isinstance(result, ToolResult) else result)
+    receipt = json.loads(result.content if isinstance(result, ToolValue) else result)
     assert receipt["attachment_id"] == attachment_id
     assert path.read_bytes() == original
     if case in {"corrupt", "pixels"}:
-        if isinstance(result, ToolResult):
+        if isinstance(result, ToolValue):
             assert not result.images
             assert receipt["view_status"] == "error"
         else:
             assert receipt["status"] == "error"
         assert ("decoded" if case == "corrupt" else "pixel") in receipt["message"]
         return
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     assert result.images
     assert receipt["view_status"] == "ready"
     with Image.open(io.BytesIO(result.images[0].content)) as image:
@@ -184,7 +184,7 @@ async def test_view_file_attachment_denies_wrong_room_even_when_listed(tmp_path:
             if entrypoint == "view_file"
             else await tools.get_attachment(record.attachment_id, view=True)
         )
-    if isinstance(result, ToolResult):
+    if isinstance(result, ToolValue):
         assert not result.images
         assert json.loads(result.content)["view_status"] == "error"
     else:
@@ -251,7 +251,7 @@ async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_p
                 if entrypoint == "view_file"
                 else await tools.get_attachment(attachment_id, view=True)
             )
-    assert isinstance(viewed, ToolResult)
+    assert isinstance(viewed, ToolValue)
     receipt = json.loads(viewed.content)
     assert receipt["view_status"] == "unsupported"
     assert not viewed.images
