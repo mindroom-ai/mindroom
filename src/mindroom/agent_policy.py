@@ -169,15 +169,13 @@ def dashboard_credentials_supported_for_scope(worker_scope: WorkerScope | None) 
     return worker_scope in {None, "shared"}
 
 
-def _has_private_knowledge(seed: AgentPolicySeed) -> bool:
-    return seed.is_private and seed.private_knowledge_enabled
-
-
 def _resolve_agent_policy(seed: AgentPolicySeed) -> ResolvedAgentPolicy:
     """Resolve one canonical agent policy from one authored seed."""
     execution_scope, scope_label, scope_source = _resolved_scope_and_source(seed)
     private_knowledge_base_id = (
-        f"{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{seed.agent_name}" if _has_private_knowledge(seed) else None
+        f"{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}{seed.agent_name}"
+        if seed.is_private and seed.private_knowledge_enabled
+        else None
     )
     private_workspace_enabled = seed.is_private and execution_scope not in {None, "shared"}
     private_agent_knowledge_enabled = private_knowledge_base_id is not None and execution_scope not in {
@@ -355,17 +353,6 @@ def resolve_agent_policy_index(seeds: Mapping[str, AgentPolicySeed]) -> Resolved
     )
 
 
-def resolve_private_knowledge_base_agent(base_id: str, seeds: Mapping[str, AgentPolicySeed]) -> str | None:
-    """Return the private agent whose synthetic private knowledge base ``base_id`` names, or None."""
-    if not base_id.startswith(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX):
-        return None
-    agent_name = base_id.removeprefix(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
-    seed = seeds.get(agent_name)
-    if seed is None or not _has_private_knowledge(seed):
-        return None
-    return agent_name
-
-
 __all__ = [
     "PRIVATE_KNOWLEDGE_BASE_ID_PREFIX",
     "AgentPolicySeed",
@@ -380,6 +367,5 @@ __all__ = [
     "get_unsupported_team_agents",
     "resolve_agent_policy",
     "resolve_agent_policy_index",
-    "resolve_private_knowledge_base_agent",
     "unsupported_team_agent_message",
 ]

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.config.resolution import agent_policy
+from mindroom.config.resolution import agent_knowledge_base_ids, agent_policy
 from mindroom.constants import (
     RuntimePaths,
     config_relative_path,
@@ -266,7 +266,7 @@ def resolve_agent_runtime(
             ).is_relative_to(workspace_knowledge_root)
         }
         knowledge_paths: dict[str, Path] = {}
-        for base_id in config.resolve_agent(agent_name).knowledge_base_ids:
+        for base_id in agent_knowledge_base_ids(config, agent_name):
             base_config = config.get_knowledge_base_config(base_id)
             if config.get_private_knowledge_base_agent(base_id) is None:
                 knowledge_paths[base_id] = resolve_config_relative_path(base_config.path, runtime_paths).resolve()

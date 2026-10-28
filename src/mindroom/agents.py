@@ -21,7 +21,7 @@ from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     tool_may_require_approval,
 )
-from mindroom.config.resolution import memory_backend, show_tool_calls
+from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, show_tool_calls
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
@@ -560,7 +560,7 @@ def _file_mode_knowledge_instruction_block(
         "Available file-only sources:",
     ]
     source_lines: list[str] = []
-    for base_id in config.resolve_agent(agent_name).knowledge_base_ids:
+    for base_id in agent_knowledge_base_ids(config, agent_name):
         base_config = config.get_knowledge_base_config(base_id)
         if base_config.mode != "files":
             continue
@@ -1420,6 +1420,7 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
+    file_access: FileAccess,
     include_identity: bool,
 ) -> _AgentRoleContext:
     """Render the identity, the runtime facts, the preloaded files, and the authored role into the role, as sections.
@@ -1437,7 +1438,7 @@ def _build_agent_role_context(
                 local_tool_names=local_tool_names,
                 worker_routed_tool_names=worker_routed_tool_names,
                 worker_scope=agent_runtime.execution.execution_scope,
-                file_access=config.resolve_entity(agent_name).file_access,
+                file_access=file_access,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     requires_primary_runtime=False,
@@ -1857,6 +1858,7 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
+        file_access=agent.file_access,
         include_identity=persona is None,
     )
     deferred_names = tool_assembly.deferred_wire_tool_names
@@ -1889,7 +1891,6 @@ def create_agent(
         skill_authoring=persona is None,
     )
 
-    entity_view = config.resolve_entity(agent_name)
     toolkits = tool_assembly.toolkits
     # A standard agent's own shell commands can call its other tools when the shell reaches MindRoom.
     # A subagent runs inside its caller's response, whose CLI belongs to the caller, so its shell gets none.
@@ -1913,7 +1914,7 @@ def create_agent(
         model=provider,
         system_messages=(),
         toolkits=toolkits if windowed_toolkits is None else windowed_toolkits,
-        max_tool_calls_per_turn=entity_view.max_tool_calls_per_turn,
+        max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
     )
     prompt = PromptSpec(
         persona=persona_prompt,
@@ -1983,7 +1984,7 @@ def create_agent(
         spec=spec,
         prompt=prompt,
         request_template=ModelRequest(messages=(), deferred_tools=deferred_tools),
-        history_settings=entity_view.history_settings,
+        history_settings=agent.history_settings,
         store=store,
         tool_policy=bind_live_tools(spec.functions, tool_assembly.tool_middleware),
         tool_jobs=tool_jobs,

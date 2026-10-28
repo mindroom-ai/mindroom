@@ -31,7 +31,6 @@ from mindroom.agent_policy import (
     get_agent_delegation_closure,
     get_unsupported_team_agents,
     resolve_agent_policy_index,
-    resolve_private_knowledge_base_agent,
     unsupported_team_agent_message,
 )
 from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
@@ -1358,8 +1357,11 @@ class Config(BaseModel):
         )
 
     def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
-        """Return the owning agent for a synthetic private knowledge base ID."""
-        return resolve_private_knowledge_base_agent(base_id, self._agent_policy_seeds())
+        """Return the private agent whose synthetic private knowledge base ``base_id`` names, or None."""
+        agent_name = base_id.removeprefix(PRIVATE_KNOWLEDGE_BASE_ID_PREFIX)
+        if agent_name == base_id or agent_name not in self.agents:
+            return None
+        return agent_name if agent_policy(self, agent_name).private_knowledge_base_id == base_id else None
 
     def get_knowledge_base_config(self, base_id: str) -> KnowledgeBaseConfig:
         """Return one effective knowledge base config, including synthetic private bases."""

@@ -7,12 +7,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.agent_policy import (
-    AgentPolicySeed,
     PolicyInputs,
     build_agent_policy_seeds,
     resolve_agent_policy,
     resolve_agent_policy_index,
-    resolve_private_knowledge_base_agent,
 )
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -297,40 +295,26 @@ def test_private_knowledge_base_derives_from_policy_seed() -> None:
     assert policy.private_agent_knowledge_enabled is True
 
 
-def test_resolve_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
+def test_private_knowledge_base_lookup_requires_active_private_knowledge() -> None:
     """Reverse lookup resolves only a private agent whose private knowledge is on."""
-    seeds = build_agent_policy_seeds(
-        _typed_inputs(
-            {
-                "mind": AgentConfig(
-                    display_name="Mind",
-                    private={"per": "user", "knowledge": {"enabled": True, "path": "memory"}},
-                ),
-                "assistant": AgentConfig(display_name="Assistant", private={"per": "user"}),
-                "helper": AgentConfig(display_name="Helper"),
-            },
-        ),
-        default_worker_scope=None,
-    )
-    # No authored config builds a shared agent with private knowledge, but the seed alone must not make one.
-    seeds["shared_seed"] = AgentPolicySeed(
-        agent_name="shared_seed",
-        delegate_to=(),
-        is_private=False,
-        private_scope=None,
-        worker_scope=None,
-        default_worker_scope=None,
-        private_knowledge_enabled=True,
-        private_root=None,
+    config = Config(
+        agents={
+            "mind": AgentConfig(
+                display_name="Mind",
+                private={"per": "user", "knowledge": {"enabled": True, "path": "memory"}},
+            ),
+            "assistant": AgentConfig(display_name="Assistant", private={"per": "user"}),
+            "helper": AgentConfig(display_name="Helper"),
+        },
     )
 
-    assert resolve_private_knowledge_base_agent("__agent_private__:mind", seeds) == "mind"
-    assert resolve_private_knowledge_base_agent("mind", seeds) is None
-    assert resolve_private_knowledge_base_agent("other_prefix:mind", seeds) is None
-    assert resolve_private_knowledge_base_agent("__agent_private__:ghost", seeds) is None
-    assert resolve_private_knowledge_base_agent("__agent_private__:helper", seeds) is None
-    assert resolve_private_knowledge_base_agent("__agent_private__:shared_seed", seeds) is None
-    assert resolve_private_knowledge_base_agent("__agent_private__:assistant", seeds) is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:mind") == "mind"
+    assert config.get_private_knowledge_base_agent("mind") is None
+    assert config.get_private_knowledge_base_agent("other_prefix:mind") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:ghost") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:helper") is None
+    assert config.get_private_knowledge_base_agent("__agent_private__:assistant") is None
 
 
 def _identity(requester_id: str = "@alice:example.org") -> ToolExecutionIdentity:

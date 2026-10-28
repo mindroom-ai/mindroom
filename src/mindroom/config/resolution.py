@@ -451,18 +451,23 @@ def resolve_entity(config: Config, name: str) -> ResolvedEntity:
     return ResolvedEntity(**_scope_fields(config, name), model_name=model_name)
 
 
+def agent_knowledge_base_ids(config: Config, agent_name: str) -> tuple[str, ...]:
+    """Return the knowledge bases one agent searches: its authored ones, then its private base."""
+    private_base = agent_policy(config, agent_name).private_knowledge_base_id
+    return (*config.get_agent(agent_name).knowledge_bases, *((private_base,) if private_base is not None else ()))
+
+
 def resolve_agent(config: Config, name: str) -> ResolvedAgent:
     """Return what one configured agent gets."""
     agent = config.get_agent(name)
     policy = agent_policy(config, name)
-    private_base = policy.private_knowledge_base_id
     return ResolvedAgent(
         **_scope_fields(config, name),
         model_name=agent.model,
         cheap_model=cheap_model(config, name),
         policy=policy,
         tools=agent_tool_facts(config, name, policy=policy),
-        knowledge_base_ids=(*agent.knowledge_bases, *((private_base,) if private_base is not None else ())),
+        knowledge_base_ids=agent_knowledge_base_ids(config, name),
         automations=tuple(
             agent.automations
             if agent.automations is not None
