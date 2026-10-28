@@ -33,7 +33,7 @@ From **Add service**:
 - **The form asks which account, in place of the API key.**
   Where the form today offers the separate-account checkbox (`offersSeparateAccount`: a personal service whose login is not requester-scoped, on an agent that is not shared), it shows a field **Account** with two choices instead:
   "The account your tools use", followed by that account's address when another service of the agent shows it, saves `oauth_separate_account: false`;
-  "Another {provider} account", with the hint "You sign in right after saving. Agents pick it with `X-Agent-Keys-Service: {name}`.", saves `true`.
+  "Another {provider} account", with the hint "You sign in right after saving. Agents choose it with `X-Agent-Keys-Service: {name}`.", saves `true`.
   For a preset the field sits in the main form, right after Preset; for a custom service it stays in **More options**, right after the login select it depends on. The checkbox goes away.
   A new service starts on "Another" when another service of the agent (not a limit) already uses the same provider without its own account, and on "The account your tools use" otherwise; choosing the tools' account while such a service exists shows "{that service} already uses this account." under it.
   Editing shows the saved choice; switching keeps today's cleanup on save.

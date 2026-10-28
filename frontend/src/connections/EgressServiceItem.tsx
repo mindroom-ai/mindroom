@@ -687,11 +687,14 @@ export function EgressServiceItem({
         {oauth && (
           <AccountReuseDialog
             open={confirm === "reuse"}
-            // An allowed account asks again only to change to read and write.
+            // An allowed account asks again only to change to read and write;
+            // a service's own account not connected yet is another than the tools' one.
             title={
               reuseEnabled
                 ? `Change ${oauth.display_name} to read and write?`
-                : `Use your ${oauth.display_name} account for Agent Keys?`
+                : service.separate_account && !oauth.connected
+                  ? `Sign in to another ${oauth.display_name} account?`
+                  : `Use your ${oauth.display_name} account for Agent Keys?`
             }
             description={accountReuseDescription({
               provider: oauth.display_name,

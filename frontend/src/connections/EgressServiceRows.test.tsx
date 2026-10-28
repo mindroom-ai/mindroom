@@ -615,6 +615,50 @@ describe("connected accounts", () => {
     await expectNoAction(/^(Set|Replace|Remove) key for /);
   });
 
+  it("asks to sign in to another account for an own account not connected yet, and keeps the title otherwise", async () => {
+    renderRows([
+      withAccount(
+        { reuse_enabled: false, reuse_access: null },
+        { separate_account: true },
+      ),
+    ]);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAccessibleName("Sign in to another GitHub account?");
+    expect(dialog).toHaveTextContent(
+      "will act as the GitHub account you connect",
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Continue" }),
+    ).toBeVisible();
+    cleanup();
+    // Its own account once connected, and the tools' account not connected, keep today's title.
+    for (const [service, action] of [
+      [
+        withAccount(
+          { connected: true, account_label: "octocat", reuse_enabled: false },
+          { separate_account: true },
+        ),
+        "Let agents use GitHub",
+      ],
+      [
+        withAccount({ reuse_enabled: false, reuse_access: null }),
+        "Connect GitHub for Agent Keys for GitHub",
+      ],
+    ] as const) {
+      renderRows([service]);
+      fireEvent.click(screen.getByRole("button", { name: action }));
+      expect(await screen.findByRole("dialog")).toHaveAccessibleName(
+        "Use your GitHub account for Agent Keys?",
+      );
+      cleanup();
+    }
+  });
+
   it("says a service's own account is not connected yet, not that it is not set", () => {
     renderRows([withAccount({}, { separate_account: true })]);
     expect(within(row("GitHub")).getByText("Not connected")).toBeVisible();

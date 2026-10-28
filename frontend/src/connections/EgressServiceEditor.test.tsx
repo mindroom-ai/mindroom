@@ -593,7 +593,7 @@ describe("the editor form", () => {
     fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: team_calendar.",
+        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar.",
       ),
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
@@ -1806,7 +1806,7 @@ describe("the name of a new service", () => {
     expect(name()).toHaveValue("team_calendar");
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: team_calendar.",
+        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar.",
       ),
     ).toBeVisible();
   });
@@ -3481,7 +3481,7 @@ describe("the Account choice", () => {
     expect(screen.getByText("Gmail already uses this account.")).toBeVisible();
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: google_gmail-2.",
+        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: google_gmail-2.",
       ),
     ).toBeVisible();
     expect(
@@ -3499,7 +3499,7 @@ describe("the Account choice", () => {
     type("Name", "");
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: <name>.",
+        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: <name>.",
       ),
     ).toBeVisible();
   });
@@ -3546,7 +3546,7 @@ describe("the Account choice", () => {
     expect(another()).toBeChecked();
     // It already has its own account, so saving signs in to nothing new.
     expect(
-      screen.getByText("Agents pick it with X-Agent-Keys-Service: mail."),
+      screen.getByText("Agents choose it with X-Agent-Keys-Service: mail."),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Save service" })).toBeVisible();
     fireEvent.click(toolsAccount());
@@ -3582,7 +3582,7 @@ describe("the Account choice", () => {
     ).toBeChecked();
     expect(
       screen.getByText(
-        "You sign in right after saving. Agents pick it with X-Agent-Keys-Service: mail.",
+        "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: mail.",
       ),
     ).toBeVisible();
     expect(

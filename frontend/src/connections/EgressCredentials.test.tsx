@@ -2745,9 +2745,8 @@ describe("adding another account", () => {
   /** The open allow dialog of the new row, starting on Read only; Continue allows the account to read and signs in. */
   async function expectSignInDialog() {
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveAccessibleName(
-      "Use your Gmail account for Agent Keys?",
-    );
+    // The new service's own account, not the tools' one.
+    expect(dialog).toHaveAccessibleName("Sign in to another Gmail account?");
     expect(
       within(dialog).getByRole("radio", { name: "Read only" }),
     ).toBeChecked();

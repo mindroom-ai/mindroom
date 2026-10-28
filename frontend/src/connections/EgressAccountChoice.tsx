@@ -67,7 +67,7 @@ export function EgressAccountChoice({
       {choice(
         true,
         `Another ${provider} account`,
-        `${signsIn ? "You sign in right after saving. " : ""}Agents pick it with X-Agent-Keys-Service: ${name || "<name>"}.`,
+        `${signsIn ? "You sign in right after saving. " : ""}Agents choose it with X-Agent-Keys-Service: ${name || "<name>"}.`,
       )}
     </div>
   );
