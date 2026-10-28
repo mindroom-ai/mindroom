@@ -19,7 +19,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
-from mindroom.response_runner import ResponseRunner, _DeliveryProgress
+from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -189,7 +189,7 @@ async def test_one_turn_never_shows_two_placeholders(
 
 def test_delivery_progress_transitions() -> None:
     """The delivery-progress state machine tracks delivery start and terminal reasons."""
-    progress = _DeliveryProgress()
+    progress = DeliveryProgress()
 
     progress.note_delivery_started(None)
     assert progress.stage_started is True

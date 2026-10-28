@@ -457,7 +457,7 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
 async def test_a_follow_up_runs_a_model_turn_that_posts_its_reply(tmp_path: Path) -> None:
     """The follow-up's turn reaches the model with its prompt and posts what the model answers."""
     bot = _bot(tmp_path)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)
@@ -533,7 +533,7 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
 async def test_a_follow_up_gives_way_to_a_message_already_waiting(tmp_path: Path) -> None:
     """A follow-up posts nothing while a message waits for its conversation, whose reply reports the jobs instead."""
     bot = _bot(tmp_path)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     key = _runner_key(bot)

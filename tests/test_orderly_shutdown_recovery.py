@@ -220,14 +220,14 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
         _plain_request(_target(), source_event_id=source_id),
         on_source_turn_suppressed=lambda: principal.settle(source_id),
     )
-    assert await runner._request_remains_authorized(request)
+    assert await runner.request_remains_authorized(request)
     decisions: list[bool] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         entered.set()
         try:
             await release.wait()
-            decisions.append(await runner._request_remains_authorized(request))
+            decisions.append(await runner.request_remains_authorized(request))
         finally:
             exited.set()
         return TurnDispatchOutcome.DEFERRED

@@ -11,7 +11,7 @@ import pytest
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall
-from mindroom.event_journal.approval_continuations import ApprovalDecision
+from mindroom.event_journal.approval_calls import ApprovalDecision
 from mindroom.history.session_context import load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunStatus, TeamRunRecord
@@ -48,7 +48,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
     """The coordinator cannot replace frozen member ownership while rebuilding tools."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store)
+    await _admit_approval_source(runner.deps.replies.store)
     target = _target(thread_id="$thread")
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -89,7 +89,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",
     )
-    assert await paused_for_approval(runner.deps.approval_store, continuation) is not None
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
     progress = AsyncMock()
     with (
@@ -98,11 +98,11 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
             "build_dispatch_context",
             return_value=ToolDispatchContext(execution_identity=identity),
         ),
-        patch("mindroom.response_runner.continue_paused_team_run", new=continued),
+        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
         async with resumed_approval(bot, continuation) as claimed:
-            result = await runner._continue_entity_call(
+            result = await runner._approvals._continue_entity_call(
                 claimed,
                 request=_plain_request(target, source_event_id="$source"),
                 target=target,

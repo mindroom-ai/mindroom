@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.approval import manager as approval_manager
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import Toolkit
     from mindroom.tool_system.tool_function import ToolFunction
@@ -39,3 +44,8 @@ def gated_functions(
         approvals_as_jobs=approvals_as_jobs,
     )
     return {function.name: function for function in adapted.functions}
+
+
+def scheduled_call_approvals(**methods: object) -> AbstractContextManager[object]:
+    """Stand in for the approval manager with the scheduled-call methods a test names, as scheduling reaches it."""
+    return patch.object(approval_manager, "get_approval_store", return_value=SimpleNamespace(**methods))

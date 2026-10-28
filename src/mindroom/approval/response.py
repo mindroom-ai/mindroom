@@ -1,80 +1,49 @@
-"""Response-side coordination for journal-owned native tool approvals."""
+"""Which calls of a paused run need a person: the approval plan of a paused generation and the publication of its cards."""
 
 from __future__ import annotations
 
-import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.auto_approve_windows import auto_approve_expires_at
-from mindroom.approval.failure import prepare_approval_failure
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
+    human_gate,
     resolve_tool_approval_approver,
 )
-from mindroom.cancellation import cancel_source_from_failure_reason
-from mindroom.constants import (
-    STREAM_STATUS_APPROVAL_PENDING,
-    STREAM_STATUS_PENDING,
-)
-from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delegation.state import member_slot_id, pending_call_slot
-from mindroom.delivery_gateway import DeliveryStage
-from mindroom.event_journal import ApprovalAdvance, ApprovalCall, ApprovalContinuation, approval_arguments_digest
-from mindroom.event_journal import ApprovalDecision as ContinuationDecision
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalContinuation,
+    ApprovalDecision,
+    approval_arguments_digest,
+)
 from mindroom.message_target import MessageTarget
-from mindroom.redaction import redact_sensitive_text
-from mindroom.reply_lifecycle import NoteKind, SpanOutcome
 from mindroom.tool_approval_grants import grant_operation
 from mindroom.tool_system.events import tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
 
-
-def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
-    """Raise outside the publication try block's I/O expression when an edit fails."""
-    if not succeeded:
-        raise RuntimeError(failure_reason)
-
-
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.event_journal import MatrixDelivery, PrincipalStore
+    from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.llm.runs import ToolExecution
     from mindroom.response_turn import PausedAttempt
     from mindroom.tool_approval_grants import ApprovalOperation
-    from mindroom.tool_system.events import ToolTraceEntry
-
-
-# Records a chained pause's advance with the reply's pause row; returns the
-# advanced continuation and whether the row reached Matrix.
-type _ReplyPause = Callable[..., Awaitable[tuple[ApprovalContinuation | None, bool]]]
 
 
 @dataclass(frozen=True)
-class _ApprovalPausePlan:
+class ApprovalPausePlan:
     """One paused generation normalized for persistence and card publication."""
 
     tools: tuple[ToolExecution, ...]
     calls: tuple[ApprovalCall, ...]
     waiting_text: str | None
-
-
-@dataclass(frozen=True)
-class _ApprovalPausePresentation:
-    """Visible response state published for one chained approval generation."""
-
-    response_text: str
-    tool_trace: tuple[ToolTraceEntry, ...]
-    approval_pending: bool
 
 
 def _team_config_names_by_provider_id(state: dict[str, object]) -> dict[str, str]:
@@ -182,15 +151,10 @@ async def plan_approval_calls(
     toolkit_owners: Mapping[tuple[str, str], str],
     room_id: str | None,
     thread_id: str | None,
-) -> _ApprovalPausePlan:
-    """Evaluate policy once and normalize exact calls with integer deadlines.
-
-    The approver's auto-approve window in the conversation approves every call that would ask them.
-    A call that would ask in a room without the router is denied with a reason, so the agent can invite the router.
-    """
+) -> ApprovalPausePlan:
+    """Evaluate policy once and normalize exact calls with integer deadlines; ``human_gate`` decides what policy gates."""
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
-    manager = approval_manager.get_approval_store()
-    decisions: dict[str, tuple[ContinuationDecision | None, float, bool, str | None]] = {}
+    decisions: dict[str, tuple[ApprovalDecision | None, float, bool, str | None]] = {}
     for tool, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
             config,
@@ -203,21 +167,15 @@ async def plan_approval_calls(
             tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
         )
         requires_approval = requires_approval or tool_authored_confirmation
-        # Read after the awaited policy, so a window that ended meanwhile approves nothing.
-        window_open = requires_approval and (
-            auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
-            is not None
-        )
-        decision, reason = None, None
-        if not requires_approval or window_open:
-            decision = ContinuationDecision.APPROVED
-        elif approver_id is None:
+        decision, reason = ApprovalDecision.APPROVED, None
+        if requires_approval:
+            # Read after the awaited policy, so a window that ended meanwhile approves nothing.
+            gate = human_gate(runtime_paths, approver_id=approver_id, room_id=room_id, thread_id=thread_id)
             decision, reason = (
-                ContinuationDecision.DENIED,
-                "No approval recipient is configured; the tool was denied safely.",
+                (None, None)
+                if gate is None
+                else (ApprovalDecision.APPROVED if gate.approved else ApprovalDecision.DENIED, gate.reason)
             )
-        elif room_id is not None and manager is not None and manager.router_missing and manager.router_missing(room_id):
-            decision, reason = ContinuationDecision.DENIED, approval_manager.DEFAULT_ROUTER_MANAGED_ROOM_REASON
         decisions[tool.tool_call_id] = (decision, timeout_seconds, requires_approval, reason)
     now = datetime.now(UTC)
     calls = tuple(
@@ -240,7 +198,7 @@ async def plan_approval_calls(
         msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
         raise RuntimeError(msg)
     gated_calls = tuple(call for call in calls if call.decision is None)
-    return _ApprovalPausePlan(
+    return ApprovalPausePlan(
         tools=tuple(tool for tool, _invoking_agent in identified),
         calls=calls,
         waiting_text=(
@@ -256,273 +214,89 @@ def timed_grant_operation(config: Config, tool: ToolExecution, call: ApprovalCal
     return grant_operation(config, call.tool_name, dict(tool.tool_args or {}))
 
 
-@dataclass
-class ApprovalResponseCoordinator:
-    """Own approval policy, card publication, and visible terminal settlement."""
-
-    config: Callable[[], Config]
-    runtime_paths: RuntimePaths
-    store: PrincipalStore
-    delivery_gateway: DeliveryGateway
-    retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Finishes a paused run once its FINAL is terminal, settling its turn.
-    finish_approval: Callable[[str], Awaitable[bool]]
-    # Releases an interrupted run, with the generation it observed: replay continues its reply, or a Stop ends it.
-    release_approval: Callable[[str, int], Awaitable[bool]]
-
-    async def _publish_cards(
-        self,
-        continuation: ApprovalContinuation,
-        plan: _ApprovalPausePlan,
-        *,
-        target: MessageTarget,
-        failure_reason: str,
-    ) -> None:
-        """Publish every human-gated card already linked by durable identity."""
-        config = self.config()
-        manager = approval_manager.get_approval_store()
-        approver = resolve_tool_approval_approver(config, self.runtime_paths, continuation.requester_id)
-        cards = []
-        for index, (tool, call) in enumerate(zip(plan.tools, plan.calls, strict=True)):
-            if call.decision is not None:
-                continue
-            if manager is None or approver is None:
-                raise RuntimeError(failure_reason)
-            card = await manager.prepare_detached_approval(
-                approval_id=f"{continuation.approval_id}-{continuation.generation}-{index}",
-                continuation_id=continuation.approval_id,
-                continuation_generation=continuation.generation,
-                entity_name=continuation.entity_name,
-                response_event_id=continuation.response_event_id,
-                tool_call_id=call.tool_call_id,
-                tool_name=call.tool_name,
-                arguments=deepcopy(dict(tool.tool_args or {})),
-                room_id=target.room_id,
-                requester_id=continuation.requester_id,
-                approver_user_id=approver,
-                expires_at_ns=call.expires_at_ns,
-                agent_name=call.invoking_agent,
-                thread_id=target.resolved_thread_id,
-                grant_operation=timed_grant_operation(config, tool, call),
-            )
-            if card is None:
-                raise RuntimeError(failure_reason)
-            cards.append(card)
-        if cards:
-            assert manager is not None
-            if not await manager.reserve_and_publish(
-                continuation_principal_id=self.store.principal_id,
-                continuation_id=continuation.approval_id,
-                continuation_generation=continuation.generation,
-                cards=tuple(cards),
-            ):
-                raise RuntimeError(failure_reason)
-        elif (
-            await self.store.activate_approval_continuation(
-                continuation.approval_id,
-                expected_generation=continuation.generation,
-            )
-            is None
+async def _publish_cards(
+    continuation: ApprovalContinuation,
+    plan: ApprovalPausePlan,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    store: ApprovalStore,
+    target: MessageTarget,
+    failure_reason: str,
+) -> None:
+    """Publish every human-gated card already linked by durable identity."""
+    manager = approval_manager.get_approval_store()
+    approver = resolve_tool_approval_approver(config, runtime_paths, continuation.requester_id)
+    cards = []
+    for index, (tool, call) in enumerate(zip(plan.tools, plan.calls, strict=True)):
+        if call.decision is not None:
+            continue
+        if manager is None or approver is None:
+            raise RuntimeError(failure_reason)
+        card = await manager.prepare_reply_card(
+            approval_id=f"{continuation.approval_id}-{continuation.generation}-{index}",
+            continuation_id=continuation.approval_id,
+            continuation_generation=continuation.generation,
+            entity_name=continuation.entity_name,
+            response_event_id=continuation.response_event_id,
+            tool_call_id=call.tool_call_id,
+            tool_name=call.tool_name,
+            arguments=deepcopy(dict(tool.tool_args or {})),
+            room_id=target.room_id,
+            requester_id=continuation.requester_id,
+            approver_user_id=approver,
+            expires_at_ns=call.expires_at_ns,
+            agent_name=call.invoking_agent,
+            thread_id=target.resolved_thread_id,
+            grant_operation=timed_grant_operation(config, tool, call),
+        )
+        if card is None:
+            raise RuntimeError(failure_reason)
+        cards.append(card)
+    if cards:
+        assert manager is not None
+        if not await manager.reserve_and_publish(
+            continuation_principal_id=store.principal_id,
+            continuation_id=continuation.approval_id,
+            continuation_generation=continuation.generation,
+            cards=tuple(cards),
         ):
             raise RuntimeError(failure_reason)
-
-    async def publish_generation(
-        self,
-        continuation: ApprovalContinuation,
-        plan: _ApprovalPausePlan,
-        *,
-        target: MessageTarget,
-        failure_reason: str,
-    ) -> None:
-        """Publish every required card, release its lease, and wake executable work."""
-        if continuation.state == "waiting":
-            await self._publish_cards(
-                continuation,
-                plan,
-                target=target,
-                failure_reason=failure_reason,
-            )
-            refreshed = await self.store.approval_continuation(continuation.approval_id)
-            if refreshed is None:
-                raise RuntimeError(failure_reason)
-            continuation = refreshed
-        if continuation.state == "ready":
-            self.retry_sources(continuation.room_id, continuation.source_event_ids)
-
-    async def advance_pause(
-        self,
-        current: ApprovalContinuation,
-        paused: PausedAttempt,
-        *,
-        target: MessageTarget,
-        pending_text: str,
-        reply_pause: _ReplyPause,
-    ) -> _ApprovalPausePresentation:
-        """Replace one claim with the run's next exact pause generation.
-
-        ``reply_pause`` records the advance with the reply's pause row and
-        returns the advanced continuation and whether its pause row reached Matrix.
-        """
-        require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
-        identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
-        plan = await plan_approval_calls(
-            identified,
-            config=self.config(),
-            runtime_paths=self.runtime_paths,
-            requester_id=current.requester_id,
-            toolkit_owners=paused.toolkit_owners,
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-        )
-        approval_pending = plan.waiting_text is not None
-        visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
-        visible_text = paused.response_text or plan.waiting_text or pending_text
-        stream_status = STREAM_STATUS_APPROVAL_PENDING if approval_pending else STREAM_STATUS_PENDING
-        advance = ApprovalAdvance(
-            approval_id=current.approval_id,
-            claimant_generation=current.generation,
-            run_id=paused.run_id,
-            session_id=paused.session_id,
-            calls=plan.calls,
-            runtime_model_name=paused.runtime_model_name,
-            continuation_count=max(current.continuation_count, paused.continuation_count),
-            delegation_storage_bindings=paused.delegation_storage_bindings,
-            cli_call=paused.cli_call,
-        )
-        publishing, shown_with_pause = await reply_pause(
-            advance,
-            paused,
-            visible_text=visible_text,
-            stream_status=stream_status,
-            tool_trace=visible_tool_trace,
-            waiting_text=plan.waiting_text,
-        )
-        if publishing is None:
-            msg = "Could not persist the chained approval pause"
-            raise RuntimeError(msg)
-        failure_reason = "Chained approval publication failed"
-        try:
-            _require_successful_edit(shown_with_pause, failure_reason)
-            await self.publish_generation(
-                publishing,
-                plan,
-                target=target,
-                failure_reason=failure_reason,
-            )
-        except (asyncio.CancelledError, Exception):
-            await self.request_failure(publishing, failure_reason)
-            raise
-        return _ApprovalPausePresentation(
-            response_text=visible_text,
-            tool_trace=visible_tool_trace,
-            approval_pending=approval_pending,
-        )
-
-    async def request_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-    ) -> ApprovalContinuation | None:
-        """Fence exactly the state a failed lifecycle observed and wake settlement."""
-        failing = await self.store.request_approval_failure(
+    elif (
+        await store.activate_approval_continuation(
             continuation.approval_id,
-            reason,
-            expected_state=continuation.state,
             expected_generation=continuation.generation,
-            expected_runtime_generation=continuation.runtime_generation,
         )
-        if failing is not None:
-            self.retry_sources(failing.room_id, failing.source_event_ids)
-        return failing
+        is None
+    ):
+        raise RuntimeError(failure_reason)
 
-    async def fail_publication(self, approval_id: str, *, reason: str) -> ApprovalContinuation | None:
-        """Fence a born continuation whose card publication did not finish."""
-        continuation = await self.store.approval_continuation(approval_id)
-        return None if continuation is None else await self.request_failure(continuation, reason)
 
-    async def settle_failure(
-        self,
-        continuation: ApprovalContinuation,
-        reason: str,
-        *,
-        interruption: NoteKind | None = None,
-    ) -> bool:
-        """Settle cards and the failure outcome from the owning source worker.
-
-        ``interruption`` names the note the reply shows below its content.
-        """
-        current = await self.store.approval_continuation(continuation.approval_id)
-        if current is None:
-            return True
-        if await self.successful_final_delivery(current) is not None:
-            return False
-        current = await self._prepare_failure(current, reason)
-        if current is None:
-            return False
-        if await self.finish_approval(current.approval_id):
-            return True
-        user_stop = cancel_source_from_failure_reason(reason) == "user_stop"
-        written = await self.delivery_gateway.write_approval_failure_note(
-            current.response_event_id,
-            approval_id=current.approval_id,
-            note=interruption or (NoteKind.CANCELLED if user_stop else NoteKind.ERROR),
-            text=redact_sensitive_text(reason),
-            target=continuation_target(current),
-        )
-        # The reply's records show the note; the finish ends the reply.
-        return written and await self.finish_approval(current.approval_id)
-
-    async def release_to_replay(self, continuation: ApprovalContinuation, reason: str) -> bool:
-        """End an interrupted continuation's cards and release it: its sources go back to replay unless a Stop ends the reply."""
-        current = await self._prepare_failure(continuation, reason)
-        return current is not None and await self.release_approval(current.approval_id, current.generation)
-
-    async def _prepare_failure(self, continuation: ApprovalContinuation, reason: str) -> ApprovalContinuation | None:
-        """Fence a continuation for failure, expire its cards, and cancel its delegations; ``None`` when that failed."""
-        manager = approval_manager.get_approval_store()
-        current = await prepare_approval_failure(
+async def publish_generation(
+    continuation: ApprovalContinuation,
+    plan: ApprovalPausePlan,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    store: ApprovalStore,
+    target: MessageTarget,
+    failure_reason: str,
+    retry_sources: Callable[[str, tuple[str, ...]], None],
+) -> None:
+    """Publish every required card of a paused generation, release its lease, and wake it when it is executable."""
+    if continuation.state == "waiting":
+        await _publish_cards(
             continuation,
-            reason,
-            request_failure=partial(self.request_failure, continuation),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
+            plan,
+            config=config,
+            runtime_paths=runtime_paths,
+            store=store,
+            target=target,
+            failure_reason=failure_reason,
         )
-        if current is None:
-            return None
-        await cancel_approval_delegations(
-            current,
-            config=self.config(),
-            runtime_paths=self.runtime_paths,
-            reason=reason,
-        )
-        return current
-
-    async def successful_final_delivery(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        recover: bool = False,
-    ) -> MatrixDelivery | None:
-        """Return FINAL debt produced by a completed continuation, not failure settlement."""
-        delivery = await self.final_delivery(continuation, recover=recover)
-        if delivery is None or delivery.permanently_failed:
-            return None
-        span = None if delivery.span_id is None else await self.store.replies.span(delivery.span_id)
-        return delivery if span is not None and span.outcome is SpanOutcome.COMPLETED else None
-
-    async def final_delivery(
-        self,
-        continuation: ApprovalContinuation,
-        *,
-        recover: bool = False,
-    ) -> MatrixDelivery | None:
-        """Return the continuation's frozen FINAL, optionally retrying its delivery."""
-        load = partial(
-            self.delivery_gateway.deps.outbox.load_matrix_delivery,
-            delivery_id=continuation.source_event_ids[0],
-            stage=DeliveryStage.FINAL,
-        )
-        delivery = await load()
-        if recover and delivery is not None and delivery.acknowledged_event_id is None:
-            await self.delivery_gateway.recover_deliveries()
-            delivery = await load()
-        return delivery
+        refreshed = await store.approval_continuation(continuation.approval_id)
+        if refreshed is None:
+            raise RuntimeError(failure_reason)
+        continuation = refreshed
+    if continuation.state == "ready":
+        retry_sources(continuation.room_id, continuation.source_event_ids)

@@ -9,6 +9,7 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.reply_lifecycle import (
+    ApprovalFailureKind,
     CancelSpan,
     ClaimContext,
     ClaimRequest,
@@ -920,7 +921,7 @@ def test_a_failed_approval_ends_a_resume_an_older_instance_left_current() -> Non
         orphan,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="cancelled_by_user",
+        failure_kind=ApprovalFailureKind.USER_STOP,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1007,7 +1008,7 @@ def test_a_resume_that_waited_in_place_stays_stoppable_through_its_approval() ->
         now_ns=NOW,
     )
     assert stop.effects == (
-        FenceApproval("approval-1", "cancelled_by_user"),
+        FenceApproval("approval-1", ApprovalFailureKind.USER_STOP),
         CancelSpan(resume.claimed.span_id, by_stop=True),
     )
 
@@ -1031,7 +1032,7 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
     """A Stop on a paused reply requests approval failure; the settlement ends the reply."""
     reply, _span, _transition = _paused()
     stop = rl.stop(reply, None, StopFacts(receipt_order=4, span_live=False), now_ns=NOW)
-    assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"),)
+    assert stop.effects == (FenceApproval("approval-1", ApprovalFailureKind.USER_STOP),)
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.PAUSED
     settled = rl.approval_settled(
@@ -1039,7 +1040,7 @@ def test_stop_on_a_paused_reply_fences_and_wakes_its_approval() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="cancelled_by_user",
+        failure_kind=ApprovalFailureKind.USER_STOP,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1052,7 +1053,7 @@ def test_stop_on_an_in_place_wait_also_cancels_the_waiting_span() -> None:
     reply, span, _transition = _paused(in_place=True)
     stop = rl.stop(reply, span, StopFacts(receipt_order=4, span_live=True), now_ns=NOW)
     assert CancelSpan(span.span_id, by_stop=True) in stop.effects
-    assert FenceApproval("approval-1", "cancelled_by_user") in stop.effects
+    assert FenceApproval("approval-1", ApprovalFailureKind.USER_STOP) in stop.effects
 
 
 def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
@@ -1075,7 +1076,7 @@ def test_a_stopped_in_place_wait_leaves_its_sources_to_the_approval() -> None:
         ended,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="cancelled_by_user",
+        failure_kind=ApprovalFailureKind.USER_STOP,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1208,7 +1209,7 @@ def test_an_approval_failure_note_freezes_the_reply_against_a_later_stop() -> No
         ended,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1236,7 +1237,7 @@ def test_a_later_stop_on_a_cancelled_resume_still_reaches_its_approval() -> None
     assert cancelled.reply is not None
     ended = _span_after(cancelled, resume.claimed.span_id)
     again = rl.stop(cancelled.reply, ended, StopFacts(receipt_order=6, span_live=False), now_ns=NOW)
-    assert again.effects == (FenceApproval("approval-1", "cancelled_by_user"),)
+    assert again.effects == (FenceApproval("approval-1", ApprovalFailureKind.USER_STOP),)
     assert again.reply is not None
     assert again.reply.state is ReplyState.ACTIVE
 
@@ -1276,7 +1277,7 @@ def test_permanently_failed_pause_row_fences_the_approval() -> None:
     assert failed.reply.state is ReplyState.FAILED
     assert failed.reply.owed_write is not None
     assert failed.reply.owed_write.note == rl.NoteKind.APPROVAL_FAILED
-    assert failed.effects == (FenceApproval("approval-1", "failed"),)
+    assert failed.effects == (FenceApproval("approval-1", ApprovalFailureKind.ERROR, rl._APPROVAL_REPLY_ENDED),)
 
 
 def test_approval_settlement_guards() -> None:
@@ -1287,7 +1288,7 @@ def test_approval_settlement_guards() -> None:
         None,
         approval_id="other",
         paused_span_id="span-1",
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1297,7 +1298,7 @@ def test_approval_settlement_guards() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1309,7 +1310,7 @@ def test_approval_settlement_guards() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1521,7 +1522,7 @@ def test_deleting_the_sources_of_a_held_reply_cancels_its_approval_and_keeps_a_f
     the sources the approval holds.
     """
     reply, span, transition = _paused()
-    cancel = (FenceApproval("approval-1", "cancelled_by_user"),)
+    cancel = (FenceApproval("approval-1", ApprovalFailureKind.USER_STOP),)
     settling = replace(reply, state=ReplyState.ACTIVE, current_span_id=None)
     assert settling.approval_id is not None
     for held in (reply, settling):
@@ -1539,7 +1540,7 @@ def test_deleting_the_sources_of_a_held_reply_cancels_its_approval_and_keeps_a_f
         _span_after(transition, span.span_id),
         approval_id="approval-1",
         paused_span_id=span.span_id,
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1792,7 +1793,7 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
         _span_after(transition, span.span_id),
         approval_id="approval-1",
         paused_span_id=span.span_id,
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=False,
         now_ns=NOW,
     )
@@ -1818,7 +1819,7 @@ def test_removed_entity_leaves_a_held_reply_to_its_approval() -> None:
         paused,
         approval_id="approval-1",
         paused_span_id=span.span_id,
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -1900,7 +1901,7 @@ def test_an_approval_settles_its_turn_unanswered_when_nothing_answers_it() -> No
             paused,
             approval_id="approval-1",
             paused_span_id=span.span_id,
-            disposition="failed",
+            failure_kind=ApprovalFailureKind.ERROR,
             answers_turn=answers_turn,
             now_ns=NOW,
         )
@@ -2008,7 +2009,7 @@ def test_failed_pause_row_of_an_in_place_wait_fences_and_cancels_the_waiter(stag
     assert failed.reply is not None
     assert failed.reply.state is ReplyState.FAILED
     assert failed.reply.current_span_id is None
-    assert FenceApproval("approval-1", "failed") in failed.effects
+    assert FenceApproval("approval-1", ApprovalFailureKind.ERROR, rl._APPROVAL_REPLY_ENDED) in failed.effects
     assert CancelSpan(span.span_id) in failed.effects
     assert _span_after(failed, span.span_id).outcome is SpanOutcome.FAILED
 
@@ -2050,7 +2051,7 @@ def test_stop_after_restart_during_an_approval_resume_fences_the_approval() -> N
     assert resume.claimed is not None
     stale_resume = replace(resume.claimed, bot_generation=OLD_GEN)
     stop = rl.stop(resume.reply, stale_resume, StopFacts(3, span_live=False), now_ns=NOW)
-    assert stop.effects == (FenceApproval("approval-1", "cancelled_by_user"),)
+    assert stop.effects == (FenceApproval("approval-1", ApprovalFailureKind.USER_STOP),)
     assert stop.reply is not None
     assert stop.reply.state is ReplyState.ACTIVE
     released = rl.approval_released(replace(stop.reply, state=ReplyState.CANCELLED), stale_resume, now_ns=NOW)
@@ -2148,7 +2149,7 @@ def test_approval_failure_after_an_applied_stop_is_a_failure() -> None:
         None,
         approval_id="approval-1",
         paused_span_id="span-1",
-        disposition="failed",
+        failure_kind=ApprovalFailureKind.ERROR,
         answers_turn=True,
         now_ns=NOW,
     )
@@ -2233,7 +2234,7 @@ def test_an_unmodeled_event_on_a_held_reply_fails_its_approval() -> None:
     """The approval's failure settlement settles the sources it holds."""
     reply, _span, transition = _paused()
     ended = rl._unmodeled(reply, _span_after(transition, "span-1"), reason="test", now_ns=NOW)
-    assert FenceApproval("approval-1", "failed") in ended.effects
+    assert FenceApproval("approval-1", ApprovalFailureKind.ERROR, rl._APPROVAL_REPLY_ENDED) in ended.effects
     assert not any(isinstance(effect, SettleSources) for effect in ended.effects)
 
 

@@ -1185,12 +1185,12 @@ async def test_an_approval_pause_holds_the_reply(
 
     initialize_approval_store_for_test(
         turn.bot.runtime_paths,
-        prepare_event=prepare_event,
-        send_delivery=send_card,
-        resolve_delivery=AsyncMock(return_value=None),
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send_card,
+        resolve_approval_delivery=AsyncMock(return_value=None),
         cards=turn.bot._journal_store.principal("router@shared"),
-        transport_sender=lambda: "@router:localhost",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     try:
         assert await turn.runner.generate_response(_plain_request(_target())) is None

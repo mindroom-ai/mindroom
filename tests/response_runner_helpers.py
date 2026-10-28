@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.event_journal import EventJournalStore
     from mindroom.final_delivery import FinalDeliveryOutcome, _VisibleBodyState
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.response_turn import TurnSinks
@@ -54,7 +55,7 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _bot(tmp_path: Path) -> AgentBot:
+def _bot(tmp_path: Path, *, journal_store: EventJournalStore | None = None) -> AgentBot:
     config = _config(tmp_path)
     agent_user = AgentMatrixUser(
         agent_name="general",
@@ -62,7 +63,14 @@ def _bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    bot = make_test_agent_bot(
+        agent_user,
+        tmp_path,
+        config,
+        runtime_paths_for(config),
+        rooms=["!room:localhost"],
+        journal_store=journal_store,
+    )
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)

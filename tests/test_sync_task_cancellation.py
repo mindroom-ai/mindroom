@@ -3897,6 +3897,7 @@ async def test_ordinary_agent_stop_exposes_real_resource_release_phase() -> None
     bot._ingestion_session = None
     bot._own_journal = None
     bot._runtime_view = SimpleNamespace(client=None)
+    bot._response_runner = MagicMock()
 
     failures: list[BaseException] = []
     stopping = asyncio.create_task(AgentBot._release_stopped_resources(bot, failures, shutdown_intent=ORDERLY_SHUTDOWN))

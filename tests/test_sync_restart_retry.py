@@ -103,7 +103,7 @@ async def test_a_retry_of_an_edit_a_restart_interrupted_runs_it_again(tmp_path: 
 
     restarted = _bot(tmp_path)
     unique_room_send_responses(restarted.client)
-    await restarted._reply_runtime.start()
+    await restarted._take_over_replies()
     try:
         assert await _answer(restarted, _retry(), AsyncMock(return_value="Edited answer.")) == "$sent1"
         reply = await _reply(restarted)

@@ -1385,7 +1385,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     )
 
     with (
-        patch.object(runner, "_suspend_for_approval", new=suspend),
+        patch.object(runner._approvals, "suspend_for_approval", new=suspend),
         patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
     ):
         await runner.generate_response(_request())

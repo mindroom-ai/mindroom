@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
     from mindroom.delivery_gateway import ResponseHookService, ResponseIdentity
+    from mindroom.event_journal.approval_signals import ApprovalSignals, PausedReply
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
@@ -253,32 +254,42 @@ class ResponseLifecycleCoordinator:
 
     _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
     _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
-    # A pending approval counts as an active response turn of its conversation, by approval.
+    # A pending approval counts as an active response turn of its conversation, by approval,
+    # for each paused reply the journal's approval signals report.
     _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
+    _stop_following_approvals: Callable[[], None] | None = None
 
-    def hold_for_approval(self, approval_id: str, target: MessageTarget) -> None:
-        """Keep a conversation busy while an approval of its reply is pending; holding it again changes nothing.
+    def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
+        """Hold the conversation of each paused reply of ``principal_id``, from the ones paused now, until it ends.
 
         Later messages wait as they wait behind a running response. The hold
         does not take the lifecycle lock, so the approval's own resume and
         settlement still run.
         """
-        if approval_id in self._approval_holds:
-            return
-        self._approval_holds[approval_id] = target.lifecycle_key
-        self._get_or_create_queued_signal(target).begin_response_turn()
+        self.stop_following_approval_holds()
+        self._stop_following_approvals = signals.follow_paused_replies(
+            principal_id,
+            paused=self._hold_for_approval,
+            ended=self._release_approval_hold,
+        )
 
-    def release_approval_hold(self, approval_id: str) -> None:
-        """End the hold of an approval that ended, letting its conversation's waiting messages run."""
+    def stop_following_approval_holds(self) -> None:
+        """Stop learning of paused replies, as a stopping bot does before its replacement follows them."""
+        stop, self._stop_following_approvals = self._stop_following_approvals, None
+        if stop is not None:
+            stop()
+
+    def _hold_for_approval(self, paused: PausedReply) -> None:
+        if paused.approval_id in self._approval_holds:
+            return
+        lifecycle_key = ResponseLifecycleKey(room_id=paused.room_id, thread_id=paused.thread_id)
+        self._approval_holds[paused.approval_id] = lifecycle_key
+        self._queued_signal_for_key(lifecycle_key).begin_response_turn()
+
+    def _release_approval_hold(self, approval_id: str) -> None:
         lifecycle_key = self._approval_holds.pop(approval_id, None)
         if lifecycle_key is not None:
             self._thread_queued_signals[lifecycle_key].finish_response_turn()
-
-    def release_approval_holds_in_room(self, room_id: str) -> None:
-        """End the holds of a room this bot left, whose approvals the departure ended."""
-        for approval_id, lifecycle_key in tuple(self._approval_holds.items()):
-            if lifecycle_key.room_id == room_id:
-                self.release_approval_hold(approval_id)
 
     def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:
         """Return the approvals that hold one conversation."""
@@ -383,7 +394,9 @@ class ResponseLifecycleCoordinator:
 
     def _get_or_create_queued_signal(self, target: MessageTarget) -> _QueuedMessageState:
         """Return the queued-message signal for one canonical conversation thread."""
-        lifecycle_key = target.lifecycle_key
+        return self._queued_signal_for_key(target.lifecycle_key)
+
+    def _queued_signal_for_key(self, lifecycle_key: ResponseLifecycleKey) -> _QueuedMessageState:
         signal = self._thread_queued_signals.get(lifecycle_key)
         if signal is not None:
             return signal
