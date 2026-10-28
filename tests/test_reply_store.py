@@ -1272,11 +1272,14 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
         delivered_projections=(),
     )
 
-    assert await alice.approvals.discard_unavailable_approval_continuation(
+    effects = await alice.approvals.discard_unavailable_approval_continuation(
         "approval-1",
         notice_principal_id="router@alice",
     )
 
+    # Its effects are returned like a finish's, for whatever runs them.
+    assert effects is not None
+    assert ApprovalEnded("approval-1", paused.reply_id) in effects
     ended = await alice.replies.load(paused.reply_id)
     assert ended is not None
     assert ended.state is ReplyState.FAILED

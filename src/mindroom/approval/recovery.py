@@ -142,10 +142,13 @@ class ApprovalRecovery:
         notice_store = await self.deliver_unavailable_notice(current, reason)
         if notice_store is None:
             return False
-        return await store.approvals.discard_unavailable_approval_continuation(
+        # No bot of the gone entity is there to run what the discard's commit left for afterwards; the conversation
+        # its approval held learns of the end from the approval signals.
+        effects = await store.approvals.discard_unavailable_approval_continuation(
             current.approval_id,
             notice_principal_id=notice_store.principal_id,
         )
+        return effects is not None
 
     def reset_startup_cleanup_gate(self) -> None:
         """Reset one-shot startup approval cleanup state."""

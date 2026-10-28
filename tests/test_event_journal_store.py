@@ -8445,7 +8445,7 @@ class TestApprovalContinuations:
                 "approval-1",
                 notice_principal_id="router@alice",
             )
-            is False
+            is None
         )
         assert await alice.is_pending("$source-1")
         assert await alice.is_pending("$source-2")
@@ -8474,7 +8474,7 @@ class TestApprovalContinuations:
                 "approval-1",
                 notice_principal_id="router@alice",
             )
-            is True
+            is not None
         )
         assert await alice.approvals.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")
@@ -8560,7 +8560,7 @@ class TestApprovalContinuations:
         departed, discarded = await asyncio.gather(departure, cleanup)
 
         assert departed == 1
-        assert not discarded
+        assert discarded is None
 
     async def test_stale_unavailable_notice_cannot_discard_sources(
         self,
@@ -8612,7 +8612,7 @@ class TestApprovalContinuations:
                 "approval-1",
                 notice_principal_id="router@alice",
             )
-            is False
+            is None
         )
         assert await alice.approvals.approval_continuation("approval-1") is not None
         assert await alice.is_pending("$source-1")
@@ -8664,7 +8664,7 @@ class TestApprovalContinuations:
                 "approval-1",
                 notice_principal_id="router@alice",
             )
-            is False
+            is None
         )
 
         current_delivery_id = await router.approvals.enqueue_unavailable_approval_notice(
@@ -8694,7 +8694,7 @@ class TestApprovalContinuations:
                 "approval-1",
                 notice_principal_id="router@alice",
             )
-            is True
+            is not None
         )
         assert await alice.approvals.approval_continuation("approval-1") is None
         assert not await alice.is_pending("$source-1")

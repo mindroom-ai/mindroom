@@ -1102,8 +1102,9 @@ async def test_startup_unavailable_cleanup_scans_owners_while_card_recovery_rema
     assert recovery._startup_cleanup_done is False
 
 
+@pytest.mark.parametrize("discarded", [True, False], ids=["discarded", "refused"])
 @pytest.mark.asyncio
-async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sources() -> None:
+async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sources(*, discarded: bool) -> None:
     """A removed entity's waiting response must not be the last visible lifecycle state."""
     continuation = MagicMock(
         approval_id="approval-removed",
@@ -1157,7 +1158,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         approvals=MagicMock(
             approval_continuation=AsyncMock(return_value=continuation),
             request_approval_failure=AsyncMock(return_value=failing),
-            discard_unavailable_approval_continuation=AsyncMock(return_value=True),
+            discard_unavailable_approval_continuation=AsyncMock(return_value=() if discarded else None),
         ),
     )
     notice_store = MagicMock(
@@ -1209,6 +1210,9 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         "approval-removed",
         notice_principal_id="router@localhost",
     )
+    # A discard the journal refused leaves the cleanup incomplete, so it is tried again later.
+    assert (recovery._startup_cleanup_retry is None) is discarded
+    await recovery.close()
 
 
 @pytest.mark.parametrize("with_result", [True, False], ids=["success", "without-result"])

@@ -582,11 +582,13 @@ class ApprovalStore:
         approval_id: str,
         *,
         notice_principal_id: str,
-    ) -> bool:
-        """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused."""
+    ) -> tuple[PostCommitEffect, ...] | None:
+        """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused.
+
+        Returns the work its commit left for afterwards, or ``None`` when the run may not be discarded.
+        """
         # The owner that could settle the reply is gone; the notice is what the room sees.
-        # No live ledger of that owner learns it; its next start loads it.
-        ended = await self._backend.write(
+        return await self._backend.write(
             lambda transaction: _end_approval(
                 transaction,
                 self._principal_id,
@@ -605,7 +607,6 @@ class ApprovalStore:
                 ),
             ),
         )
-        return ended is not None
 
     @property
     def principal_id(self) -> str:

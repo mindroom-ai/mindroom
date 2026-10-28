@@ -141,9 +141,9 @@ async def test_unavailable_owner_cancels_children_before_discarding() -> None:
     async def cancel(_continuation: ApprovalContinuation, _reason: str) -> None:
         order.append("children")
 
-    async def discard(*_args: object, **_kwargs: object) -> bool:
+    async def discard(*_args: object, **_kwargs: object) -> tuple[object, ...]:
         order.append("source")
-        return True
+        return ()
 
     store = MagicMock(spec=PrincipalStore)
     store.approvals.approval_continuation = AsyncMock(return_value=continuation)
