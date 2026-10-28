@@ -256,7 +256,6 @@ def test_run_record_defaults_and_status() -> None:
     assert record.to_dict()["status"] == "RUNNING"
     assert RunStatus("PAUSED") is RunStatus.paused
     assert RunStatus.cancelled.name == "cancelled"
-    assert RunRecord.from_dict({"run_id": "r", "status": "REGENERATED"}).status is RunStatus.regenerated
 
 
 def test_team_run_record_defaults() -> None:

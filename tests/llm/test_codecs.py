@@ -20,12 +20,7 @@ import pytest
 from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import (
-    RunRecord,
-    RunRequirement,
-    TeamRunRecord,
-    ToolExecution,
-)
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, SessionMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
     DROPPED_METRICS_KEYS,
@@ -283,9 +278,13 @@ def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
 
 @pytest.mark.parametrize("status", ["PENDING", "REGENERATED"])
 def test_run_record_reads_every_status_agno_could_store(status: str) -> None:
+    """A run Agno stored as not started or as replaced by a regeneration reads as a run that did not finish."""
     agno_dict = agno("runs_by_status")[status]
 
-    assert RunRecord.from_dict(agno_dict).to_dict() == expected_run_dict(agno_dict)
+    record = RunRecord.from_dict(agno_dict)
+
+    assert record.status is RunStatus.error
+    assert record.to_dict() == {**expected_run_dict(agno_dict), "status": "ERROR"}
 
 
 def test_run_requirement_reads_rows_agno_read_leniently() -> None:

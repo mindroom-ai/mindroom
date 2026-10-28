@@ -410,13 +410,11 @@ def test_a_run_stores_tools_requirements_and_metrics_exactly_when_set() -> None:
 
 def test_run_statuses_are_stored_by_value_and_named_in_lower_case() -> None:
     assert [[status.name, status.value] for status in RunStatus] == [
-        ["pending", "PENDING"],
         ["running", "RUNNING"],
         ["completed", "COMPLETED"],
         ["paused", "PAUSED"],
         ["cancelled", "CANCELLED"],
         ["error", "ERROR"],
-        ["regenerated", "REGENERATED"],
     ]
     for status in RunStatus:
         # ``.name`` is persisted as ``mindroom_original_status``, so the member names are stored values too.
