@@ -32,6 +32,7 @@ from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
     QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -76,6 +77,7 @@ UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic ret
 ERROR = "⚠️ Error: "
 AUTHENTICATION = "❌ Authentication failed"
 CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context window."
+OVER_TOKENS_PER_MINUTE = "⚠️ This request is larger than the account's tokens-per-minute limit."
 
 
 @pytest.fixture(autouse=True)
@@ -671,8 +673,9 @@ _OPENAI_HTTP_CASES = [
             "rate_limit_exceeded",
         ),
         ContextWindowExceeded,
-        CONTEXT_WINDOW,
+        OVER_TOKENS_PER_MINUTE,
         1,
+        code=TOKENS_PER_MINUTE,
     ),
     _Case(
         "http_500",

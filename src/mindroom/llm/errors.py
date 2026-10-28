@@ -20,6 +20,9 @@ TRANSPORT_TIMEOUT = "timeout"
 SAFEGUARD_REFUSAL = "refusal"
 # The marker of a request whose route has no credential at all, so the reply can say how to add one.
 MISSING_API_KEY = "missing_api_key"
+# The marker of a request that alone exceeds the account's tokens-per-minute limit: it fails as a context-window error,
+# since only a smaller request passes, but its reply must not say the conversation outgrew the context window.
+TOKENS_PER_MINUTE = "tokens_per_minute"
 # The marker of a request the provider refused because the account has no credit left or reached a spend or usage
 # limit: no retry passes until the account's billing or limits change, and the request's media did not cause it.
 QUOTA_EXHAUSTED = "quota_exhausted"
@@ -114,6 +117,7 @@ __all__ = [
     "MODEL_SAFEGUARD_REFUSAL_MESSAGE",
     "QUOTA_EXHAUSTED",
     "SAFEGUARD_REFUSAL",
+    "TOKENS_PER_MINUTE",
     "TRANSPORT_TIMEOUT",
     "AuthenticationFailed",
     "ContextWindowExceeded",

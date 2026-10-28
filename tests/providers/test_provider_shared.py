@@ -12,6 +12,7 @@ import pytest
 
 from mindroom.llm.errors import (
     QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -38,9 +39,7 @@ _REQUEST_TOO_LARGE = (
     ("status", "message", "code", "expected", "retryable"),
     [
         (429, "slow down", None, RateLimited, True),
-        # A request above the account's tokens-per-minute limit fails every time; only a smaller one passes.
-        (429, _REQUEST_TOO_LARGE, "rate_limit_exceeded", ContextWindowExceeded, False),
-        # Other context-window wording on a 429 is still a rate limit, such as Bedrock's throttle.
+        # Context-window wording on a 429 other than "Request too large" is still a rate limit, such as Bedrock's.
         (429, "Too many tokens, please wait before trying again.", None, RateLimited, True),
         (429, "Rate limit reached for gpt-6-astra on tokens per min (TPM).", "rate_limit_exceeded", RateLimited, True),
         (529, "Overloaded", None, ProviderUnavailable, True),
@@ -114,6 +113,20 @@ def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str
     assert retry_after_seconds(headers, now=now) == seconds
 
 
+@pytest.mark.parametrize("status", [429, None])
+def test_a_request_above_the_tokens_per_minute_limit_is_too_large_not_rate_limited(status: int | None) -> None:
+    """Only a smaller request passes, and the marker keeps its reply from blaming the context window."""
+    error = classify_provider_error(_REQUEST_TOO_LARGE, provider="Test", status_code=status, code="rate_limit_exceeded")
+
+    assert (type(error), error.retryable, error.code, error.provider_code, error.status_code) == (
+        ContextWindowExceeded,
+        False,
+        TOKENS_PER_MINUTE,
+        "rate_limit_exceeded",
+        status,
+    )
+
+
 def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
     """A server that names its failure ``timeout`` sent no transport timeout, which only MindRoom's marker reports."""
     error = classify_provider_error("upstream busy", provider="Test", status_code=500, code=TRANSPORT_TIMEOUT)
@@ -156,7 +169,6 @@ def test_an_account_out_of_credit_or_past_its_limits_fails_at_once(
     [
         ("Slow down", None, "rate_limit_error", RateLimited),
         ("Slow down", "rate_limit_exceeded", None, RateLimited),
-        (_REQUEST_TOO_LARGE, "rate_limit_exceeded", None, ContextWindowExceeded),
         ("Rate limit exceeded: free-models-per-min", "429", None, RateLimited),
         ("Slow down", "529", None, ProviderUnavailable),
         ("An error occurred.", "server_error", None, ProviderUnavailable),

@@ -19,6 +19,7 @@ from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -151,7 +152,8 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
     1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
-       the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``: only a smaller request passes.
+       the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded`` marked ``TOKENS_PER_MINUTE``:
+       only a smaller request passes.
     2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
@@ -183,7 +185,8 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     if names & _QUOTA_EXHAUSTED_NAMES:
         return typed(ProviderError, marker=QUOTA_EXHAUSTED)
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
-        return typed(ContextWindowExceeded if _REQUEST_TOO_LARGE in lowered else RateLimited)
+        too_large = _REQUEST_TOO_LARGE in lowered
+        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if too_large else typed(RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
