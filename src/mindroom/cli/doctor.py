@@ -456,10 +456,23 @@ def _ollama_embedder_options(config: Config, runtime_paths: RuntimePaths) -> dic
     return ollama_client_options(settings.host, settings.api_key)
 
 
+def _check_ollama_server(subject: str, options: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Check the Ollama server the runtime's client ``options`` reach, reported under ``subject``."""
+    host = _ollama_host(options)
+    valid, detail = _ollama_reachable(options)
+    return _print_validation(
+        valid,
+        detail,
+        f"{subject} reachable ({host})",
+        f"{subject} unreachable: {host}",
+        f"{subject}: could not reach {host}",
+    )
+
+
 def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check each server the Ollama models reach, once, through the client the runtime builds for the first of them."""
     servers: dict[str, Mapping[str, Any]] = {}
-    warnings = 0
+    passed = failed = warnings = 0
     for name, model_config in config.models.items():
         if provider_route(model_config.provider) != "ollama":
             continue
@@ -468,16 +481,8 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
             warnings += 1
         else:
             servers.setdefault(_ollama_host(options), options)
-    passed = failed = 0
-    for host, options in servers.items():
-        valid, detail = _ollama_reachable(options)
-        p, f, w = _print_validation(
-            valid,
-            detail,
-            f"ollama reachable ({host})",
-            f"ollama unreachable: {host}",
-            f"ollama: could not reach {host}",
-        )
+    for options in servers.values():
+        p, f, w = _check_ollama_server("ollama", options)
         passed += p
         failed += f
         warnings += w
@@ -649,21 +654,6 @@ def _check_default_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tu
     return 0, 0, 1
 
 
-def _check_ollama_server(subject: str, read: Callable[[], Mapping[str, Any]]) -> tuple[int, int, int]:
-    """Check the Ollama server the runtime's client options reach, reported under ``subject``."""
-    if (options := _ollama_options(subject, read)) is None:
-        return 0, 0, 1
-    host = _ollama_host(options)
-    valid, detail = _ollama_reachable(options)
-    return _print_validation(
-        valid,
-        detail,
-        f"{subject}: ollama reachable ({host})",
-        f"{subject}: ollama unreachable ({host})",
-        f"{subject}: could not reach ollama ({host})",
-    )
-
-
 def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM configuration. Returns (passed, failed, warnings)."""
     if config.memory.llm is None:
@@ -671,7 +661,8 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
 
     llm_provider = config.memory.llm.provider
     if llm_provider == "ollama":
-        return _check_ollama_server("Memory LLM", partial(_mem0_ollama_options, config, runtime_paths))
+        options = _ollama_options("Memory LLM", partial(_mem0_ollama_options, config, runtime_paths))
+        return (0, 0, 1) if options is None else _check_ollama_server("Memory LLM: ollama", options)
 
     llm_model = config.memory.llm.config.get("model", "default")
     # The model is free-form config text, which may contain brackets Rich reads as markup.
@@ -713,7 +704,8 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
     """Check memory embedder configuration. Returns (passed, failed, warnings)."""
     emb = config.memory.embedder
     if emb.provider == "ollama":
-        return _check_ollama_server("Memory embedder", partial(_ollama_embedder_options, config, runtime_paths))
+        options = _ollama_options("Memory embedder", partial(_ollama_embedder_options, config, runtime_paths))
+        return (0, 0, 1) if options is None else _check_ollama_server("Memory embedder: ollama", options)
 
     if emb.provider == "sentence_transformers":
         valid, detail = _validate_sentence_transformers_embedder(runtime_paths, emb.config.model)
