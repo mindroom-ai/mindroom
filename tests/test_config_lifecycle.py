@@ -402,6 +402,44 @@ async def test_replacement_admission_serializes_config_and_mcp_owners(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_reload_loads_an_edit_while_another_replacement_drains(tmp_path: Path) -> None:
+    """An edit reaches the dashboard while an MCP restart holds admission, so a dashboard save cannot overwrite it."""
+    loaded = threading.Event()
+
+    def load_edit() -> PublishedConfigLoad:
+        loaded.set()
+        return published_config_load(Config(timezone="Europe/Amsterdam"))
+
+    lifecycle = _make_lifecycle(tmp_path, load_config=load_edit)
+    mcp_started = asyncio.Event()
+    release_mcp = asyncio.Event()
+
+    async def apply_mcp_restart() -> None:
+        mcp_started.set()
+        await release_mcp.wait()
+
+    mcp_task = asyncio.create_task(
+        lifecycle.apply_with_response_admission(
+            apply_mcp_restart,
+            operation_name="MCP catalog restart",
+            request_is_current=lambda: True,
+        ),
+    )
+    await mcp_started.wait()
+    reload_task = asyncio.create_task(lifecycle._update_config())
+    loaded_during_drain = await asyncio.to_thread(loaded.wait, 5)
+    # Release before asserting, so a reload stuck behind the drain fails instead of hanging.
+    release_mcp.set()
+    assert loaded_during_drain
+    assert not reload_task.done()
+    lifecycle.apply_update_plan.assert_not_awaited()
+
+    await mcp_task
+    assert await asyncio.wait_for(reload_task, timeout=5) is True
+    lifecycle.apply_update_plan.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_stuck_drain_warns_then_stops_deferring(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -737,7 +775,7 @@ async def test_apply_does_not_block_response_drain_started_by_the_apply(
         return "admitted"
 
     async def apply_plan(*_args: object) -> bool:
-        # Stand in for stop_entities -> prepare_for_sync_shutdown -> drain_inbox_responses.
+        # Stand in for the fleet's restart stop, whose bot preparation drains inbox responses.
         task = asyncio.create_task(response_lifecycle())
         _done, pending = await asyncio.wait([task], timeout=1)
         assert not pending, "drain stalled: response could not settle during apply"
@@ -1091,6 +1129,42 @@ async def test_reload_that_loses_to_a_dashboard_save_adopts_nothing_and_stays_pe
     lifecycle.apply_update_plan.assert_not_awaited()
     assert lifecycle.status == ConfigReloadStatus(status="pending")
     assert lifecycle.failed_reload_source_files is None
+
+
+@pytest.mark.asyncio
+async def test_one_edit_is_loaded_once_and_the_dashboard_holds_the_config_the_runtime_applies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Under `mindroom run` an edit is read once, and the dashboard publishes the very config the runtime applies."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    runtime_paths.config_path.write_text(_AGENT1_YAML, encoding="utf-8")
+    current_config = load_config(runtime_paths)
+    api_app = FastAPI()
+    initialize_api_app(api_app, runtime_paths)
+    real_load_attempt = api_config_lifecycle.load_config_attempt
+    load_attempts: list[object] = []
+
+    def counted_load_attempt(paths: object) -> object:
+        load_attempts.append(paths)
+        return real_load_attempt(paths)
+
+    monkeypatch.setattr(api_config_lifecycle, "load_config_attempt", counted_load_attempt)
+    lifecycle = _make_lifecycle(
+        tmp_path,
+        current_config=current_config,
+        agent_bots={"router": MagicMock(), "agent1": MagicMock()},
+        load_config=partial(api_config_lifecycle.load_config_into_app, runtime_paths, api_app),
+    )
+    runtime_paths.config_path.write_text(_AGENT1_YAML.replace("Agent 1", "Renamed"), encoding="utf-8")
+
+    assert await lifecycle._update_config() is True
+
+    assert load_attempts == [runtime_paths]
+    [(_applied_from, plan)] = [call.args for call in lifecycle.apply_update_plan.await_args_list]
+    snapshot = api_config_lifecycle.require_api_state(api_app).snapshot
+    assert plan.new_config is snapshot.runtime_config
+    assert plan.new_config.agents["agent1"].display_name == "Renamed"
 
 
 @pytest.mark.asyncio

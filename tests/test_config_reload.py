@@ -186,14 +186,18 @@ def test_startup_phase_logging_helpers_emit_structured_timing(monkeypatch: pytes
 
 @pytest.mark.asyncio
 async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The skills watcher should not run recursive skill snapshots on the asyncio loop."""
+    """The skills watcher snapshots off the asyncio loop and keeps watching until cancelled, even after shutdown begins."""
 
     class DummyOrchestrator:
         running = True
 
+    class StopWatchingError(Exception):
+        pass
+
     dummy_orchestrator = DummyOrchestrator()
     snapshot_function_calls: list[object] = []
     clear_calls = 0
+    sleeps = 0
 
     def direct_snapshot_call() -> object:
         raise AssertionError
@@ -208,6 +212,10 @@ async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.Mo
 
     async def fake_sleep(delay: float) -> None:
         del delay
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise StopWatchingError
 
     def fake_clear_skill_cache() -> None:
         nonlocal clear_calls
@@ -218,7 +226,8 @@ async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.Mo
     monkeypatch.setattr(orchestrator_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(orchestrator_module, "clear_skill_cache", fake_clear_skill_cache)
 
-    await _watch_skills_task(dummy_orchestrator)  # type: ignore[arg-type]
+    with pytest.raises(StopWatchingError):
+        await _watch_skills_task(dummy_orchestrator)  # type: ignore[arg-type]
 
     assert snapshot_function_calls == [direct_snapshot_call, direct_snapshot_call]
     assert clear_calls == 1
@@ -437,6 +446,41 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     assert (plugin_root / "hooks.py") in changed_paths
     assert (plugin_root / "helper.py") in changed_paths
     assert all(path.is_relative_to(plugin_root) for path in changed_paths)
+
+
+@pytest.mark.asyncio
+async def test_plugin_watcher_idles_until_cancelled_once_shutdown_begins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A watcher that returned at shutdown would be restarted with a warning, so it idles until cancelled."""
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_SCAN_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("mindroom.file_watcher._WATCH_TREE_DEBOUNCE_SECONDS", 0.01)
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        '{"name": "demo", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator.running = True
+    orchestrator.reload_plugins_now = AsyncMock()
+    watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
+    try:
+        await asyncio.sleep(0.05)
+        orchestrator.running = False
+        (plugin_root / "hooks.py").write_text("VALUE = 2\n", encoding="utf-8")
+        await asyncio.sleep(0.1)
+        assert not watcher_task.done()
+    finally:
+        watcher_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await watcher_task
+
+    orchestrator.reload_plugins_now.assert_not_awaited()
 
 
 def test_plugin_watcher_drops_unconfigured_root_snapshots(tmp_path: Path) -> None:
@@ -834,6 +878,7 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
     orchestrator, config, plugin_root, hooks_path = _plugin_watcher_race_runtime(tmp_path)
     second_scan_started = asyncio.Event()
     release_second_scan = asyncio.Event()
+    third_scan_started = asyncio.Event()
     collect_count = 0
 
     async def collect(roots: tuple[Path, ...], _snapshots: dict[Path, dict[Path, int]]) -> set[Path]:
@@ -842,8 +887,11 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
         collect_count += 1
         if collect_count == 1:
             return {hooks_path}
-        second_scan_started.set()
-        await release_second_scan.wait()
+        if collect_count == 2:
+            second_scan_started.set()
+            await release_second_scan.wait()
+        else:
+            third_scan_started.set()
         return set()
 
     monkeypatch.setattr("mindroom.orchestration.plugin_watch._collect_plugin_root_changes", collect)
@@ -853,12 +901,14 @@ async def test_plugin_watcher_drops_pending_changes_when_reload_commits_during_s
     try:
         await asyncio.wait_for(second_scan_started.wait(), timeout=1)
         orchestrator.plugin_watch.refresh(config)
-        orchestrator.running = False
         release_second_scan.set()
-        await task
+        # The scan after the committed reload shows the watcher already handled the pending edit.
+        await asyncio.wait_for(third_scan_started.wait(), timeout=1)
     finally:
         task.cancel()
         release_second_scan.set()
+        with suppress(asyncio.CancelledError):
+            await task
     reload_mock.assert_not_awaited()
 
 

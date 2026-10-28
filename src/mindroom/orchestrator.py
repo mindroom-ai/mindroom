@@ -1144,7 +1144,7 @@ class _MultiAgentOrchestrator:
         clear_worker_validation_snapshot_cache()
 
     def _prepare_plugins(self, plan: ConfigUpdatePlan) -> Callable[[], HookRegistry] | None:
-        """Stage changed plugins before anything stops, so a broken plugin fails the reload with every bot intact.
+        """Stage changed plugins before anything stops, so a plugin reload that fails to stage fails the reload with every bot intact.
 
         Returns the step that commits the staged plugins and their watcher baselines.
         """
@@ -1894,7 +1894,8 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
     last_snapshot = await asyncio.to_thread(get_skill_snapshot)
-    while orchestrator.running:
+    # Runs until cancelled: a supervised loop that returned would be restarted.
+    while True:
         await asyncio.sleep(1.0)
         snapshot = await asyncio.to_thread(get_skill_snapshot)
         if snapshot != last_snapshot:

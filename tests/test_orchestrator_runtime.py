@@ -1868,14 +1868,8 @@ class TestAgentBot(AgentBotTestBase):
             watched_paths.append(path)
             config_watcher_ran.set()
 
-        async def _run_auxiliary(
-            task_name: str,
-            operation: Callable[[], Awaitable[None]],
-            *,
-            should_restart: Callable[[], bool] | None = None,
-        ) -> None:
+        async def _run_auxiliary(task_name: str, operation: Callable[[], Awaitable[None]]) -> None:
             del task_name
-            del should_restart
             await operation()
 
         async def _start(_config: Config) -> None:
@@ -5242,7 +5236,7 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
             ),
-            patch.object(orchestrator.fleet, "stop", new=AsyncMock()) as stop_entities,
+            patch.object(orchestrator.fleet, "stop", new=AsyncMock()) as fleet_stop,
             patch(
                 "mindroom.orchestrator.prepare_plugin_reload",
                 side_effect=RuntimeError("broken plugin"),
@@ -5252,7 +5246,7 @@ class TestMultiAgentOrchestrator:
         ):
             await orchestrator.config_reload._update_config()
 
-        stop_entities.assert_not_awaited()
+        fleet_stop.assert_not_awaited()
         assert bot.running is True
         assert orchestrator.config is current_config
         mock_clear_snapshot_cache.assert_not_called()

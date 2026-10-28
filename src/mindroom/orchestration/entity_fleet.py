@@ -16,6 +16,7 @@ from mindroom.background_tasks import retry_delay_seconds
 from mindroom.logging_config import get_logger
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
+    GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
     RESPONSE_FINALIZATION_TIMEOUT_SECONDS,
     SYNC_RESTART_SHUTDOWN,
@@ -330,8 +331,7 @@ class EntityFleet:
             slot.retry_task = None
 
     async def stop_all(self) -> _FleetShutdown:
-        """Stop every bot for process shutdown; the slots stay, so later cleanup still finds every bot."""
-        await self.cancel_retries()
+        """Stop every bot for process shutdown once ``cancel_retries`` ran; the slots stay, so later cleanup still finds every bot."""
         slots = dict(self._slots)
         bots = [slot.bot for slot in slots.values()]
         cancellations: list[asyncio.CancelledError] = []
@@ -342,7 +342,7 @@ class EntityFleet:
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         cancel_results = await run_shutdown_step(
             "sync_tasks",
-            _phase(cancellations, *(_cancel_sync(slot, None) for slot in slots.values())),
+            _phase(cancellations, *(_cancel_sync(slot, GENERIC_SHUTDOWN) for slot in slots.values())),
         )
         for bot in bots:
             bot.running = False
@@ -441,12 +441,9 @@ async def _start_once(entity_name: str, bot: _Bot) -> bool | None:
     return True
 
 
-async def _cancel_sync(slot: _EntitySlot, intent: RuntimeShutdownIntent | None) -> None:
+async def _cancel_sync(slot: _EntitySlot, intent: RuntimeShutdownIntent) -> None:
     task, slot.sync_task = slot.sync_task, None
-    if intent is None:
-        await cancel_task(task)
-    else:
-        await cancel_task(task, shutdown_intent=intent)
+    await cancel_task(task, shutdown_intent=intent)
 
 
 async def _leave_then_cancel_sync(slot: _EntitySlot, *, leave: bool) -> None:

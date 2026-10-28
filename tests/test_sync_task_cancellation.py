@@ -2901,17 +2901,18 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
             orchestrator.config_reload.request_reload()
             reload_task = orchestrator.config_reload._reload_task
             assert reload_task is not None
-            await asyncio.sleep(0)
-            assert not reload_started.is_set()
+            # The reload loads the edit for the dashboard at once, but applies it only after startup publication.
+            await asyncio.wait_for(reload_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            reload_can_finish.set()
+            for _ in range(10):
+                await asyncio.sleep(0)
+            assert not reload_task.done()
+            assert orchestrator._response_admission_gate.closed
 
             setup_can_finish.set()
             await asyncio.wait_for(router_sync_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             await orchestrator.handle_bot_ready(router_bot)
             await asyncio.wait_for(runtime_ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-            await asyncio.wait_for(reload_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-            assert not orchestrator._response_admission_gate.closed
-
-            reload_can_finish.set()
             await asyncio.wait_for(reload_task, timeout=SETTLE_TIMEOUT_SECONDS)
             assert not orchestrator._response_admission_gate.closed
         finally:

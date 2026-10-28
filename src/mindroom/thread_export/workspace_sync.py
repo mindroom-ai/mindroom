@@ -106,7 +106,7 @@ class WorkspaceThreadExportRunner:
     async def sync(self, config: Config) -> None:  # noqa: ARG002 - each pass reads the active config
         """Start the loop, and reconcile every workspace against a changed config right away.
 
-        The first sync comes before any bot runs, so it leaves the startup pass to ``queue_full_pass`` once bots run.
+        The first sync, from startup maintenance, finds the startup pass already queued once bots ran, so only later syncs queue one.
         """
         if self._loop.running:
             self.queue_full_pass()

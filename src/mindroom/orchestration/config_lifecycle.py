@@ -203,26 +203,28 @@ class ConfigReloadLifecycle:
 
     async def _update_config(self) -> bool | None:
         """Reload config, returning whether agents changed or ``None`` when superseded."""
+        # Config validation executes plugin modules and walks the filesystem;
+        # keep it off the event loop (#1260). The load runs before the admission
+        # lock, so the embedded dashboard sees an edit as soon as it loads, even
+        # while another replacement drains responses; a dashboard save against
+        # the previous config would otherwise overwrite the edit. The runtime
+        # adopts nothing until planning under the admission lock succeeds.
+        async with self.config_update_lock:
+            published = await asyncio.to_thread(self.load_config)
+        if published.superseded:
+            # A dashboard save or runtime swap committed during the load and
+            # already changed the files, so the watcher queues the reload
+            # that applies it; this stale read is never adopted.
+            return None
+        new_config = published.attempt.loaded_config()
+        self.loaded_source_files = new_config.source_files
+        self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
+        self.failed_reload_source_files = None
         async with self._response_admission_apply_lock:
-            # Config validation executes plugin modules and walks the filesystem;
-            # keep it off the event loop (#1260). Admission stays open because
-            # the runtime adopts nothing until loading and planning both succeed;
-            # the embedded dashboard sees the load as soon as it finishes.
-            async with self.config_update_lock:
-                published = await asyncio.to_thread(self.load_config)
-            if published.superseded:
-                # A dashboard save or runtime swap committed during the load and
-                # already changed the files, so the watcher queues the reload
-                # that applies it; this stale read is never adopted.
-                return None
-            new_config = published.attempt.loaded_config()
-            self.loaded_source_files = new_config.source_files
-            self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
             runtime_config = self.current_config()
             if self._fully_applied_config is None:
                 self._fully_applied_config = runtime_config
             current_config = self._fully_applied_config
-            self.failed_reload_source_files = None
 
             if pending_event_journal_restart(new_config, self.runtime_paths):
                 # Adopted, not refused: the store was opened once at startup and

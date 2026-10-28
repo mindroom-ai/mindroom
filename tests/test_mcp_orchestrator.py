@@ -8,11 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
 
-import mindroom.orchestration.config_lifecycle as lifecycle_module
-from mindroom.api import config_lifecycle
-from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
@@ -405,71 +401,6 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
     assert updated is False
     mock_bind_runtime.assert_called_once_with(new_config, orchestrator.agent_bots)
     mock_invalidate_memberships.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_one_reload_loads_once_and_binds_triggers_to_that_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Under `mindroom run` one edit is read once, and that read is what the dashboard and trigger runtime see."""
-    runtime_paths = _runtime_paths(tmp_path)
-    current_config = _config_with_code_agent(tmp_path)
-    runtime_paths.config_path.write_text(yaml.dump(current_config.authored_model_dump()), encoding="utf-8")
-    real_load_attempt = config_lifecycle.load_config_attempt
-    load_attempts: list[object] = []
-
-    def counted_load_attempt(paths: object) -> object:
-        load_attempts.append(paths)
-        return real_load_attempt(paths)
-
-    monkeypatch.setattr(config_lifecycle, "load_config_attempt", counted_load_attempt)
-    monkeypatch.setattr(lifecycle_module, "load_config_attempt", counted_load_attempt)
-    current_config = await lifecycle_module.load_startup_config(runtime_paths, api_enabled=True)
-    assert len(load_attempts) == 1
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    new_config = _config_with_code_agent(
-        tmp_path,
-        external_trigger_policy={"default_max_body_bytes": 4096, "max_body_bytes": 4096},
-    )
-    runtime_paths.config_path.write_text(yaml.dump(new_config.authored_model_dump()), encoding="utf-8")
-    orchestrator.config = current_config
-    router_bot = MagicMock(spec=AgentBot)
-    router_bot.agent_name = ROUTER_AGENT_NAME
-    router_bot.running = True
-    router_bot.client = object()
-    router_bot._conversation_reader = object()
-    target_bot = MagicMock(spec=AgentBot)
-    target_bot.agent_name = "code"
-    target_bot.running = True
-    install_bots(
-        orchestrator,
-        {
-            ROUTER_AGENT_NAME: router_bot,
-            "code": target_bot,
-        },
-    )
-
-    with (
-        patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-        patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
-        patch.object(orchestrator.plugin_watch, "sync_roots"),
-        patch.object(orchestrator, "_activate_hook_registry"),
-        patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-        patch.object(orchestrator, "_update_unchanged_bots", new=AsyncMock()),
-        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-        patch.object(orchestrator._approval_recovery, "mark_startup_runtime_support_ready", new=AsyncMock()),
-        patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-    ):
-        assert await orchestrator.config_reload._update_config() is False
-
-    assert len(load_attempts) == 2
-    snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
-    runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
-    assert snapshot.runtime_config is orchestrator.config
-    assert orchestrator.config.external_trigger_policy.default_max_body_bytes == 4096
-    assert runtime is not None
-    assert runtime.config_generation == snapshot.generation
 
 
 def test_log_mcp_degraded_entities_warns_per_failed_optional_server(tmp_path: Path) -> None:
