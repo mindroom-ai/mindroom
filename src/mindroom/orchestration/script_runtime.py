@@ -289,7 +289,7 @@ class _LiveScriptRuntimeResolver:
         config = context.current_config
         agent_config = config.get_agent(context.agent_name)
         worker_target = build_agent_toolkit_worker_target(
-            config.resolve_entity(context.agent_name).execution_scope,
+            config.resolve_agent(context.agent_name).policy.effective_execution_scope,
             context.agent_name,
             is_private=agent_config.private is not None,
             execution_identity=parse_tool_execution_identity_payload(
@@ -1438,7 +1438,7 @@ def _agent_isolation_changed(current: AgentConfig, updated: AgentConfig) -> bool
 
 def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
     """Return whether one agent's effective tool surface includes script controls."""
-    return any(entry.name == "script" for entry in config.resolve_entity(agent_name).tool_configs)
+    return "script" in config.resolve_agent(agent_name).tools.tool_names
 
 
 def _require_successful_worker_replacement_stage(

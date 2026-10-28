@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
-from mindroom.config.resolution import agent_tool_facts
+from mindroom.config.resolution import agent_policy, agent_tool_facts
 from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
 from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
 
@@ -88,9 +88,9 @@ class AgentTools:
         return [name for name in self.config.expand_tool_names(tool_names) if name not in self.facts.disabled]
 
     @property
-    def tool_names(self) -> list[str]:
+    def tool_names(self) -> tuple[str, ...]:
         """Every toolkit the agent's entries name, presets and implied toolkits expanded, initial and deferred."""
-        return self._expanded([entry.name for entry in self.facts.authored])
+        return self.facts.tool_names
 
     @property
     def _deferred_entries(self) -> tuple[EffectiveToolConfig, ...]:
@@ -220,4 +220,7 @@ def room_turn_offers(config: Config, agent_name: str, tool_name: str) -> bool:
 
 def resolve_agent_tools(config: Config, agent_name: str) -> AgentTools:
     """Return the toolkits ``agent_name`` may use; a caller that builds plugin toolkits loads their plugins first."""
-    return AgentTools(config=config, facts=agent_tool_facts(config, agent_name))
+    return AgentTools(
+        config=config,
+        facts=agent_tool_facts(config, agent_name, policy=agent_policy(config, agent_name)),
+    )

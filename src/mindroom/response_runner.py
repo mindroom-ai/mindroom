@@ -16,7 +16,6 @@ from mindroom import reply_lifecycle as rl
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
@@ -32,6 +31,7 @@ from mindroom.approval.response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.config.resolution import entity_timezone, show_tool_calls
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
@@ -1540,7 +1540,7 @@ class ResponseRunner:
 
     def _show_tool_calls(self) -> bool:
         """Return tool-call visibility for this agent."""
-        return show_tool_calls_for_agent(self.deps.runtime.config, self.deps.agent_name)
+        return show_tool_calls(self.deps.runtime.config, self.deps.agent_name)
 
     def _thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
         """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
@@ -4583,7 +4583,7 @@ class ResponseRunner:
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             # A team turn is dated in the zone of the entity whose bot runs it, as its leader and prompt are.
-            timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
+            timezone=entity_timezone(self.deps.runtime.config, self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
         assert turn_models is not None
@@ -5633,7 +5633,7 @@ class ResponseRunner:
         resolved_model = runtime_model.model_name
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
-        cheap_model = config.get_agent_cheap_model(self.deps.agent_name) if agent is not None else None
+        cheap_model = config.resolve_agent(self.deps.agent_name).cheap_model if agent is not None else None
         if (
             agent is None
             or agent.cold_cache is None
@@ -5747,7 +5747,7 @@ class ResponseRunner:
                 request.thread_history,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,
-                timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
+                timezone=entity_timezone(self.deps.runtime.config, self.deps.agent_name),
                 model_prompt=request.model_prompt,
             )
         )

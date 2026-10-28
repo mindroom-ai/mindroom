@@ -951,6 +951,7 @@ depends_on = [
     "mindroom.tool_system.toolkit_connections",
     "mindroom.failure_text",
     "mindroom.tool_system.agent_tools",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -1917,6 +1918,7 @@ depends_on = [
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -2692,6 +2694,7 @@ depends_on = [
     "mindroom.streaming",
     "mindroom.timestamp_formatting",
     "mindroom.tool_system.events",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -3327,6 +3330,7 @@ depends_on = [
     "mindroom.turn_store",
     "mindroom.user_turn_time",
     "mindroom.tool_system.agent_tools",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -3467,6 +3471,7 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
+    "mindroom.config.resolution",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -3509,10 +3514,6 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.config.entity_view"
-depends_on = []
-
-[[modules]]
 path = "mindroom.config.yaml_includes"
 depends_on = []
 
@@ -3525,7 +3526,6 @@ depends_on = [
     "mindroom.config.automations",
     "mindroom.config.auth",
     "mindroom.config.calls",
-    "mindroom.config.entity_view",
     "mindroom.config.knowledge",
     "mindroom.config.matrix",
     "mindroom.config.memory",
@@ -3554,6 +3554,7 @@ depends_on = [
     "mindroom.config.knowledge_graph",
     "mindroom.config.egress_broker",
     "mindroom.providers.registry",
+    "mindroom.config.resolution",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -3617,6 +3618,7 @@ depends_on = [
     "mindroom.memory._shared",
     "mindroom.memory_scope_ids",
     "mindroom.runtime_resolution",
+    "mindroom.config.resolution",
 ]
 visibility = [
     "mindroom.memory._backend",
@@ -3730,6 +3732,7 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.timing",
     "mindroom.token_budget",
+    "mindroom.config.resolution",
 ]
 visibility = ["mindroom.memory", "mindroom.memory._backend", "mindroom.memory.functions"]
 
@@ -4706,6 +4709,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -4872,6 +4876,7 @@ depends_on = [
     "mindroom.user_stop_reconciliation",
     "mindroom.visible_response_reconciliation",
     "mindroom.voice.visible_voice_echo",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -5283,6 +5288,7 @@ depends_on = [
     "mindroom.requester_identity",
     "mindroom.approval.tool_approval",
     "mindroom.failure_text",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]
@@ -5745,6 +5751,12 @@ depends_on = [
 path = "mindroom.config.resolution"
 depends_on = [
     "mindroom.tool_system.worker_routing",
+    "mindroom.agent_policy",
+    "mindroom.config.automations",
+    "mindroom.config.models",
+    "mindroom.constants",
+    "mindroom.history.types",
+    "mindroom.tool_system.catalog",
 ]
 
 [[modules]]
@@ -9373,6 +9385,7 @@ visibility = [
     "mindroom.automations.runner",
     "mindroom.config.agent",
     "mindroom.config.main",
+    "mindroom.config.resolution",
     "mindroom.config.models",
     "mindroom.response_runner",
     "mindroom.automations.exploration",
@@ -9428,6 +9441,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.memory",
     "mindroom.path_confinement",
+    "mindroom.config.resolution",
 ]
 visibility = ["mindroom.automations.registry"]
 

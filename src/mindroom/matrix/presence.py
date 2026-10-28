@@ -68,8 +68,8 @@ def build_agent_status_message(
     """
     status_parts = []
 
-    entity_view = config.resolve_entity(agent_name)
-    model_name = entity_view.model_name
+    agent = config.resolve_agent(agent_name) if agent_name in config.agents else None
+    model_name = agent.model_name if agent is not None else config.resolve_entity(agent_name).model_name
 
     # Format model info
     if model_name in config.models:
@@ -88,12 +88,12 @@ def build_agent_status_message(
         if team_config.role:
             status_parts.append(f"👥 {team_config.role[:100]}")  # Limit length
         status_parts.append(f"🤝 Team: {', '.join(team_config.agents[:5])}")  # Show first 5 agents
-    elif agent_name in config.agents:
+    elif agent is not None:
         agent_config = config.agents[agent_name]
         if agent_config.role:
             status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
         # Add tool count
-        effective_tools = entity_view.available_tools
+        effective_tools = agent.tools.tool_names
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
         if voice_calls_available:

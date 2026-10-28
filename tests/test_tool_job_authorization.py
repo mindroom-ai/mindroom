@@ -52,7 +52,7 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         placement=tool_placement(paths),
         config=config,
         runtime_paths=paths,
-        tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
+        tool_config_overrides=config.resolve_agent("lead").tools.authored[0].tool_config_overrides,
         execution_identity=_OWNER,
     )
     assert toolkit is not None
@@ -90,7 +90,7 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
         placement=tool_placement(paths),
         config=config,
         runtime_paths=paths,
-        tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
+        tool_config_overrides=config.resolve_agent("lead").tools.authored[0].tool_config_overrides,
         execution_identity=_OWNER,
     )
     assert toolkit is not None

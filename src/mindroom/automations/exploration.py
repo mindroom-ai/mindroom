@@ -129,7 +129,7 @@ def check_exploration(ctx: AutomationContext) -> Ask | None:
     # A revisit catches changes in the sources people use; an agent or instance nobody talked to since needs none.
     if not leads and not (revisit_due and active):
         return None
-    fixes = ctx.config.agent_edits_knowledge_graph(ctx.agent_name)
+    fixes = ctx.config.resolve_agent(ctx.agent_name).knowledge_graph_edits
     prompt = ctx.config.render_prompt(
         "EXPLORATION_PROMPT_TEMPLATE",
         max_tool_calls=entry.max_tool_calls,

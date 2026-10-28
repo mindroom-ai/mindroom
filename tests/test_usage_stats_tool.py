@@ -256,9 +256,7 @@ def test_admin_scope_is_valid_on_an_agent_tool_entry(tmp_path: Path) -> None:
 
     bound = bind_runtime_paths(config, test_runtime_paths(tmp_path))
 
-    usage_entry = next(
-        entry for entry in bound.resolve_entity("usage").authored_tool_configs if entry.name == "usage_stats"
-    )
+    usage_entry = next(entry for entry in bound.resolve_agent("usage").tools.authored if entry.name == "usage_stats")
     assert usage_entry.tool_config_overrides == {"admin_scope": True}
 
 

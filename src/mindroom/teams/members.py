@@ -365,7 +365,7 @@ def build_team_spec(
         execution_identity=execution_identity,
     )
     label = materialized_team_label(members.display_names)
-    team_view = config.resolve_entity(configured_team_name)
+    team_scope = config.resolve_scope(configured_team_name)
     jobs = team_background_jobs(config, runtime_paths, execution_identity)
     team_members = tuple(
         _team_member(
@@ -383,7 +383,7 @@ def build_team_spec(
         model=model,
         system_messages=(),
         toolkits=() if jobs is None else (jobs.controls,),
-        max_tool_calls_per_turn=team_view.max_tool_calls_per_turn,
+        max_tool_calls_per_turn=team_scope.max_tool_calls_per_turn,
     )
     turn_context = appended_context(render_session_context(config, timezone), system_enrichment)
     team_config = config.teams.get(configured_team_name) if configured_team_name is not None else None
@@ -402,7 +402,7 @@ def build_team_spec(
     )
     return BuiltTeam(
         spec=TeamSpec(leader=replace(leader, system_messages=system_messages), mode=mode, members=team_members),
-        history_settings=team_view.history_settings,
+        history_settings=team_scope.history_settings,
         timezone=timezone,
         leader_middleware=() if jobs is None else jobs.middleware,
         leader_jobs=None if jobs is None else jobs.actor,

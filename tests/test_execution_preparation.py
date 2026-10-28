@@ -359,7 +359,7 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
         config=config,
         timezone="UTC",
         team_name=None,
-        history_settings=config.resolve_entity(None).history_settings,
+        history_settings=config.resolve_scope(None).history_settings,
         active_model_name="default",
         active_context_window=6_000,
     )
@@ -876,7 +876,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         config=config,
         timezone="UTC",
         team_name=None,
-        history_settings=config.resolve_entity(None).history_settings,
+        history_settings=config.resolve_scope(None).history_settings,
         active_model_name=None,
         active_context_window=None,
     )
@@ -928,7 +928,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         config=config,
         timezone="UTC",
         team_name=None,
-        history_settings=config.resolve_entity(None).history_settings,
+        history_settings=config.resolve_scope(None).history_settings,
         active_model_name=None,
         active_context_window=None,
         response_sender_id=team_id,

@@ -112,7 +112,7 @@ def _instances(config: Config, runtime_paths: RuntimePaths) -> list[_Instance]:
     return agent_instances(
         config,
         runtime_paths,
-        [agent_name for agent_name in config.agents if config.resolve_entity(agent_name).automations],
+        [agent_name for agent_name in config.agents if config.resolve_agent(agent_name).automations],
     )
 
 
@@ -235,8 +235,9 @@ class AutomationRunner:
         clock_offset = now - datetime.now(UTC)
         for instance in instances:
             agent_name, _requester_id = instance
-            timezone = config.get_entity_timezone(agent_name)
-            for automation in config.resolve_entity(agent_name).automations:
+            resolved = config.resolve_agent(agent_name)
+            timezone = resolved.timezone
+            for automation in resolved.automations:
                 key = _key(instance, automation.name)
                 enabled.add(key)
                 schedule = (automation.cron, timezone)

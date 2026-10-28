@@ -262,7 +262,7 @@ class ToolRuntimeContext:
             )
             raise ValueError(msg)
         return build_agent_toolkit_worker_target(
-            self.config.resolve_entity(self.agent_name).execution_scope,
+            self.config.resolve_agent(self.agent_name).policy.effective_execution_scope,
             self.agent_name,
             is_private=self.config.get_agent(self.agent_name).private is not None,
             execution_identity=build_execution_identity_from_runtime_context(self),

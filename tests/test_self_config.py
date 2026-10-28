@@ -392,7 +392,7 @@ class TestUpdateOwnConfig:
 
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].tool_names == ["openclaw_compat", "python"]
-            effective = reloaded.resolve_entity("coder").available_tools
+            effective = reloaded.resolve_agent("coder").tools.tool_names
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective

@@ -135,7 +135,7 @@ def resolve_connection_user(
     gateway = tuple(
         name
         for name in usable
-        if config.resolve_entity(name).execution_scope in {"user", "user_agent"}
+        if config.resolve_agent(name).policy.effective_execution_scope in {"user", "user_agent"}
         or config.agents[name].mcp_gateway_shared_credentials
     )
     return ConnectionUserContext(
@@ -167,7 +167,7 @@ def _connection_agent_identity_and_target(
         session_id=None,
     )
     target = build_agent_toolkit_worker_target(
-        config.resolve_entity(agent_name).execution_scope,
+        config.resolve_agent(agent_name).policy.effective_execution_scope,
         agent_name,
         is_private=config.agents[agent_name].private is not None,
         execution_identity=identity,

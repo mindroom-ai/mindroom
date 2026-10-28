@@ -57,6 +57,7 @@ from mindroom.api.openai_streaming_protocol import (
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.config.access import validate_concrete_matrix_user_ids
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.error_handling import needs_provider_key
 from mindroom.failure_text import failure_text
@@ -1024,7 +1025,7 @@ def _build_team(
         execution_identity=execution_identity,
         model_name=models.team_model_name,
         configured_team_name=team_name,
-        timezone=config.get_entity_timezone(team_name),
+        timezone=entity_timezone(config, team_name),
         include_openai_compat_guidance=True,
     )
 

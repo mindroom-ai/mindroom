@@ -1214,8 +1214,9 @@ def _resolve_and_read_workspace_source(context: ToolRuntimeContext, relative_pat
 
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
     agent_config = context.config.get_agent(context.agent_name)
-    if agent_config.private is not None and context.config.resolve_entity(context.agent_name).execution_scope != (
-        "user_agent"
+    if (
+        agent_config.private is not None
+        and context.config.resolve_agent(context.agent_name).policy.effective_execution_scope != "user_agent"
     ):
         msg = "Background-script workers for private agents require private.per=user_agent."
         raise ScriptRunManagerError(msg)

@@ -128,7 +128,7 @@ def built_team(spec: TeamSpec) -> BuiltTeam:
     """Return ``spec`` as a built team under the default history settings in UTC, with no leader middleware or jobs."""
     return BuiltTeam(
         spec=spec,
-        history_settings=Config().resolve_entity(None).history_settings,
+        history_settings=Config().resolve_scope(None).history_settings,
         timezone="UTC",
         leader_middleware=(),
         leader_jobs=None,

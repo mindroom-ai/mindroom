@@ -84,15 +84,15 @@ def test_cold_cache_requires_cheap_model() -> None:
 def test_default_cheap_model_applies_to_agents_without_their_own() -> None:
     """One defaults.cheap_model serves every agent, and an agent's own cheap_model wins."""
     inherited = _config({}, cheap_model=None, default_cheap_model="haiku")
-    assert inherited.get_agent_cheap_model("assistant") == "haiku"
+    assert inherited.resolve_agent("assistant").cheap_model == "haiku"
     own = _config({}, cheap_model="haiku", default_cheap_model="unsized")
-    assert own.get_agent_cheap_model("assistant") == "haiku"
+    assert own.resolve_agent("assistant").cheap_model == "haiku"
 
 
 def test_default_cheap_model_skips_the_agent_already_on_it() -> None:
     """An agent whose model is the default cheap model has no cheaper alternative."""
     config = _config(agent_model="haiku", cheap_model=None, default_cheap_model="haiku")
-    assert config.get_agent_cheap_model("assistant") is None
+    assert config.resolve_agent("assistant").cheap_model is None
     with pytest.raises(ValidationError, match="cold_cache needs a cheap_model"):
         _config({}, agent_model="haiku", cheap_model=None, default_cheap_model="haiku")
 
@@ -104,7 +104,7 @@ def test_default_cheap_model_is_validated() -> None:
     with pytest.raises(ValidationError, match="context window"):
         _config({}, cheap_model=None, default_cheap_model="tiny")
     # Unused by an agent without cold_cache, an ill-fitting default is harmless.
-    assert _config(cheap_model=None, default_cheap_model="tiny").get_agent_cheap_model("assistant") == "tiny"
+    assert _config(cheap_model=None, default_cheap_model="tiny").resolve_agent("assistant").cheap_model == "tiny"
 
 
 @pytest.mark.parametrize(

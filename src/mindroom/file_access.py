@@ -54,7 +54,7 @@ def agent_file_access(config: Config | None, agent_name: str | None) -> FileAcce
     """Resolve one agent's file_access; without an agent the configured default applies, without config ``workspace``."""
     if config is None:
         return "workspace"
-    return config.resolve_entity(agent_name).file_access
+    return config.resolve_scope(agent_name if agent_name in config.agents else None).file_access
 
 
 def resolve_agent_file(

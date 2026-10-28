@@ -40,7 +40,7 @@ def _private_mind(**fields: object) -> AgentConfig:
 
 def test_a_bare_name_enables_a_built_in_with_its_defaults() -> None:
     """`- prompt_curation` is shorthand for the built-in with every default."""
-    (automation,) = _config(mind=_mind(automations=["prompt_curation"])).resolve_entity("mind").automations
+    (automation,) = _config(mind=_mind(automations=["prompt_curation"])).resolve_agent("mind").automations
 
     assert automation.name == "prompt_curation"
     assert automation.cron == "0 4 * * *"
@@ -52,7 +52,7 @@ def test_a_bare_name_enables_a_built_in_with_its_defaults() -> None:
 
 def test_dreaming_runs_nightly_by_default() -> None:
     """`- dreaming` checks at 03:15 and posts in the agent's first room with the agent's model."""
-    (automation,) = _config(mind=_mind(automations=["dreaming"])).resolve_entity("mind").automations
+    (automation,) = _config(mind=_mind(automations=["dreaming"])).resolve_agent("mind").automations
 
     assert automation.name == "dreaming"
     assert (automation.cron, automation.room, automation.model) == ("15 3 * * *", None, None)
@@ -61,7 +61,7 @@ def test_dreaming_runs_nightly_by_default() -> None:
 def test_both_built_ins_can_run_for_one_agent() -> None:
     """Each entry parses into its own built-in by name."""
     entries = ["prompt_curation", {"name": "dreaming", "cron": "0 2 * * *"}]
-    automations = _config(mind=_mind(automations=entries)).resolve_entity("mind").automations
+    automations = _config(mind=_mind(automations=entries)).resolve_agent("mind").automations
 
     assert [(automation.name, automation.cron) for automation in automations] == [
         ("prompt_curation", "0 4 * * *"),
@@ -72,7 +72,7 @@ def test_both_built_ins_can_run_for_one_agent() -> None:
 def test_a_mapping_overrides_fields() -> None:
     """A mapping entry overrides only the fields it sets."""
     entry = {"name": "prompt_curation", "cron": "30 2 * * 1", "room": "personal", "trigger_tokens": 30_000}
-    (automation,) = _config(mind=_mind(automations=[entry])).resolve_entity("mind").automations
+    (automation,) = _config(mind=_mind(automations=[entry])).resolve_agent("mind").automations
 
     assert (automation.cron, automation.room, automation.trigger_tokens) == ("30 2 * * 1", "personal", 30_000)
     assert automation.max_content_loss == 0.05
@@ -88,9 +88,9 @@ def test_eligible_agents_inherit_default_automations() -> None:
         private=_mind(private=AgentPrivateConfig(per="user")),
     )
 
-    assert [automation.name for automation in config.resolve_entity("mind").automations] == ["prompt_curation"]
+    assert [automation.name for automation in config.resolve_agent("mind").automations] == ["prompt_curation"]
     for agent_name in ("opted_out", "mem0", "private"):
-        assert config.resolve_entity(agent_name).automations == []
+        assert config.resolve_agent(agent_name).automations == ()
 
 
 @pytest.mark.parametrize(
@@ -114,7 +114,7 @@ def test_the_personal_rooms_private_agent_can_list_automations() -> None:
     """Each requester's runs post in their personal room, so the agent that owns personal rooms may run automations."""
     config = _personal_rooms_config(mind=_private_mind(automations=["prompt_curation", "dreaming"]))
 
-    assert [entry.name for entry in config.resolve_entity("mind").automations] == ["prompt_curation", "dreaming"]
+    assert [entry.name for entry in config.resolve_agent("mind").automations] == ["prompt_curation", "dreaming"]
 
 
 def test_a_private_agent_other_than_the_personal_rooms_agent_gets_no_automations() -> None:
@@ -123,7 +123,7 @@ def test_a_private_agent_other_than_the_personal_rooms_agent_gets_no_automations
         _personal_rooms_config(mind=_mind(), other=_private_mind(automations=["prompt_curation"]))
     config = _personal_rooms_config(["prompt_curation"], mind=_mind(), other=_private_mind())
 
-    assert config.resolve_entity("other").automations == []
+    assert config.resolve_agent("other").automations == ()
 
 
 def test_a_private_agent_entry_cannot_choose_a_room() -> None:
@@ -140,8 +140,8 @@ def test_the_personal_rooms_private_agent_inherits_defaults_without_a_room() -> 
         shared=_mind(),
     )
 
-    assert [entry.name for entry in config.resolve_entity("mind").automations] == ["prompt_curation"]
-    assert [entry.name for entry in config.resolve_entity("shared").automations] == ["prompt_curation", "dreaming"]
+    assert [entry.name for entry in config.resolve_agent("mind").automations] == ["prompt_curation"]
+    assert [entry.name for entry in config.resolve_agent("shared").automations] == ["prompt_curation", "dreaming"]
 
 
 @pytest.mark.parametrize(
@@ -192,9 +192,7 @@ def test_an_automation_model_must_be_a_configured_model() -> None:
     """A model override names a key of models, both on an agent and in the defaults."""
     models = {"large": ModelConfig(provider="openai", id="test-large")}
     entry = {"name": "prompt_curation", "model": "large"}
-    (automation,) = (
-        Config(agents={"mind": _mind(automations=[entry])}, models=models).resolve_entity("mind").automations
-    )
+    (automation,) = Config(agents={"mind": _mind(automations=[entry])}, models=models).resolve_agent("mind").automations
     assert automation.model == "large"
 
     missing = {"name": "prompt_curation", "model": "missing"}
@@ -207,7 +205,7 @@ def test_an_automation_model_must_be_a_configured_model() -> None:
 def test_a_plugin_automation_parses_with_its_options() -> None:
     """Any other name is an automation a plugin provides; its options are kept for the plugin to read."""
     entry = {"name": "weekly_digest", "cron": "0 9 * * 1", "options": {"target": "digest.md"}}
-    (automation,) = _config(mind=_mind(automations=[entry])).resolve_entity("mind").automations
+    (automation,) = _config(mind=_mind(automations=[entry])).resolve_agent("mind").automations
 
     assert isinstance(automation, PluginAutomation)
     assert automation.options == {"target": "digest.md"}
@@ -225,7 +223,7 @@ def test_entries_given_as_models_keep_their_kind() -> None:
         mind=_mind(automations=[DreamingAutomation(), PluginAutomation(name="weekly_digest", cron="0 9 * * 1")]),
     )
 
-    assert [type(entry) for entry in config.resolve_entity("mind").automations] == [
+    assert [type(entry) for entry in config.resolve_agent("mind").automations] == [
         DreamingAutomation,
         PluginAutomation,
     ]
@@ -239,7 +237,7 @@ def test_a_saved_config_loads_back_with_the_same_automations() -> None:
 
     again = Config.model_validate(config.authored_model_dump())
 
-    assert again.resolve_entity("mind").automations == config.resolve_entity("mind").automations
+    assert again.resolve_agent("mind").automations == config.resolve_agent("mind").automations
 
 
 def test_inherited_defaults_are_filtered_entry_by_entry() -> None:
@@ -251,9 +249,9 @@ def test_inherited_defaults_are_filtered_entry_by_entry() -> None:
         private=_mind(private=AgentPrivateConfig(per="user")),
     )
 
-    assert [entry.name for entry in config.resolve_entity("mind").automations] == ["dreaming", "weekly_digest"]
-    assert [entry.name for entry in config.resolve_entity("mem0").automations] == ["weekly_digest"]
-    assert config.resolve_entity("private").automations == []
+    assert [entry.name for entry in config.resolve_agent("mind").automations] == ["dreaming", "weekly_digest"]
+    assert [entry.name for entry in config.resolve_agent("mem0").automations] == ["weekly_digest"]
+    assert config.resolve_agent("private").automations == ()
 
 
 def test_a_plugin_automation_can_be_listed_for_an_agent_without_file_memory() -> None:
@@ -264,6 +262,6 @@ def test_a_plugin_automation_can_be_listed_for_an_agent_without_file_memory() ->
         automations=[{"name": "weekly_digest", "cron": "0 9 * * 1"}],
     )
 
-    (automation,) = _config(mem0=agent).resolve_entity("mem0").automations
+    (automation,) = _config(mem0=agent).resolve_agent("mem0").automations
 
     assert automation.name == "weekly_digest"

@@ -421,7 +421,7 @@ def _conversation_connect_context(
         requester_id=requester_id,
     )
     worker_target = build_agent_toolkit_worker_target(
-        config.resolve_entity(agent_name).execution_scope,
+        config.resolve_agent(agent_name).policy.effective_execution_scope,
         agent_name,
         is_private=config.get_agent(agent_name).private is not None,
         execution_identity=identity,

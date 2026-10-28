@@ -21,6 +21,7 @@ from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     tool_may_require_approval,
 )
+from mindroom.config.resolution import memory_backend, show_tool_calls
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
@@ -59,7 +60,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agent_tools import AgentTools, resolve_agent_tools, turn_room_flags
+from mindroom.tool_system.agent_tools import AgentTools, turn_room_flags
 from mindroom.tool_system.agno_toolkits import (
     adapt_function,
     adapt_toolkit,
@@ -112,6 +113,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig, FileAccess
+    from mindroom.config.resolution import ResolvedAgent
     from mindroom.delegation.state import SubagentPersona
     from mindroom.hooks import HookRegistryPlugin
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -243,19 +245,12 @@ class _AgentRoleContext:
         return [path.relative_to(workspace_root).as_posix() for path in paths if path.is_relative_to(workspace_root)]
 
 
-def show_tool_calls_for_agent(config: Config, agent_name: str) -> bool:
-    """Resolve tool-call visibility for one agent from current config."""
-    agent_config = config.agents.get(agent_name)
-    if agent_config and agent_config.show_tool_calls is not None:
-        return agent_config.show_tool_calls
-    return config.defaults.show_tool_calls
-
-
-def _uses_default_mind_workspace_scaffold(agent_name: str, agent_config: AgentConfig) -> bool:
+def _uses_default_mind_workspace_scaffold(config: Config, agent_name: str) -> bool:
+    agent_config = config.agents[agent_name]
     return (
         agent_name == _DEFAULT_MIND_AGENT_NAME
         and agent_config.private is None
-        and agent_config.memory_backend == "file"
+        and memory_backend(config, agent_name) == "file"
         and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
     )
 
@@ -271,15 +266,14 @@ def _ensure_default_mind_workspace(storage_path: Path) -> None:
 
 def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
     """Materialize built-in starter workspaces under the active runtime storage root."""
-    for agent_name, agent_config in config.agents.items():
-        if _uses_default_mind_workspace_scaffold(agent_name, agent_config):
+    for agent_name in config.agents:
+        if _uses_default_mind_workspace_scaffold(config, agent_name):
             _ensure_default_mind_workspace(storage_path)
 
 
 def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage_path: Path) -> bool:
     """Return True when it is safe to overlap agent construction with file-memory reads."""
-    agent_config = config.get_agent(agent_name)
-    if not _uses_default_mind_workspace_scaffold(agent_name, agent_config):
+    if not _uses_default_mind_workspace_scaffold(config, agent_name):
         return True
     memory_path = agent_workspace_root_path(storage_path, agent_name) / "MEMORY.md"
     return memory_path.is_file()
@@ -573,7 +567,7 @@ def _file_mode_knowledge_instruction_block(
         "Available file-only sources:",
     ]
     source_lines: list[str] = []
-    for base_id in config.resolve_entity(agent_name).knowledge_base_ids:
+    for base_id in config.resolve_agent(agent_name).knowledge_base_ids:
         base_config = config.get_knowledge_base_config(base_id)
         if base_config.mode != "files":
             continue
@@ -998,10 +992,10 @@ def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -
 
 
 @timed("system_prompt_assembly.agent_create.tool_registry_sync")
-def _resolve_agent_tools(config: Config, runtime_paths: constants.RuntimePaths, agent_name: str) -> AgentTools:
-    """Sync the registry with the config's MCP servers, then resolve the toolkits the agent may use."""
+def _resolve_agent_tools(config: Config, runtime_paths: constants.RuntimePaths, agent: ResolvedAgent) -> AgentTools:
+    """Sync the registry with the config's MCP servers, then return the toolkits the resolved agent may use."""
     ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
-    return resolve_agent_tools(config, agent_name)
+    return AgentTools(config=config, facts=agent.tools)
 
 
 @timed("system_prompt_assembly.agent_create.hook_bridge")
@@ -1591,7 +1585,7 @@ def _build_agent_instructions(
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
-    if not show_tool_calls_for_agent(config, agent_name):
+    if not show_tool_calls(config, agent_name):
         instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
 
     if include_interactive_questions:
@@ -1780,7 +1774,6 @@ def create_agent(
     agent_config = config.get_agent(agent_name)
     if create_runtime_state:
         ensure_default_agent_workspaces(config, runtime_paths.storage_root)
-    defaults = config.defaults
 
     model_name = model.model_name
     provider = _build_agent_model_provider(
@@ -1804,7 +1797,8 @@ def create_agent(
     # Loaded before the toolkits are resolved and placed, which read plugin tool metadata, and before the skills,
     # which include the skills of the plugins this config loads.
     plugins = _load_agent_plugins(config, runtime_paths)
-    agent_tools = _resolve_agent_tools(config, runtime_paths, agent_name)
+    agent = config.resolve_agent(agent_name)
+    agent_tools = _resolve_agent_tools(config, runtime_paths, agent)
     tool_function_filter, disabled_tool_names = persona_tool_policy(
         persona_tools,
         lambda: caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth),
@@ -1836,7 +1830,7 @@ def create_agent(
     prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
     # The graph is one more source of the knowledge search, which agents call far more than search_graph.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
-    if config.agent_uses_knowledge_graph(agent_name) and (persona is None or persona.kept_knowledge is None):
+    if agent.knowledge_graph and (persona is None or persona.kept_knowledge is None):
         from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415
 
         knowledge = with_knowledge_graph(knowledge, agent_name, config, runtime_paths, execution_identity)
@@ -1952,9 +1946,9 @@ def create_agent(
         persona=persona_prompt,
         role=role_context.role,
         instructions=tuple(instructions),
-        markdown=agent_config.markdown if agent_config.markdown is not None else defaults.markdown,
+        markdown=agent.markdown,
         tool_instructions=tool_assembly.instructions,
-        turn_context=render_session_context(config, config.get_entity_timezone(agent_name)),
+        turn_context=render_session_context(config, agent.timezone),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
         knowledge_block=None if enabled_knowledge is None else enabled_knowledge.prompt_block(),
     )
@@ -2032,6 +2026,5 @@ __all__ = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
-    "show_tool_calls_for_agent",
     "team_background_jobs",
 ]

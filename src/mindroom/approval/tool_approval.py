@@ -17,6 +17,7 @@ from mindroom.approval.manager import (
     ApprovalActionResult,
     ToolApprovalTransportError,
 )
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import ModuleType
 
-    from mindroom.config.approval import ApprovalRuleConfig
     from mindroom.config.main import Config
     from mindroom.event_journal import (
         ScheduledApprovalArmState,
@@ -156,8 +156,19 @@ def _load_script_module(
     return module, resolved_path
 
 
+# The approved-egress switch's tool asks before each network grant unless an authored rule already requires approval.
+_APPROVED_EGRESS_RULE = ApprovalRuleConfig(match="request_network_access", action="require_approval")
+
+
 def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
-    return next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+    rule = next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+    if (
+        config.approved_egress_enabled
+        and fnmatchcase(tool_name, _APPROVED_EGRESS_RULE.match)
+        and (rule is None or rule.action != "require_approval")
+    ):
+        return _APPROVED_EGRESS_RULE
+    return rule
 
 
 def approval_gated(function: ToolFunction) -> bool:

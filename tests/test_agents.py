@@ -954,7 +954,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.resolve_entity("summary").available_tools == [
+    assert config.resolve_agent("summary").tools.tool_names == (
         "openclaw_compat",
         "shell",
         "coding",
@@ -965,7 +965,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
         "matrix_message",
         "attachments",
         "matrix_room",
-    ]
+    )
 
 
 def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
@@ -979,7 +979,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.resolve_entity("summary").available_tools == [
+    assert config.resolve_agent("summary").tools.tool_names == (
         "browser",
         "openclaw_compat",
         "shell",
@@ -991,7 +991,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "matrix_message",
         "attachments",
         "matrix_room",
-    ]
+    )
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1007,7 +1007,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.resolve_entity("summary").available_tools
+    assert looked_up_tools == list(config.resolve_agent("summary").tools.tool_names)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -2067,7 +2067,7 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.resolve_entity("general").private_knowledge_base_id
+    private_base_id = config.resolve_agent("general").policy.private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
@@ -2263,7 +2263,7 @@ def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.resolve_entity("general").private_knowledge_base_id
+    private_base_id = config.resolve_agent("general").policy.private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert not knowledge_link.exists()
@@ -2613,7 +2613,7 @@ def test_openclaw_compat_implies_matrix_message_tool() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
@@ -2628,7 +2628,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -2638,8 +2638,8 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
-    assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
+    effective_tools = config.resolve_agent("summary").tools.tool_names
+    assert effective_tools == ("matrix_message", "attachments", "matrix_room")
 
 
 def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
@@ -2648,7 +2648,7 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("attachments") == 1
 
 
@@ -5148,7 +5148,7 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
         },
     )
 
-    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
+    private_base_id = config.resolve_agent("mind").policy.private_knowledge_base_id
     assert private_base_id is not None
     assert config.get_knowledge_base_config(private_base_id).path == "."
 
@@ -5288,9 +5288,9 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
         },
     )
 
-    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
+    private_base_id = config.resolve_agent("mind").policy.private_knowledge_base_id
     assert private_base_id is not None
-    assert config.resolve_entity("mind").knowledge_base_ids == ["company_docs", private_base_id]
+    assert config.resolve_agent("mind").knowledge_base_ids == ("company_docs", private_base_id)
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
 
@@ -5309,8 +5309,8 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
         },
     )
 
-    assert config.resolve_entity("mind").private_knowledge_base_id is None
-    assert config.resolve_entity("mind").knowledge_base_ids == []
+    assert config.resolve_agent("mind").policy.private_knowledge_base_id is None
+    assert config.resolve_agent("mind").knowledge_base_ids == ()
 
 
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:

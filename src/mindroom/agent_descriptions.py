@@ -40,7 +40,7 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if agent_config.role:
         parts.append(f"- {agent_config.role}")
 
-    effective_tools = config.resolve_entity(agent_name).available_tools
+    effective_tools = config.resolve_agent(agent_name).tools.tool_names
     if effective_tools:
         parts.append(f"- Tools: {', '.join(effective_tools)}")
 

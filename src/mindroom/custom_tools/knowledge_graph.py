@@ -104,7 +104,7 @@ class KnowledgeGraphTools(Toolkit):
         self._config = config
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
-        self._edits = config.agent_edits_knowledge_graph(agent_name)
+        self._edits = config.resolve_agent(agent_name).knowledge_graph_edits
         edits = (
             [
                 self.delete_graph_fact,

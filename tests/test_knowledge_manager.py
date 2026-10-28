@@ -333,7 +333,7 @@ async def test_only_bases_whose_files_workers_write_limit_the_vectors_a_search_l
         runtime_paths,
     )
     identity = _identity("@alice:localhost")
-    private_base_id = config.resolve_entity("helper").private_knowledge_base_id
+    private_base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert private_base_id is not None
     private_key = resolve_published_index_key(
         private_base_id,
@@ -710,7 +710,7 @@ async def test_knowledge_binding_failure_is_not_reported_as_initializing(tmp_pat
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     with pytest.raises(ValueError, match="requires an active execution identity"):
         get_published_index(base_id, config=config, runtime_paths=runtime_paths)
@@ -3758,7 +3758,7 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -3843,7 +3843,7 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -8082,7 +8082,7 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity_a = _identity("@alice:localhost")
     identity_b = _identity("@bob:localhost")
@@ -8154,7 +8154,7 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     identity = _identity("@alice:localhost")
     key = resolve_published_index_key(
@@ -8226,7 +8226,7 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     max_entries = max(
         knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES,
@@ -8303,7 +8303,7 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
         ),
         runtime_paths,
     )
-    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    base_id = config.resolve_agent("helper").policy.private_knowledge_base_id
     assert base_id is not None
     count = knowledge_registry._MAX_PRIVATE_PUBLISHED_INDEXES + 10
 

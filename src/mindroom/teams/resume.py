@@ -19,6 +19,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
+from mindroom.config.resolution import entity_timezone
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
@@ -366,7 +367,7 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             model_name=model_name,
             configured_team_name=team_name,
-            timezone=config.get_entity_timezone(configured_team_name),
+            timezone=entity_timezone(config, configured_team_name),
         )
         toolkit_owners = tool_owners_by_agent(*members.builds)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)

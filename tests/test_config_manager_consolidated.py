@@ -28,6 +28,7 @@ from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
@@ -724,8 +725,8 @@ class TestConsolidatedConfigManager:
         assert "not_a_field" in result
         assert config_path.read_bytes() == original
 
-    def test_manage_config_preserves_tool_overrides_and_runtime_overlay(self, tmp_path: Path) -> None:
-        """Unrelated patches must preserve authored overrides without persisting runtime overlays."""
+    def test_manage_config_preserves_tool_overrides_without_saving_approved_egress(self, tmp_path: Path) -> None:
+        """Unrelated patches must preserve authored overrides without saving the approved-egress switch's tool or rule."""
         config_path = tmp_path / "config.yaml"
         write_config_yaml(
             Config(
@@ -1481,7 +1482,7 @@ class TestConsolidatedConfigManager:
 
             config = load_config_yaml(config_path)
             assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
-            effective = config.resolve_entity("test_agent").available_tools
+            effective = config.resolve_agent("test_agent").tools.tool_names
             assert effective[0] == "openclaw_compat"
             assert "shell" in effective
             assert "matrix_message" in effective
@@ -1657,7 +1658,7 @@ class TestConsolidatedConfigManager:
         assert config.defaults.tool_names == ["scheduler", "shell"]
         assert config.agents["code"].tool_names == ["file", "shell"]
 
-        resolved = config.resolve_entity("code").tool_configs
+        resolved = config.resolve_agent("code").tools.authored
         assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
         resolved_shell = next(entry for entry in resolved if entry.name == "shell")
         assert resolved_shell.tool_config_overrides == {
@@ -1687,7 +1688,7 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = next(entry for entry in config.resolve_entity("code").tool_configs if entry.name == "clickup")
+        resolved = next(entry for entry in config.resolve_agent("code").tools.authored if entry.name == "clickup")
         assert resolved.tool_config_overrides == {}
 
     def test_tool_approval_null_section_uses_default_config(self) -> None:
@@ -1697,31 +1698,6 @@ class TestConsolidatedConfigManager:
         assert config.tool_approval.default == "auto_approve"
         assert config.tool_approval.timeout_days == 7.0
         assert config.tool_approval.rules == []
-
-    def test_runtime_approved_egress_flag_adds_tool_and_approval_rule(self) -> None:
-        """Runtime-managed approved egress should not require editing authored config."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=Path("config.yaml"),
-            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
-        )
-
-        config = Config.validate_with_runtime(
-            {
-                "defaults": {"tools": ["scheduler"]},
-                "tool_approval": {
-                    "rules": [
-                        {"match": "run_shell_command", "action": "require_approval"},
-                    ],
-                },
-            },
-            runtime_paths,
-        )
-
-        assert config.defaults.tool_names == ["scheduler", "approved_egress"]
-        assert [rule.model_dump(exclude_none=True) for rule in config.tool_approval.rules] == [
-            {"match": "request_network_access", "action": "require_approval"},
-            {"match": "run_shell_command", "action": "require_approval"},
-        ]
 
     @pytest.mark.parametrize(
         ("authored_defaults", "enabled", "expected_tools"),
@@ -1741,7 +1717,7 @@ class TestConsolidatedConfigManager:
         enabled: bool,
         expected_tools: list[str],
     ) -> None:
-        """The runtime overlay adds egress without changing default-tool inheritance."""
+        """The approved-egress switch adds its tool without changing default-tool inheritance."""
         data: dict[str, object] = {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
@@ -1758,55 +1734,8 @@ class TestConsolidatedConfigManager:
 
         config = Config.validate_with_runtime(data, runtime_paths)
 
-        assert config.resolve_entity("assistant").available_tools == expected_tools
-        assert config.resolve_entity("standalone").available_tools == []
-
-    def test_runtime_approved_egress_flag_keeps_authored_dump_unmodified(self) -> None:
-        """Runtime-managed approved egress should not become persisted authored config."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=Path("config.yaml"),
-            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
-        )
-
-        config = Config.validate_with_runtime(
-            {
-                "defaults": {"tools": ["scheduler"]},
-            },
-            runtime_paths,
-        )
-        empty_config = Config.validate_with_runtime({}, runtime_paths)
-
-        assert config.defaults.tool_names == ["scheduler", "approved_egress"]
-        assert config.authored_model_dump()["defaults"]["tools"] == ["scheduler"]
-        assert "tool_approval" not in config.authored_model_dump()
-        assert empty_config.defaults.tool_names == ["scheduler", "approved_egress"]
-        assert empty_config.authored_model_dump() == {}
-
-    def test_runtime_approved_egress_flag_forces_approval_ahead_of_script_rules(self) -> None:
-        """Runtime-managed approved egress must require Matrix approval even with authored scripts."""
-        runtime_paths = resolve_runtime_paths(
-            config_path=Path("config.yaml"),
-            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
-        )
-
-        config = Config.validate_with_runtime(
-            {
-                "tool_approval": {
-                    "rules": [
-                        {"match": "*", "script": "approval.py"},
-                    ],
-                },
-            },
-            runtime_paths,
-        )
-
-        assert [rule.model_dump(exclude_none=True) for rule in config.tool_approval.rules] == [
-            {"match": "request_network_access", "action": "require_approval"},
-            {"match": "*", "script": "approval.py"},
-        ]
-        assert config.authored_model_dump()["tool_approval"]["rules"] == [
-            {"match": "*", "script": "approval.py"},
-        ]
+        assert list(config.resolve_agent("assistant").tools.tool_names) == expected_tools
+        assert config.resolve_agent("standalone").tools.tool_names == ()
 
     def test_tool_output_auto_save_threshold_is_configurable_in_defaults(self) -> None:
         """The automatic tool-output save threshold should be a validated config setting."""
@@ -1904,7 +1833,9 @@ class TestConsolidatedConfigManager:
             _runtime_paths(),
         )
 
-        resolved = {entry.name: entry.tool_config_overrides for entry in config.resolve_entity("code").tool_configs}
+        resolved = {
+            entry.name: entry.tool_config_overrides for entry in resolve_agent_tools(config, "code").candidates()
+        }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
         assert resolved["coding"] == {}
@@ -2275,7 +2206,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code", worker_scope="user_agent"),
             },
         )
-        assert config.resolve_entity("code").execution_scope == "user_agent"
+        assert config.resolve_agent("code").policy.effective_execution_scope == "user_agent"
 
     def test_worker_scope_falls_back_to_defaults(self) -> None:
         """Worker scope should inherit from defaults when agent config omits it."""
@@ -2285,7 +2216,7 @@ class TestAgentWorkerScope:
                 "code": AgentConfig(display_name="Code"),
             },
         )
-        assert config.resolve_entity("code").execution_scope == "user"
+        assert config.resolve_agent("code").policy.effective_execution_scope == "user"
 
 
 class TestWorkerGrantableCredentials:

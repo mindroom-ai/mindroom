@@ -1467,7 +1467,7 @@ def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
         # Plugin paths let the child register plugin tools; their settings stay out of the process running tool code.
         include = {"plugins": {"__all__": {"path", "enabled"}}, "defaults": default_fields}
         if ToolManagedInitArg.FILE_ACCESS in builtin_metadata.managed_init_args:
-            # The injected file_access resolves the routing agent through config.resolve_entity().
+            # The injected file_access resolves the routing agent through config.resolve_scope().
             default_fields.add("file_access")
             include["agents"] = {"__all__": {"display_name", "file_access"}}
     payload = config.model_dump(

@@ -85,13 +85,14 @@ def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePa
     """
     if agent_name not in config.agents:
         return None
-    if _EGRESS_TOOL_NAME not in _agent_tool_names(config, agent_name) or not _runs_commands_in_a_worker(
+    resolved = config.resolve_agent(agent_name)
+    if _EGRESS_TOOL_NAME not in resolved.tools.tool_names or not _runs_commands_in_a_worker(
         config,
         agent_name,
         runtime_paths,
     ):
         return None
-    execution_scope = config.resolve_entity(agent_name).execution_scope
+    execution_scope = resolved.policy.effective_execution_scope
     return "unscoped" if execution_scope is None else execution_scope
 
 
@@ -103,19 +104,12 @@ def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime
     """
     if agent_name not in config.agents:
         return False
-    tools = _agent_tool_names(config, agent_name)
+    tools = config.resolve_agent(agent_name).tools.tool_names
     return (
         _EGRESS_TOOL_NAME in tools
         and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(tools)
         and not _runs_commands_in_a_worker(config, agent_name, runtime_paths)
     )
-
-
-def _agent_tool_names(config: Config, agent_name: str) -> list[str]:
-    # Deferred: the sandbox proxy imports this module, and agent tool resolution imports the sandbox proxy.
-    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
-
-    return resolve_agent_tools(config, agent_name).tool_names
 
 
 def _runs_commands_in_a_worker(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:

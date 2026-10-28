@@ -933,7 +933,7 @@ def _validate_resolved_authority(
         runtime_paths=context.runtime_paths,
     )
     expected_tool_worker_target = build_agent_toolkit_worker_target(
-        live_config.resolve_entity(context.agent_name).execution_scope,
+        live_config.resolve_agent(context.agent_name).policy.effective_execution_scope,
         context.agent_name,
         is_private=live_config.get_agent(context.agent_name).private is not None,
         execution_identity=durable_identity,

@@ -279,7 +279,7 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
         placement=tool_placement(context.runtime_paths),
         config=context.config,
         runtime_paths=context.runtime_paths,
-        tool_config_overrides=context.config.resolve_entity("general").authored_tool_configs[0].tool_config_overrides,
+        tool_config_overrides=context.config.resolve_agent("general").tools.authored[0].tool_config_overrides,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
     assert isinstance(toolkit, DynamicWorkflowTools)

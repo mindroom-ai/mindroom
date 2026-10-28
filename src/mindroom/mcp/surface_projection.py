@@ -240,7 +240,7 @@ def _agent_function_surface_snapshot(
     configured_surface: tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]],
 ) -> MCPFunctionSurfaceSnapshot:
     """Snapshot one configured agent and credential surface from supplied runtime state."""
-    agent_execution_scope = context.config.resolve_entity(agent_name).execution_scope
+    agent_execution_scope = context.config.resolve_agent(agent_name).policy.effective_execution_scope
     local_function_names, configured_mcp_tool_configs = configured_surface
     server_function_sources: list[tuple[str, tuple[frozenset[str], ...]]] = []
     for server_id in sorted(configured_mcp_tool_configs):

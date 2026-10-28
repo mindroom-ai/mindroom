@@ -142,7 +142,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
         process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "false"},
     )
     reloaded = load_config(disabled_paths)
-    assert reloaded.resolve_entity("research").available_tools == defaults.get("tools", ["scheduler"])
+    assert reloaded.resolve_agent("research").tools.tool_names == tuple(defaults.get("tools", ["scheduler"]))
 
 
 @pytest.mark.parametrize("writer", ["persist", "structured", "raw"])

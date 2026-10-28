@@ -363,8 +363,8 @@ def _build_oauth_onboarding_guidance(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    previous_tools: list[str],
-    updated_tools: list[str],
+    previous_tools: Sequence[str],
+    updated_tools: Sequence[str],
     tool_metadata: dict[str, ToolMetadata],
 ) -> str:
     """Return target-scoped connect links for newly enabled generic OAuth providers."""
@@ -404,7 +404,7 @@ def _build_oauth_onboarding_guidance(
     )
     agent = config.get_agent(agent_name)
     worker_target = build_agent_toolkit_worker_target(
-        config.resolve_entity(agent_name).execution_scope,
+        config.resolve_agent(agent_name).policy.effective_execution_scope,
         agent_name,
         is_private=agent.private is not None,
         execution_identity=target_identity,
@@ -454,8 +454,8 @@ def _oauth_onboarding_guidance(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    previous_tools: list[str],
-    updated_tools: list[str],
+    previous_tools: Sequence[str],
+    updated_tools: Sequence[str],
     tool_metadata: dict[str, ToolMetadata],
 ) -> str:
     """Build optional OAuth guidance without changing a successful config write into an error."""
@@ -1243,7 +1243,7 @@ class ConfigManagerTools(Toolkit):
                 self.runtime_paths,
                 agent_name,
                 [],
-                persisted_config.resolve_entity(agent_name).available_tools,
+                persisted_config.resolve_agent(agent_name).tools.tool_names,
                 tool_metadata,
             )
 
@@ -1288,7 +1288,7 @@ class ConfigManagerTools(Toolkit):
                 return f"Error: Agent '{agent_name}' not found. Use manage_agent with operation='create' to create it."
 
             agent = config.agents[agent_name]
-            previous_tools = config.resolve_entity(agent_name).available_tools
+            previous_tools = config.resolve_agent(agent_name).tools.tool_names
 
             # Validate tools if provided
             if tools is not None:
@@ -1356,7 +1356,7 @@ class ConfigManagerTools(Toolkit):
                 self.runtime_paths,
                 agent_name,
                 previous_tools,
-                persisted_config.resolve_entity(agent_name).available_tools,
+                persisted_config.resolve_agent(agent_name).tools.tool_names,
                 tool_metadata,
             )
 

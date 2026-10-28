@@ -20,6 +20,7 @@ from mindroom import ai_runtime
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -861,7 +862,7 @@ def _team_turn(
         reason_prefix=reason_prefix,
         holder=_TeamTurnHolder(members=team_members),
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
-        timezone=config.get_entity_timezone(ctx.entity_label),
+        timezone=entity_timezone(config, ctx.entity_label),
     )
 
 

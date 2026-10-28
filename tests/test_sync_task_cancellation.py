@@ -2706,6 +2706,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.plugins = []
         config.event_journal = MagicMock()
         config.calls = Config().calls
+        config.defaults = Config().defaults
         config.mindroom_user = None
         config.personal_agent_instance.return_value = None
         config.get_all_configured_rooms.return_value = []

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
+from mindroom.config.resolution import entity_timezone
 from mindroom.constants import resolve_config_relative_path
 from mindroom.embeddings.errors import classified_embedder_error
 from mindroom.logging_config import get_logger
@@ -1057,7 +1058,7 @@ def append_agent_daily_file_memory(
         agent_name=agent_name,
         execution_identity=execution_identity,
     )
-    current_date = datetime.now(ZoneInfo(config.get_entity_timezone(agent_name))).date().isoformat()
+    current_date = datetime.now(ZoneInfo(entity_timezone(config, agent_name))).date().isoformat()
     daily_relative_path = f"{FILE_MEMORY_DAILY_DIR}/{current_date}.md"
     scope_user_id = agent_scope_user_id(agent_name)
     result = _append_scope_memory_entry(

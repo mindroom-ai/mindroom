@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -23,12 +22,8 @@ if TYPE_CHECKING:
 
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
     """Freeze the actor's execution scope and file access without constructing tools."""
-    policy = resolve_agent_policy_from_data(
-        agent_name,
-        config.agents[agent_name],
-        default_worker_scope=config.defaults.worker_scope,
-    )
-    return {"scope": policy.effective_execution_scope, "file_access": config.resolve_entity(agent_name).file_access}
+    agent = config.resolve_agent(agent_name)
+    return {"scope": agent.policy.effective_execution_scope, "file_access": agent.file_access}
 
 
 def toolkit_authority(snapshot: Mapping[str, Any], toolkit: Toolkit) -> dict[str, Any]:
@@ -89,7 +84,7 @@ def locally_allowed(
         return False
     # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.
     edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
-    if edits_graph and not config.agent_edits_knowledge_graph(owner.agent_name):
+    if edits_graph and not config.resolve_agent(owner.agent_name).knowledge_graph_edits:
         return False
     return _configured_tool_allowed(config, entry, tool_name, origin, construction)
 

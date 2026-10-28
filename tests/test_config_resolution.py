@@ -1,4 +1,4 @@
-"""Behavioral tests for `ResolvedEntityView`, the per-entity resolved config API."""
+"""Behavioral tests for the resolved per-entity config records: `resolve_scope`, `resolve_entity`, `resolve_agent`."""
 # ruff: noqa: D103
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from mindroom.config.models import (
     ModelConfig,
     ToolConfigEntry,
 )
+from mindroom.config.resolution import ResolvedAgent, ResolvedEntity
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -93,8 +94,8 @@ def test_history_settings_resolution() -> None:
     assert config.resolve_entity("overriding_agent").history_settings.max_tool_calls_from_history == 3
     assert config.resolve_entity("overriding_team").history_settings.policy == HistoryPolicy(mode="messages", limit=11)
     assert config.resolve_entity("overriding_team").history_settings.max_tool_calls_from_history == 9
-    for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
-        settings = config.resolve_entity(inheriting_scope).history_settings
+    for inheriting_scope in ("inheriting_agent", "inheriting_team", ROUTER_AGENT_NAME, None):
+        settings = config.resolve_scope(inheriting_scope).history_settings
         assert settings.policy == HistoryPolicy(mode="runs", limit=4)
         assert settings.max_tool_calls_from_history == 9
 
@@ -117,7 +118,7 @@ def test_compaction_resolution() -> None:
     assert disabled.timeout_seconds == 420.0
 
     for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
-        inherited = config.resolve_entity(inheriting_scope).history_settings.compaction_config
+        inherited = config.resolve_scope(inheriting_scope).history_settings.compaction_config
         assert inherited == CompactionConfig(
             enabled=False,
             threshold_tokens=12_000,
@@ -127,7 +128,7 @@ def test_compaction_resolution() -> None:
             timeout_seconds=420.0,
         )
     for scope in ("overriding_agent", "overriding_team", "inheriting_agent", "inheriting_team", None):
-        assert config.resolve_entity(scope).history_settings.has_authored_compaction_config is True
+        assert config.resolve_scope(scope).history_settings.has_authored_compaction_config is True
 
 
 def test_memory_resolution() -> None:
@@ -139,9 +140,9 @@ def test_memory_resolution() -> None:
     assert overridden_search.include == ["notes/**/*.md"]
 
     for inheriting_scope in ("inheriting_agent", "overriding_team", ROUTER_AGENT_NAME, None):
-        assert config.resolve_entity(inheriting_scope).memory_backend == "none"
-        assert config.resolve_entity(inheriting_scope).memory_search.mode == "keyword"
-        assert config.resolve_entity(inheriting_scope).memory_search.include == ["notes/**/*.md"]
+        assert config.resolve_scope(inheriting_scope).memory_backend == "none"
+        assert config.resolve_scope(inheriting_scope).memory_search.mode == "keyword"
+        assert config.resolve_scope(inheriting_scope).memory_search.include == ["notes/**/*.md"]
 
 
 def test_model_name_resolution() -> None:
@@ -151,52 +152,48 @@ def test_model_name_resolution() -> None:
     assert config.resolve_entity("inheriting_agent").model_name == "default"
     assert config.resolve_entity("overriding_team").model_name == "default"
     assert config.resolve_entity(ROUTER_AGENT_NAME).model_name == "default"
-    with pytest.raises(ValueError, match="defaults-only scope has no authored model"):
-        _ = config.resolve_entity(None).model_name
+    # The defaults scope of an ad hoc team has no authored model.
+    assert not isinstance(config.resolve_scope(None), ResolvedEntity)
 
 
 def test_tool_resolution() -> None:
     config = _representative_config()
-    view = config.resolve_entity("overriding_agent")
+    tools = config.resolve_agent("overriding_agent").tools
 
-    assert view.available_tools == Config.expand_tool_names(["calculator", "shell"])
-    assert [entry.name for entry in view.tool_configs] == (
-        Config.expand_tool_names(["calculator"]) + Config.expand_tool_names(["shell"])
-    )
-    shell_entry = next(entry for entry in view.tool_configs if entry.name == "shell")
+    assert tools.tool_names == tuple(Config.expand_tool_names(["calculator", "shell"]))
+    assert [entry.name for entry in tools.authored] == ["calculator", "shell"]
+    shell_entry = next(entry for entry in tools.authored if entry.name == "shell")
     assert shell_entry.defer is True
     assert shell_entry.initial is True
     assert shell_entry.tool_config_overrides == {"shell_path_prepend": ["/run/wrappers/bin"]}
+    assert [entry.name for entry in tools.authored if entry.defer] == ["shell"]
+    assert "shell" not in tools.scope_incompatible
 
-    facts = resolve_agent_tools(config, "overriding_agent").facts
-    assert [entry.name for entry in facts.authored if entry.defer] == ["shell"]
     # The agent's toolkits receive its authored agent-only list joined into the tool's string setting.
     candidates = {entry.name: entry for entry in resolve_agent_tools(config, "overriding_agent").candidates()}
     assert candidates["shell"].tool_config_overrides == {"shell_path_prepend": "/run/wrappers/bin"}
     assert candidates["calculator"].tool_config_overrides == {}
-    assert "shell" not in facts.scope_incompatible
 
-    inheriting = config.resolve_entity("inheriting_agent")
-    assert inheriting.available_tools == []
-    assert inheriting.tool_configs == []
-    assert not any(entry.defer for entry in resolve_agent_tools(config, "inheriting_agent").facts.authored)
+    inheriting = config.resolve_agent("inheriting_agent").tools
+    assert inheriting.tool_names == ()
+    assert inheriting.authored == ()
 
 
 def test_scope_resolution() -> None:
     config = _representative_config()
 
-    assert config.resolve_entity("overriding_agent").execution_scope == "user_agent"
-    assert config.resolve_entity("overriding_agent").scope_label == "worker_scope=user_agent"
-    assert config.resolve_entity("inheriting_agent").execution_scope is None
-    assert config.resolve_entity("inheriting_agent").scope_label == "unscoped"
+    assert config.resolve_agent("overriding_agent").policy.effective_execution_scope == "user_agent"
+    assert config.resolve_agent("overriding_agent").policy.scope_label == "worker_scope=user_agent"
+    assert config.resolve_agent("inheriting_agent").policy.effective_execution_scope is None
+    assert config.resolve_agent("inheriting_agent").policy.scope_label == "unscoped"
 
 
 def test_knowledge_resolution() -> None:
     config = _representative_config()
 
-    assert config.resolve_entity("overriding_agent").knowledge_base_ids == ["engineering_docs"]
-    assert config.resolve_entity("inheriting_agent").knowledge_base_ids == []
-    assert config.resolve_entity("overriding_agent").private_knowledge_base_id is None
+    assert config.resolve_agent("overriding_agent").knowledge_base_ids == ("engineering_docs",)
+    assert config.resolve_agent("inheriting_agent").knowledge_base_ids == ()
+    assert config.resolve_agent("overriding_agent").policy.private_knowledge_base_id is None
 
 
 def test_unauthored_compaction_reports_not_authored() -> None:
@@ -213,38 +210,37 @@ def test_unauthored_compaction_reports_not_authored() -> None:
     )
 
     assert [
-        config.resolve_entity(scope).history_settings.has_authored_compaction_config
+        config.resolve_scope(scope).history_settings.has_authored_compaction_config
         for scope in ("plain_agent", "compacting_agent", None)
     ] == [False, True, False]
 
 
-def test_resolve_entity_returns_a_fresh_view_per_call() -> None:
+def test_each_resolution_returns_a_fresh_record() -> None:
     config = _representative_config()
 
-    assert config.resolve_entity("overriding_agent") is not config.resolve_entity("overriding_agent")
+    assert config.resolve_agent("overriding_agent") is not config.resolve_agent("overriding_agent")
 
 
-def test_agent_only_fields_raise_for_defaults_scope() -> None:
-    view = _representative_config().resolve_entity(None)
-
-    with pytest.raises(ValueError, match="defaults-only scope has no per-agent config"):
-        _ = view.available_tools
+def test_the_defaults_scope_has_no_agent_record() -> None:
+    assert not isinstance(_representative_config().resolve_scope(None), ResolvedAgent)
 
 
-def test_agent_only_fields_raise_for_team_names() -> None:
-    view = _representative_config().resolve_entity("overriding_team")
+def test_a_team_has_no_agent_record() -> None:
+    config = _representative_config()
 
+    assert not isinstance(config.resolve_entity("overriding_team"), ResolvedAgent)
     with pytest.raises(ValueError, match="Unknown agent: overriding_team"):
-        _ = view.available_tools
+        config.resolve_agent("overriding_team")
 
 
-def test_unknown_entity_raises_on_field_access() -> None:
-    view = _representative_config().resolve_entity("missing")
+def test_unknown_entity_raises() -> None:
+    """A name that is no agent, configured team, or the router raises instead of resolving to the defaults."""
+    config = _representative_config()
 
     with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.history_settings
+        config.resolve_scope("missing")
     with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = view.model_name
+        config.resolve_entity("missing")
 
 
 def test_max_tool_calls_per_turn_resolution() -> None:
@@ -272,10 +268,8 @@ def test_max_tool_calls_per_turn_resolution() -> None:
 
     assert config.resolve_entity("capped_agent").max_tool_calls_per_turn == 40
     assert config.resolve_entity("capped_team").max_tool_calls_per_turn == 12
-    for inheriting_scope in ("inheriting_agent", "inheriting_team", None):
-        assert config.resolve_entity(inheriting_scope).max_tool_calls_per_turn == 90
-    with pytest.raises(ValueError, match="Unknown entity: missing"):
-        _ = config.resolve_entity("missing").max_tool_calls_per_turn
+    for inheriting_scope in ("inheriting_agent", "inheriting_team", ROUTER_AGENT_NAME, None):
+        assert config.resolve_scope(inheriting_scope).max_tool_calls_per_turn == 90
 
 
 def test_max_tool_calls_per_turn_defaults_and_validation() -> None:
@@ -296,7 +290,7 @@ def test_file_access_defaults_to_workspace_and_agent_overrides_it() -> None:
             "teams": {"crew": {"display_name": "Crew", "role": "r", "agents": ["plain"], "mode": "coordinate"}},
         },
     )
-    assert config.resolve_entity(None).file_access == "workspace"
+    assert config.resolve_scope(None).file_access == "workspace"
     assert config.resolve_entity("plain").file_access == "workspace"
     assert config.resolve_entity("admin").file_access == "unrestricted"
     assert config.resolve_entity("crew").file_access == "workspace"
@@ -319,10 +313,3 @@ def test_file_access_global_default_is_inherited() -> None:
 def test_file_access_rejects_unknown_values() -> None:
     with pytest.raises(ValueError, match="file_access"):
         Config.model_validate({"defaults": {"file_access": "readonly"}})
-
-
-def test_file_access_unknown_entity_names_inherit_the_default() -> None:
-    config = Config.model_validate(
-        {"defaults": {"file_access": "unrestricted"}, "agents": {"plain": {"display_name": "Plain"}}},
-    )
-    assert config.resolve_entity("not-configured").file_access == "unrestricted"

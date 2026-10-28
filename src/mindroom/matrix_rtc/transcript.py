@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from mindroom.config.resolution import memory_backend as agent_memory_backend
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.spoken_turns import spoken_continuation
 from mindroom.memory import add_agent_memory, redact_memory_text
@@ -64,7 +65,7 @@ def _call_transcript_roots(
         execution_identity=execution_identity,
         create=True,
     )
-    if config.resolve_entity(agent_name).memory_backend == "file":
+    if agent_memory_backend(config, agent_name) == "file":
         workspace = agent_runtime.workspace
         if workspace is None:
             msg = f"File-memory agent '{agent_name}' has no resolved workspace"
@@ -231,7 +232,7 @@ class CallTranscript:
             return
         if not self._spoken:
             return
-        memory_backend = config.resolve_entity(self.agent_name).memory_backend
+        memory_backend = agent_memory_backend(config, self.agent_name)
         if memory_backend == "none":
             return
         transcript_path = self.path.relative_to(self.reference_root).as_posix()

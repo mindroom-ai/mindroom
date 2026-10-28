@@ -120,7 +120,7 @@ def test_the_switch_gives_default_tool_agents_the_approved_egress_tool(
 ) -> None:
     """Agents that take the default tools get the tool; an agent that opts out does not."""
     config, _ = _config(tmp_path, **raw)
-    assert ("approved_egress" in config.resolve_entity("code").available_tools) is expected
+    assert ("approved_egress" in config.resolve_agent("code").tools.tool_names) is expected
 
 
 @pytest.mark.parametrize(

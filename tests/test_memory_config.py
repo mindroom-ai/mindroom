@@ -1398,7 +1398,7 @@ def test_memory_search_defaults_to_keyword_daily_files() -> None:
     """File-memory search should default to keyword mode over daily memory files."""
     config = Config(router=RouterConfig(model="default"))
 
-    search = config.resolve_entity("missing_agent").memory_search
+    search = config.resolve_scope(None).memory_search
 
     assert search.mode == "keyword"
     assert search.include == ["memory/**/*.md"]

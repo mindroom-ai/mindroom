@@ -13,6 +13,7 @@ from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
 from mindroom.agents import create_agent
+from mindroom.config import resolution
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -321,7 +322,7 @@ def test_effective_tool_configs_keep_defer_initial_and_authored_order(tmp_path: 
 
     config = _validated_config(tmp_path, raw)
 
-    entries = config.resolve_entity("code").tool_configs
+    entries = config.resolve_agent("code").tools.authored
     assert [(entry.name, entry.defer, entry.initial, entry.authored_order) for entry in entries] == [
         ("shell", True, True, 0),
         ("sleep", False, False, 1),
@@ -750,24 +751,24 @@ def test_deferred_scope_validation_builds_authored_tools_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scope validation must not rebuild the whole tool list for every deferred entry."""
+    """Finding the deferred entries an agent's scope cannot run builds its authored entries once, not once per entry."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [  # type: ignore[index]
         {name: {"defer": True}} for name in ["homeassistant", "shell", "file", "calculator", "sleep"]
     ]
     config = _validated_config(tmp_path, raw)
     config.agents["code"].worker_scope = "user"
-    original = Config._agent_authored_deferred_tool_configs
+    original = resolution._authored_tool_entries
     builds = 0
 
-    def count_builds(self: Config, agent_name: str) -> list[EffectiveToolConfig]:
+    def count_builds(config: Config, agent_name: str) -> tuple[EffectiveToolConfig, ...]:
         nonlocal builds
         builds += 1
-        return original(self, agent_name)
+        return original(config, agent_name)
 
-    monkeypatch.setattr(Config, "_agent_authored_deferred_tool_configs", count_builds)
+    monkeypatch.setattr(resolution, "_authored_tool_entries", count_builds)
 
-    assert config._agent_scope_incompatible_deferred_tools("code") == {"homeassistant": ["homeassistant"]}
+    assert config.resolve_agent("code").tools.scope_incompatible == {"homeassistant": ("homeassistant",)}
     assert builds == 1
 
 

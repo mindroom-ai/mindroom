@@ -93,6 +93,7 @@ def resolve_oauth_reset_target(
     if requester_id is None:
         raise OAuthResetTargetError(_UNAUTHORIZED_RESET)
 
+    agent = config.resolve_agent(agent_name)
     tool_metadata = resolved_tool_metadata_for_runtime(
         runtime_paths,
         config,
@@ -100,7 +101,7 @@ def resolve_oauth_reset_target(
     )
     allowed_provider_ids = {
         metadata.auth_provider
-        for tool_name in config.resolve_entity(agent_name).available_tools
+        for tool_name in agent.tools.tool_names
         if (metadata := tool_metadata.get(tool_name)) is not None and metadata.auth_provider is not None
     }
     if provider_id not in allowed_provider_ids:
@@ -116,7 +117,7 @@ def resolve_oauth_reset_target(
     resolved_worker_target = worker_target
     if resolved_worker_target is None:
         resolved_worker_target = build_agent_toolkit_worker_target(
-            config.resolve_entity(agent_name).execution_scope,
+            agent.policy.effective_execution_scope,
             agent_name,
             is_private=config.get_agent(agent_name).private is not None,
             execution_identity=execution_identity,

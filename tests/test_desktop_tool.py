@@ -102,7 +102,7 @@ def test_desktop_supports_normal_and_private_agents(tmp_path: Path, private: dic
         test_runtime_paths(tmp_path),
     )
 
-    assert "desktop" in config.resolve_entity("computer").available_tools
+    assert "desktop" in config.resolve_agent("computer").tools.tool_names
 
 
 def test_desktop_rejects_authored_device_identity(tmp_path: Path) -> None:
