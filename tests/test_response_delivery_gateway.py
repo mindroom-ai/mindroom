@@ -26,7 +26,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, _LargeMessageStrategy
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
-    DURABLE_FINAL_OUTCOME_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
 )
 from mindroom.delivery_gateway import (
@@ -1262,7 +1261,6 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert prompt["question_text"] == "Pick"
         assert prompt["options"] == {"1": "yes", "✅": "yes"}
         # The reply's records hold the body and its success; the result keeps only the question's registration facts.
-        assert DURABLE_FINAL_OUTCOME_KEY not in new_content
         assert delivery.result is not None
         assert set(delivery.result) == {"interactive"}
         assert delivery.result["interactive"]["question_text"] == "Pick"

@@ -42,7 +42,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.event_journal import (
     ApprovalCall,
@@ -1294,11 +1293,8 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
         room_id="!room:localhost",
         thread_id="$thread",
         edits_event_id="$waiting",
-        payload={
-            "msgtype": "m.text",
-            "body": "finished",
-            **({DURABLE_FINAL_OUTCOME_KEY: {"terminal_status": "completed"}} if with_result else {}),
-        },
+        payload={"msgtype": "m.text", "body": "finished"},
+        result={"terminal_status": "completed"} if with_result else None,
     )
     final = await principal.claim_matrix_delivery(delivery_id=source_event_id, stage=DeliveryStage.FINAL)
     assert final is not None

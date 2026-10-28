@@ -30,7 +30,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
-from mindroom.legacy_delivery_payloads import decode_delivery_result
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .membership_state import claim_membership_epoch
@@ -842,11 +841,11 @@ def _delivery(row: Row) -> MatrixDelivery:
     if not isinstance(payload, dict):
         msg = f"Outbox payload for delivery {row['delivery_id']!r} is not an object"
         raise TypeError(msg)
-    result = decode_delivery_result(
-        payload,
-        cast("str | None", row["result_json"]),
-        delivery_id=str(row["delivery_id"]),
-    )
+    raw_result = cast("str | None", row["result_json"])
+    result = None if raw_result is None else json.loads(raw_result)
+    if result is not None and not isinstance(result, dict):
+        msg = f"Outbox result for delivery {row['delivery_id']!r} is not an object"
+        raise TypeError(msg)
     return MatrixDelivery(
         delivery_id=row["delivery_id"],
         stage=DeliveryStage(row["stage"]),

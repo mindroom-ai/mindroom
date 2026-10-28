@@ -522,7 +522,6 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.history.types",
     "mindroom.interactive_models",
-    "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
     "mindroom.reply_lifecycle",
@@ -1057,16 +1056,6 @@ visibility = [
 path = "mindroom.attachments.legacy_attachments"
 depends_on = ["mindroom.path_confinement"]
 visibility = ["mindroom.attachments.storage"]
-
-[[modules]]
-path = "mindroom.legacy_delivery_payloads"
-depends_on = ["mindroom.constants"]
-visibility = [
-    "mindroom.delivery_gateway",
-    "mindroom.event_journal",
-    "mindroom.event_journal.outbox",
-    "mindroom.matrix.large_messages",
-]
 
 [[modules]]
 path = "mindroom.approval.legacy_approval_payloads"
@@ -2633,7 +2622,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.hooks",
-    "mindroom.legacy_delivery_payloads",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.event_info",
     "mindroom.matrix.room_history_reads",
