@@ -661,8 +661,12 @@ def _template_text(name: str, todos: str, *, description: str = "Workspace templ
         ),
         pytest.param(
             {
-                "hostile": _template_text("hostile", "  - sub_template: leaf\n" * 40),
-                "leaf": _template_text("leaf", "  - title: Leaf\n") + "#" * 2048 + "\n",
+                # Each leaf fits the size cap and the third read exceeds it, after too few sandboxed renders to
+                # approach the call's render deadline.
+                "hostile": _template_text("hostile", "  - sub_template: leaf\n" * 4),
+                "leaf": _template_text("leaf", "  - title: Leaf\n")
+                + "#" * (todo_module._MAX_TEMPLATE_SIZE // 3)
+                + "\n",
             },
             {},
             "templates read by one call exceed",
