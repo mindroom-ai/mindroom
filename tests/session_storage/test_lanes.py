@@ -106,17 +106,20 @@ async def test_operations_waiting_on_a_busy_lane_leave_the_default_executor_free
         loop.call_soon_threadsafe(queued_opened.set)
         return store
 
-    holder = asyncio.create_task(run_session_storage_operation(lambda: store, hold_the_lane))
-    queued = asyncio.create_task(run_session_storage_operation(open_queued, lambda _conversation: "queued"))
+    operations = [asyncio.create_task(run_session_storage_operation(lambda: store, hold_the_lane))]
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
+        operations.append(
+            asyncio.create_task(run_session_storage_operation(open_queued, lambda _conversation: "queued")),
+        )
         await asyncio.wait_for(queued_opened.wait(), timeout=5)
         assert await asyncio.wait_for(asyncio.to_thread(lambda: "offloaded"), timeout=5) == "offloaded"
-        assert not queued.done()
+        assert not operations[1].done()
     finally:
         release.set()
-        assert await asyncio.gather(holder, queued) == ["held", "queued"]
+        results = await asyncio.gather(*operations)
         default_executor.shutdown()
+    assert results == ["held", "queued"]
 
 
 @pytest.mark.asyncio
