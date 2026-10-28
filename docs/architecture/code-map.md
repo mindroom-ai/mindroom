@@ -463,6 +463,8 @@ Matrix sync callback
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
+| `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
+| `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, and parsing of conversation, message, permalink, and user targets |
 
 ## Persistent State
 
