@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 # A credential rejection names the status it came with: a 401, or another client error whose wording names the
 # credentials, such as Gemini's 400 "API key not valid" on an OpenAI-compatible endpoint.
-_EMBEDDER_AUTH_FAILED_DETAIL = re.compile(r"embedder authentication failed \(HTTP \d{3}\)")
+_EMBEDDER_AUTH_FAILED_PATTERN = re.compile(r"embedder authentication failed \(HTTP \d{3}\)")
 _EMBEDDER_PERMISSION_DENIED_DETAIL = "embedder permission denied (HTTP 403)"
 EMBEDDER_UNREACHABLE_DETAIL = "embedder endpoint unreachable"
 EMBEDDER_EMPTY_VECTOR_DETAIL = "embedder returned an empty vector"
@@ -39,7 +39,7 @@ def is_embedder_auth_failure_detail(detail: str | None) -> bool:
     """Return whether a failure detail describes a credential rejection."""
     if detail is None:
         return False
-    return detail == _EMBEDDER_PERMISSION_DENIED_DETAIL or _EMBEDDER_AUTH_FAILED_DETAIL.fullmatch(detail) is not None
+    return detail == _EMBEDDER_PERMISSION_DENIED_DETAIL or _EMBEDDER_AUTH_FAILED_PATTERN.fullmatch(detail) is not None
 
 
 # Fully-fixed classified forms only: the type-name fallback is excluded because
@@ -62,19 +62,9 @@ def extract_classified_embedder_detail(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def as_embedder_error(exc: BaseException) -> EmbedderRequestError | None:
-    """Return ``exc`` when it is a classified embedder error, or None for any other failure.
-
-    Every embedder, Mem0's included, raises its failures as this error at its own boundary, so a raw provider error,
-    such as one from Mem0's memory model, is never mistaken for the embedder's.
-    """
-    return exc if isinstance(exc, EmbedderRequestError) else None
-
-
 def classified_embedder_error(exc: BaseException) -> str | None:
-    """Return a safe detail only for a known embedding-provider failure."""
-    error = as_embedder_error(exc)
-    return None if error is None else str(error)
+    """Return a safe detail only for a classified embedder failure, which an embedder raises at its own boundary."""
+    return str(exc) if isinstance(exc, EmbedderRequestError) else None
 
 
 _FORBIDDEN_STATUS = 403
@@ -119,9 +109,8 @@ def embedder_failure_is_transient(exc: BaseException) -> bool:
     mismatches and malformed payloads are not: retrying them repeats the same
     rejected request, burns the retry budget, and buries the real cause.
     """
-    error = as_embedder_error(exc)
-    if error is not None:
-        return error.retryable
+    if isinstance(exc, EmbedderRequestError):
+        return exc.retryable
     return isinstance(exc, (TimeoutError, ConnectionError))
 
 
@@ -142,10 +131,9 @@ def embedder_batch_cardinality_mismatch(exc: BaseException) -> bool:
 
 def embedder_retry_after_seconds(exc: BaseException) -> float | None:
     """Return the provider's ``Retry-After`` hint in seconds, when it gave one."""
-    error = as_embedder_error(exc)
-    return None if error is None else error.retry_after_seconds
+    return exc.retry_after_seconds if isinstance(exc, EmbedderRequestError) else None
 
 
 def describe_embedder_error(exc: BaseException) -> str:
     """Return a compact failure description that never includes provider text."""
-    return str(as_embedder_error(exc) or embedder_request_error(exc, None))
+    return str(exc if isinstance(exc, EmbedderRequestError) else embedder_request_error(exc, None))
