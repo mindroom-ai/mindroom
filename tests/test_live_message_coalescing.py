@@ -94,9 +94,10 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
+from mindroom.turns.facts import PrecheckedEvent
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -7507,7 +7508,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ticket = bot._turn_controller.reserve_prompt_ingress_order(room, "@user:localhost")
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
-            _PrecheckedEvent(
+            PrecheckedEvent(
                 event=sidecar_event,
                 facts=make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
             ),
@@ -7675,7 +7676,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ticket = bot._turn_controller.reserve_prompt_ingress_order(room, sidecar.sender)
         outcome = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
-            _PrecheckedEvent(event=sidecar, facts=make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender)),
+            PrecheckedEvent(event=sidecar, facts=make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender)),
             ticket=ticket,
             coalescing_thread_id=None,
         )

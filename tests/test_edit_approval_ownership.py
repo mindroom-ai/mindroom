@@ -38,6 +38,7 @@ from tests.conftest import (
     initialize_approval_store_for_test,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
+    update_turn_owner_deps,
 )
 from tests.reply_span_helpers import reply_span, response_span, seed_finished_reply
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -327,7 +328,7 @@ async def _paused_case(  # noqa: PLR0915
         entity_name="general",
     )
     controller = unwrap_extracted_collaborator(bot._turn_controller)
-    controller.deps = replace(controller.deps, edit_regenerator=regenerator)
+    update_turn_owner_deps(bot, edit_regenerator=regenerator)
     outcomes: list[TurnDispatchOutcome] = []
 
     async def dispatch_edit(room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:

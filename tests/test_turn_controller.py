@@ -271,11 +271,12 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     generate_response_mock = AsyncMock(side_effect=generate_response)
     install_generate_response_mock(bot, generate_response_mock)
 
-    await bot._turn_controller._handle_interactive_selection(
+    await bot._interactive_selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
         source_event_id="$selection:localhost",
+        response_target=bot._interactive_selections._interactive_selection_target(room.room_id, selection),
     )
 
     bot._delivery_gateway.send_text.assert_awaited_once()
@@ -360,11 +361,12 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
     install_generate_response_mock(bot, generate_response_mock)
 
     with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-        await bot._turn_controller._handle_interactive_selection(
+        await bot._interactive_selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=make_ingress_facts("@user:localhost", source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
             source_event_id="$selection:localhost",
+            response_target=bot._interactive_selections._interactive_selection_target(room.room_id, selection),
         )
 
     generate_response_mock.assert_awaited_once()

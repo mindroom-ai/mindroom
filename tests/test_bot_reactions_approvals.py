@@ -57,6 +57,7 @@ from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_record import TurnRecord
+from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -236,6 +237,35 @@ def _claimed_test_selection(
         reply_to_event_id=selection.question_event_id,
     )
     return selection, target
+
+
+async def _start_selection_response(
+    bot: AgentBot,
+    response: Callable[[], Awaitable[object]],
+    *,
+    target: MessageTarget,
+) -> None:
+    """Start one claimed selection whose response runs ``response`` instead of executing the selection."""
+    selections = bot._interactive_selections
+
+    async def handle(*_args: object, **_kwargs: object) -> object:
+        return await response()
+
+    selections._handle_interactive_selection = handle  # type: ignore[method-assign]
+    selection, _target = _claimed_test_selection(bot, room_id=target.room_id)
+    await selections._start_interactive_selection(
+        nio.MatrixRoom(target.room_id, bot.matrix_id.full_id),
+        InteractiveSelectionDispatch(
+            selection=selection,
+            response_target=target,
+            source_event_id="$reaction",
+            facts=make_ingress_facts(
+                "@user:localhost",
+                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            ),
+        ),
+    )
 
 
 def _mock_interactive_claim(
@@ -775,7 +805,7 @@ class TestAgentBot(AgentBotTestBase):
         assert admission is AdmissionResult.ADMITTED
 
         execute = AsyncMock(side_effect=(OSError("pending write failed"), None))
-        with patch.object(bot._turn_controller, "_execute_interactive_selection", new=execute):
+        with patch.object(bot._interactive_selections, "_execute_interactive_selection", new=execute):
             await _dispatch_reaction(bot, room, event)
             await bot._response_runner.drain_inbox_responses()
             assert event.event_id in await bot._journal_dispatcher.unsettled_event_ids()
@@ -829,7 +859,7 @@ class TestAgentBot(AgentBotTestBase):
         assert admission is AdmissionResult.ADMITTED
 
         with patch.object(
-            bot._turn_controller,
+            bot._interactive_selections,
             "_execute_interactive_selection",
             new=AsyncMock(side_effect=OSError("pending write failed")),
         ):
@@ -964,10 +994,7 @@ class TestAgentBot(AgentBotTestBase):
                 return
             await original_dispatch(turn)
 
-        async def start_selection(
-            _response_factory: Callable[[], Awaitable[None]],
-            **_kwargs: object,
-        ) -> None:
+        async def start_selection(*_args: object) -> None:
             execution_order.append("reaction")
 
         monkeypatch.setattr(bot._coalescing_gate, "_dispatch_turn", dispatch_turn)
@@ -1153,17 +1180,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await bot._turn_controller._start_interactive_selection(
-            prepare_forever,
-            response_target=target,
-            source_event_id="$reaction",
-            facts=make_ingress_facts(
-                "@user:localhost",
-                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
-                requester_user_id="@user:localhost",
-            ),
-            selected_value="Selected",
-        )
+        await _start_selection_response(bot, prepare_forever, target=target)
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
         assert bot._response_runner.has_active_response_for_target(target)
 
@@ -1182,7 +1199,7 @@ class TestAgentBot(AgentBotTestBase):
         settlement_error = OSError("simulated journal settlement failure")
         settle_dispatch_sources = AsyncMock(side_effect=settlement_error)
         retry_dispatch_sources = MagicMock()
-        controller = replace_turn_controller_deps(
+        replace_turn_controller_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
             retry_dispatch_sources=retry_dispatch_sources,
@@ -1197,17 +1214,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await controller._start_interactive_selection(
-            response,
-            response_target=target,
-            source_event_id="$reaction",
-            facts=make_ingress_facts(
-                "@user:localhost",
-                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
-                requester_user_id="@user:localhost",
-            ),
-            selected_value="Selected",
-        )
+        await _start_selection_response(bot, response, target=target)
         await bot._response_runner.drain_inbox_responses()
 
         assert response_completed.is_set()
@@ -1225,7 +1232,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         settle_dispatch_sources = AsyncMock()
-        controller = replace_turn_controller_deps(
+        replace_turn_controller_deps(
             bot,
             settle_dispatch_sources=settle_dispatch_sources,
         )
@@ -1238,17 +1245,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await controller._start_interactive_selection(
-            hand_off_response,
-            response_target=target,
-            source_event_id="$reaction",
-            facts=make_ingress_facts(
-                "@user:localhost",
-                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
-                requester_user_id="@user:localhost",
-            ),
-            selected_value="Selected",
-        )
+        await _start_selection_response(bot, hand_off_response, target=target)
         await bot._response_runner.drain_inbox_responses()
 
         settle_dispatch_sources.assert_not_awaited()
@@ -1263,7 +1260,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         source_is_terminal = AsyncMock(return_value=True)
-        controller = replace_turn_controller_deps(
+        replace_turn_controller_deps(
             bot,
             dispatch_source_is_terminal=source_is_terminal,
         )
@@ -1272,13 +1269,13 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(
-                controller,
+                bot._interactive_selections,
                 "_execute_interactive_selection",
                 new=AsyncMock(side_effect=asyncio.CancelledError("restart")),
             ),
             pytest.raises(asyncio.CancelledError, match="restart"),
         ):
-            await controller._handle_interactive_selection(
+            await bot._interactive_selections._handle_interactive_selection(
                 room,
                 selection=selection,
                 facts=make_ingress_facts(
@@ -1314,13 +1311,13 @@ class TestAgentBot(AgentBotTestBase):
             await release_terminal_probe.wait()
             return True
 
-        controller = replace_turn_controller_deps(bot, dispatch_source_is_terminal=source_is_terminal)
+        replace_turn_controller_deps(bot, dispatch_source_is_terminal=source_is_terminal)
         selection, target = _claimed_test_selection(bot)
         room = nio.MatrixRoom(target.room_id, bot.matrix_id.full_id)
 
-        with patch.object(controller, "_execute_interactive_selection", new=execute_selection):
+        with patch.object(bot._interactive_selections, "_execute_interactive_selection", new=execute_selection):
             response = asyncio.create_task(
-                controller._handle_interactive_selection(
+                bot._interactive_selections._handle_interactive_selection(
                     room,
                     selection=selection,
                     facts=make_ingress_facts(
@@ -1718,9 +1715,9 @@ class TestAgentBot(AgentBotTestBase):
         """Outer response ownership returns its journal source before preparation starts."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
-        selection, target = _claimed_test_selection(bot)
+        _selection, target = _claimed_test_selection(bot)
         retry_dispatch_sources = MagicMock()
-        controller = replace_turn_controller_deps(
+        replace_turn_controller_deps(
             bot,
             retry_dispatch_sources=retry_dispatch_sources,
         )
@@ -1747,17 +1744,7 @@ class TestAgentBot(AgentBotTestBase):
 
         try:
             with acquire_patch:
-                await controller._start_interactive_selection(
-                    response,
-                    response_target=target,
-                    source_event_id="$reaction",
-                    facts=make_ingress_facts(
-                        "@user:localhost",
-                        source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
-                        requester_user_id="@user:localhost",
-                    ),
-                    selected_value=selection.selected_value,
-                )
+                await _start_selection_response(bot, response, target=target)
                 if failure_stage == "queued_cancel":
                     # This checks ownership recovery, not millisecond shutdown latency.
                     # Allow queued acquisition cancellation and shielded reservation cleanup to finish.

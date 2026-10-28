@@ -115,12 +115,19 @@ from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-from mindroom.turn_controller import InteractiveSelectionDispatch, TurnController, TurnControllerDeps
+from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim, TurnStore, TurnStoreDeps
+from mindroom.turns.interactive_selection import (
+    InteractiveSelectionDispatch,
+    InteractiveSelections,
+    InteractiveSelectionsDeps,
+)
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
+from mindroom.voice.ingress import VoiceIngress, VoiceIngressDeps
+from mindroom.voice.readiness import VoiceReadiness
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
@@ -418,6 +425,8 @@ class _Harness:
     """One directly constructed TurnController plus its observable seams."""
 
     controller: TurnController
+    selections: InteractiveSelections
+    voice: VoiceIngress
     policy: _SpyTurnPolicy
     runner: _RecordingResponseRunner
     gateway: _RecordingDeliveryGateway
@@ -486,6 +495,30 @@ def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> C
             read_strict=AsyncMock(return_value=page),
         ),
     )
+
+
+_VOICE_READINESS_CHANGES = {"normalizer": "normalizer", "turn_store": "turn_store", "logger": "logger"}
+
+
+def _replace_harness_deps(harness: _Harness, **changes: object) -> None:
+    """Swap collaborators in place on every turn owner whose deps name them, voice readiness included.
+
+    In place, because the gate keeps the owners it was built with.
+    """
+    owners = (harness.controller, harness.selections, harness.voice)
+    known = set(_VOICE_READINESS_CHANGES).union(*(owner.deps.__dataclass_fields__ for owner in owners))
+    unknown = set(changes) - known
+    assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
+    for owner in owners:
+        owner_changes = {name: value for name, value in changes.items() if name in owner.deps.__dataclass_fields__}
+        if owner_changes:
+            owner.deps = replace(owner.deps, **owner_changes)
+    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    if readiness_changes:
+        harness.voice.deps = replace(
+            harness.voice.deps,
+            readiness=replace(harness.voice.deps.readiness, **readiness_changes),
+        )
 
 
 def _build_harness(
@@ -675,6 +708,52 @@ def _build_harness(
             turn_policy=policy,
         ),
     )
+    selections = InteractiveSelections(
+        InteractiveSelectionsDeps(
+            runtime=runtime,
+            logger=logger,
+            runtime_paths=runtime_paths,
+            agent_name=agent_name,
+            resolver=resolver,
+            normalizer=normalizer,
+            turn_policy=cast("TurnPolicy", policy),
+            response_runner=cast("ResponseRunner", runner),
+            delivery_gateway=cast("DeliveryGateway", gateway),
+            turn_store=turn_store,
+            visible_responses=visible_responses,
+            retry_dispatch_sources=_retry_dispatch_sources,
+            settle_dispatch_sources=_settle_ignored_dispatch_sources,
+            dispatch_source_is_terminal=_dispatch_source_is_terminal,
+        ),
+    )
+    voice = VoiceIngress(
+        VoiceIngressDeps(
+            runtime=runtime,
+            logger=logger,
+            runtime_paths=runtime_paths,
+            matrix_id=matrix_id,
+            resolver=resolver,
+            response_runner=cast("ResponseRunner", runner),
+            delivery_gateway=cast("DeliveryGateway", gateway),
+            readiness=VoiceReadiness(
+                normalizer=normalizer,
+                turn_store=turn_store,
+                visible_echo=VisibleVoiceEchoLifecycle(
+                    VisibleVoiceEchoDeps(
+                        runtime=runtime,
+                        logger=logger,
+                        agent_name=agent_name,
+                        delivery_gateway=cast("DeliveryGateway", gateway),
+                        turn_store=turn_store,
+                        router_turn_records=journal_store.turn_records(ROUTER_AGENT_NAME),
+                        ingress=ingress_validator,
+                        wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
+                    ),
+                ),
+                logger=logger,
+            ),
+        ),
+    )
     controller = TurnController(
         TurnControllerDeps(
             runtime=runtime,
@@ -695,27 +774,18 @@ def _build_harness(
             coalescing_gate=gate,
             edit_regenerator=_UnusedEditRegenerator(),
             ingress=ingress_validator,
-            visible_voice_echo=VisibleVoiceEchoLifecycle(
-                VisibleVoiceEchoDeps(
-                    runtime=runtime,
-                    logger=logger,
-                    agent_name=agent_name,
-                    delivery_gateway=cast("DeliveryGateway", gateway),
-                    turn_store=turn_store,
-                    router_turn_records=journal_store.turn_records(ROUTER_AGENT_NAME),
-                    ingress=ingress_validator,
-                    wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
-                ),
-            ),
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
             settle_dispatch_sources=_settle_ignored_dispatch_sources,
-            dispatch_source_is_terminal=_dispatch_source_is_terminal,
+            selections=selections,
+            voice=voice,
         ),
     )
     controller_ref.append(controller)
     return _Harness(
         controller=controller,
+        selections=selections,
+        voice=voice,
         policy=policy,
         runner=runner,
         gateway=gateway,
@@ -1638,11 +1708,17 @@ async def test_a_selection_coalesced_with_another_message_is_refused(config: Con
         room=room,
         facts=_SELECTION_FACTS,
         selection=InteractiveSelectionDispatch(
-            response_factory=AsyncMock(return_value=True),
+            selection=interactive.InteractiveSelection(
+                question_event_id="$question:localhost",
+                question_text="Proceed?",
+                selection_key="1",
+                selected_label="Yes",
+                selected_value="yes",
+                thread_id=None,
+            ),
             response_target=target,
             source_event_id="$selection:localhost",
             facts=_SELECTION_FACTS,
-            selected_value="yes",
         ),
     )
     message = PendingEvent(
@@ -1850,8 +1926,8 @@ async def test_router_silent_ignore_compacts_exact_callback(config: Config, tmp_
         entity_name=ROUTER_AGENT_NAME,
         room=room,
     )
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         visible_responses=VisibleResponseReconciler(
             replace(
                 harness.controller.deps.visible_responses.deps,
@@ -2741,7 +2817,7 @@ async def test_cancelled_or_failed_agent_reply_never_wakes_the_agent_it_mentions
     with_responder_access(config, "general", users=[_OWNER, _entity_user_id(config, "research")])
     harness = _build_harness(config, tmp_path)
     regenerator = _NoEditRegeneration()
-    harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
+    _replace_harness_deps(harness, edit_regenerator=regenerator)
     room = _joined_room(config, "general", "research")
     _admit_placeholder(harness, "$placeholder:localhost")
     edit = _final_reply_edit(
@@ -4127,8 +4203,8 @@ async def test_eventless_silent_schedule_completion_is_terminal_before_recovery(
         entity_name="general",
         room=room,
     )
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         visible_responses=VisibleResponseReconciler(
             replace(
                 harness.controller.deps.visible_responses.deps,
@@ -4752,8 +4828,8 @@ async def test_config_command_replay_recovers_confirmation_before_terminal_settl
         recoveries.append((room_id, preview_event_id))
         return True
 
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         command_executor=CommandTurnExecutor(
             replace(
                 harness.controller.deps.command_executor.deps,
@@ -5176,11 +5252,12 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=_SELECTION_FACTS,
         source_event_id="$selection:localhost",
+        response_target=harness.selections._interactive_selection_target(room.room_id, selection),
     )
 
     assert len(harness.gateway.sent) == 1
@@ -5264,11 +5341,12 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
 
     harness.runner.admission_waiter = wait_for_replacement
     selection_task = asyncio.create_task(
-        harness.controller._handle_interactive_selection(
+        harness.selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=_SELECTION_FACTS,
             source_event_id=source_event_id,
+            response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         ),
     )
     await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
@@ -5307,17 +5385,19 @@ async def test_edited_question_selection_uses_its_exact_source_as_turn_identity(
         selected_value="replacement",
     )
 
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=original,
         facts=_SELECTION_FACTS,
         source_event_id="$original-selection:localhost",
+        response_target=harness.selections._interactive_selection_target(room.room_id, original),
     )
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=replacement,
         facts=_SELECTION_FACTS,
         source_event_id="$replacement-selection:localhost",
+        response_target=harness.selections._interactive_selection_target(room.room_id, replacement),
     )
 
     assert len(harness.runner.requests) == 2
@@ -5381,11 +5461,12 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     selection_event_id = "$selection:localhost"
 
     with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-        await harness.controller._handle_interactive_selection(
+        await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=_SELECTION_FACTS,
             source_event_id=selection_event_id,
+            response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
 
     pending_turn = await harness.turn_store.get_turn_record(selection.question_event_id)
@@ -5393,11 +5474,12 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     assert pending_turn.completed is False
 
     harness.runner.response_event_id = "$sent-1:localhost"
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=_SELECTION_FACTS,
         source_event_id=selection_event_id,
+        response_target=harness.selections._interactive_selection_target(room.room_id, selection),
     )
 
     # The retry sends the acknowledgement under the same delivery id, which the
@@ -5443,11 +5525,12 @@ async def test_interactive_selection_persistence_failure_prevents_ack_and_genera
     monkeypatch.setattr(TurnRecordStore, "write", fail_pending_write)
 
     with pytest.raises(OSError, match="pending context write failed"):
-        await harness.controller._handle_interactive_selection(
+        await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=_SELECTION_FACTS,
             source_event_id="$selection:localhost",
+            response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
 
     assert harness.gateway.sent == []
@@ -5485,11 +5568,12 @@ async def test_interactive_selection_claim_conflict_accepts_racing_terminal_turn
 
     monkeypatch.setattr(harness.turn_store, "record_pending_turn", lose_claim_race)
 
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=_SELECTION_FACTS,
         source_event_id="$selection:localhost",
+        response_target=harness.selections._interactive_selection_target(room.room_id, selection),
     )
 
     assert harness.gateway.sent == []
@@ -5522,11 +5606,12 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
     monkeypatch.setattr(harness.runner, "generate_response", refuse)
 
     with pytest.raises(ResponseAdmissionRefusedError):
-        await harness.controller._handle_interactive_selection(
+        await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=_SELECTION_FACTS,
             source_event_id=selection_event_id,
+            response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
 
     # Only the durably tracked acknowledgement was sent. Refusal performs no
@@ -5569,11 +5654,12 @@ async def test_interactive_selection_redacted_after_ack_is_suppressed_under_lock
 
     monkeypatch.setattr(harness.gateway, "send_text", send_ack_then_redact)
 
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=_SELECTION_FACTS,
         source_event_id=selection_event_id,
+        response_target=harness.selections._interactive_selection_target(room.room_id, selection),
     )
 
     assert len(harness.runner.requests) == 1
@@ -5631,11 +5717,12 @@ async def test_interactive_selection_rehydrates_attachment_context_from_thread(
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=_SELECTION_FACTS,
         source_event_id="$selection:localhost",
+        response_target=harness.selections._interactive_selection_target(room.room_id, selection),
     )
 
     assert len(harness.runner.requests) == 1
@@ -5676,11 +5763,12 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
         thread_id="$thread-root:localhost",
     )
 
-    await harness.controller._handle_interactive_selection(
+    await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
         facts=_SELECTION_FACTS,
         source_event_id="$selection:localhost",
+        response_target=harness.selections._interactive_selection_target(room.room_id, selection),
     )
 
     assert harness.runner.requests == []
@@ -5706,11 +5794,12 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
     )
 
     with pytest.raises(RuntimeError, match="no durable terminal outcome"):
-        await harness.controller._handle_interactive_selection(
+        await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=_SELECTION_FACTS,
             source_event_id="$selection:localhost",
+            response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
 
     assert len(harness.runner.requests) == 1
@@ -5738,11 +5827,12 @@ async def test_interactive_selection_interruption_records_handled_selection(
     selection_event_id = "$selection:localhost"
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):
-        await harness.controller._handle_interactive_selection(
+        await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
             facts=_SELECTION_FACTS,
             source_event_id=selection_event_id,
+            response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
 
     record = await harness.turn_store.get_turn_record(selection_event_id)
@@ -5887,8 +5977,8 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
         visible.deps,
         settle_ignored_sources=dispatcher.settle_intentionally_ignored_turn_sources,
     )
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         dispatch_source_is_terminal=dispatcher.source_is_terminal,
     )
     reached, release = asyncio.Event(), asyncio.Event()
@@ -6104,7 +6194,7 @@ async def test_an_edit_before_the_turn_starts_changes_what_it_answers_unless_an_
     """
     harness = _build_harness(config, tmp_path)
     regenerator = _NoEditRegeneration()
-    harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
+    _replace_harness_deps(harness, edit_regenerator=regenerator)
     room = _room_with_members(config, "general", "research")
     sender = _entity_user_id(config, "research") if by_agent else _SENDER
     mentions = {"user_ids": [_entity_user_id(config, "general")]}
@@ -6146,7 +6236,7 @@ async def test_each_admitted_event_is_classified_once(config: Config, tmp_path: 
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     ingress = MagicMock(spec=IngressValidator, wraps=harness.controller.deps.ingress)
-    harness.controller.deps = replace(harness.controller.deps, ingress=ingress)
+    _replace_harness_deps(harness, ingress=ingress)
 
     await harness.deliver(room, _text_event("@general hello", thread_id=_THREAD_ROOT))
 
@@ -6278,7 +6368,7 @@ async def test_a_persons_edit_reaches_the_regenerator_classified_as_an_edit(conf
     """An edit of a message no queue holds regenerates as an edit, run by its author."""
     harness = _build_harness(config, tmp_path)
     regenerator = _NoEditRegeneration()
-    harness.controller.deps = replace(harness.controller.deps, edit_regenerator=regenerator)
+    _replace_harness_deps(harness, edit_regenerator=regenerator)
     room = _room_with_members(config, "general")
     edit = _text_event("* @general what is 3+3?", event_id="$edit:localhost", origin_server_ts=1_000_001)
     edit.source["content"]["m.new_content"] = {"body": "@general what is 3+3?", "msgtype": "m.text"}

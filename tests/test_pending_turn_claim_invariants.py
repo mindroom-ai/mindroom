@@ -15,7 +15,7 @@ harness (real ``TurnStore``, ``CoalescingGate``, and ingress lanes).
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
@@ -39,6 +39,7 @@ from tests.test_turn_controller_focused import (
     _build_harness,
     _entity_user_id,
     _image_event,
+    _replace_harness_deps,
     _room_with_members,
     _text_event,
 )
@@ -218,8 +219,8 @@ def _mention_text_event(body: str, mentioned_user_id: str, *, event_id: str) -> 
 
 def _install_normalizer(harness: _Harness, normalizer: object) -> None:
     """Swap the controller's normalizer for a typed test double."""
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         normalizer=cast("InboundTurnNormalizer", normalizer),
     )
 

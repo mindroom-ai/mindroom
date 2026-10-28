@@ -34,6 +34,7 @@ from tests.test_turn_controller_focused import (
     _build_harness,
     _entity_user_id,
     _obligation_runner,
+    _replace_harness_deps,
     _room_with_members,
     _settle_dispatcher,
 )
@@ -78,8 +79,8 @@ def _wire_dispatcher(harness: _Harness, room: nio.MatrixRoom, tmp_path: Path) ->
         on_intentionally_ignored_source=settle_ignored,
     )
     harness.gate = gate
-    harness.controller.deps = replace(
-        harness.controller.deps,
+    _replace_harness_deps(
+        harness,
         coalescing_gate=gate,
         retry_dispatch_sources=dispatcher.retry_turn_sources,
         settle_dispatch_sources=dispatcher.settle_intentionally_ignored_turn_sources,
@@ -200,7 +201,7 @@ async def test_delayed_voice_echo_keeps_source_pending_until_one_reply(  # noqa:
             reply_to_event_id=event.event_id,
             event_source=event.source,
         )
-        echo = router.controller.deps.visible_voice_echo
+        echo = router.voice.deps.readiness.visible_echo
         handle = echo.start(
             VisibleVoiceEchoRequest(
                 source_event_id=event.event_id,

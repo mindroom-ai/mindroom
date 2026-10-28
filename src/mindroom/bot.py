@@ -162,8 +162,11 @@ from .tool_jobs.runtime import get_background_runtime
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
+from .turns.interactive_selection import InteractiveSelections, InteractiveSelectionsDeps
 from .user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from .visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
+from .voice.ingress import VoiceIngress, VoiceIngressDeps
+from .voice.readiness import VoiceReadiness
 from .voice.visible_voice_echo import VisibleVoiceEchoDeps, VisibleVoiceEchoLifecycle
 
 if TYPE_CHECKING:
@@ -392,6 +395,8 @@ class AgentBot:
     _calls_full_reconcile_pending: bool
     _call_rooms_reconcile_pending: set[str]
     _reply_membership_sync: AgentReplyMembershipSync | None
+    _interactive_selections: InteractiveSelections
+    _voice_ingress: VoiceIngress
     _turn_controller: TurnController
     _room_lifecycle: BotRoomLifecycle
     _decryption_diagnostics: DecryptionDiagnostics
@@ -872,6 +877,41 @@ class AgentBot:
                 delivery_gateway=self._delivery_gateway,
             ),
         )
+        self._interactive_selections = InteractiveSelections(
+            InteractiveSelectionsDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                agent_name=self.agent_name,
+                resolver=self._conversation_resolver,
+                normalizer=self._inbound_turn_normalizer,
+                turn_policy=self._turn_policy,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+                turn_store=self._turn_store,
+                visible_responses=self._visible_responses,
+                retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
+                settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
+                dispatch_source_is_terminal=self._journal_dispatcher.source_is_terminal,
+            ),
+        )
+        self._voice_ingress = VoiceIngress(
+            VoiceIngressDeps(
+                runtime=self._runtime_view,
+                logger=self.logger,
+                runtime_paths=self.runtime_paths,
+                matrix_id=runtime_matrix_id,
+                resolver=self._conversation_resolver,
+                response_runner=self._response_runner,
+                delivery_gateway=self._delivery_gateway,
+                readiness=VoiceReadiness(
+                    normalizer=self._inbound_turn_normalizer,
+                    turn_store=self._turn_store,
+                    visible_echo=self._visible_voice_echo,
+                    logger=self.logger,
+                ),
+            ),
+        )
         self._turn_controller = TurnController(
             TurnControllerDeps(
                 runtime=self._runtime_view,
@@ -892,11 +932,11 @@ class AgentBot:
                 coalescing_gate=self._coalescing_gate,
                 edit_regenerator=self._edit_regenerator,
                 ingress=self._ingress_validator,
-                visible_voice_echo=self._visible_voice_echo,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
-                dispatch_source_is_terminal=self._journal_dispatcher.source_is_terminal,
+                selections=self._interactive_selections,
+                voice=self._voice_ingress,
             ),
         )
         self._reaction_dispatcher = ReactionDispatcher(
@@ -911,7 +951,7 @@ class AgentBot:
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_controller.reserve_prompt_ingress_order,
-                enqueue_interactive_selection=self._turn_controller.enqueue_interactive_selection,
+                enqueue_interactive_selection=self._interactive_selections.enqueue_interactive_selection,
                 emit_reaction_received_hooks=self._emit_reaction_received_hooks,
                 wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(

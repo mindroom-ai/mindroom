@@ -15,9 +15,9 @@ from mindroom.dispatch_handoff import (
     payload_metadata_from_source,
 )
 from mindroom.matrix.event_info import EventInfo
-from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
+from mindroom.turns.facts import PrecheckedEvent
 from tests.conftest import make_ingress_facts
 
 if TYPE_CHECKING:
@@ -30,11 +30,11 @@ if TYPE_CHECKING:
 
 
 def _prepared_ingress(
-    event: PreparedIngress | nio.RoomMessageFormatted | _PrecheckedEvent,
+    event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
     requester_user_id: str | None,
 ) -> tuple[PreparedIngress, IngressFacts]:
     """Return the prepared event and its facts: a prechecked event's own, else a plain message from its sender."""
-    if isinstance(event, _PrecheckedEvent):
+    if isinstance(event, PrecheckedEvent):
         facts = event.facts
         event = event.event
     elif requester_user_id is None:
@@ -61,7 +61,7 @@ def _prepared_ingress(
 
 def make_test_turn(
     room: nio.MatrixRoom,
-    event: PreparedIngress | nio.RoomMessageFormatted | _PrecheckedEvent,
+    event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
     requester_user_id: str | None = None,
     *,
     media_events: list[MediaDispatchEvent] | None = None,
@@ -111,7 +111,7 @@ def make_test_turn(
 async def dispatch_test_turn(
     controller: TurnController,
     room: nio.MatrixRoom,
-    event: PreparedIngress | nio.RoomMessageFormatted | _PrecheckedEvent,
+    event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
     requester_user_id: str | None = None,
     **kwargs: object,
 ) -> None:

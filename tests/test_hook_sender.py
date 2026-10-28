@@ -55,10 +55,11 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_payload_preparation import DispatchPayloadInputs
-from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
 from mindroom.turn_record import TurnRecord
+from mindroom.turns.facts import PrecheckedEvent
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -884,7 +885,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(
+        PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),
@@ -1083,7 +1084,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
+        PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
     )
 
     assert hook_calls == ["called"]
@@ -1164,7 +1165,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
+        PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
     )
 
     assert hook_calls == ["called"]
@@ -1673,7 +1674,7 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(
+        PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),
@@ -1710,7 +1711,7 @@ async def test_router_reply_to_hook_dispatch_text_preserves_original_envelope_me
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
+        PrecheckedEvent(event=event, facts=bot._ingress_validator.classify(event)),
     )
 
     request = bot._delivery_gateway.send_text.await_args.args[0]
@@ -1741,7 +1742,7 @@ async def test_deep_hook_dispatch_does_not_consume_interactive_answer_on_message
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
-        return_value=_PrecheckedEvent(
+        return_value=PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),
@@ -1780,7 +1781,7 @@ async def test_first_hop_hook_dispatch_does_not_consume_interactive_answer_on_me
     interactive_questions.claim_interactive_text = AsyncMock()
     replace_turn_controller_deps(bot, interactive_questions=interactive_questions)
     bot._turn_controller._precheck_dispatch_event = AsyncMock(
-        return_value=_PrecheckedEvent(
+        return_value=PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),
@@ -1832,7 +1833,7 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(
+        PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),
@@ -1900,7 +1901,7 @@ async def test_first_hop_hook_dispatch_sidecar_preview_skips_interactive_answer_
         )
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
-            _PrecheckedEvent(
+            PrecheckedEvent(
                 event=sidecar_event,
                 facts=bot._ingress_validator.classify(sidecar_event),
             ),
@@ -1971,7 +1972,7 @@ async def test_deep_hook_dispatch_sidecar_preview_stops_before_interactive_or_di
         )
         handled = await bot._turn_controller._dispatch_file_sidecar_text_preview(
             room,
-            _PrecheckedEvent(
+            PrecheckedEvent(
                 event=sidecar_event,
                 facts=bot._ingress_validator.classify(sidecar_event),
             ),
@@ -2012,7 +2013,7 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(
+        PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),
@@ -2051,7 +2052,7 @@ async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: 
     await dispatch_test_turn(
         bot._turn_controller,
         room,
-        _PrecheckedEvent(
+        PrecheckedEvent(
             event=event,
             facts=bot._ingress_validator.classify(event),
         ),

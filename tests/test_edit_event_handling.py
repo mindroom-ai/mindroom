@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turns.facts import PrecheckedEvent
 from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -131,7 +131,7 @@ async def test_bot_ignores_edit_events(tmp_path: Path) -> None:
         patch.object(
             bot._turn_controller,
             "_precheck_dispatch_event",
-            return_value=_PrecheckedEvent(
+            return_value=PrecheckedEvent(
                 event=edit_event,
                 facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
             ),
@@ -210,7 +210,7 @@ async def test_edit_event_reserves_prompt_order_while_regenerating(tmp_path: Pat
         patch.object(
             bot._turn_controller,
             "_precheck_dispatch_event",
-            return_value=_PrecheckedEvent(
+            return_value=PrecheckedEvent(
                 event=edit_event,
                 facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
             ),
@@ -287,7 +287,7 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
         patch.object(
             bot._turn_controller,
             "_precheck_dispatch_event",
-            return_value=_PrecheckedEvent(
+            return_value=PrecheckedEvent(
                 event=edit_event,
                 facts=make_ingress_facts(edit_event.sender, requester_user_id=sender_id),
             ),
@@ -387,7 +387,7 @@ async def test_bot_ignores_multiple_edits(tmp_path: Path) -> None:
             bot._turn_controller,
             "_precheck_dispatch_event",
             side_effect=[
-                _PrecheckedEvent(
+                PrecheckedEvent(
                     event=edit_event,
                     facts=make_ingress_facts(edit_event.sender, requester_user_id="@user:example.com"),
                 )

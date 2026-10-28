@@ -38,10 +38,11 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_controller import _IngressAdmissionOutcome, _media_source_kind, _PrecheckedEvent
+from mindroom.turn_controller import _IngressAdmissionOutcome, _media_source_kind
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
+from mindroom.turns.facts import PrecheckedEvent
 from tests.bot_helpers import (
     AgentBotTestBase,
     _agent_response_handled_turn,
@@ -215,7 +216,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("image", sender="@user:localhost", event_id="$img_event")
-        prechecked_event = _PrecheckedEvent(
+        prechecked_event = PrecheckedEvent(
             event=event,
             facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
         )
@@ -286,7 +287,7 @@ class TestAgentBot(AgentBotTestBase):
 
         bot._conversation_resolver.coalescing_thread_id = AsyncMock(side_effect=record_thread_id)
         bot._turn_controller._precheck_dispatch_event = AsyncMock(
-            return_value=_PrecheckedEvent(
+            return_value=PrecheckedEvent(
                 event=event,
                 facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
             ),
@@ -433,7 +434,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         room = _synced_room(bot.matrix_id.full_id)
         event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice_event")
-        prechecked_event = _PrecheckedEvent(
+        prechecked_event = PrecheckedEvent(
             event=event,
             facts=make_ingress_facts(event.sender, source_kind=_media_source_kind(event)),
         )

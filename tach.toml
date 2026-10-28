@@ -151,6 +151,7 @@ visibility = [
     "mindroom.journal_dispatch",
     "mindroom.reaction_dispatch",
     "mindroom.turn_controller",
+    "mindroom.voice.ingress",
 ]
 
 [[modules]]
@@ -160,6 +161,7 @@ visibility = [
     "mindroom.coalescing.gate",
     "mindroom.journal_dispatch",
     "mindroom.turn_controller",
+    "mindroom.voice.ingress",
     "mindroom.voice.visible_voice_echo",
 ]
 
@@ -3321,13 +3323,14 @@ depends_on = [
 path = "mindroom.response_sources"
 depends_on = []
 visibility = [
-    "mindroom.event_journal",
     "mindroom.approval.response",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
+    "mindroom.event_journal",
     "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.turn_controller",
+    "mindroom.turns.interactive_selection",
 ]
 
 [[modules]]
@@ -3345,6 +3348,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
+    "mindroom.turns.interactive_selection",
     "mindroom.voice.visible_voice_echo",
 ]
 
@@ -3360,7 +3364,7 @@ depends_on = [
 visibility = [
     "mindroom.response_runner",
     "mindroom.text_ingress_dispatch",
-    "mindroom.turn_controller",
+    "mindroom.turns.interactive_selection",
 ]
 
 [[modules]]
@@ -4857,9 +4861,12 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_controller",
     "mindroom.turn_policy",
+    "mindroom.turns.interactive_selection",
     "mindroom.turn_store",
     "mindroom.user_stop_reconciliation",
     "mindroom.visible_response_reconciliation",
+    "mindroom.voice.ingress",
+    "mindroom.voice.readiness",
     "mindroom.voice.visible_voice_echo",
 ]
 
@@ -5980,7 +5987,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
-    "mindroom.turn_controller",
     "mindroom.voice.readiness",
 ]
 
@@ -5997,7 +6003,40 @@ depends_on = [
     "mindroom.turn_record",
     "mindroom.voice.visible_voice_echo",
 ]
-visibility = ["mindroom.turn_controller"]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.turns.interactive_selection"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.delivery_gateway",
+    "mindroom.hooks",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.response_admission",
+    "mindroom.response_lifecycle",
+    "mindroom.response_runner",
+    "mindroom.response_sources",
+    "mindroom.turn_policy",
+    "mindroom.turn_record",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.turns.queued_notice"
+depends_on = []
+visibility = [
+    "mindroom.turn_controller",
+    "mindroom.voice.ingress",
+]
+
+[[modules]]
+path = "mindroom.voice.ingress"
+depends_on = [
+    "mindroom.dispatch_callback_outcome",
+    "mindroom.dispatch_recovery_context",
+    "mindroom.turns.queued_notice",
+]
+visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.turn_controller"
@@ -6023,7 +6062,6 @@ depends_on = [
     "mindroom.matrix.transport_progress",
     "mindroom.metadata_merge",
     "mindroom.coalescing.ingress_ticket",
-    "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
     "mindroom.response_sources",
@@ -6035,7 +6073,7 @@ depends_on = [
     "mindroom.turn_store",
     "mindroom.turn_policy",
     "mindroom.visible_response_reconciliation",
-    "mindroom.voice.readiness",
+    "mindroom.turns.queued_notice",
 ]
 
 [[modules]]

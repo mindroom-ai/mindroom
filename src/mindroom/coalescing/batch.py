@@ -32,9 +32,9 @@ if TYPE_CHECKING:
 
     from mindroom.commands.parsing import Command
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
-    from mindroom.turn_controller import InteractiveSelectionDispatch
     from mindroom.turn_store import TurnClaim
     from mindroom.turns.facts import IngressFacts
+    from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
 
 
 @dataclass(frozen=True)

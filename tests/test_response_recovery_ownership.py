@@ -26,6 +26,7 @@ from tests.conftest import (
     make_visible_message,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
+    update_turn_owner_deps,
 )
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_room_events import (
@@ -113,8 +114,8 @@ async def test_preparation_outcomes_reach_controller_and_journal_owners(  # noqa
             settle_ignored_sources=settle_ignored,
         ),
     )
-    controller.deps = replace(
-        controller.deps,
+    update_turn_owner_deps(
+        bot,
         response_runner=runner,
         delivery_gateway=gateway,
         turn_store=store,

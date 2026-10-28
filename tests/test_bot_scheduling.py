@@ -28,9 +28,9 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling import tasks as scheduling
 from mindroom.thread_utils import AgentResponseDecision
-from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord
+from mindroom.turns.facts import PrecheckedEvent
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -2015,7 +2015,7 @@ class TestRouterSkipsSingleAgent:
             await dispatch_test_turn(
                 bot._turn_controller,
                 room,
-                _PrecheckedEvent(
+                PrecheckedEvent(
                     event=event,
                     facts=make_ingress_facts(event.sender, requester_user_id="@alice:localhost"),
                 ),

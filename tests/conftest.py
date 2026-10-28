@@ -187,6 +187,7 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_helpers import make_test_ca_pem
 
 if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
     from xdist.workermanage import WorkerController
 
     from mindroom.agent_cli.session import CliTurnOwner
@@ -2887,20 +2888,54 @@ def replace_interactive_selection_handlers(
     handle: Callable[..., Awaitable[bool]] | None = None,
     start: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
-    """Replace controller-owned interactive handlers for one test bot."""
-    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    """Replace the interactive-selection handlers for one test bot."""
+    selections = bot._interactive_selections
     if handle is not None:
-        controller._handle_interactive_selection = handle  # type: ignore[method-assign]
+        selections._handle_interactive_selection = handle  # type: ignore[method-assign]
     if start is not None:
-        controller._start_interactive_selection = start  # type: ignore[method-assign]
+        selections._start_interactive_selection = start  # type: ignore[method-assign]
+
+
+def _changes_for(deps: "DataclassInstance", changes: Mapping[str, object]) -> dict[str, object]:
+    """Return the changes that name one owner's deps fields."""
+    return {name: value for name, value in changes.items() if name in deps.__dataclass_fields__}
+
+
+_VOICE_READINESS_CHANGES = {
+    "normalizer": "normalizer",
+    "turn_store": "turn_store",
+    "visible_voice_echo": "visible_echo",
+    "logger": "logger",
+}
+
+
+def update_turn_owner_deps(bot: RuntimeBot, **changes: object) -> None:
+    """Swap collaborators in place on every turn owner whose deps name them, voice readiness included.
+
+    In place, because the gate and the reaction dispatcher keep the owners they were built with.
+    """
+    controller = unwrap_extracted_collaborator(bot._turn_controller)
+    owners = (controller, bot._interactive_selections, bot._voice_ingress)
+    known = set(_VOICE_READINESS_CHANGES).union(*(owner.deps.__dataclass_fields__ for owner in owners))
+    unknown = set(changes) - known
+    assert not unknown, f"not a turn owner collaborator: {sorted(unknown)}"
+    for owner in owners:
+        if owner_changes := _changes_for(owner.deps, changes):
+            owner.deps = replace(owner.deps, **owner_changes)
+    readiness_changes = {field: changes[name] for name, field in _VOICE_READINESS_CHANGES.items() if name in changes}
+    if readiness_changes:
+        voice = bot._voice_ingress
+        voice.deps = replace(voice.deps, readiness=replace(voice.deps.readiness, **readiness_changes))
 
 
 def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnController:
-    """Rebuild the turn controller after swapping collaborators captured at construction."""
+    """Swap turn collaborators captured at construction, rebuilding the collaborators that capture them too."""
     sync_bot_runtime_state(bot)
     controller = unwrap_extracted_collaborator(bot._turn_controller)
-    controller_field_names = set(controller.deps.__dataclass_fields__)
-    rebuilt_changes = {name: value for name, value in changes.items() if name in controller_field_names}
+    owner_field_names = set().union(
+        *(owner.deps.__dataclass_fields__ for owner in (controller, bot._interactive_selections, bot._voice_ingress)),
+    )
+    rebuilt_changes = {name: value for name, value in changes.items() if name in owner_field_names}
     default_collaborators = {
         "resolver": "_conversation_resolver",
         "normalizer": "_inbound_turn_normalizer",
@@ -2913,10 +2948,15 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         "edit_regenerator": "_edit_regenerator",
         "visible_responses": "_visible_responses",
     }
+    # The owners are updated in place, so a collaborator a test passed in stays until
+    # the test passes another; only a bot attribute swapped since the last call replaces it.
+    propagated = bot.__dict__.setdefault("_propagated_turn_collaborators", {})
     for field_name, attr_name in default_collaborators.items():
-        if field_name in rebuilt_changes:
-            continue
-        rebuilt_changes[field_name] = getattr(bot, attr_name)
+        held = getattr(controller.deps, field_name)
+        propagated.setdefault(attr_name, held)
+        if field_name not in rebuilt_changes:
+            current = getattr(bot, attr_name)
+            rebuilt_changes[field_name] = current if current is not propagated[attr_name] else held
     store_field_names = set(unwrap_extracted_collaborator(bot._turn_store).deps.__dataclass_fields__)
     store_changes = {name: value for name, value in changes.items() if name in store_field_names}
     if store_changes:
@@ -2946,7 +2986,6 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         ),
     )
     wrap_extracted_collaborators(bot, "_visible_voice_echo")
-    rebuilt_changes["visible_voice_echo"] = bot._visible_voice_echo
     visible_responses = unwrap_extracted_collaborator(bot._visible_responses)
     visible_response_changes = {
         name: value
@@ -3008,8 +3047,8 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         ),
     )
     wrap_extracted_collaborators(bot, "_user_stop_reconciler")
-    rebuilt = TurnController(replace(controller.deps, **rebuilt_changes))
-    bot._turn_controller = rebuilt
+    update_turn_owner_deps(bot, **rebuilt_changes, visible_voice_echo=bot._visible_voice_echo)
+    rebuilt = controller
     reaction_dispatcher = bot._reaction_dispatcher
     replace_reaction_dispatcher_deps(
         bot,
@@ -3021,7 +3060,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
         user_stop_reconciler=bot._user_stop_reconciler,
         ingress=rebuilt.deps.ingress,
         reserve_prompt_ingress_order=rebuilt.reserve_prompt_ingress_order,
-        enqueue_interactive_selection=rebuilt.enqueue_interactive_selection,
+        enqueue_interactive_selection=bot._interactive_selections.enqueue_interactive_selection,
         config_confirmation=replace(
             reaction_dispatcher.deps.config_confirmation,
             runtime=rebuilt.deps.runtime,
@@ -3037,6 +3076,7 @@ def replace_turn_controller_deps(bot: RuntimeBot, **changes: object) -> TurnCont
     }
     if edit_changes:
         replace_edit_regenerator_deps(bot, **edit_changes)
+    propagated.update({attr_name: getattr(bot, attr_name) for attr_name in default_collaborators.values()})
     return rebuilt
 
 
