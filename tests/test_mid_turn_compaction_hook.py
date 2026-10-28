@@ -175,6 +175,7 @@ def _responses_body(request: ModelRequest) -> dict[str, object]:
         request=request,
         settings=ResponsesSettings(),
         wire=_RESPONSES_WIRE,
+        provider="OpenAI Responses",
     )
     return {**kwargs, **kwargs.get("extra_body", {})}
 

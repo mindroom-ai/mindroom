@@ -7,8 +7,9 @@ import ipaddress
 import os
 import tempfile
 from collections.abc import Mapping
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -20,6 +21,7 @@ from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_v
 from mindroom.credentials.sync import get_secret_from_env, get_stored_provider_key, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
+from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
 from mindroom.llm.errors import AuthenticationFailed, ProviderError
 from mindroom.llm.messages import Message
@@ -36,10 +38,10 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.credentials import model_uses_own_credential
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
 from mindroom.providers.names import provider_route
+from mindroom.providers.ollama.settings import ollama_client_options
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -398,12 +400,104 @@ def _validate_vertexai_claude_connection(
     return True, ""
 
 
-def _get_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str:
-    """Get the Ollama host from config or environment."""
-    for model in config.models.values():
-        if provider_route(model.provider) == "ollama" and model.host:
-            return model.host
-    return runtime_paths.env_value("OLLAMA_HOST", default=OLLAMA_HOST_DEFAULT) or OLLAMA_HOST_DEFAULT
+def _ollama_options(subject: str, read: Callable[[], Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """Return the Ollama client options the runtime builds, or None after a warning when its settings cannot be read.
+
+    Building them can read the credential store, and an unreadable store must not end the remaining checks.
+    """
+    try:
+        return read()
+    except (OSError, ValueError) as exc:
+        console.print(f"[yellow]![/yellow] {escape(subject)}: could not read its Ollama settings ({escape(str(exc))})")
+        return None
+
+
+def _ollama_host(options: Mapping[str, Any]) -> str:
+    """Return the server ``options`` reach, as doctor prints it; without a host the Ollama SDK reads ``OLLAMA_HOST``."""
+    return escape(str(options.get("host") or "OLLAMA_HOST or the Ollama SDK default"))
+
+
+def _ollama_reachable(options: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """List the server's models through an Ollama SDK client built from the runtime's ``options``, as requests go.
+
+    The SDK completes a host such as ``gpu.example:11434`` with its scheme, and the options carry the runtime's key.
+    Returns (True, "") when the server answers, (False, reason) when it rejects the request, and (None, reason) when
+    it cannot be reached.
+    """
+    from ollama import Client, ResponseError  # noqa: PLC0415 - the SDK loads only when an Ollama server is checked
+
+    client_options: dict[str, Any] = {**options, "timeout": 5}
+    try:
+        Client(**client_options).list()
+    except ResponseError as exc:
+        return False, f"HTTP {exc.status_code}"
+    except (ConnectionError, httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+        return None, str(exc)
+    return True, ""
+
+
+def _ollama_model_options(config: Config, model_name: str, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return the client options of the Ollama adapter the runtime builds for ``model_name``, its saved key included."""
+    from mindroom.providers.ollama.adapter import build_provider  # noqa: PLC0415 - loads the Ollama SDK
+    from mindroom.providers.registry import configured_model  # noqa: PLC0415 - loads every provider family
+
+    return build_provider(configured_model(config, runtime_paths, model_name), runtime_paths).client_options()
+
+
+def _mem0_ollama_options(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return the client options of Mem0's Ollama memory LLM, which MindRoom gives only the host."""
+    from mindroom.memory.config import mem0_ollama_host  # noqa: PLC0415 - memory setup loads Agno and tiktoken
+
+    return ollama_client_options(mem0_ollama_host(config, runtime_paths), None)
+
+
+def _ollama_embedder_options(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
+    """Return the client options of the Ollama embedder the runtime builds."""
+    settings = resolve_embedder_settings(config, runtime_paths)
+    return ollama_client_options(settings.host, settings.api_key)
+
+
+def _check_ollama_server(subject: str, options: Mapping[str, Any]) -> tuple[int, int, int]:
+    """Check the Ollama server the runtime's client ``options`` reach, reported under ``subject``."""
+    host = _ollama_host(options)
+    valid, detail = _ollama_reachable(options)
+    return _print_validation(
+        valid,
+        detail,
+        f"{subject} reachable ({host})",
+        f"{subject} unreachable: {host}",
+        f"{subject}: could not reach {host}",
+    )
+
+
+def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check the server each Ollama model reaches through the client the runtime builds for it, once per client.
+
+    The check sets its own timeout, so models whose other client options match, such as the same server and key,
+    share one check, reported under their names; models on one server with different keys are each checked.
+    """
+    probes: list[tuple[list[str], Mapping[str, Any]]] = []
+    passed = failed = warnings = 0
+    for name, model_config in config.models.items():
+        if provider_route(model_config.provider) != "ollama":
+            continue
+        options = _ollama_options(f"models.{name}", partial(_ollama_model_options, config, name, runtime_paths))
+        if options is None:
+            warnings += 1
+            continue
+        probe = {key: value for key, value in options.items() if key != "timeout"}
+        names = next((names for names, other in probes if other == probe), None)
+        if names is None:
+            probes.append(([name], probe))
+        else:
+            names.append(name)
+    for names, options in probes:
+        subject = escape(", ".join(f"models.{name}" for name in names))
+        p, f, w = _check_ollama_server(f"{subject}: ollama", options)
+        passed += p
+        failed += f
+        warnings += w
+    return passed, failed, warnings
 
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -476,16 +570,7 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
         return passed, failed, warnings
 
     if provider == "ollama":
-        host = _get_ollama_host(config, runtime_paths=runtime_paths)
-        url = f"{host.rstrip('/')}/api/tags"
-        valid, detail = _http_check(url)
-        return _print_validation(
-            valid,
-            detail,
-            f"{provider} reachable ({host})",
-            f"{provider} unreachable: {host}",
-            f"{provider}: could not reach {host}",
-        )
+        return _check_ollama_models(config, runtime_paths)
 
     env_key = env_key_for_provider(provider)
     if not env_key:
@@ -561,36 +646,34 @@ def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     return p1 + p2, f1 + f2, w1 + w2
 
 
+def _check_default_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check the Ollama server the memory LLM falls back to when none is configured. Returns (passed, failed, warnings)."""
+    if (options := _ollama_options("Memory LLM", partial(_mem0_ollama_options, config, runtime_paths))) is None:
+        return 0, 0, 1
+    ollama_host = _ollama_host(options)
+    console.print(
+        "[yellow]![/yellow] Memory LLM not configured"
+        f" (defaults to ollama at {ollama_host};"
+        " see memory/config.py fallback)",
+    )
+    valid, detail = _ollama_reachable(options)
+    if valid is not True:
+        console.print(
+            f"[red]✗[/red] Default Ollama for memory LLM unreachable ({ollama_host}: {detail})",
+        )
+        return 0, 1, 0
+    return 0, 0, 1
+
+
 def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Check memory LLM configuration. Returns (passed, failed, warnings)."""
     if config.memory.llm is None:
-        ollama_host = _get_ollama_host(config, runtime_paths=runtime_paths)
-        console.print(
-            "[yellow]![/yellow] Memory LLM not configured"
-            f" (defaults to ollama at {ollama_host};"
-            " see memory/config.py fallback)",
-        )
-        # Check if default Ollama is reachable
-        valid, detail = _http_check(f"{ollama_host.rstrip('/')}/api/tags")
-        if valid is not True:
-            console.print(
-                f"[red]✗[/red] Default Ollama for memory LLM unreachable ({ollama_host}: {detail})",
-            )
-            return 0, 1, 0
-        return 0, 0, 1
+        return _check_default_memory_llm(config, runtime_paths)
 
     llm_provider = config.memory.llm.provider
-    llm_base_url = config.memory.llm.config.get("openai_base_url") or config.memory.llm.config.get("base_url")
     if llm_provider == "ollama":
-        host = config.memory.llm.config.get("host") or llm_base_url or _get_ollama_host(config, runtime_paths)
-        valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
-        return _print_validation(
-            valid,
-            detail,
-            f"Memory LLM: ollama reachable ({host})",
-            f"Memory LLM: ollama unreachable ({host})",
-            f"Memory LLM: could not reach ollama ({host})",
-        )
+        options = _ollama_options("Memory LLM", partial(_mem0_ollama_options, config, runtime_paths))
+        return (0, 0, 1) if options is None else _check_ollama_server("Memory LLM: ollama", options)
 
     llm_model = config.memory.llm.config.get("model", "default")
     # The model is free-form config text, which may contain brackets Rich reads as markup.
@@ -632,15 +715,8 @@ def _check_memory_embedder(config: Config, runtime_paths: RuntimePaths) -> tuple
     """Check memory embedder configuration. Returns (passed, failed, warnings)."""
     emb = config.memory.embedder
     if emb.provider == "ollama":
-        host = emb.config.host or _get_ollama_host(config, runtime_paths=runtime_paths)
-        valid, detail = _http_check(f"{host.rstrip('/')}/api/tags")
-        return _print_validation(
-            valid,
-            detail,
-            f"Memory embedder: ollama reachable ({host})",
-            f"Memory embedder: ollama unreachable ({host})",
-            f"Memory embedder: could not reach ollama ({host})",
-        )
+        options = _ollama_options("Memory embedder", partial(_ollama_embedder_options, config, runtime_paths))
+        return (0, 0, 1) if options is None else _check_ollama_server("Memory embedder: ollama", options)
 
     if emb.provider == "sentence_transformers":
         valid, detail = _validate_sentence_transformers_embedder(runtime_paths, emb.config.model)

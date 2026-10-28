@@ -112,6 +112,21 @@
           "threshold": 60000
         },
         "mindroom_portable_replay": true,
+        "mindroom_response_output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Walking shoes.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ],
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },

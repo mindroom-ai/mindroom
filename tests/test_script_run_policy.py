@@ -237,12 +237,13 @@ def test_launch_toolkits_include_egress_credentials_only_while_the_broker_is_on(
     assert ("egress_credentials" in names) is broker_on
 
 
-def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
-    """Like self_config, skill_manage stays with the agent's chat even when the agent lists it."""
+@pytest.mark.parametrize("restricted", ["agent_manager", "skill_manage"])
+def test_launch_grants_exclude_chat_only_tools(tmp_path: Path, restricted: str) -> None:
+    """Like self_config, these stay with the agent's chat even when the agent lists them."""
     context = _context_for_config(
         tmp_path,
         Config(
-            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "skill_manage"])},
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", restricted])},
             defaults=DefaultsConfig(tools=[]),
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
@@ -251,7 +252,7 @@ def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
     grants = resolve_script_launch_grants(context)
 
     assert ScriptToolGrant("calculator", "add") in grants
-    assert all(grant.toolkit_name != "skill_manage" for grant in grants)
+    assert all(grant.toolkit_name != restricted for grant in grants)
 
 
 def test_launch_grants_exclude_claude_agent(tmp_path: Path) -> None:

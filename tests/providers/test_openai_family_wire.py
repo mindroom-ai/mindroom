@@ -45,6 +45,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.native_compaction import native_compaction_route
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -52,6 +53,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -635,20 +637,19 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_config", "reply", "text_part"),
+    ("model_config", "reply"),
     [
-        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")), "text"),
-        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()), "input_text"),
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed())),
     ],
     ids=["chat", "responses"],
 )
-async def test_attachments_deleted_since_their_turn_are_left_out(
+async def test_attachments_deleted_since_their_turn_are_sent_as_the_media_note(
     tmp_path: Path,
     model_config: dict[str, Any],
     reply: dict[str, Any],
-    text_part: str,
 ) -> None:
-    """History whose attachment files were cleaned up still replays: its text is sent and each missing file logged."""
+    """A turn whose attachment files were cleaned up still runs: its text is sent with the media fallback's note."""
     gone = tmp_path / "cleaned-up"
     photo, report = gone / "att_photo.png", gone / "att_report.pdf"
     earlier = Message(
@@ -664,8 +665,8 @@ async def test_attachments_deleted_since_their_turn_are_left_out(
 
     body = built.body()
     sent = body["messages"][0] if "messages" in body else body["input"][0]
-    assert sent["content"] == [{"type": text_part, "text": "Compare these."}]
-    assert [log["path"] for log in logs if log["event"] == "Model input file not found"] == [str(photo), str(report)]
+    assert sent["content"] == f"Compare these.\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+    assert [log["path"] for log in logs if log["event"] == "media_file_unreadable"] == [str(photo)]
 
 
 # --- Errors ---------------------------------------------------------------------------------------------------
@@ -1327,15 +1328,17 @@ _UNSTORED_OUTPUT = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("store", [True, False], ids=["stored", "unstored"])
 @pytest.mark.parametrize("listed", [True, False], ids=["listed-by-the-ended-response", "only-streamed"])
-async def test_an_unstored_response_keeps_its_output_for_replay_without_its_compaction_item(
+async def test_a_response_keeps_its_output_for_replay_without_its_compaction_item(
     tmp_path: Path,
     *,
     listed: bool,
+    store: bool,
 ) -> None:
-    """An unstored reply keeps its output for replay, from the ended response or, when that lists none, its stream.
+    """A reply keeps its output for replay, from the ended response or, when that lists none, its stream.
 
-    The compaction item stays out of that output.
+    It does on every route, whatever the route stores, and the compaction item stays out of that output.
     """
     done = [
         {"type": "response.output_item.done", "sequence_number": 2 + index, "output_index": index, "item": item}
@@ -1343,7 +1346,7 @@ async def test_an_unstored_response_keeps_its_output_for_replay_without_its_comp
     ]
     ended = _completed(_UNSTORED_OUTPUT if listed else None)
     reply = _responses_reply(*_text_events("Pack"), *done, ended)
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": False}}, reply)
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": store}}, reply)
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 

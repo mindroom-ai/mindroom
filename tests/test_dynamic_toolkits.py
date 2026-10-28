@@ -42,7 +42,9 @@ from mindroom.tool_system.dynamic_toolkits import (
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
+from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_generated_agents import _created, _load, _personal, _with_template
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -243,7 +245,10 @@ def test_config_rejects_lazy_flags_inside_named_tool_overrides(tmp_path: Path, l
         _validated_config(tmp_path, raw)
 
 
-@pytest.mark.parametrize("tool_name", ["delegate", "dynamic_tools", "invite_router", "self_config", "skill_manage"])
+@pytest.mark.parametrize(
+    "tool_name",
+    ["agent_manager", "delegate", "dynamic_tools", "invite_router", "self_config", "skill_manage"],
+)
 def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
     """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
     raw = _base_config_data()
@@ -2075,3 +2080,34 @@ def test_search_toolkit_results_are_never_redirected_to_output_files(
 
     assert "dynamic_tools" in _toolkit_names(agent)
     assert "dynamic_tools" not in wrapped
+
+
+def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) -> None:
+    """A creator is offered create_agent, a generated agent its own settings, a created one delete, an authored one none."""
+    config = _load(tmp_path, _with_template(), entries=[_personal()], created=[_created()])
+    config.agents["code"] = config.agents["creator"].model_copy(update={"created_agents_per_owner": 0})
+    paths = test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+
+    def offered(agent_name: str) -> set[str]:
+        build = create_agent(
+            agent_name,
+            config,
+            paths,
+            execution_identity=None,
+            knowledge=None,
+            active_model_name=None,
+            supports_native_tool_approval=True,
+        )
+        return {
+            function.name
+            for toolkit in build.spec.toolkits
+            if toolkit.name == "agent_manager"
+            for function in toolkit.functions
+        }
+
+    managed = {"agent_settings", "update_agent"}
+    assert offered("creator") == {"create_agent"}
+    assert offered("creator_research") == managed | {"delete_agent"}
+    assert offered("mind_alice") == managed
+    assert offered("code") == set()

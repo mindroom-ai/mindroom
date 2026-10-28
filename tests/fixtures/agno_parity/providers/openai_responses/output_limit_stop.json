@@ -32,6 +32,21 @@
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
         },
+        "mindroom_response_output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Pack a light rain jacket and",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "incomplete",
+            "type": "message"
+          }
+        ],
         "mindroom_response_stored": true,
         "response_id": "resp_parity"
       },
