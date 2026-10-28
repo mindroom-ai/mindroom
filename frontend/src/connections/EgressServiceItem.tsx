@@ -693,7 +693,10 @@ export function EgressServiceItem({
               sharedAgent: asksAboutSharedAccount ? agent.displayName : null,
               unscoped: agent.scope === "unscoped",
               readOnly: readOnlyOffered && access === "read",
-              separateAccount: service.separate_account === true,
+              // A `user` scope's services and their own accounts serve all of the user's agents in it.
+              oneAgent:
+                service.separate_account === true &&
+                agent.scope === "user_agent",
             })}
             confirmLabel={
               reuseEnabled

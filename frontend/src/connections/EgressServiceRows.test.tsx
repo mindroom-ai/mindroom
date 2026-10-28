@@ -27,6 +27,7 @@ import type {
   EgressOAuthStatus,
   EgressRuleAuthType,
   EgressRuleSummary,
+  EgressScope,
 } from "./types";
 
 type RowsProps =
@@ -886,15 +887,32 @@ describe("connected accounts", () => {
       );
     });
 
-    it("says what allowing a service's own account does, without covering other agents", async () => {
-      renderRows([{ ...toolsOnly, separate_account: true }]);
-      fireEvent.click(
-        screen.getByRole("button", { name: "Use account for GitHub" }),
-      );
-      const dialog = await screen.findByRole("dialog");
-      expect(dialog).toHaveTextContent(approvalBypass);
-      expect(dialog).not.toHaveTextContent("This covers");
-    });
+    it.each<[EgressScope, boolean]>([
+      ["user_agent", false],
+      ["user", true],
+    ])(
+      "says what allowing a service's own account does on a %s agent, covering other agents only where they share it",
+      async (scope, coversOthers) => {
+        const own = { ...toolsOnly, separate_account: true };
+        renderRows([own], {
+          agent: {
+            displayName: "Personal Mind",
+            shared: false,
+            scope,
+            services: [own],
+          },
+        });
+        fireEvent.click(
+          screen.getByRole("button", { name: "Use account for GitHub" }),
+        );
+        const dialog = await screen.findByRole("dialog");
+        expect(dialog).toHaveTextContent(approvalBypass);
+        const covers =
+          "This covers each of your agents whose GitHub service uses this account.";
+        if (coversOthers) expect(dialog).toHaveTextContent(covers);
+        else expect(dialog).not.toHaveTextContent("This covers");
+      },
+    );
 
     it("says a service's own account is not used yet, never that the tools use it", () => {
       renderRows([{ ...toolsOnly, separate_account: true }]);
