@@ -1890,7 +1890,6 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
         sandbox_proxy_module.save_attachment_to_worker(
             runtime_paths=_runtime_paths_from_env(),
             worker_target=worker_target,
-            worker_tools_override=["file"],
             attachment_id="att_sample",
             mindroom_output_path="sample.bin",
             payload_bytes=payload_bytes,
