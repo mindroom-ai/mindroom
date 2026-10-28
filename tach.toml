@@ -2206,6 +2206,7 @@ path = "mindroom.tool_system.dedicated_threads"
 depends_on = []
 visibility = [
     "mindroom.api.sandbox_runner",
+    "mindroom.tool_system.authoring",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.sandbox_proxy",
@@ -5620,7 +5621,14 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.authoring"
-depends_on = ["mindroom.tool_system.invocation", "mindroom.tool_system.runtime_context"]
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_system.dedicated_threads",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_hooks",
+]
 
 [[modules]]
 path = "mindroom.tool_system.tool_schema"
@@ -8723,6 +8731,7 @@ visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.tool_system.agent_tool_calls",
+    "mindroom.tool_system.authoring",
 ]
 
 [[modules]]

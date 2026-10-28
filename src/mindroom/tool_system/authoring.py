@@ -9,9 +9,11 @@ The module imports no Agno code, so plugin code that authors tools through ``min
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, overload
+from typing import TYPE_CHECKING, Any, Protocol, cast, overload
 
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -207,15 +209,48 @@ def toolkit_functions(toolkit: Toolkit | _AgnoToolkit) -> dict[str, Callable[...
     """Return the callables of ``toolkit``'s functions by name, one per name, to call directly.
 
     For an Agno toolkit, such as one ``get_tool_by_name`` returns, a function's async variant wins where it has one,
-    as an agent runs it.
+    as an agent runs it. A call through an async callable is a tool call of its own, so a tool may call one any number
+    of times, at once too: the synchronous body or worker request it starts belongs to it, not to the call of the tool
+    that makes it, and it returns only once that work has finished, even when cancelled.
     """
     if isinstance(toolkit, Toolkit):
-        return dict(toolkit.functions)
-    return {
-        name: function.entrypoint
-        for name, function in toolkit.get_async_functions().items()
-        if function.entrypoint is not None
-    }
+        functions = dict(toolkit.functions)
+    else:
+        functions = {
+            name: function.entrypoint
+            for name, function in toolkit.get_async_functions().items()
+            if function.entrypoint is not None
+        }
+    return {name: _own_call(function) for name, function in functions.items()}
+
+
+def _own_call[F: Callable[..., Any]](function: F) -> F:
+    """Return ``function``, an async one run as a tool call of its own, which owns the synchronous work it starts."""
+    if not inspect.iscoroutinefunction(function):
+        return function
+
+    @functools.wraps(function)
+    async def own_call(*args: object, **kwargs: object) -> object:
+        # Deferred: they load the tool-call policy and the job runtime, which plugin code importing this module must
+        # not; any code running a tool has loaded them already.
+        from mindroom.background_tasks import wait_for_future_until_complete  # noqa: PLC0415
+        from mindroom.tool_jobs.control import job_owns_execution  # noqa: PLC0415
+        from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR  # noqa: PLC0415
+        from mindroom.tool_system.tool_hooks import (  # noqa: PLC0415
+            SyncToolCompletionTracker,
+            track_sync_tool_completion,
+        )
+
+        # A job's call has no time limit, so what it offloads must not hold a shared pool's thread.
+        tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR if job_owns_execution() else None)
+        try:
+            with track_sync_tool_completion(tracker):
+                return await function(*args, **kwargs)
+        finally:
+            if (started := tracker.started_task()) is not None:
+                await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
+
+    return cast("F", own_call)
 
 
 __all__ = ["CurrentCall", "Toolkit", "authored_description", "current_call", "tool", "toolkit_functions"]

@@ -57,7 +57,9 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm.media import Image
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.authoring import toolkit_functions
 from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.media_transport import encode_media_result
@@ -84,7 +86,11 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.tool_hooks import (
+    SyncToolCompletionTracker,
+    build_tool_hook_middleware,
+    track_sync_tool_completion,
+)
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -1014,6 +1020,120 @@ async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: P
         assert await sandbox_runner_module._call_entrypoint(entrypoint, [], {}) == "async"
     finally:
         restore_tool_registry_snapshot(snapshot)
+
+
+def _routed_ping_toolkit(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    responder: Callable[[str, dict[str, Any]], object] | None = None,
+) -> tuple[Toolkit, Callable[[], None]]:
+    """Register a toolkit with one synchronous function, route it to a worker, and build it; return its restore."""
+
+    class _PingToolkit(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name=tool_name, tools=[self.ping])
+
+        def ping(self) -> str:
+            return "local"
+
+    snapshot = capture_tool_registry_snapshot()
+    register_tool_with_metadata(
+        name=tool_name,
+        file_access=ToolFileAccess.NONE,
+        display_name="Routed Ping",
+        description="Test-only toolkit a plugin calls directly.",
+        category=ToolCategory.DEVELOPMENT,
+    )(lambda: _PingToolkit)
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        execution_mode="selective",
+        proxy_tools={tool_name},
+        credential_policy={},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(responder=responder),
+    )
+    try:
+        toolkit = get_tool_by_name(tool_name, runtime_paths, worker_target=None)
+    except BaseException:
+        restore_tool_registry_snapshot(snapshot)
+        raise
+    return toolkit, lambda: restore_tool_registry_snapshot(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_routed_toolkit_function_runs_more_than_once_inside_one_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool calling a sibling's function twice, and twice at once, leaves its own call's synchronous slot alone."""
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_twice")
+    try:
+        ping = toolkit_functions(toolkit)["ping"]
+        tracker = SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=2))
+        with track_sync_tool_completion(tracker):
+            results = [await ping(), await ping(), *await asyncio.gather(ping(), ping())]
+    finally:
+        restore()
+
+    assert results == ["sandbox-result"] * 4
+    assert tracker.started_task() is None
+
+
+@pytest.mark.asyncio
+async def test_a_toolkit_function_called_inside_a_job_runs_on_the_jobs_own_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job's calls have no time limit, so the request a nested call starts takes no shared pool's thread."""
+    threads: list[str] = []
+
+    def record_thread(_url: str, _payload: dict[str, Any]) -> object:
+        threads.append(threading.current_thread().name)
+        return {"ok": True, "result": "sandbox-result"}
+
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_in_job", record_thread)
+    try:
+        ping = toolkit_functions(toolkit)["ping"]
+        with job_control_context(JobControl()):
+            result = await ping()
+    finally:
+        restore()
+
+    assert result == "sandbox-result"
+    assert threads == ["mindroom-job-call"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_toolkit_function_call_waits_for_the_worker_request_it_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling the tool that made the call does not leave the call's blocking request running behind it."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking(_url: str, _payload: dict[str, Any]) -> object:
+        started.set()
+        release.wait(timeout=30)
+        return {"ok": True, "result": "sandbox-result"}
+
+    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_cancelled", blocking)
+    try:
+        ping = toolkit_functions(toolkit)["ping"]
+        with track_sync_tool_completion(SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=1))):
+            call = asyncio.create_task(ping())
+            await asyncio.to_thread(started.wait, 30)
+            call.cancel()
+            for _ in range(10):
+                await asyncio.sleep(0)
+            settled_early = call.done()
+            release.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await call
+    finally:
+        restore()
+
+    assert not settled_early
 
 
 @pytest.mark.asyncio
