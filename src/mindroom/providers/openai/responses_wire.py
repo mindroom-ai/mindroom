@@ -5,7 +5,8 @@ Stored responses continue with ``previous_response_id`` while the conversation t
 replays before that response. Any other request sends the history explicitly, each reply as the ordered output its
 response recorded when that carries encrypted reasoning, so a later request can replay a tool loop exactly
 (``response_replay``). ``store: false`` responses and portable replay ask for encrypted reasoning; a reply stored
-without portable replay has none, so a changed conversation on its route resends it rebuilt from its text and calls.
+without portable replay has none unless the route's ``include`` asks for it, so a changed conversation on its route
+otherwise resends it rebuilt from its text and calls.
 A turn ends only when ``response.completed`` or ``response.incomplete`` arrives.
 """
 
