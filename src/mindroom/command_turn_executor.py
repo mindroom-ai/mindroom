@@ -88,7 +88,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
-        acts_for_requester: bool = False,
+        acts_for_requester: bool,
     ) -> None:
         """Run one explicit command under its durable turn journal.
 
@@ -336,7 +336,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
-        acts_for_requester: bool = False,
+        acts_for_requester: bool,
     ) -> bool:
         """Execute only on the bot that owns this command response."""
         if command.type is CommandType.MODEL and model_selection_targets_other_runtime(

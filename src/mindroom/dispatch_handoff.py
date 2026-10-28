@@ -54,7 +54,8 @@ class PreparedIngress:
     body: str
     source: dict[str, Any]
     server_timestamp: int | float | None = None
-    # Whether MindRoom vouches for this payload's internal keys: a managed sender's content, or voice MindRoom normalized.
+    # Whether MindRoom wrote this payload itself, as voice it normalized. A managed sender's content is trusted
+    # through its facts instead.
     payload_trusted: bool = False
     # Set by the gate when the event queued behind its conversation's running response.
     active_follow_up: bool = False

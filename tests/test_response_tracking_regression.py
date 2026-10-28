@@ -128,6 +128,7 @@ class TestResponseTrackingRegression:
             command,
             target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
             handled_turn=TurnRecord.create([command_event.event_id]),
+            acts_for_requester=False,
         )
 
         # Verify response was sent
@@ -152,6 +153,7 @@ class TestResponseTrackingRegression:
             command,
             target=MessageTarget.resolve(test_room_id, None, "$command_123", thread_start_root_event_id="$command_123"),
             handled_turn=handled_turn,
+            acts_for_requester=False,
         )
 
         # Should NOT send another response if properly tracked

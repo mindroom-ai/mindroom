@@ -1409,6 +1409,7 @@ class TestCommandThreadContextRoomMode:
                 command=command,
                 target=MessageTarget.resolve(room.room_id, None, event.event_id, room_mode=True),
                 handled_turn=TurnRecord.create([event.event_id]),
+                acts_for_requester=False,
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] is None
@@ -1469,6 +1470,7 @@ class TestCommandThreadContextRoomMode:
                 command=command,
                 target=stable_target,
                 handled_turn=TurnRecord.create([event.event_id]),
+                acts_for_requester=False,
             )
 
         assert mock_schedule.await_args.kwargs["thread_id"] == "$stable_thread"

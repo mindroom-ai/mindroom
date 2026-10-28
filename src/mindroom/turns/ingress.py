@@ -632,7 +632,7 @@ class TurnIngress:
         # A command an entity wrote for a human runs with that human's authority, as its conversation would;
         # handle_command refuses the commands only the human may send.
         pending_event = PendingEvent(
-            event=replace(dispatch_event, payload_trusted=dispatch_event.payload_trusted or facts.sender_is_managed),
+            event=dispatch_event,
             room=room,
             facts=facts,
         )
@@ -712,7 +712,6 @@ class TurnIngress:
             text_debounce_seconds=text_debounce_seconds,
             event=replace(
                 prepared_event,
-                payload_trusted=prepared_event.payload_trusted or facts.sender_is_managed,
                 turn_dispatch_recovery=turn_dispatch_recovery_active(),
                 for_another_participant=self._mentions_another_participant(room, prepared_event.source),
             ),

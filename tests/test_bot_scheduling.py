@@ -147,6 +147,7 @@ async def _execute_command(
         command,
         target=target,
         handled_turn=TurnRecord.create([event.event_id]),
+        acts_for_requester=False,
     )
 
 
@@ -467,6 +468,7 @@ class TestBotScheduleCommands:
             command,
             target=stable_target,
             handled_turn=TurnRecord.create([event.event_id]),
+            acts_for_requester=False,
         )
 
         send_response_mock.assert_called_once()

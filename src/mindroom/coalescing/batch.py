@@ -301,7 +301,7 @@ def _batch_payload_metadata(pending_events: list[PendingEvent]) -> DispatchPaylo
     event_metadata = [
         payload_metadata_from_source(
             pending_event.event.source,
-            trust_internal_metadata=pending_event.event.payload_trusted,
+            trust_internal_metadata=pending_event.event.payload_trusted or pending_event.facts.sender_is_managed,
         )
         for pending_event in pending_events
     ]

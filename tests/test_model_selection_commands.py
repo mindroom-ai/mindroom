@@ -184,6 +184,7 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
         command,
         target=MessageTarget.resolve(ROOM, "$root", "$command"),
         handled_turn=TurnRecord.create(["$command"]),
+        acts_for_requester=False,
     )
     assert owned is False
     assert await harness.turn_store.get_turn_record("$command") is None
@@ -224,6 +225,7 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
             command,
             target=target,
             handled_turn=TurnRecord.create(["$command"]),
+            acts_for_requester=False,
         )
     pending = await harness.turn_store.get_turn_record("$command")
     assert pending is not None
@@ -240,7 +242,15 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
         entity_names=("helper",),
         config=config,
     )
-    await executor.execute(client.rooms[ROOM], event, USER, command, target=target, handled_turn=pending)
+    await executor.execute(
+        client.rooms[ROOM],
+        event,
+        USER,
+        command,
+        target=target,
+        handled_turn=pending,
+        acts_for_requester=False,
+    )
     assert _helper_override(paths, config) == "later"
     assert json.dumps(harness.gateway.sent[0].extra_content, sort_keys=True) == saved
     assert harness.gateway.sent[0].response_text == sent[0].response_text
@@ -280,6 +290,7 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
         command,
         target=MessageTarget.resolve(ROOM, "$root", "$command"),
         handled_turn=pending.record,
+        acts_for_requester=False,
     )
     assert "uncertain" in harness.gateway.sent[0].response_text
     assert harness.gateway.sent[0].extra_content is None
@@ -336,6 +347,7 @@ async def test_same_thread_senders_cannot_overtake_waiting_model_command(
             command,
             target=MessageTarget.resolve(ROOM, "$root", event.event_id),
             handled_turn=TurnRecord.create([event.event_id]),
+            acts_for_requester=False,
         )
 
     first = asyncio.create_task(run(event_for("$first", USER, "default", structured=True)))

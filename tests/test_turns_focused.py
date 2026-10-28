@@ -5127,6 +5127,7 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
                 command,
                 target=target,
                 handled_turn=handled_turn,
+                acts_for_requester=False,
             )
 
         pending_turn = await harness.turn_store.get_turn_record(event.event_id)
@@ -5141,6 +5142,7 @@ async def test_command_replay_adopts_durable_response(config: Config, tmp_path: 
             command,
             target=target,
             handled_turn=handled_turn,
+            acts_for_requester=False,
         )
 
     assert record_visible_response.await_count == 2
@@ -5215,6 +5217,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
             command,
             target=target,
             handled_turn=handled_turn,
+            acts_for_requester=False,
         )
 
     await harness.dispatcher.deps.command_executor.execute(
@@ -5224,6 +5227,7 @@ async def test_command_replay_does_not_repeat_mutation_after_visible_response(co
         command,
         target=target,
         handled_turn=handled_turn,
+        acts_for_requester=False,
     )
 
     mutate.assert_called_once()
@@ -5259,6 +5263,7 @@ async def test_command_send_failure_keeps_turn_pending(config: Config, tmp_path:
             command,
             target=target,
             handled_turn=TurnRecord.create([event.event_id]),
+            acts_for_requester=False,
         )
 
     record = await harness.turn_store.get_turn_record(event.event_id)
@@ -5297,6 +5302,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
                 command,
                 target=target,
                 handled_turn=TurnRecord.create([event.event_id]),
+                acts_for_requester=False,
             )
 
         pending_turn = await harness.turn_store.get_turn_record(event.event_id)
@@ -5311,6 +5317,7 @@ async def test_mutating_command_retries_checkpointed_result_without_reapplying(c
             command,
             target=target,
             handled_turn=pending_turn,
+            acts_for_requester=False,
         )
 
     mutate.assert_called_once()
@@ -5346,6 +5353,7 @@ async def test_failed_mutating_command_execution_requires_manual_retry(config: C
             command,
             target=target,
             handled_turn=TurnRecord.create([event.event_id]),
+            acts_for_requester=False,
         )
 
     pending_turn = await harness.turn_store.get_turn_record(event.event_id)
@@ -5361,6 +5369,7 @@ async def test_failed_mutating_command_execution_requires_manual_retry(config: C
             command,
             target=target,
             handled_turn=pending_turn,
+            acts_for_requester=False,
         )
 
     attempt.assert_called_once()
