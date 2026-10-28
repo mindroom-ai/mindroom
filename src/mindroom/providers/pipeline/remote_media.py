@@ -15,7 +15,7 @@ import httpx2
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.llm.errors import InvalidRequest
-from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, downloaded_media_fields, url_file_name
+from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource, url_file_name
 from mindroom.logging_config import get_logger
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -77,15 +77,7 @@ async def _downloaded[T: (Image, Audio, Video, File)](item: T, kind: MediaKind, 
     if url is None:
         return item
     data, declared = await _download(url, kind, provider)
-    kept = downloaded_media_fields(
-        kind,
-        url_file_name(url),
-        declared,
-        mime_type=item.mime_type,
-        media_format=item.format,
-        filename=(item.filename or item.name) if isinstance(item, File) else None,
-    )
-    return replace(item, url=None, content=data, **kept)
+    return replace(named_by_resource(item, url_file_name(url), declared), url=None, content=data)
 
 
 async def _download(url: str, kind: MediaKind, provider: str) -> tuple[bytes, str | None]:

@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Container, Mapping
+    from collections.abc import Mapping
 
 # Images that ``get_attachment(view=True)`` produced carry ids with this prefix, so a route that rejects image
 # input can mark their tool receipts as unsupported.
@@ -217,60 +217,11 @@ _AUDIO_FORMATS = {
 }
 # Audio formats a file name's suffix names as they are.
 _AUDIO_SUFFIX_FORMATS = frozenset({"mp3", "wav", "ogg", "webm"})
-# A declared type that names none.
-_UNTYPED = "application/octet-stream"
 
 
 def url_file_name(url: str) -> str:
     """Return the file name a URL's path ends in, decoded, or ``""`` when it ends in none."""
     return PurePosixPath(unquote(urlsplit(url).path)).name
-
-
-def downloaded_media_fields(
-    kind: str,
-    name: str,
-    declared: str | None,
-    *,
-    mime_type: str | None,
-    media_format: str | None,
-    filename: str | None = None,
-    file_types: Container[str] | None = None,
-) -> dict[str, str | None]:
-    """Return the fields a media item read from its URL or file keeps of the type that source named.
-
-    ``kind`` is ``image``, ``audio``, ``video``, or ``file``; ``name`` is the source's file name, ``declared`` the
-    type a server declared for it, and ``mime_type``, ``media_format``, and ``filename`` the item's own, which stand.
-    A file gets the name as its filename when it has none, and a type from the declared type, its filename, or the
-    name, the first that names one (within ``file_types`` when given). Other media without a type or format gets the
-    declared type when it is of its kind, an image also its name's; audio and video get the name's suffix as their
-    format, and audio whose suffix names no audio format the format its type means, such as ``mp3``.
-    """
-    if kind == "file":
-        filename = filename or name or None
-        candidates = (declared, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
-        named = (
-            candidate
-            for candidate in candidates
-            if candidate and candidate != _UNTYPED and (file_types is None or candidate in file_types)
-        )
-        return {"filename": filename, "mime_type": mime_type or next(named, None)}
-    kept: dict[str, str | None] = {}
-    if mime_type is None and media_format is None:
-        inferred = mimetypes.guess_type(name)[0] if kind == "image" else None
-        family = f"{kind}/"
-        kept["mime_type"] = next((value for value in (declared, inferred) if value and value.startswith(family)), None)
-    if kind in {"audio", "video"} and media_format is None and name:
-        kept["format"] = PurePosixPath(name).suffix.removeprefix(".").lower() or None
-    suffix_type = mimetypes.guess_type(name)[0] or ""
-    if (
-        kind == "audio"
-        and media_format is None
-        and kept.get("format") not in _AUDIO_SUFFIX_FORMATS
-        and not suffix_type.startswith("audio/")
-        and (named_format := _audio_format(mime_type or kept.get("mime_type")))
-    ):
-        kept["format"] = named_format
-    return kept
 
 
 def _audio_format(mime_type: str | None) -> str | None:
@@ -295,6 +246,36 @@ def image_mime_type(image: Image, data: bytes) -> str:
 
 def _is_text(mime_type: str | None) -> bool:
     return mime_type is not None and mime_type.startswith("text/")
+
+
+# The document types a tool may return a file as for the model to read; a model's provider adapter decides which of
+# them it sends.
+DOCUMENT_MIME_TYPES = frozenset(
+    {
+        "application/pdf",
+        "application/json",
+        "application/x-javascript",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/msword",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-outlook",
+        "application/zip",
+        "message/rfc822",
+        "text/javascript",
+        "application/x-python",
+        "text/x-python",
+        "text/plain",
+        "text/html",
+        "text/css",
+        "text/markdown",
+        "text/csv",
+        "text/xml",
+        "text/rtf",
+    },
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -355,7 +336,48 @@ class File:
         return cls(id=_id_from(data), content=content, **_stored_fields(cls, data))
 
 
+# The MIME type family of each media kind that a file name or a declared type can name.
+_MEDIA_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
+
+
+def named_by_resource[T: Image | Audio | Video | File](
+    media: T,
+    resource_name: str,
+    declared_mime: str | None = None,
+) -> T:
+    """Return ``media`` with the type, and for a file the filename, the resource its bytes came from gives it.
+
+    ``resource_name`` is the last part of that resource's path or URL, and ``declared_mime`` the type its server
+    declared. A type, format, or filename the item already has stands. A file takes the first of the declared type,
+    its filename's, and the resource name's that is in ``DOCUMENT_MIME_TYPES``. Other media without a type or format
+    takes the declared type when it is of its kind, an image also its resource name's; audio and video take the
+    name's suffix as their format, and audio whose suffix names no audio format the format its type means, such as
+    ``mp3``.
+    """
+    if isinstance(media, File):
+        filename = media.filename or media.name or resource_name or None
+        candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(resource_name)[0])
+        mime_type = media.mime_type or next((value for value in candidates if value in DOCUMENT_MIME_TYPES), None)
+        return replace(media, filename=filename, mime_type=mime_type)
+    mime_type, media_format = media.mime_type, media.format
+    named_type = mimetypes.guess_type(resource_name)[0]
+    if mime_type is None and media_format is None:
+        family = _MEDIA_FAMILIES[type(media)]
+        candidates = (declared_mime, named_type if isinstance(media, Image) else None)
+        mime_type = next((value for value in candidates if value and value.startswith(family)), None)
+    if not isinstance(media, Image) and media.format is None:
+        media_format = PurePosixPath(resource_name).suffix.removeprefix(".").lower() or None
+        if (
+            isinstance(media, Audio)
+            and media_format not in _AUDIO_SUFFIX_FORMATS
+            and not (named_type or "").startswith("audio/")
+        ):
+            media_format = _audio_format(mime_type) or media_format
+    return replace(media, mime_type=mime_type, format=media_format)
+
+
 __all__ = [
+    "DOCUMENT_MIME_TYPES",
     "IMAGE_HEADER_BYTES",
     "VIEWED_IMAGE_ID_PREFIX",
     "Audio",
@@ -363,8 +385,8 @@ __all__ = [
     "Image",
     "Video",
     "canonical_mime_type",
-    "downloaded_media_fields",
     "image_format",
     "image_mime_type",
+    "named_by_resource",
     "url_file_name",
 ]

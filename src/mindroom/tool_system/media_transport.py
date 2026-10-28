@@ -6,12 +6,11 @@ import base64
 import binascii
 import json
 import math
-from dataclasses import dataclass
-from typing import Any, cast
+from dataclasses import dataclass, fields
+from typing import Any, cast, get_args, get_origin, get_type_hints
 
-from pydantic import ValidationError
-
-from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
+from mindroom.llm.media import DOCUMENT_MIME_TYPES, Audio, File, Image, Video
+from mindroom.tool_system.tool_function import ToolValue
 
 MAX_MEDIA_COUNT = 8
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
@@ -21,10 +20,23 @@ _MAX_METADATA_CHARS = 64 * 1024
 _MAX_ENCODED_BYTES = 4 * ((MAX_MEDIA_BYTES + 2) // 3)
 _MAX_MEDIA_ID_CHARS = 256
 _KEY = "mindroom_tool_result"
-_MEDIA_MODELS = {"images": AgnoImage, "audios": AgnoAudio, "videos": AgnoVideo, "files": AgnoFile}
-_RESOURCE_FIELDS = {"content", "url", "filepath", "media_reference", "external"}
-type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
-_MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {AgnoImage: "image/", AgnoAudio: "audio/", AgnoVideo: "video/"}
+_MEDIA_MODELS = {"images": Image, "audios": Audio, "videos": Video, "files": File}
+_RESOURCE_FIELDS = {"content", "url", "filepath"}
+type _Media = Image | Audio | Video | File
+_MEDIA_MIME_FAMILIES: dict[type[_Media], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
+
+
+def _json_types(hint: object) -> tuple[object, ...]:
+    """Return the JSON value types a field annotated ``hint`` accepts: its declared types, and an int for a float."""
+    kinds = tuple(get_origin(kind) or kind for kind in get_args(hint) or (hint,))
+    return (*kinds, int) if float in kinds else kinds
+
+
+# The types of each attribute a wire medium may carry, which is every field of its type but the resource ones.
+_ATTRIBUTE_TYPES: dict[type[_Media], dict[str, tuple[object, ...]]] = {
+    model: {name: _json_types(hint) for name, hint in get_type_hints(model).items() if name not in _RESOURCE_FIELDS}
+    for model in _MEDIA_MODELS.values()
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,22 +83,24 @@ def _encode_media(media: _Media) -> dict[str, Any]:
         not isinstance(media.content, bytes)
         or media.url is not None
         or media.filepath is not None
-        or media.media_reference is not None
-        or (isinstance(media, AgnoFile) and media.external is not None)
         or not media.content
         or len(media.content) > MAX_MEDIA_BYTES
     ):
         raise _invalid()
-    entry = media.model_dump(exclude=_RESOURCE_FIELDS, exclude_none=True)
+    entry = {
+        item.name: value
+        for item in fields(media)
+        if item.name not in _RESOURCE_FIELDS and (value := getattr(media, item.name)) is not None
+    }
     _json_size(entry, _MAX_METADATA_CHARS)
     entry["data_base64"] = base64.b64encode(media.content).decode("ascii")
     return entry
 
 
 def encode_media_result(result: object) -> dict[str, object]:
-    """Encode JSON data or a bounded typed result without resolving resources."""
-    if isinstance(result, ToolResult):
-        media = (result.images or [], result.audios or [], result.videos or [], result.files or [])
+    """Encode JSON data or a bounded tool value without resolving resources."""
+    if isinstance(result, ToolValue):
+        media = (result.images, result.audios, result.videos, result.files)
         if sum(map(len, media)) > MAX_MEDIA_COUNT:
             raise _invalid()
         total = sum(len(item.content) for items in media for item in items if isinstance(item.content, bytes))
@@ -95,8 +109,6 @@ def encode_media_result(result: object) -> dict[str, object]:
         value: dict[str, object] = {"version": 1, "kind": "tool_result", "content": result.content}
         for field, items in zip(_MEDIA_MODELS, media, strict=True):
             value[field] = [_encode_media(item) for item in items]
-        if result.metadata is not None:
-            value["metadata"] = result.metadata
     else:
         _json_size(result, _MAX_CONTENT_CHARS)
         value = {"version": 1, "kind": "json", "value": result}
@@ -109,26 +121,26 @@ def _validate_media_entry(entry: object, model: type[_Media]) -> tuple[dict[str,
     if not isinstance(entry, dict) or "data_base64" not in entry:
         raise _invalid()
     entry = cast("dict[str, Any]", entry)
-    allowed = set(model.model_fields) - _RESOURCE_FIELDS
-    if not set(entry) <= allowed | {"data_base64"}:
+    types = _ATTRIBUTE_TYPES[model]
+    if not set(entry) <= {*types, "data_base64"}:
+        raise _invalid()
+    if any(value is not None and type(value) not in types[name] for name, value in entry.items() if name in types):
         raise _invalid()
     encoded = entry["data_base64"]
     if not isinstance(encoded, str) or not encoded or len(encoded) > _MAX_ENCODED_BYTES:
         raise _invalid()
     attributes = {key: value for key, value in entry.items() if key != "data_base64"}
     identifier = attributes.get("id")
-    if identifier is not None and (
-        not isinstance(identifier, str) or not identifier or len(identifier) > _MAX_MEDIA_ID_CHARS
-    ):
+    if identifier is not None and (not identifier or len(identifier) > _MAX_MEDIA_ID_CHARS):
         raise _invalid()
     mime = attributes.get("mime_type")
     if mime is not None:
         family = _MEDIA_MIME_FAMILIES.get(model)
         if (
-            not isinstance(mime, str)
-            or "/" not in mime
+            "/" not in mime
             or any(character.isspace() for character in mime)
             or (family is not None and not mime.startswith(family))
+            or (model is File and mime not in DOCUMENT_MIME_TYPES)
         ):
             raise _invalid()
     return attributes, encoded
@@ -150,12 +162,19 @@ def decode_media_result(payload: object) -> object:
         _json_size(value["value"], _MAX_CONTENT_CHARS)
         return value["value"]
     required = {"version", "kind", "content", *_MEDIA_MODELS}
+    # LEGACY_COMPAT: Worker media envelopes that carry the tool's own metadata.
+    # Legacy format: the `tool_result` value also holds `metadata`, the `metadata` of the Agno `ToolResult` a tool
+    # returned, when the tool set it; no MindRoom or vendor tool sets it.
+    # Last legacy release: v2026.10.636; replacement: v2026.10.637 tools return a `ToolValue`, which has no metadata,
+    # and workers never write the key. A worker may run an earlier release than its primary while a deployment rolls out.
+    # Handling: the key is still accepted and bounded with the media's metadata, then ignored, as nothing reads it.
+    # Coverage: tests/test_worker_media.py::test_a_worker_envelope_with_the_tools_metadata_still_decodes.
     if value.get("kind") != "tool_result" or set(value) not in (required, required | {"metadata"}):
         raise _invalid()
-    return _decode_tool_result(value)
+    return _decode_tool_value(value)
 
 
-def _decode_tool_result(value: dict[str, Any]) -> ToolResult:
+def _decode_tool_value(value: dict[str, Any]) -> ToolValue:
     content = value["content"]
     metadata = value.get("metadata")
     if not isinstance(content, str) or len(content) > _MAX_CONTENT_CHARS:
@@ -175,7 +194,7 @@ def _decode_tool_result(value: dict[str, Any]) -> ToolResult:
     max_encoded = 4 * ((MAX_TOTAL_MEDIA_BYTES + 2) // 3) + 4 * (MAX_MEDIA_COUNT - 1)
     if metadata_size > _MAX_METADATA_CHARS or sum(len(item.data) for item in pending) > max_encoded:
         raise _invalid()
-    decoded: dict[str, Any] = {field: [] for field in _MEDIA_MODELS}
+    decoded: dict[str, list[Any]] = {field: [] for field in _MEDIA_MODELS}
     total = 0
     for item in pending:
         media, data = _decode_media_entry(item)
@@ -183,7 +202,7 @@ def _decode_tool_result(value: dict[str, Any]) -> ToolResult:
         if total > MAX_TOTAL_MEDIA_BYTES:
             raise _invalid()
         decoded[item.field].append(media)
-    return ToolResult(content=content, metadata=metadata, **{field: items or None for field, items in decoded.items()})
+    return ToolValue(content=content, **{field: tuple(items) for field, items in decoded.items()})
 
 
 def _decode_media_entry(item: _EncodedMedia) -> tuple[_Media, bytes]:
@@ -193,8 +212,6 @@ def _decode_media_entry(item: _EncodedMedia) -> tuple[_Media, bytes]:
         raise _invalid() from exc
     if not data or len(data) > MAX_MEDIA_BYTES or base64.b64encode(data).decode("ascii") != item.data:
         raise _invalid()
-    try:
-        media = item.model.model_validate({**item.attributes, "content": data}, strict=True)
-    except ValidationError as exc:
-        raise _invalid() from exc
-    return media, data
+    # An entry without an id, or with a null one, takes a new id.
+    attributes = {name: value for name, value in item.attributes.items() if name != "id" or value is not None}
+    return item.model(**attributes, content=data), data

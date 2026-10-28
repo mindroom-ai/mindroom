@@ -1,8 +1,7 @@
-"""Team runs store the rows the storage goldens hold and tell the leader what each member returned.
+"""Team runs store one record for the team and one for each member run, and tell the leader what each member returned.
 
-The storage goldens are the reference: ``team-completed`` (a member used a tool), ``team-member-error`` (a member's run
-failed), ``team-paused`` (a member's call waits for approval), and the streamed collaborate run ``panel-completed``.
-Member rows leave out the team run's metadata, which the storage goldens copy into them (``stored_as_owned``).
+The stored records are asserted as typed values (``tests.run_record_helpers``): a coordinate run whose member used a
+tool, a member run that failed, a member call that waits for approval, and a streamed collaborate run.
 """
 # ruff: noqa: D103
 
@@ -19,7 +18,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.runs import RunStatus
+from mindroom.llm.runs import RunMetrics, RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_paused_content, team_usage
@@ -29,21 +28,19 @@ from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
 from tests.providers.golden_support import Wire, hide_provider_environment, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter
+from tests.run_record_helpers import PROVIDER, execution, reply, result, run_metrics, settled
 from tests.teams.squad import (
     CHECKER_PAUSED_PIECE,
     PANEL,
+    REQUESTER,
     SQUAD,
     Store,
     collect,
-    comparable,
-    golden_metadata,
-    golden_run,
     prompt,
     run_context,
     scripted,
     squad,
     start_team,
-    stored_as_owned,
 )
 
 if TYPE_CHECKING:
@@ -59,7 +56,15 @@ pytestmark = pytest.mark.asyncio
 
 
 def _delegate(call_id: str, member_id: str, task: str, *, metrics: MessageMetrics) -> list[Any]:
-    return calls(tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task), metrics=metrics)
+    return calls(_delegation(call_id, member_id, task), metrics=metrics)
+
+
+def _delegation(call_id: str, member_id: str, task: str) -> dict[str, Any]:
+    return tool_call("delegate_task_to_member", call_id, member_id=member_id, task=task)
+
+
+# The run metadata the turn starts with, which the team's record stores and its member records do not.
+_METADATA = {"room_id": "!room:example.org", "thread_id": "$squad", "requester_id": REQUESTER}
 
 
 _OLLAMA_MEMBER = {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"}
@@ -96,21 +101,21 @@ def _delegation_to_both(mode: TeamMode) -> list[Any]:
     )
 
 
-async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_completed_rows() -> None:
-    team_row = golden_run("team_squad", SQUAD, "team-completed")
-    writer_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-00000000004b")
+async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_and_member_records() -> None:
+    delegation = _delegation("call-team-writer", "writer", "Add 2 and 3")
+    addition = tool_call("add", "call-writer-add", a=2, b=3)
+    sum_result = '{"operation": "addition", "result": 5.0}'
+    leader_usage = (usage(400, 12), usage(450, 9, time_to_first_token=0.25))
+    writer_usage = (usage(80, 4), usage(95, 1, time_to_first_token=0.25))
     leader = scripted(
         "leader-model",
-        _delegate("call-team-writer", "writer", "Add 2 and 3", metrics=usage(400, 12)),
-        answer("The writer found 5.", usage(450, 9, time_to_first_token=0.25)),
+        calls(delegation, metrics=leader_usage[0]),
+        answer("The writer found 5.", leader_usage[1]),
     )
-    writer = scripted(
-        "writer-model",
-        calls(tool_call("add", "call-writer-add", a=2, b=3), metrics=usage(80, 4)),
-        answer("5", usage(95, 1, time_to_first_token=0.25)),
-    )
+    writer = scripted("writer-model", calls(addition, metrics=writer_usage[0]), answer("5", writer_usage[1]))
     checker = scripted("checker-model")
-    ctx = run_context("team-completed", SQUAD, golden_metadata(team_row))
+    ctx = run_context("team-completed", SQUAD, _METADATA)
+    question = prompt("What is 2 + 3?")
     store = Store()
     stored_when_the_delegation_completed: list[list[tuple[str, str]]] = []
 
@@ -121,12 +126,55 @@ async def test_a_coordinate_run_with_a_member_tool_call_stores_the_team_complete
             yield event
 
     events, record = await collect(
-        noting_the_store(start_team(squad(leader, writer, checker), prompt(team_row), ctx=ctx, persist=store)),
+        noting_the_store(start_team(squad(leader, writer, checker), question, ctx=ctx, persist=store)),
     )
 
-    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(stored_as_owned(writer_row))
+    assert settled(record) == settled(
+        TeamRunRecord(
+            run_id="team-completed",
+            team_id="squad",
+            session_id=SQUAD,
+            user_id=REQUESTER,
+            status=RunStatus.completed,
+            content="The writer found 5.",
+            model="leader-model",
+            model_provider=PROVIDER,
+            messages=[
+                Message(role="system", content="You lead the squad."),
+                *question,
+                reply(None, model="leader-model", metrics=leader_usage[0], calls=[delegation]),
+                result(delegation, "5"),
+                reply("The writer found 5.", model="leader-model", metrics=leader_usage[1]),
+            ],
+            tools=[execution(delegation, is_error=False, result="5")],
+            metrics=run_metrics(*(("leader-model", step) for step in leader_usage)),
+            metadata=_METADATA,
+        ),
+    )
+    assert settled(member) == settled(
+        RunRecord(
+            run_id=member.run_id,
+            agent_id="writer",
+            agent_display_name="Writer",
+            session_id=SQUAD,
+            parent_run_id="team-completed",
+            user_id=REQUESTER,
+            status=RunStatus.completed,
+            content="5",
+            model="writer-model",
+            model_provider=PROVIDER,
+            messages=[
+                Message(role="system", content="You are Writer."),
+                Message(role="user", content="Add 2 and 3"),
+                reply(None, model="writer-model", metrics=writer_usage[0], calls=[addition]),
+                result(addition, sum_result),
+                reply("5", model="writer-model", metrics=writer_usage[1]),
+            ],
+            tools=[execution(addition, is_error=False, result=sum_result)],
+            metrics=run_metrics(*(("writer-model", step) for step in writer_usage)),
+        ),
+    )
     # The team's metadata stays on the team's record; the member's record stores none of it.
     assert record.metadata is ctx.metadata
     assert member.metadata is None
@@ -186,134 +234,227 @@ async def test_a_member_s_tools_read_the_team_s_metadata_which_only_the_team_s_r
     assert record.metadata == {"room_id": "!room:example.org"}
 
 
-async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_an_error_row() -> None:
-    team_row = golden_run("team_squad", SQUAD, "team-member-error")
-    checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-000000000054")
-
+async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_an_error_record() -> None:
+    delegation = _delegation("call-team-checker", "checker", "Check that 2 + 3 = 5")
+    leader_usage = (usage(420, 12), usage(470, 8, time_to_first_token=0.25))
     leader = scripted(
         "leader-model",
-        _delegate("call-team-checker", "checker", "Check that 2 + 3 = 5", metrics=usage(420, 12)),
-        answer("The checker could not answer.", usage(470, 8, time_to_first_token=0.25)),
+        calls(delegation, metrics=leader_usage[0]),
+        answer("The checker could not answer.", leader_usage[1]),
     )
     checker = scripted("checker-model", [Await(_overloaded)])
-    ctx = run_context("team-member-error", SQUAD, golden_metadata(team_row))
+    ctx = run_context("team-member-error", SQUAD, _METADATA)
+    question = prompt("Check the answer.")
     store = Store()
 
     with capture_logs() as logs:
         _, record = await collect(
-            start_team(squad(leader, scripted("writer-model"), checker), prompt(team_row), ctx=ctx, persist=store),
+            start_team(squad(leader, scripted("writer-model"), checker), question, ctx=ctx, persist=store),
         )
 
-    assert comparable(record.to_dict()) == comparable(stored_as_owned(team_row))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
-    assert (member.status, member.content) == (RunStatus.error, "Checker overloaded")
-    assert record.tools is not None
-    assert (record.tools[0].result, record.tools[0].is_error) == ("Checker overloaded", False)
+    # The member's failure answers the delegation as a result, not as a failed call.
+    assert settled(record) == settled(
+        TeamRunRecord(
+            run_id="team-member-error",
+            team_id="squad",
+            session_id=SQUAD,
+            user_id=REQUESTER,
+            status=RunStatus.completed,
+            content="The checker could not answer.",
+            model="leader-model",
+            model_provider=PROVIDER,
+            messages=[
+                Message(role="system", content="You lead the squad."),
+                *question,
+                reply(None, model="leader-model", metrics=leader_usage[0], calls=[delegation]),
+                result(delegation, "Checker overloaded"),
+                reply("The checker could not answer.", model="leader-model", metrics=leader_usage[1]),
+            ],
+            tools=[execution(delegation, is_error=False, result="Checker overloaded")],
+            metrics=run_metrics(*(("leader-model", step) for step in leader_usage)),
+            metadata=_METADATA,
+        ),
+    )
+    # The failed member run keeps its task and stores the error's text as its content, with no usage.
+    assert settled(member) == settled(
+        RunRecord(
+            run_id=member.run_id,
+            agent_id="checker",
+            agent_display_name="Checker",
+            session_id=SQUAD,
+            parent_run_id="team-member-error",
+            user_id=REQUESTER,
+            status=RunStatus.error,
+            content="Checker overloaded",
+            model="checker-model",
+            model_provider=PROVIDER,
+            messages=[
+                Message(role="system", content="You are Checker."),
+                Message(role="user", content="Check that 2 + 3 = 5"),
+            ],
+            metrics=RunMetrics(),
+        ),
+    )
     assert store.statuses == [("checker", "ERROR"), ("squad", "COMPLETED")]
     failures = [log for log in logs if log["event"] == "team_member_run_failed"]
     assert [(log["team_id"], log["member_id"]) for log in failures] == [("squad", "checker")]
 
 
-async def test_a_member_approval_pauses_the_team_with_the_team_paused_rows() -> None:
-    team_row = golden_run("team_squad", SQUAD, "team-paused")
-    checker_row = golden_run("team_squad", SQUAD, "00000000-0000-4000-8000-00000000005a")
-    leader = scripted(
-        "leader-model",
-        _delegate("call-team-multiply", "checker", "Multiply 6 by 7", metrics=usage(430, 12)),
-    )
-    checker = scripted(
-        "checker-model",
-        calls(tool_call("multiply", "call-checker-multiply", a=6, b=7), metrics=usage(85, 5)),
-    )
-    team = squad(
-        leader,
-        scripted("writer-model"),
-        checker,
-        system=team_row["messages"][0]["content"],
-        checker_system=checker_row["messages"][0]["content"],
-    )
+async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() -> None:
+    delegation = _delegation("call-team-multiply", "checker", "Multiply 6 by 7")
+    multiplication = tool_call("multiply", "call-checker-multiply", a=6, b=7)
+    leader = scripted("leader-model", calls(delegation, metrics=usage(430, 12)))
+    checker = scripted("checker-model", calls(multiplication, metrics=usage(85, 5)))
+    team = squad(leader, scripted("writer-model"), checker)
+    question = prompt("Multiply 6 by 7.")
     store = Store()
 
     _, record = await collect(
-        start_team(
-            team,
-            prompt(team_row),
-            ctx=run_context("team-paused", SQUAD, golden_metadata(team_row)),
-            persist=store,
-        ),
+        start_team(team, question, ctx=run_context("team-paused", SQUAD, _METADATA), persist=store),
     )
 
-    assert record.status is RunStatus.paused
-    # The delegation names the member run it waits on, where Agno stored no member run on it.
-    [delegation] = team_row["tools"]
-    linked = {**team_row, "tools": [{**delegation, "child_run_id": checker_row["run_id"]}]}
-    assert comparable(record.to_dict()) == comparable(stored_as_owned(linked))
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(stored_as_owned(checker_row))
+    waiting = execution(multiplication, requires_confirmation=True, approval_type="mindroom_policy")
+    paused_member = RunRecord(
+        run_id=member.run_id,
+        agent_id="checker",
+        agent_display_name="Checker",
+        session_id=SQUAD,
+        parent_run_id="team-paused",
+        user_id=REQUESTER,
+        status=RunStatus.paused,
+        content="I have tools to execute, but I need confirmation.",
+        model="checker-model",
+        model_provider=PROVIDER,
+        messages=[
+            Message(role="system", content="You are Checker."),
+            Message(role="user", content="Multiply 6 by 7"),
+            reply(None, model="checker-model", metrics=usage(85, 5), calls=[multiplication]),
+        ],
+        tools=[waiting],
+        requirements=[RunRequirement(waiting)],
+        metrics=run_metrics(("checker-model", usage(85, 5))),
+    )
+    paused_notice = MEMBER_PAUSED_RESULT.format(name="Checker")
+    assert settled(member) == settled(paused_member)
+    assert settled(record) == settled(
+        TeamRunRecord(
+            run_id="team-paused",
+            team_id="squad",
+            session_id=SQUAD,
+            user_id=REQUESTER,
+            status=RunStatus.paused,
+            content="Team run paused. The following require input:\n- Checker: multiply requires confirmation",
+            model="leader-model",
+            model_provider=PROVIDER,
+            messages=[
+                Message(role="system", content="You lead the squad."),
+                *question,
+                reply(None, model="leader-model", metrics=usage(430, 12), calls=[delegation]),
+                result(delegation, paused_notice),
+            ],
+            # The delegation names the member run it waits on.
+            tools=[execution(delegation, is_error=False, result=paused_notice, child_run_id=member.run_id)],
+            requirements=[
+                RunRequirement(
+                    waiting,
+                    member_agent_id="checker",
+                    member_display_name="Checker",
+                    member_run_id=member.run_id,
+                ),
+            ],
+            metrics=run_metrics(("leader-model", usage(430, 12))),
+            metadata=_METADATA,
+            member_responses=[paused_member],
+        ),
+    )
     assert record.member_responses == [member]
     assert record.tools is not None
     assert record.tools[0].child_run_id == member.run_id
     assert record.requirements is not None
     [requirement] = record.requirements
-    # The approval card keys the call by member id and call id, both as the member run recorded them.
+    # The approval card keys the call by member id and call id, both as the member run recorded them, and the team's
+    # requirement is the member's own.
     assert f"{requirement.member_agent_id}:{requirement.tool_execution.tool_call_id}" == "checker:call-checker-multiply"
     assert (requirement.member_display_name, requirement.member_run_id) == ("Checker", member.run_id)
+    assert [item.id for item in member.requirements or ()] == [requirement.id]
     assert len(leader.requests) == 1  # The leader is not asked again while the member waits.
     assert store.statuses == [("checker", "PAUSED"), ("squad", "PAUSED")]
     assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
 
 
-def _with_delegation_result(row: dict[str, Any], call_id: str, result: str) -> dict[str, Any]:
-    """Return a stored run dict whose delegation call ``call_id`` answered ``result``, in its tools and its messages."""
-    return {
-        **row,
-        "tools": [{**tool, "result": result} if tool["tool_call_id"] == call_id else tool for tool in row["tools"]],
-        "messages": [
-            {**message, "content": result} if message.get("tool_call_id") == call_id else message
-            for message in row["messages"]
-        ],
-    }
-
-
-async def test_a_collaborate_run_stores_the_panel_rows_with_labeled_member_results_in_member_order() -> None:
-    # The panel golden's rows differ only in the delegation's result, which now labels each member's piece.
+async def test_a_collaborate_run_stores_labeled_member_results_in_member_order() -> None:
+    task = "Give one fact about the number 5."
+    delegation = tool_call("delegate_task_to_members", "call-panel", task=task)
     labeled = "Agent Writer: Five is prime.\n\nAgent Checker: Five is odd."
-    team_row = golden_run("team_panel", PANEL, "panel-completed")
-    writer_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-00000000006d")
-    checker_row = golden_run("team_panel", PANEL, "00000000-0000-4000-8000-000000000070")
+    leader_usage = (usage(380, 10), usage(410, 7, time_to_first_token=0.25))
+    answers = {
+        "writer": ("Five is prime.", usage(60, 3, time_to_first_token=0.25)),
+        "checker": ("Five is odd.", usage(61, 3, time_to_first_token=0.25)),
+    }
     leader = scripted(
         "leader-model",
-        calls(
-            tool_call("delegate_task_to_members", "call-panel", task="Give one fact about the number 5."),
-            metrics=usage(380, 10),
-        ),
-        answer("Five is prime and odd.", usage(410, 7, time_to_first_token=0.25)),
+        calls(delegation, metrics=leader_usage[0]),
+        answer("Five is prime and odd.", leader_usage[1]),
     )
-    writer = scripted("writer-model", answer("Five is prime.", usage(60, 3, time_to_first_token=0.25)))
-    checker = scripted("checker-model", answer("Five is odd.", usage(61, 3, time_to_first_token=0.25)))
+    writer = scripted("writer-model", answer(*answers["writer"]))
+    checker = scripted("checker-model", answer(*answers["checker"]))
     team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE, team_id="panel")
+    question = prompt("Tell me about 5.")
+    metadata = {**_METADATA, "thread_id": "$panel"}
     store = Store()
 
     events, record = await collect(
-        start_team(
-            team,
-            prompt(team_row),
-            ctx=run_context("panel-completed", PANEL, golden_metadata(team_row)),
-            persist=store,
-        ),
+        start_team(team, question, ctx=run_context("panel-completed", PANEL, metadata), persist=store),
     )
 
-    assert comparable(record.to_dict()) == comparable(
-        _with_delegation_result(stored_as_owned(team_row), "call-panel", labeled),
+    assert settled(record) == settled(
+        TeamRunRecord(
+            run_id="panel-completed",
+            team_id="panel",
+            session_id=PANEL,
+            user_id=REQUESTER,
+            status=RunStatus.completed,
+            content="Five is prime and odd.",
+            model="leader-model",
+            model_provider=PROVIDER,
+            messages=[
+                Message(role="system", content="You lead the squad."),
+                *question,
+                reply(None, model="leader-model", metrics=leader_usage[0], calls=[delegation]),
+                result(delegation, labeled),
+                reply("Five is prime and odd.", model="leader-model", metrics=leader_usage[1]),
+            ],
+            tools=[execution(delegation, is_error=False, result=labeled)],
+            metrics=run_metrics(*(("leader-model", step) for step in leader_usage)),
+            metadata=metadata,
+        ),
     )
     members = store.members
-    assert [comparable(member.to_dict()) for member in members] == [
-        comparable(stored_as_owned(writer_row)),
-        comparable(stored_as_owned(checker_row)),
+    assert [settled(member) for member in members] == [
+        settled(
+            RunRecord(
+                run_id=member.run_id,
+                agent_id=agent_id,
+                agent_display_name=agent_id.title(),
+                session_id=PANEL,
+                parent_run_id="panel-completed",
+                user_id=REQUESTER,
+                status=RunStatus.completed,
+                content=text,
+                model=f"{agent_id}-model",
+                model_provider=PROVIDER,
+                messages=[
+                    Message(role="system", content=f"You are {agent_id.title()}."),
+                    Message(role="user", content=task),
+                    reply(text, model=f"{agent_id}-model", metrics=metrics),
+                ],
+                metrics=run_metrics((f"{agent_id}-model", metrics)),
+            ),
+        )
+        for member, (agent_id, (text, metrics)) in zip(members, answers.items(), strict=True)
     ]
-    assert record.tools is not None
-    assert record.tools[0].result == labeled
     streamed = {
         member_id: "".join(
             event.event.text
@@ -350,7 +491,7 @@ async def test_an_unknown_member_id_answers_the_leader_with_the_not_found_notice
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=store,
         ),
@@ -382,7 +523,7 @@ async def test_a_collaborate_member_that_pauses_adds_its_labeled_notice_in_its_p
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=store,
         ),
@@ -413,7 +554,7 @@ async def test_the_leader_tool_definitions_are_the_tools_each_leader_request_sen
     )
 
     await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
 
     [request] = leader.requests
@@ -435,7 +576,7 @@ async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=store,
         ),
@@ -473,7 +614,7 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=store,
         ),
@@ -513,7 +654,7 @@ async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_
         try:
             async for _ in start_team(
                 team,
-                prompt({"messages": [{"role": "user", "content": "hi"}]}),
+                prompt("hi"),
                 ctx=run_context("r", SQUAD),
                 persist=store,
             ):
@@ -590,7 +731,7 @@ async def test_a_collaborate_run_gives_the_leader_each_member_s_labeled_result(
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
         ),
     )
@@ -650,7 +791,7 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=store,
         ),
@@ -690,7 +831,7 @@ async def test_a_coordinate_member_without_text_reaches_the_leader_by_the_one_re
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
         ),
     )
@@ -745,7 +886,7 @@ async def test_the_leader_reads_a_chat_member_s_tool_results_when_it_writes_no_t
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
         ),
     )
@@ -795,7 +936,7 @@ async def test_the_leader_reads_an_ollama_member_s_answer_without_its_thinking(
     _, record = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=store,
         ),

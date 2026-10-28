@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.tool_jobs.legacy_results import drop_legacy_payload_fields
+from mindroom.tool_jobs.legacy_results import LEGACY_TOOL_VALUE_TAG, drop_legacy_payload_fields
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ def _encode(value: Any, allowance: _FileAllowance) -> Any:  # noqa: ANN401, C901
         media = (value.images, value.audios, value.videos, value.files)
         fields: dict[str, Any] = {"content": value.content}
         fields.update({name: list(items) for name, items in zip(_TOOL_VALUE_MEDIA, media, strict=True)})
-        return {"type": "ToolResult", "value": _encode(fields, allowance)}
+        return {"type": "ToolValue", "value": _encode(fields, allowance)}
     if isinstance(value, (Image, Audio, Video, File)):
         fields = asdict(value)
         if value.filepath is not None:
@@ -117,7 +117,7 @@ def _decode(value: Any) -> Any:  # noqa: ANN401, PLR0911 - One explicit branch p
         return base64.b64decode(data, validate=True)
     if kind == "path":
         return Path(data)
-    if kind == "ToolResult":
+    if kind in {"ToolValue", LEGACY_TOOL_VALUE_TAG}:
         fields = _decode(data)
         # A legacy value saves null in place of an empty media list; see legacy_results.
         media = {name: tuple(fields[name] or ()) for name in _TOOL_VALUE_MEDIA}

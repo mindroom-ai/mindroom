@@ -4,57 +4,52 @@ from __future__ import annotations
 
 import pytest
 
-from mindroom.llm.media import downloaded_media_fields, url_file_name
+from mindroom.llm.media import Audio, File, Image, Video, named_by_resource, url_file_name
 
 
 @pytest.mark.parametrize(
-    ("kind", "url", "declared", "own", "expected"),
+    ("media", "declared", "expected"),
     [
-        ("audio", "https://media.test/speech", "audio/mpeg", {}, {"mime_type": "audio/mpeg", "format": "mp3"}),
-        ("audio", "https://media.test/song.mp3", None, {}, {"mime_type": None, "format": "mp3"}),
-        ("audio", "https://media.test/clip", "audio/mpeg", {"media_format": "wav"}, {}),
-        ("video", "https://media.test/clip.webm", "video/webm", {}, {"mime_type": "video/webm", "format": "webm"}),
-        ("video", "https://media.test/clip.mp4", "application/octet-stream", {}, {"mime_type": None, "format": "mp4"}),
-        ("image", "https://media.test/chart.png", None, {}, {"mime_type": "image/png"}),
-        ("image", "https://media.test/photo", "image/webp", {"mime_type": "image/png"}, {}),
-        (
-            "file",
-            "https://media.test/files/report%20q3.pdf",
-            "application/octet-stream",
-            {},
-            {"filename": "report q3.pdf", "mime_type": "application/pdf"},
-        ),
-        (
-            "file",
-            "https://media.test/download?id=7",
-            "text/csv",
-            {"filename": "rows.txt"},
-            {"filename": "rows.txt", "mime_type": "text/csv"},
-        ),
+        (Audio(url="https://media.test/speech"), "audio/mpeg", ("audio/mpeg", "mp3")),
+        (Audio(url="https://media.test/song.mp3"), None, (None, "mp3")),
+        (Audio(url="https://media.test/clip", format="wav"), "audio/mpeg", (None, "wav")),
+        (Video(url="https://media.test/clip.webm"), "video/webm", ("video/webm", "webm")),
+        (Video(url="https://media.test/clip.mp4"), "application/octet-stream", (None, "mp4")),
+        (Image(url="https://media.test/chart.png"), None, ("image/png", None)),
+        (Image(url="https://media.test/photo", mime_type="image/png"), "image/webp", ("image/png", None)),
     ],
 )
 def test_downloaded_media_keeps_the_type_its_source_names(
-    kind: str,
-    url: str,
+    media: Image | Audio | Video,
     declared: str | None,
-    own: dict[str, str],
-    expected: dict[str, str | None],
+    expected: tuple[str | None, str | None],
 ) -> None:
-    """The item's own type stands; else the declared type of its kind, then the URL's name, type it."""
-    fields = {"mime_type": None, "media_format": None, **own}
+    """The item's own type or format stands; else the declared type of its kind, then its URL's name, type it."""
+    assert media.url is not None
+    named = named_by_resource(media, url_file_name(media.url), declared)
 
-    assert downloaded_media_fields(kind, url_file_name(url), declared, **fields) == expected
+    assert (named.mime_type, named.format) == expected
 
 
-def test_worker_file_types_limit_what_a_file_is_typed_as() -> None:
-    """A declared type outside ``file_types`` leaves the file's name to type it."""
-    fields = downloaded_media_fields(
-        "file",
-        "notes.txt",
-        "image/png",
-        mime_type=None,
-        media_format=None,
-        file_types=frozenset({"text/plain"}),
-    )
+@pytest.mark.parametrize(
+    ("file", "declared", "expected"),
+    [
+        (
+            File(url="https://media.test/files/report%20q3.pdf"),
+            "application/octet-stream",
+            ("report q3.pdf", "application/pdf"),
+        ),
+        (File(url="https://media.test/download?id=7", filename="rows.txt"), "text/csv", ("rows.txt", "text/csv")),
+        (File(url="https://media.test/export/notes.txt"), "image/png", ("notes.txt", "text/plain")),
+    ],
+)
+def test_a_downloaded_file_takes_a_document_type_and_its_url_s_name(
+    file: File,
+    declared: str | None,
+    expected: tuple[str | None, str | None],
+) -> None:
+    """``application/octet-stream`` and a type no document has give way to the file's or the URL's name."""
+    assert file.url is not None
+    named = named_by_resource(file, url_file_name(file.url), declared)
 
-    assert fields == {"filename": "notes.txt", "mime_type": "text/plain"}
+    assert (named.filename, named.mime_type) == expected
