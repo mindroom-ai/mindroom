@@ -152,7 +152,7 @@ class ToolRuntimeContext:
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
     # What posted this turn's message when a hook did; a resumed approval turn restores it.
-    # Last, so plugins that build this context positionally keep their argument order.
+    # Keep `hook_source` last: plugins construct this context positionally.
     hook_source: str | None = None
 
     @property
