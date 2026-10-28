@@ -66,7 +66,7 @@ def test_file_needs_no_source_and_allows_several() -> None:
     bare = File(id="provider-file", mime_type="application/pdf")
     both = File(url="https://example.invalid/f", filepath="/data/f")
 
-    assert bare.to_dict() == {"id": "provider-file", "mime_type": "application/pdf"}
+    assert (bare.id, bare.url, bare.filepath, bare.content) == ("provider-file", None, None, None)
     assert (both.url, both.filepath) == ("https://example.invalid/f", "/data/f")
 
 
@@ -82,43 +82,12 @@ def test_media_get_unique_ids_and_are_frozen() -> None:
 def test_file_mime_type_is_not_restricted() -> None:
     document = File(filepath="/data/model.safetensors", mime_type="application/octet-stream")
 
-    assert document.to_dict()["mime_type"] == "application/octet-stream"
-
-
-def test_file_text_content_round_trips_by_mime_type() -> None:
-    text = File(content="héllo".encode(), mime_type="text/plain")
-    binary = File(content=b"\x00\x01", mime_type="application/octet-stream")
-    looks_like_base64 = File(content=b"TestData", mime_type="text/plain")
-
-    assert text.to_dict()["content"] == "héllo"
-    assert binary.to_dict()["content"] == "AAE="
-    assert File.from_dict(looks_like_base64.to_dict()).content == b"TestData"
-    assert File.from_dict(binary.to_dict()).content == b"\x00\x01"
-
-
-def test_file_to_dict_keeps_text_content_and_base64_encodes_text_bytes_that_are_not_utf8() -> None:
-    # A tool's Agno ``File`` can carry its content as text, which the stored run keeps as it is.
-    assert File(content="plain text").to_dict()["content"] == "plain text"
-    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content, with the
-    # ``content_encoding`` marker that lets them read back as these bytes.
-    assert File(content="café".encode("latin-1"), mime_type="text/plain").to_dict()["content"] == "Y2Fm6Q=="
+    assert document.mime_type == "application/octet-stream"
 
 
 def test_stored_content_that_is_not_base64_reads_as_its_utf8_bytes() -> None:
     # Agno's reader fell back to the text's UTF-8 bytes when the stored content was not valid base64.
     assert Image.from_dict({"content": "abc"}).content == b"abc"
-
-
-def test_media_to_dict_without_content_keeps_scalars() -> None:
-    audio = Audio(id="a", content=b"x", mime_type="audio/wav", transcript="hi")
-
-    assert audio.to_dict(include_content=False) == {
-        "id": "a",
-        "mime_type": "audio/wav",
-        "sample_rate": 24000,
-        "channels": 1,
-        "transcript": "hi",
-    }
 
 
 # --- messages --------------------------------------------------------------------------------------------------
@@ -148,13 +117,6 @@ def test_message_defaults() -> None:
     assert isinstance(first.created_at, int)
     assert first.metrics == MessageMetrics()
     assert (first.from_history, first.add_to_agent_memory) == (False, True)
-    assert Message.from_dict({"role": "user"}).to_dict().keys() == {
-        "id",
-        "from_history",
-        "stop_after_tool_call",
-        "role",
-        "created_at",
-    }
 
 
 def test_message_is_mutable_and_copies_independently() -> None:
@@ -186,29 +148,6 @@ def test_message_is_mutable_and_copies_independently() -> None:
 )
 def test_message_get_content_string(content: str | list[object] | None, expected: str) -> None:
     assert Message(role="user", content=content).get_content_string() == expected
-
-
-def test_message_to_dict_drops_empty_values_but_keeps_false_and_zero() -> None:
-    message = Message(
-        role="tool",
-        content="",
-        tool_args={},
-        tool_calls=[],
-        provider_data={},
-        tool_call_error=False,
-        created_at=0,
-        id="m",
-    )
-
-    assert message.to_dict() == {
-        "id": "m",
-        "content": "",
-        "from_history": False,
-        "stop_after_tool_call": False,
-        "role": "tool",
-        "tool_call_error": False,
-        "created_at": 0,
-    }
 
 
 def test_message_from_dict_requires_a_role() -> None:
@@ -253,7 +192,6 @@ def test_run_record_defaults_and_status() -> None:
     assert record.status is RunStatus.running
     assert record.messages == []
     assert (record.tools, record.requirements, record.metrics) == (None, None, None)
-    assert record.to_dict()["status"] == "RUNNING"
     assert RunStatus("PAUSED") is RunStatus.paused
     assert RunStatus.cancelled.name == "cancelled"
 
@@ -263,7 +201,6 @@ def test_team_run_record_defaults() -> None:
 
     assert record.member_responses == []
     assert record.parent_run_id is None
-    assert "agent_id" not in record.to_dict()
 
 
 # --- usage -----------------------------------------------------------------------------------------------------

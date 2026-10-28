@@ -18,6 +18,44 @@ from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, Session
 # --- media -----------------------------------------------------------------------------------------------------
 
 
+def test_a_file_known_only_by_its_id_stores_its_id_and_type() -> None:
+    assert File(id="provider-file", mime_type="application/pdf").to_dict() == {
+        "id": "provider-file",
+        "mime_type": "application/pdf",
+    }
+
+
+def test_file_text_content_round_trips_by_mime_type() -> None:
+    text = File(content="héllo".encode(), mime_type="text/plain")
+    binary = File(content=b"\x00\x01", mime_type="application/octet-stream")
+    looks_like_base64 = File(content=b"TestData", mime_type="text/plain")
+
+    assert text.to_dict()["content"] == "héllo"
+    assert binary.to_dict()["content"] == "AAE="
+    assert File.from_dict(looks_like_base64.to_dict()).content == b"TestData"
+    assert File.from_dict(binary.to_dict()).content == b"\x00\x01"
+
+
+def test_file_to_dict_keeps_text_content_and_base64_encodes_text_bytes_that_are_not_utf8() -> None:
+    # A tool's Agno ``File`` can carry its content as text, which the stored run keeps as it is.
+    assert File(content="plain text").to_dict()["content"] == "plain text"
+    # Latin-1 text bytes cannot be stored as UTF-8 text, so they are stored as base64 like binary content, with the
+    # ``content_encoding`` marker that lets them read back as these bytes.
+    assert File(content="café".encode("latin-1"), mime_type="text/plain").to_dict()["content"] == "Y2Fm6Q=="
+
+
+def test_media_to_dict_without_content_keeps_scalars() -> None:
+    audio = Audio(id="a", content=b"x", mime_type="audio/wav", transcript="hi")
+
+    assert audio.to_dict(include_content=False) == {
+        "id": "a",
+        "mime_type": "audio/wav",
+        "sample_rate": 24000,
+        "channels": 1,
+        "transcript": "hi",
+    }
+
+
 def test_a_text_file_that_is_not_utf8_reads_back_as_its_bytes() -> None:
     """A ``text/*`` file whose bytes are not UTF-8 is stored as base64 that says so, and reads back as those bytes."""
     latin1 = File(id="f", content="café".encode("latin-1"), mime_type="text/plain")
@@ -236,11 +274,37 @@ def test_a_message_stores_each_field_it_holds_under_its_key_and_reads_back_as_it
     assert Message.from_dict(stored) == owned
 
 
-def test_a_new_message_stores_no_compressed_copy_of_its_content() -> None:
-    """Only rows Agno's retired ``compress_tool_results`` wrote hold a compressed copy; no MindRoom writer makes one."""
-    result = Message(role="tool", content="a long tool result", tool_call_id="c", tool_name="t")
+def test_a_message_with_only_a_role_stores_its_id_flags_role_and_creation_time() -> None:
+    assert Message.from_dict({"role": "user"}).to_dict().keys() == {
+        "id",
+        "from_history",
+        "stop_after_tool_call",
+        "role",
+        "created_at",
+    }
 
-    assert "compressed_content" not in result.to_dict()
+
+def test_message_to_dict_drops_empty_values_but_keeps_false_and_zero() -> None:
+    message = Message(
+        role="tool",
+        content="",
+        tool_args={},
+        tool_calls=[],
+        provider_data={},
+        tool_call_error=False,
+        created_at=0,
+        id="m",
+    )
+
+    assert message.to_dict() == {
+        "id": "m",
+        "content": "",
+        "from_history": False,
+        "stop_after_tool_call": False,
+        "role": "tool",
+        "tool_call_error": False,
+        "created_at": 0,
+    }
 
 
 def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:
@@ -408,9 +472,12 @@ def test_a_run_stores_tools_requirements_and_metrics_exactly_when_set() -> None:
 
     assert (empty.to_dict()["tools"], empty.to_dict()["requirements"]) == ([], [])
     assert {"tools", "requirements", "metrics"}.isdisjoint(absent.to_dict())
+    # A new run stores its starting status.
+    assert absent.to_dict()["status"] == "RUNNING"
     assert [RunRecord.from_dict(run.to_dict()) for run in (empty, absent)] == [empty, absent]
-    # A team run always stores its member list, empty when no member run is paused with it.
-    assert TeamRunRecord(run_id="t", team_id="x", created_at=1).to_dict()["member_responses"] == []
+    # A team run always stores its member list, empty when no member run is paused with it, and no agent id.
+    team = TeamRunRecord(run_id="t", team_id="x", created_at=1).to_dict()
+    assert (team["member_responses"], "agent_id" in team) == ([], False)
 
 
 def test_run_statuses_are_stored_by_value_and_named_in_lower_case() -> None:
