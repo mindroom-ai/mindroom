@@ -69,15 +69,16 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
+        ToolManagedInitArg.CURRENT_ROOM_ID,
     ),
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#slack",
     helper_text=(
         "Each user connects their own Slack account through the MindRoom Slack app. "
         "Store the app's client ID and secret in the slack_oauth_client credential service, "
-        "and its bot token and signing secret in slack_app."
+        "and its bot token, signing secret and, for watches, app-level token in slack_app."
     ),
-    function_names=("slack_search", "slack_read", "slack_download", "slack_post", "slack_react"),
+    function_names=("slack_search", "slack_read", "slack_download", "slack_post", "slack_react", "slack_watch"),
 )
 def slack_tools() -> type[SlackTools]:
     """Return Slack tools that act as the requester or as the MindRoom Slack app in a project's channels."""

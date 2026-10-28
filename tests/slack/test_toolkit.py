@@ -5,17 +5,18 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs
 
 import httpx
+import nio
 import pytest
 
 from mindroom import constants
 from mindroom.api.config_lifecycle import ApiSnapshot
-from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
+from mindroom.api.connection_agents import AgentToolContext, resolve_connection_agent, resolve_connection_user
 from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import slack as slack_toolkit
@@ -24,6 +25,7 @@ from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
 from mindroom.slack.oauth import slack_oauth_provider
+from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -37,7 +39,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 ALICE = "@alice:example.org"
+ALICE_BRIDGE = "@alice-bridge:example.org"
+BOB = "@bob:example.org"
+ROOM = "!room:example.org"
+AGENT = "@mindroom_assistant:example.org"
 BOT_TOKEN = "xoxb-bot-token"  # noqa: S105
+APP_TOKEN = "xapp-app-token"  # noqa: S105
 USER_TOKEN = "xoxp-alice-token"  # noqa: S105
 CHANNEL = "C0123ABCD"
 UNLISTED = "C0999ZZZZ"
@@ -101,7 +108,7 @@ def paths(tmp_path: Path) -> RuntimePaths:
     runtime_paths = constants.resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
-        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.com"},
+        process_env={"MINDROOM_PUBLIC_URL": "https://mindroom.example.com", "MATRIX_HOMESERVER": "https://example.org"},
     )
     manager = get_runtime_credentials_manager(runtime_paths)
     manager.save_credentials("slack_oauth_client", {"client_id": "slack-client", "client_secret": "slack-secret"})
@@ -114,7 +121,7 @@ def _worker_target() -> ResolvedWorkerTarget:
         channel="matrix",
         agent_name="assistant",
         requester_id=ALICE,
-        room_id="!room:example.org",
+        room_id=ROOM,
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id=None,
@@ -152,13 +159,23 @@ def _member(channel_id: str = CHANNEL, **flags: bool) -> dict[str, Any]:
     return {"ok": True, "channel": {"id": channel_id, "name": "launch-eng", "is_member": True, **flags}}
 
 
-def _turn_context(paths: RuntimePaths, hook_source: str | None) -> ToolRuntimeContext:
+def _turn_context(
+    paths: RuntimePaths,
+    hook_source: str | None,
+    client: AsyncMock | None = None,
+) -> ToolRuntimeContext:
     return ToolRuntimeContext(
         agent_name="assistant",
-        target=MessageTarget.resolve("!room:example.org", None, "$event", room_mode=True),
+        target=MessageTarget.resolve(ROOM, None, "$event", room_mode=True),
         requester_id=ALICE,
-        client=AsyncMock(),
-        config=Config.model_validate({"models": {"default": {"provider": "ollama", "id": "test-model"}}}),
+        client=client or AsyncMock(),
+        config=Config.model_validate(
+            {
+                "models": {"default": {"provider": "ollama", "id": "test-model"}},
+                "agents": {"assistant": {"display_name": "Assistant"}},
+                "authorization": {"aliases": {ALICE: [ALICE_BRIDGE]}},
+            },
+        ),
         runtime_paths=paths,
         conversation_reader=MagicMock(),
         relations=MagicMock(),
@@ -532,8 +549,7 @@ async def test_rate_limit_reports_retry_after(
     assert result["message"] == message
 
 
-@pytest.mark.asyncio
-async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
+def _gateway_context(tmp_path: Path) -> AgentToolContext:
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -562,7 +578,12 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
         config_data=config.model_dump(),
         runtime_config=config,
     )
-    context = resolve_connection_agent(resolve_connection_user(snapshot, ALICE), "mind")
+    return resolve_connection_agent(resolve_connection_user(snapshot, ALICE), "mind")
+
+
+@pytest.mark.asyncio
+async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
+    context = _gateway_context(tmp_path)
 
     result = await gateway.search_tools(context, toolkit="slack")
     schema = await gateway.get_tool(context, toolkit="slack", function="slack_read")
@@ -577,6 +598,20 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
     ]
     assert "error" not in schema
     assert set(schema["inputSchema"]["properties"]) >= {"target", "limit", "before", "cursor"}
+
+
+@pytest.mark.asyncio
+async def test_watch_not_registered_without_room(tmp_path: Path) -> None:
+    context = _gateway_context(tmp_path)
+
+    listed = await gateway.search_tools(context, toolkit="slack")
+    schema = await gateway.get_tool(context, toolkit="slack", function="slack_watch")
+
+    assert "error" not in listed
+    assert "slack_watch" not in {item["function"] for item in listed["results"]}
+    assert schema == {
+        "error": {"code": "tool_not_found", "message": "This tool is not assigned to the selected agent."},
+    }
 
 
 def test_slack_tools_require_a_credentials_manager(paths: RuntimePaths) -> None:
@@ -862,3 +897,389 @@ async def test_unanswered_write_warns_it_may_have_been_sent_and_a_read_does_not(
     )
     assert read == "Slack could not be reached; try again"
     assert fake.methods() == ["chat.postMessage", "reactions.add", "conversations.history"]
+
+
+def _save_app_token(paths: RuntimePaths, **app: str) -> None:
+    get_runtime_credentials_manager(paths).save_credentials(
+        "slack_app",
+        {"bot_token": BOT_TOKEN, "signing_secret": "signing-secret", "app_token": APP_TOKEN, **app},
+    )
+
+
+def _watch_tools(paths: RuntimePaths) -> SlackTools:
+    return _tools(paths, current_room_id=ROOM)
+
+
+def _members(*user_ids: str) -> AsyncMock:
+    client = AsyncMock()
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        [nio.RoomMember(user_id, None, None) for user_id in user_ids],
+        ROOM,
+    )
+    return client
+
+
+async def _call_watch(
+    tools: SlackTools,
+    paths: RuntimePaths,
+    *,
+    members: tuple[str, ...] = (ALICE, AGENT),
+    requester_id: str = ALICE,
+    **arguments: Any,  # noqa: ANN401
+) -> dict[str, Any]:
+    context = replace(_turn_context(paths, None, _members(*members)), requester_id=requester_id)
+    with tool_runtime_context(context):
+        return json.loads(await tools.slack_watch(**arguments))
+
+
+def _stored_watches(paths: RuntimePaths) -> tuple[SlackWatch, ...]:
+    assert paths.control_state_root is not None
+    return SlackWatchStore(paths.control_state_root).all()
+
+
+ALICE_WATCH = SlackWatch(
+    watch_id=watch_id_for(ALICE, "assistant", ROOM),
+    owner_id=ALICE,
+    agent_name="assistant",
+    room_id=ROOM,
+    team_id="T0123ABCD",
+    slack_user_id="U0ALICE00",
+    mentions=True,
+    direct_messages=True,
+    channels=(),
+    created_at=1_800_000_000,
+)
+WATCHING = "Watching your Slack mentions and direct messages; they'll arrive here."
+
+
+def test_watch_is_registered_only_in_personal_mode_with_a_room(paths: RuntimePaths) -> None:
+    assert "slack_watch" in _watch_tools(paths).get_async_functions()
+    assert "slack_watch" not in _tools(paths).get_async_functions()
+    assert "slack_watch" not in _tools(paths, current_room_id=None).get_async_functions()
+    # A watch never writes to Slack, so turning writes off keeps it.
+    assert "slack_watch" in _tools(paths, current_room_id=ROOM, write=False).get_async_functions()
+
+
+def test_watch_not_in_project_mode(paths: RuntimePaths) -> None:
+    project = _tools(paths, channels=[CHANNEL], room="lobby", current_room_id=ROOM)
+
+    assert "slack_watch" not in project.get_async_functions()
+
+
+@pytest.mark.asyncio
+async def test_start_watches_the_connected_slack_account(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="start")
+
+    assert result == {"status": "ok", "tool": "slack", "message": WATCHING}
+    (watch,) = _stored_watches(paths)
+    assert replace(watch, created_at=ALICE_WATCH.created_at) == ALICE_WATCH
+    assert watch.created_at > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filters", "message"),
+    [
+        (
+            {"mentions": True, "direct_messages": False},
+            "Watching your Slack mentions; they'll arrive here.",
+        ),
+        (
+            {"mentions": False, "direct_messages": True},
+            "Watching your Slack direct messages; they'll arrive here.",
+        ),
+        (
+            {"channels": [CHANNEL, f"{UNLISTED}:{ROOT_TS}", CHANNEL]},
+            f"{WATCHING} Channel messages count only from {CHANNEL}, {UNLISTED}.",
+        ),
+    ],
+)
+async def test_start_words_follow_the_filters(paths: RuntimePaths, filters: dict[str, Any], message: str) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="start", **filters)
+
+    assert result["message"] == message
+    (watch,) = _stored_watches(paths)
+    assert (watch.mentions, watch.direct_messages, watch.channels) == (
+        filters.get("mentions", True),
+        filters.get("direct_messages", True),
+        (CHANNEL, UNLISTED) if "channels" in filters else (),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"mentions": False, "direct_messages": False}, "Watch mentions, direct messages, or both"),
+        ({"channels": ["U0123ABCD"]}, "Use a Slack conversation ID, <conversation>:<ts>, or a message link"),
+        ({"action": "pause"}, "action must be start, stop, or status"),
+    ],
+)
+async def test_start_refuses_filters_that_watch_nothing_or_name_no_channel(
+    paths: RuntimePaths,
+    arguments: dict[str, Any],
+    message: str,
+) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, **{"action": "start", **arguments})
+
+    assert result["message"] == message
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_start_replaces_existing(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+    await _call_watch(tools, paths, action="start")
+
+    await _call_watch(tools, paths, action="start", mentions=False, channels=[CHANNEL])
+
+    (watch,) = _stored_watches(paths)
+    assert (watch.mentions, watch.direct_messages, watch.channels) == (False, True, (CHANNEL,))
+
+
+@pytest.mark.asyncio
+async def test_stop_removes(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+    await _call_watch(tools, paths, action="start")
+
+    stopped = await _call_watch(tools, paths, action="stop")
+    again = await _call_watch(tools, paths, action="stop")
+
+    assert stopped["message"] == "Stopped watching your Slack in this room"
+    assert again["message"] == "You were not watching Slack in this room"
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_stop_needs_neither_a_slack_connection_nor_an_app_token(paths: RuntimePaths) -> None:
+    assert paths.control_state_root is not None
+    SlackWatchStore(paths.control_state_root).put(ALICE_WATCH)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="stop")
+
+    assert result["message"] == "Stopped watching your Slack in this room"
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_status_reports_the_filters_and_no_problem(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+
+    assert await _call_watch(tools, paths) == {
+        "status": "ok",
+        "tool": "slack",
+        "watching": False,
+        "message": "You are not watching Slack in this room",
+    }
+
+    await _call_watch(tools, paths, action="start", direct_messages=False, channels=[CHANNEL])
+    result = await _call_watch(tools, paths, action="status")
+
+    assert result == {
+        "status": "ok",
+        "tool": "slack",
+        "watching": True,
+        "mentions": True,
+        "direct_messages": False,
+        "channels": [CHANNEL],
+        "problem": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("members", "problem"),
+    [
+        ((ALICE, AGENT, BOB), "paused: another person is in this room"),
+        ((AGENT,), "paused: you are not in this room"),
+        ((ALICE, AGENT), None),
+    ],
+)
+async def test_status_reports_pause_reason(
+    paths: RuntimePaths,
+    members: tuple[str, ...],
+    problem: str | None,
+) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+    await _call_watch(tools, paths, action="start")
+
+    result = await _call_watch(tools, paths, members=members, action="status")
+
+    assert result["problem"] == problem
+
+
+@pytest.mark.asyncio
+async def test_status_reports_a_member_list_that_cannot_be_read(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+    await _call_watch(tools, paths, action="start")
+    client = AsyncMock()
+    client.joined_members.return_value = nio.JoinedMembersError("boom")
+
+    with tool_runtime_context(_turn_context(paths, None, client)):
+        result = json.loads(await tools.slack_watch(action="status"))
+
+    assert result["problem"] == "paused: room members could not be checked"
+
+
+@pytest.mark.asyncio
+async def test_status_reports_that_slack_is_not_connected(paths: RuntimePaths) -> None:
+    assert paths.control_state_root is not None
+    SlackWatchStore(paths.control_state_root).put(ALICE_WATCH)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="status")
+
+    assert result["watching"] is True
+    assert result["problem"] == "paused: Slack is not connected"
+    assert "oauth_connection_required" not in result
+
+
+@pytest.mark.asyncio
+async def test_status_reports_that_slack_was_reconnected_as_another_account(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    assert paths.control_state_root is not None
+    SlackWatchStore(paths.control_state_root).put(replace(ALICE_WATCH, slack_user_id="U0OTHER00"))
+
+    result = await _call_watch(_watch_tools(paths), paths, action="status")
+
+    assert result["problem"] == "paused: Slack account changed; start the watch again"
+
+
+@pytest.mark.asyncio
+async def test_start_refused_when_other_human_joined(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, members=(ALICE, AGENT, BOB), action="start")
+
+    assert result["status"] == "error"
+    assert result["message"] == "Cannot watch Slack here: another person is in this room"
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_start_refused_without_app_token(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="start")
+
+    assert result["status"] == "error"
+    assert result["message"] == "The MindRoom Slack app needs an app-level token for watches"
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_start_refused_without_the_slack_app(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    get_runtime_credentials_manager(paths).delete_credentials("slack_app")
+
+    result = await _call_watch(_watch_tools(paths), paths, action="start")
+
+    assert result["message"] == "The MindRoom Slack app is not configured"
+
+
+@pytest.mark.asyncio
+async def test_start_without_a_slack_connection_returns_the_connect_link(paths: RuntimePaths) -> None:
+    _save_app_token(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="start")
+
+    assert result["oauth_connection_required"] is True
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_start_needs_the_verified_slack_account_of_the_connection(paths: RuntimePaths) -> None:
+    publish_oauth_credentials(
+        slack_oauth_provider(),
+        {"token": USER_TOKEN, "client_id": "slack-client", "scopes": ["search:read"], "_source": "oauth"},
+        credentials_manager=get_runtime_credentials_manager(paths),
+        worker_target=_worker_target(),
+    )
+    _save_app_token(paths)
+
+    result = await _call_watch(_watch_tools(paths), paths, action="start")
+
+    assert result["oauth_connection_required"] is True
+    assert _stored_watches(paths) == ()
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_alias_owns_the_watch_as_its_person(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+
+    await _call_watch(tools, paths, requester_id=ALICE_BRIDGE, action="start")
+
+    (watch,) = _stored_watches(paths)
+    assert (watch.owner_id, watch.watch_id) == (ALICE, ALICE_WATCH.watch_id)
+
+
+@pytest.mark.asyncio
+async def test_a_person_only_stops_and_reads_their_own_watch(paths: RuntimePaths) -> None:
+    assert paths.control_state_root is not None
+    bob_watch = replace(ALICE_WATCH, watch_id=watch_id_for(BOB, "assistant", ROOM), owner_id=BOB)
+    SlackWatchStore(paths.control_state_root).put(bob_watch)
+    tools = _watch_tools(paths)
+
+    status = await _call_watch(tools, paths, action="status")
+    stopped = await _call_watch(tools, paths, action="stop")
+
+    assert status["watching"] is False
+    assert stopped["message"] == "You were not watching Slack in this room"
+    assert _stored_watches(paths) == (bob_watch,)
+
+
+@pytest.mark.asyncio
+async def test_a_watch_is_one_per_agent_and_room(paths: RuntimePaths) -> None:
+    _connect_alice(paths)
+    _save_app_token(paths)
+    tools = _watch_tools(paths)
+    await _call_watch(tools, paths, action="start")
+    elsewhere = replace(ALICE_WATCH, watch_id=watch_id_for(ALICE, "assistant", "!other:example.org"))
+    assert paths.control_state_root is not None
+    SlackWatchStore(paths.control_state_root).put(elsewhere)
+
+    await _call_watch(tools, paths, action="stop")
+
+    assert _stored_watches(paths) == (elsewhere,)
+
+
+@pytest.mark.asyncio
+async def test_watches_need_a_matrix_conversation(paths: RuntimePaths) -> None:
+    result = json.loads(await _watch_tools(paths).slack_watch(action="status"))
+
+    assert result["message"] == "Slack watches work only in a Matrix conversation"
+
+
+@pytest.mark.asyncio
+async def test_watches_need_the_control_state(paths: RuntimePaths) -> None:
+    tools = SlackTools(
+        runtime_paths=replace(paths, control_state_root=None),
+        credentials_manager=get_runtime_credentials_manager(paths),
+        worker_target=_worker_target(),
+        current_room_id=ROOM,
+    )
+
+    result = await _call_watch(tools, paths, action="status")
+
+    assert result["message"] == "Slack watches need the primary runtime's control state"

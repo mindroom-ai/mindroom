@@ -506,9 +506,10 @@
         "slack_read",
         "slack_download",
         "slack_post",
-        "slack_react"
+        "slack_react",
+        "slack_watch"
       ],
-      "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token and signing secret in slack_app.",
+      "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for watches, app-level token in slack_app.",
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
