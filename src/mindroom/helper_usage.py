@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
 from mindroom.llm.messages import is_own_model_message, read_model_provenance, usage_sums_attempts
-from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
+from mindroom.llm.usage import HelperUsage, RequestUsage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -106,11 +106,12 @@ async def record_run_usage(
 
 def _run_usage(run: RunRecord) -> HelperUsage:
     """Return the usage of ``run``: its model, time, and metrics, with a request for each answer of its own model."""
+    assert run.metrics is not None
     return HelperUsage(
         run_id=run.run_id,
         model=run.model,
         provider=run.model_provider,
-        metrics=run.metrics or RunMetrics(),
+        metrics=run.metrics,
         requests=tuple(
             RequestUsage(
                 created_at=message.created_at,
