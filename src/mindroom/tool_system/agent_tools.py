@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
@@ -31,19 +31,11 @@ def turn_room_flags(execution_identity: ToolExecutionIdentity | None) -> tuple[b
     return in_room, in_room and execution_identity.channel == "matrix"
 
 
-def _owner_precedence(config: Config, entry: EffectiveToolConfig) -> tuple[int, int, int]:
-    directly_authored = entry.name == (entry.authored_name or entry.name)
-    authored_from_individual_tool = not config.is_tool_preset(entry.authored_name or entry.name)
-    return (int(directly_authored), int(authored_from_individual_tool), -entry.authored_order)
-
-
 def _expanded_entry(entry: EffectiveToolConfig, tool_name: str) -> EffectiveToolConfig:
-    return EffectiveToolConfig(
+    return replace(
+        entry,
         name=tool_name,
-        tool_config_overrides=(dict(entry.tool_config_overrides) if tool_name == entry.name else {}),
-        defer=entry.defer,
-        initial=entry.initial,
-        authored_order=entry.authored_order,
+        tool_config_overrides=dict(entry.tool_config_overrides) if tool_name == entry.name else {},
         authored_name=entry.name,
     )
 
@@ -84,39 +76,25 @@ class AgentTools:
             for name in tool_names
         )
 
-    def _expanded(self, tool_names: list[str]) -> list[str]:
-        return list(expanded_tool_names(self.config, tool_names, self.facts.disabled))
-
     @property
     def tool_names(self) -> tuple[str, ...]:
         """Every toolkit the agent's entries name, presets and implied toolkits expanded, initial and deferred."""
         return self.facts.tool_names
 
-    @property
-    def _deferred_entries(self) -> tuple[EffectiveToolConfig, ...]:
-        """The agent's authored deferred entries, in authored order."""
-        return tuple(entry for entry in self.facts.authored if entry.defer)
-
-    def _attachable(self, requested: Iterable[str]) -> list[str]:
-        requested_names = set(requested)
-        return [
-            entry.name
-            for entry in self._deferred_entries
-            if entry.name in requested_names and not self.facts.scope_incompatible.get(entry.name)
-        ]
+    def _owner_precedence(self, entry: EffectiveToolConfig) -> tuple[int, int, int]:
+        directly_authored = entry.name == (entry.authored_name or entry.name)
+        authored_from_individual_tool = not self.config.is_tool_preset(entry.authored_name or entry.name)
+        return (int(directly_authored), int(authored_from_individual_tool), -entry.authored_order)
 
     def _visible_authored(self, attached: set[str]) -> list[EffectiveToolConfig]:
         visible: dict[str, EffectiveToolConfig] = {}
         hidden_deferred: dict[str, EffectiveToolConfig] = {}
         for authored in self.facts.authored:
             owners = visible if not authored.defer or authored.name in attached else hidden_deferred
-            for tool_name in self._expanded([authored.name]):
+            for tool_name in expanded_tool_names(self.config, [authored.name], self.facts.disabled):
                 expanded = _expanded_entry(authored, tool_name)
                 current = owners.get(tool_name)
-                if current is None or _owner_precedence(self.config, expanded) > _owner_precedence(
-                    self.config,
-                    current,
-                ):
+                if current is None or self._owner_precedence(expanded) > self._owner_precedence(current):
                     owners[tool_name] = expanded
         resolved: list[EffectiveToolConfig] = []
         for tool_name in self.tool_names:
@@ -128,7 +106,7 @@ class AgentTools:
             if (
                 hidden is not None
                 and not entry.defer
-                and _owner_precedence(self.config, hidden) > _owner_precedence(self.config, entry)
+                and self._owner_precedence(hidden) > self._owner_precedence(entry)
             ):
                 continue
             resolved.append(entry)
@@ -150,35 +128,33 @@ class AgentTools:
         the Matrix room runtime toolkits, and ``portable_search`` adds the deferred-tool search when anything defers.
         Which candidates a build actually offers also depends on filters and construction, which the build owns.
         """
-        requested = [entry.name for entry in self._deferred_entries] if deferred is None else list(deferred)
-        initial = [entry.name for entry in self._deferred_entries if entry.initial]
-        attached = set(self._attachable([*initial, *requested]))
+        deferred_entries = [entry for entry in self.facts.authored if entry.defer]
+        deferred_names = {entry.name for entry in deferred_entries}
+        requested = deferred_names if deferred is None else set(deferred)
+        attached = {
+            entry.name
+            for entry in deferred_entries
+            if (entry.initial or entry.name in requested) and not self.facts.scope_incompatible.get(entry.name)
+        }
         entries = [
-            EffectiveToolConfig(
-                name=entry.name,
+            replace(
+                entry,
                 tool_config_overrides=validate_authored_tool_entry_overrides(
                     entry.name,
                     dict(entry.tool_config_overrides),
                 ),
-                defer=entry.defer,
-                initial=entry.initial,
-                authored_order=entry.authored_order,
-                authored_name=entry.authored_name,
             )
             for entry in self._visible_authored(attached)
         ]
-        runtime_tool_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-        if matrix_room_tools:
-            entries = [entry for entry in entries if entry.name not in runtime_tool_names]
         injected = list(self.facts.injected)
-        if portable_search and self._deferred_entries:
+        if portable_search and deferred_names:
             injected.append("dynamic_tools")
         if matrix_room_tools:
+            entries = [entry for entry in entries if entry.name not in MATRIX_ROOM_RUNTIME_TOOL_NAMES]
             injected.extend(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-        authored_deferred = {entry.name for entry in self._deferred_entries}
         names = [entry.name for entry in entries]
         for tool_name in injected:
-            if tool_name in names or (tool_name not in runtime_tool_names and tool_name in authored_deferred):
+            if tool_name in names or (tool_name not in MATRIX_ROOM_RUNTIME_TOOL_NAMES and tool_name in deferred_names):
                 continue
             entries.append(
                 EffectiveToolConfig(

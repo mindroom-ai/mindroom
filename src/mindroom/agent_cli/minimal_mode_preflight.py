@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_cli.shell_access import minimal_shell_problems
 from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
 
@@ -21,8 +21,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.runtime_resolution import ResolvedAgentStorage
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 _SETUP_URL = "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements"
 
@@ -39,10 +38,9 @@ def _shell_problems(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-    storage: ResolvedAgentStorage,
+    worker_target: ResolvedWorkerTarget,
 ) -> list[str]:
     """Check the agent's effective shell functions without opening integrations or a worker."""
-    worker_target = storage.execution.worker_target
     try:
         ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
         shell = _effective_shell(config, agent_name)
@@ -73,9 +71,14 @@ def minimal_mode_problems(
     execution_identity: ToolExecutionIdentity,
 ) -> list[str]:
     """Return every unmet agent and deployment requirement for one agent scope."""
-    storage = resolve_agent_storage(agent_name, config, runtime_paths, execution_identity)
+    worker_target = resolve_agent_execution(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ).worker_target
     return [
-        *_shell_problems(config, runtime_paths, agent_name, storage),
+        *_shell_problems(config, runtime_paths, agent_name, worker_target),
         *minimal_shell_problems(config, runtime_paths, agent_name),
     ]
 

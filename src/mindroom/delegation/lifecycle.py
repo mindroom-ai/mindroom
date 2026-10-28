@@ -456,12 +456,13 @@ def prepare_child_turn(
             session_id=session_id,
         )
     )
-    # LEGACY_COMPAT: Delegated children persisted without a requested model.
-    # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
-    # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
-    # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
-    # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
-    explicit = (previous.requested_model_name or previous.model_name) if previous is not None else model
+    if previous is not None:
+        # LEGACY_COMPAT: Delegated children persisted without a requested model.
+        # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
+        # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
+        # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
+        # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
+        model = previous.requested_model_name or previous.model_name
     # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
     turn_model = resolve_turn_model(
         config,
@@ -470,12 +471,10 @@ def prepare_child_turn(
             entity=agent_name,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
-            explicit=explicit,
+            explicit=model,
         ),
         TurnBudget(monitor=budget_monitor, requester_id=owner.requester_id),
     )
-    requested_model_name = turn_model.requested_model_name
-    model_name = turn_model.model_name
     return DelegationChild(
         delegation_id=delegation_id,
         parent_tool_call_id=parent_tool_call_id,
@@ -484,8 +483,8 @@ def prepare_child_turn(
         task=task,
         session_id=session_id,
         run_id=uuid4().hex,
-        model_name=model_name,
-        requested_model_name=requested_model_name,
+        model_name=turn_model.model_name,
+        requested_model_name=turn_model.requested_model_name,
         depth=depth + 1,
         execution_identity=serialize_tool_execution_identity(identity),
         subagent_id=previous.subagent_id if previous is not None else delegation_id,

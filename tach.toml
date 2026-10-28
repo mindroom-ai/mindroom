@@ -1724,6 +1724,7 @@ depends_on = [
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.turn_model",
+    "mindroom.config.resolution",
 ]
 
 [[modules]]

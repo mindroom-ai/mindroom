@@ -19,6 +19,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.config.resolution import authored_tool_entries
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
@@ -808,7 +809,6 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
             tool_name,
             agent_tools=agent_tools,
             placement=placement,
-            config=context.config,
             runtime_paths=context.runtime_paths,
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
@@ -873,7 +873,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
         )
         if scoped:
             values.update(scoped)
-    for entry in resolve_agent_tools(context.config, context.agent_name).facts.authored:
+    for entry in authored_tool_entries(context.config, context.agent_name):
         if entry.name == "dynamic_workflow":
             values.update(entry.tool_config_overrides)
     raw_allowed = values.get("allowed_tools")

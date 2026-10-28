@@ -112,7 +112,6 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
         entry.name,
         agent_tools=agent_tools,
         placement=placement,
-        config=context.config,
         runtime_paths=context.runtime_paths,
         workspace_in_worker=agent_tools.workspace_in_worker([entry.name], placement),
         agent_runtime=runtime,

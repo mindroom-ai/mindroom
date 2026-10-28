@@ -66,6 +66,12 @@ class TeamTurnModelSelection:
     member_model_names: dict[str, str]
 
 
+def _thread_model(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> str | None:
+    if scope.entity is None or scope.thread_id is None:
+        return None
+    return resolve_thread_model_override(runtime_paths, scope.thread_id, config=config).active.get(scope.entity)
+
+
 def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> tuple[str, bool]:
     if scope.explicit is not None:
         return scope.explicit, True
@@ -73,12 +79,9 @@ def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelSc
         return _AD_HOC_MODEL_NAME, False
     # The authored model also checks that the entity exists, so an unknown name never runs any model.
     authored = entity_model_name(config, scope.entity)
-    if scope.thread_id is not None:
-        thread_model = resolve_thread_model_override(runtime_paths, scope.thread_id, config=config).active.get(
-            scope.entity,
-        )
-        if thread_model is not None:
-            return thread_model, True
+    thread_model = _thread_model(config, runtime_paths, scope)
+    if thread_model is not None:
+        return thread_model, True
     if scope.room_id is None:
         return authored, False
     room_override = resolve_room_model_override(runtime_paths, scope.room_id, configured_models=config.models).active
@@ -141,8 +144,8 @@ def resolve_team_turn_models(
     access reaches its members. Otherwise the team resolves its own model and each member resolves its own.
     """
     explicit = scope.explicit
-    if explicit is None and scope.entity in config.teams and scope.thread_id is not None:
-        explicit = resolve_thread_model_override(runtime_paths, scope.thread_id, config=config).active.get(scope.entity)
+    if explicit is None and scope.entity in config.teams:
+        explicit = _thread_model(config, runtime_paths, scope)
     if explicit is not None:
         team_requested = explicit
         member_requested = dict.fromkeys(member_names, explicit)

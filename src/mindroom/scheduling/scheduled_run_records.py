@@ -109,14 +109,13 @@ def _workspace_for_agent(
         resolved_thread_id=target.resolved_thread_id,
         session_id=target.session_id,
     )
-    resolved = resolve_agent_runtime(
+    return resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
         create=True,
-    )
-    return resolved.workspace.root
+    ).workspace.root
 
 
 def _parse_utc_timestamp(value: object) -> datetime | None:

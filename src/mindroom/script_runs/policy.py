@@ -127,7 +127,6 @@ def _build_script_toolkits(
             tool_entry.name,
             agent_tools=agent_tools,
             placement=placement,
-            config=config,
             runtime_paths=context.runtime_paths,
             workspace_in_worker=workspace_in_worker,
             agent_runtime=agent_runtime,

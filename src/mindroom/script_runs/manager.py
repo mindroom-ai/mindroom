@@ -1190,12 +1190,11 @@ class ScriptRunManager:
 
 
 def _agent_workspace(context: ToolRuntimeContext) -> Path:
-    execution_identity = build_execution_identity_from_runtime_context(context)
     return resolve_agent_runtime(
         context.agent_name,
         context.config,
         context.runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=build_execution_identity_from_runtime_context(context),
         create=True,
     ).workspace.root
 

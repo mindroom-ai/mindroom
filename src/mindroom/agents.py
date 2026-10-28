@@ -50,9 +50,7 @@ from mindroom.runtime_resolution import (
 )
 from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
 from mindroom.session_storage import agent_storage
-from mindroom.shared_directories.paths import (
-    describe_agent_shared_directories,
-)
+from mindroom.shared_directories.paths import describe_agent_shared_directories
 from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
@@ -82,11 +80,7 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
 )
-from mindroom.tool_system.dynamic_toolkits import (
-    DeferredToolkit,
-    ToolDeferral,
-    defer_toolkit,
-)
+from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
@@ -551,10 +545,9 @@ def _render_preloaded_files(
 def _file_mode_knowledge_instruction_block(
     knowledge_base_ids: tuple[str, ...],
     config: Config,
-    agent_runtime: ResolvedAgentRuntime,
+    workspace_root: Path,
 ) -> str | None:
     """Describe workspace-accessible file-only knowledge bases to the model."""
-    workspace = agent_runtime.workspace
     lines = [
         "File-only knowledge bases are available in the workspace.",
         "Use file or coding tools such as grep, list, and read instead of search_knowledge_base for these sources.",
@@ -566,7 +559,7 @@ def _file_mode_knowledge_instruction_block(
         if base_config.mode != "files":
             continue
         relative_path = Path("knowledge") / base_id
-        resolved_path = workspace.root / relative_path
+        resolved_path = workspace_root / relative_path
         if not resolved_path.exists():
             continue
         description = " ".join(base_config.description.split()) or "No description configured."
@@ -691,7 +684,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     *,
     agent_tools: AgentTools,
     placement: ToolPlacement,
-    config: Config,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
@@ -711,6 +703,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
     ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
     them; without it ``dynamic_tools`` is skipped and None is returned.
     """
+    config = agent_tools.config
     agent_name = agent_tools.agent_name
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
@@ -1229,7 +1222,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 tool_name,
                 agent_tools=agent_tools,
                 placement=placement,
-                config=config,
                 runtime_paths=runtime_paths,
                 agent_runtime=agent_runtime,
                 tool_config_overrides=tool_entry.tool_config_overrides,
@@ -1528,7 +1520,7 @@ def _build_agent_instructions(
     agent: ResolvedAgent,
     configured_instructions: Sequence[str],
     config: Config,
-    agent_runtime: ResolvedAgentRuntime,
+    workspace_root: Path,
     *,
     skill_instructions: Sequence[str],
     include_interactive_questions: bool,
@@ -1563,7 +1555,7 @@ def _build_agent_instructions(
     file_mode_knowledge_instruction = (
         None
         if disable_runtime_capabilities
-        else _file_mode_knowledge_instruction_block(agent.knowledge_base_ids, config, agent_runtime)
+        else _file_mode_knowledge_instruction_block(agent.knowledge_base_ids, config, workspace_root)
     )
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
@@ -1885,7 +1877,7 @@ def create_agent(
         agent,
         agent_config.instructions if persona is None else (),
         config,
-        agent_runtime,
+        workspace.root,
         # Only the agent that owns the workspace is told which of its skills did not load, not a persona borrowing them.
         skill_instructions=_skill_usage_instructions(
             config,
@@ -1941,7 +1933,7 @@ def create_agent(
         cli_shell=cli_shell,
         deferred=tool_assembly.cli_deferred,
         context_documents=tuple(document.body for document in role_context.context_documents),
-        context_files=tuple(role_context.workspace_context_files(agent_runtime.workspace.root)),
+        context_files=tuple(role_context.workspace_context_files(workspace.root)),
         knowledge_sources=()
         if enabled_knowledge is None
         else tuple(source.description for source in enabled_knowledge.sources),
@@ -1960,8 +1952,8 @@ def create_agent(
             identity=persona_prompt,
             toolkit_names=(*roster, *(deferred.name for deferred in tool_assembly.cli_deferred)),
             memory_root=(
-                agent_runtime.workspace.file_memory_path.relative_to(agent_runtime.workspace.root)
-                if agent_runtime.workspace.file_memory_path is not None
+                workspace.file_memory_path.relative_to(workspace.root)
+                if workspace.file_memory_path is not None
                 else None
             ),
             runtime_context=_get_mind_runtime_context(agent_name, runtime_paths),

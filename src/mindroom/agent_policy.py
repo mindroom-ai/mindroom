@@ -56,21 +56,7 @@ class PolicyInputs(BaseModel):
     @classmethod
     def from_agent(cls, agent: AgentConfig) -> PolicyInputs:
         """Return the policy inputs of one validated agent config."""
-        private = agent.private
-        knowledge = private.knowledge if private is not None else None
-        return cls(
-            worker_scope=agent.worker_scope,
-            private=None
-            if private is None
-            else PolicyPrivateInputs(
-                per=private.per,
-                root=private.root,
-                knowledge=None
-                if knowledge is None
-                else PolicyKnowledgeInputs(enabled=knowledge.enabled, path=knowledge.path),
-            ),
-            delegate_to=list(agent.delegate_to),
-        )
+        return cls.model_validate(agent, from_attributes=True)
 
 
 @dataclass(frozen=True)

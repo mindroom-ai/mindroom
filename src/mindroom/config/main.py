@@ -92,9 +92,7 @@ from mindroom.config.resolution import (
     resolve_scope,
     uses_knowledge_graph,
 )
-from mindroom.config.resolution import (
-    cheap_model as agent_cheap_model,
-)
+from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.validation import TimezoneName  # noqa: TC001
@@ -1399,11 +1397,10 @@ class Config(BaseModel):
         execution_scope: WorkerScope | None,
     ) -> bool:
         """Return whether one agent can still reach a tool at an exact execution scope."""
-        return (
-            agent_name in self.agents
-            and tool_name in (agent := resolve_agent(self, agent_name)).tools.tool_names
-            and agent.policy.effective_execution_scope == execution_scope
-        )
+        if agent_name not in self.agents:
+            return False
+        agent = resolve_agent(self, agent_name)
+        return tool_name in agent.tools.tool_names and agent.policy.effective_execution_scope == execution_scope
 
     def get_private_knowledge_base_agent(self, base_id: str) -> str | None:
         """Return the private agent whose synthetic private knowledge base ``base_id`` names, or None."""

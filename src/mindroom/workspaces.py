@@ -395,10 +395,10 @@ def _resolve_workspace(
     use_state_storage_path: bool,
     create: bool,
 ) -> ResolvedAgentWorkspace:
-    agent_config = config.get_agent(agent_name)
+    private_config = config.get_agent(agent_name).private
     file_memory = memory_backend(config, agent_name) == "file"
 
-    if agent_config.private is None:
+    if private_config is None:
         # Every shared agent works in its own workspace; with file memory, its memory files live there too.
         lexical_root = state_storage_path.expanduser() / "workspace"
         root = resolve_workspace_relative_path(
@@ -415,7 +415,6 @@ def _resolve_workspace(
             file_memory_path=root if file_memory else None,
         )
 
-    private_config = agent_config.private
     root_path = private_root_name(agent_name, private_config.root)
     template_dir = (
         config_relative_path(private_config.template_dir, runtime_paths)
@@ -446,23 +445,11 @@ def _resolve_workspace(
         )
         for relative_path in private_config.context_files or ()
     )
-    file_memory_path = (
-        resolve_workspace_relative_path(
-            root,
-            ".",
-            field_name="private file memory path",
-        )
-        if file_memory
-        else None
-    )
-    if create and file_memory_path is not None:
-        file_memory_path.mkdir(parents=True, exist_ok=True)
-
     return ResolvedAgentWorkspace(
         root=root,
         lexical_root=lexical_root,
         context_files=context_files,
-        file_memory_path=file_memory_path,
+        file_memory_path=root if file_memory else None,
     )
 
 

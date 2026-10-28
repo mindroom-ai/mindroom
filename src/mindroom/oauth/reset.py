@@ -93,7 +93,6 @@ def resolve_oauth_reset_target(
     if requester_id is None:
         raise OAuthResetTargetError(_UNAUTHORIZED_RESET)
 
-    agent = config.resolve_agent(agent_name)
     tool_metadata = resolved_tool_metadata_for_runtime(
         runtime_paths,
         config,
@@ -101,7 +100,7 @@ def resolve_oauth_reset_target(
     )
     allowed_provider_ids = {
         metadata.auth_provider
-        for tool_name in agent.tools.tool_names
+        for tool_name in config.resolve_agent(agent_name).tools.tool_names
         if (metadata := tool_metadata.get(tool_name)) is not None and metadata.auth_provider is not None
     }
     if provider_id not in allowed_provider_ids:

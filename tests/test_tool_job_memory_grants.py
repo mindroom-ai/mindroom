@@ -82,7 +82,6 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
         "memory",
         agent_tools=resolve_agent_tools(config, "leader"),
         placement=tool_placement(paths),
-        config=config,
         runtime_paths=paths,
         execution_identity=owner,
     )

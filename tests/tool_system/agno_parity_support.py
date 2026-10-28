@@ -263,7 +263,6 @@ def build_toolkit(
             tool_name,
             agent_tools=resolve_agent_tools(config, AGENT_NAME),
             placement=tool_placement(runtime_paths),
-            config=config,
             runtime_paths=runtime_paths,
             tool_config_overrides=tool_config_overrides,
             execution_identity=None,

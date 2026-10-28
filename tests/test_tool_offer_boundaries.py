@@ -292,7 +292,6 @@ def _locally_allowed(
         toolkit,
         agent_tools=resolve_agent_tools(config, "code"),
         placement=tool_placement(runtime_paths),
-        config=config,
         runtime_paths=runtime_paths,
         execution_identity=_identity(room=True),
     )

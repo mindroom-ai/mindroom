@@ -416,11 +416,6 @@ def reply_authorization_entity_names(
     return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
 
 
-def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
-    """Return whether one agent can issue Matrix message actions."""
-    return room_turn_offers(config, agent_name, "matrix_message")
-
-
 def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:
     """Return the room name already present in the synced Matrix cache."""
     client = runtime.client
@@ -2376,10 +2371,7 @@ class ResponseRunner:
         """Build the per-turn identity context for one agent response."""
         matrix_target_item = _matrix_message_target_item(
             runtime.resolved_target,
-            matrix_message_available=_agent_has_matrix_messaging_tool(
-                self.deps.runtime.config,
-                self.deps.agent_name,
-            ),
+            matrix_message_available=room_turn_offers(self.deps.runtime.config, self.deps.agent_name, "matrix_message"),
             runtime=self.deps.runtime,
         )
         state_root = resolve_agent_storage(
@@ -3159,7 +3151,7 @@ class ResponseRunner:
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(
-                _agent_has_matrix_messaging_tool(self.deps.runtime.config, name) for name in agent_names
+                room_turn_offers(self.deps.runtime.config, name, "matrix_message") for name in agent_names
             ),
             runtime=self.deps.runtime,
         )

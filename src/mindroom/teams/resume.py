@@ -362,7 +362,7 @@ async def continue_paused_team_run(
                     room_id=execution_identity.room_id,
                     thread_id=execution_identity.resolved_thread_id,
                 ),
-                list(member_names),
+                member_names,
                 None,
             ).member_model_names,
             required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},

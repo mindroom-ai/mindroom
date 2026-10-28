@@ -696,8 +696,8 @@ def get_tool_by_name(
 ) -> Toolkit:
     """Get a tool instance by its registered name.
 
-    ``runs_in_worker`` says whether the toolkit's calls go to a worker; None decides it for the agent
-    ``worker_target`` names under ``runtime_config``, as that agent's own toolkits are placed.
+    ``runs_in_worker`` says whether the toolkit's calls go to a worker; None routes them there when the sandbox
+    settings would, or when the worker tools of the agent ``worker_target`` names would.
     ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
     worker runtimes leave it unset because their own storage root is the state they own.
     ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;

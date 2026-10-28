@@ -18,7 +18,7 @@ from mindroom.history.types import HistoryPolicy, ResolvedHistorySettings
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
@@ -58,22 +58,18 @@ def authored_compaction_model_fields(
     }
 
 
-def _compaction_enabled(
-    *,
-    defaults_enabled: bool,
-    override_enabled: bool | None,
-    override_fields_set: set[str],
-    authored_model_fields: dict[str, AuthoredOptionalModel],
-) -> bool:
-    """Resolve whether one authored override block is statically enabled."""
-    if "enabled" in override_fields_set:
-        return override_enabled is True
-    cleared_model_fields = {name for name, authored in authored_model_fields.items() if authored.kind == "clear"}
-    if override_fields_set and override_fields_set <= cleared_model_fields:
-        return defaults_enabled
-    if override_fields_set:
-        return True
-    return defaults_enabled
+def _compaction_enabled(override: CompactionOverrideConfig, *, defaults_enabled: bool) -> bool:
+    """Return whether an authored override block turns text compaction on.
+
+    An authored ``enabled`` decides; an override that sets nothing or only clears model fields keeps the defaults'
+    choice, and any other override turns compaction on.
+    """
+    if "enabled" in override.model_fields_set:
+        return override.enabled is True
+    cleared = {
+        name for name, authored in authored_compaction_model_fields(override).items() if authored.kind == "clear"
+    }
+    return defaults_enabled if override.model_fields_set <= cleared else True
 
 
 def _history_policy(num_history_runs: int | None, num_history_messages: int | None) -> HistoryPolicy:
@@ -94,51 +90,39 @@ def configured_entity(config: Config, name: str) -> AgentConfig | TeamConfig:
     raise ValueError(msg)
 
 
-def _compaction_config(config: Config, name: str | None) -> CompactionConfig:
-    """Return the effective text compaction config of an agent or team, or of the defaults scope for None."""
-    base = config.defaults.compaction
-    merged = base.model_dump() if base is not None else {}
-    override = configured_entity(config, name).compaction if name is not None else None
+def _compaction_config(
+    defaults: CompactionConfig | None,
+    override: CompactionOverrideConfig | None,
+) -> CompactionConfig:
+    """Return the effective text compaction config: the defaults with an agent's or team's authored override applied."""
+    merged = defaults.model_dump() if defaults is not None else {}
     if override is not None:
-        authored_override = override.model_dump(exclude_unset=True)
-        explicit_enabled = authored_override.pop(
-            "enabled",
-            override.enabled if "enabled" in override.model_fields_set else None,
-        )
-        for field_name, field_value in authored_override.items():
-            if field_value is None:
+        authored = override.model_dump(exclude_unset=True)
+        for field_name, value in authored.items():
+            if value is None:
                 merged.pop(field_name, None)
-                continue
-            merged[field_name] = field_value
-        if authored_override.get("threshold_tokens") is not None:
+            else:
+                merged[field_name] = value
+        if authored.get("threshold_tokens") is not None:
             merged.pop("threshold_percent", None)
-        if authored_override.get("threshold_percent") is not None:
+        if authored.get("threshold_percent") is not None:
             merged.pop("threshold_tokens", None)
-        merged["enabled"] = _compaction_enabled(
-            defaults_enabled=base.enabled if base is not None else False,
-            override_enabled=explicit_enabled,
-            override_fields_set=override.model_fields_set,
-            authored_model_fields=authored_compaction_model_fields(override),
-        )
+        merged["enabled"] = _compaction_enabled(override, defaults_enabled=defaults is not None and defaults.enabled)
     return CompactionConfig.model_validate(merged)
 
 
-def _history_settings(
-    config: Config,
-    entity: AgentConfig | TeamConfig | None,
-    name: str | None,
-) -> ResolvedHistorySettings:
+def _history_settings(config: Config, entity: AgentConfig | TeamConfig | None) -> ResolvedHistorySettings:
     defaults = config.defaults
     runs, messages = (entity.num_history_runs, entity.num_history_messages) if entity is not None else (None, None)
     if runs is None and messages is None:
         runs, messages = defaults.num_history_runs, defaults.num_history_messages
     own_limit = entity.max_tool_calls_from_history if entity is not None else None
+    compaction = entity.compaction if entity is not None else None
     return ResolvedHistorySettings(
         policy=_history_policy(runs, messages),
         max_tool_calls_from_history=own_limit if own_limit is not None else defaults.max_tool_calls_from_history,
-        compaction_config=_compaction_config(config, name if entity is not None else None),
-        has_authored_compaction_config=defaults.compaction is not None
-        or (entity is not None and entity.compaction is not None),
+        compaction_config=_compaction_config(defaults.compaction, compaction),
+        has_authored_compaction_config=defaults.compaction is not None or compaction is not None,
     )
 
 
@@ -364,7 +348,7 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
     )
     authored = authored_tool_entries(config, agent_name)
 
-    def expanded(entries: list[EffectiveToolConfig]) -> tuple[str, ...]:
+    def expanded(entries: Iterable[EffectiveToolConfig]) -> tuple[str, ...]:
         return expanded_tool_names(config, [entry.name for entry in entries], disabled)
 
     scope = policy.effective_execution_scope
@@ -374,8 +358,8 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
         authored=authored,
         injected=tuple(injected),
         disabled=disabled,
-        tool_names=expanded(list(authored)),
-        startup_tool_names=frozenset(expanded([entry for entry in authored if not entry.defer or entry.initial])),
+        tool_names=expanded(authored),
+        startup_tool_names=frozenset(expanded(entry for entry in authored if not entry.defer or entry.initial)),
         scope_incompatible={
             entry.name: incompatible
             for entry in authored
@@ -386,7 +370,7 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
                 )
             )
         },
-        worker_tools=None if worker_tools is None else tuple(config.expand_tool_names(list(worker_tools))),
+        worker_tools=None if worker_tools is None else tuple(config.expand_tool_names(worker_tools)),
     )
 
 
@@ -422,7 +406,7 @@ def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
     own_calls = entity.max_tool_calls_per_turn if entity is not None else None
     return ResolvedScope(
         name=name,
-        history_settings=_history_settings(config, entity, name),
+        history_settings=_history_settings(config, entity),
         max_tool_calls_per_turn=own_calls if own_calls is not None else config.defaults.max_tool_calls_per_turn,
         file_access=file_access(config, name),
         memory_backend=memory_backend(config, name),
