@@ -2952,7 +2952,6 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
     install_bots(orchestrator, {"router": router_bot})
     orchestrator.config = current_config
     orchestrator.running = True
-    orchestrator._startup_maintenance.started = True
 
     maintenance_started = asyncio.Event()
     maintenance_released = asyncio.Event()
