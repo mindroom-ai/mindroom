@@ -3165,7 +3165,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.orchestration.runtime"
-depends_on = ["mindroom.background_tasks", "mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
+depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants", "mindroom.matrix.users"]
 
 [[modules]]
 path = "mindroom.orchestration.script_runtime"
