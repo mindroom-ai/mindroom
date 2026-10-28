@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -24,6 +25,7 @@ from mindroom.custom_tools.todo_poke import (
     TodoPokeDeps,
     TodoPokePolicy,
     TodoPokeRequesterKind,
+    TodoPokeWorker,
     scan_todo_pokes,
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
@@ -41,6 +43,7 @@ from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, ru
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from typing import Any
 
@@ -610,15 +613,41 @@ async def test_schedule_adapter_preserves_read_errors(tmp_path: Path) -> None:
         await coordinator._schedule_query("!room:localhost", ("code",))
 
 
-@pytest.mark.asyncio
-async def test_sync_wires_coordinator_adapters_into_worker(tmp_path: Path) -> None:
-    """The composition seam must install the production idle, schedule, and sender adapters."""
-    coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
+@pytest.fixture
+def started_workers() -> Iterator[list[TodoPokeWorker]]:
+    """Record each worker the coordinator runs, idling until it is asked to stop."""
+    workers: list[TodoPokeWorker] = []
 
-    await coordinator.sync()
-    worker = coordinator._worker
-    assert worker is not None
+    async def run(worker: TodoPokeWorker) -> None:
+        workers.append(worker)
+        await worker._stop_event.wait()
+
+    with patch.object(TodoPokeWorker, "run", run):
+        yield workers
+
+
+async def _until_started(workers: list[TodoPokeWorker], count: int = 1) -> None:
+    for _ in range(500):
+        if len(workers) >= count:
+            return
+        await asyncio.sleep(0.01)
+    msg = "worker did not start"
+    raise AssertionError(msg)
+
+
+@pytest.mark.asyncio
+async def test_sync_wires_coordinator_adapters_into_worker(
+    tmp_path: Path,
+    started_workers: list[TodoPokeWorker],
+) -> None:
+    """The composition seam must install the production idle, schedule, and sender adapters."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
+
+    await coordinator.sync(config)
     try:
+        await _until_started(started_workers)
+        worker = started_workers[0]
         assert worker.deps.idle_check == coordinator._agent_is_idle
         assert worker.deps.schedule_query == coordinator._schedule_query
         assert worker.deps.sender == coordinator._send_poke
@@ -628,69 +657,71 @@ async def test_sync_wires_coordinator_adapters_into_worker(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_worker_lifecycle_survives_reload_and_stops(tmp_path: Path) -> None:
-    """Sync starts one worker, reuses it on reload, and stops it promptly."""
-    coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
+async def test_worker_lifecycle_survives_reload_and_stops(
+    tmp_path: Path,
+    started_workers: list[TodoPokeWorker],
+) -> None:
+    """Sync starts one worker, keeps it on reload, and stops it."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
 
-    await coordinator.sync()
-    first_worker = coordinator._worker
-    first_task = coordinator._task
-
-    assert first_worker is not None
-    assert first_task is not None
-    assert first_task.done() is False
-
-    await coordinator.sync()
-
-    assert coordinator._worker is first_worker
-    assert coordinator._task is first_task
-
+    await coordinator.sync(config)
+    await _until_started(started_workers)
+    await coordinator.sync(config)
     await coordinator.stop()
 
-    assert first_task.done() is True
-    assert coordinator._worker is None
-    assert coordinator._task is None
+    assert len(started_workers) == 1
+    assert started_workers[0]._stop_event.is_set()
+    assert not coordinator._loop.running
 
 
 @pytest.mark.asyncio
-async def test_worker_restarts_after_task_finishes(tmp_path: Path) -> None:
-    """A finished worker task is replaced on the next sync."""
-    coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
+async def test_stop_lets_the_scan_in_progress_finish(tmp_path: Path) -> None:
+    """Stopping asks the worker to stop and waits for its current scan, so a poke it sends is recorded."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
+    workers: list[TodoPokeWorker] = []
+    release_scan = asyncio.Event()
+    scan_completed = False
 
-    await coordinator.sync()
-    first_worker = coordinator._worker
-    first_task = coordinator._task
-    assert first_worker is not None
-    assert first_task is not None
+    async def run(worker: TodoPokeWorker) -> None:
+        nonlocal scan_completed
+        workers.append(worker)
+        await release_scan.wait()
+        scan_completed = True
 
-    first_worker.stop()
-    await first_task
-    await coordinator.sync()
+    with patch.object(TodoPokeWorker, "run", run):
+        await coordinator.sync(config)
+        await _until_started(workers)
+        stopping = asyncio.create_task(coordinator.stop())
+        await asyncio.wait_for(workers[0]._stop_event.wait(), timeout=5)
+        assert not stopping.done()
 
-    assert coordinator._worker is not first_worker
-    assert coordinator._task is not first_task
-    await coordinator.stop()
+        release_scan.set()
+        await asyncio.wait_for(stopping, timeout=5)
+
+    assert scan_completed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("disabled_by", ["zero-interval", "missing-config"])
-async def test_sync_leaves_worker_stopped_when_disabled(tmp_path: Path, disabled_by: str) -> None:
-    """A zero runtime interval or missing config leaves no worker or task running."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config: Config | None = _config(tmp_path)
-    if disabled_by == "zero-interval":
-        runtime_paths = replace(
-            runtime_paths,
-            process_env={"MINDROOM_TODO_POKE_INTERVAL_SECONDS": "0"},
-        )
-    else:
-        config = None
-    coordinator = _coordinator(runtime_paths, config, {})
+async def test_sync_leaves_worker_stopped_when_disabled(
+    tmp_path: Path,
+    started_workers: list[TodoPokeWorker],
+) -> None:
+    """A zero runtime interval stops a running worker and starts none."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
+    await coordinator.sync(config)
+    await _until_started(started_workers)
 
-    await coordinator.sync()
+    coordinator.runtime_paths = replace(
+        coordinator.runtime_paths,
+        process_env={"MINDROOM_TODO_POKE_INTERVAL_SECONDS": "0"},
+    )
+    await coordinator.sync(config)
 
-    assert coordinator._worker is None
-    assert coordinator._task is None
+    assert started_workers[0]._stop_event.is_set()
+    assert not coordinator._loop.running
 
 
 def test_orchestrator_composes_live_coordinator_providers(tmp_path: Path) -> None:
