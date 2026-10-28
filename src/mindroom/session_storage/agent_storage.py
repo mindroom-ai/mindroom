@@ -50,7 +50,7 @@ def _open_state_storage(storage_name: str, state_root: Path, *, agent_name: str 
         return ConversationStore(db_path)
 
 
-def prepare_conversation_database(path: Path, names: TableNames, *, agent_name: str | None = None) -> None:
+def prepare_conversation_database(path: Path, names: TableNames, *, agent_name: str | None) -> None:
     """Bring the database at ``path`` to the current layout before a store opens it.
 
     The connection follows no link to the file (``connect_by_name``). A database in the current layout costs one read,
