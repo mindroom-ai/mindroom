@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.llm.provider import ToolSpec
 
@@ -171,11 +171,13 @@ class ToolOutcome(ToolValue):
     """What one tool call produced: the text the model reads (the error text on failure) and the tool's media.
 
     A tool or middleware may answer a call with one: ``stop_after_call`` stops the run after it, and ``is_error``
-    fails it, as the tool-call policy answers a call a plugin hook declined.
+    fails it. ``refused_by`` is set only by the tool-call policy, for a call it refused before the body ran: a plugin
+    hook declined it, or the run's approval gate denied it; a failed outcome a tool answers with leaves it unset.
     """
 
     stop_after_call: bool = False
     is_error: bool = False
+    refused_by: Literal["plugin_hook", "approval"] | None = None
 
 
 def media_reference(kind: MediaKind, medium: Image | Audio | Video | File) -> dict[str, object]:

@@ -35,7 +35,13 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
+from mindroom.tool_system.invocation import (
+    DETACHED_SESSION_ID,
+    CallResult,
+    ToolCallContext,
+    client_tool_result,
+    run_tool_call,
+)
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -43,9 +49,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
-from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import (
-    BackgroundToolApprovalDenied,
     SyncToolCompletionTracker,
     build_tool_hook_middleware,
     track_sync_tool_completion,
@@ -190,13 +194,6 @@ class _PreparedExecution:
     toolkit: Toolkit
     function: ToolFunction
     approval_config: Config
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolFailure:
-    """A tool call that raised, or that the tool-call policy declined; ``message`` is why, as the model would read it."""
-
-    message: str
 
 
 class _CurrentGrantRevokedError(ValueError):
@@ -531,26 +528,22 @@ class ScriptToolBroker:
                 arguments=arguments,
             )
 
-            if isinstance(result, BackgroundToolApprovalDenied | _ToolFailure):
-                error = (
-                    {
-                        "kind": "approval_denied",
-                        "message": sanitize_failure_text(result.reason),
-                        "retryable": False,
-                    }
-                    if isinstance(result, BackgroundToolApprovalDenied)
-                    else {
-                        "kind": "tool_failure",
-                        "message": sanitize_failure_text(result.message),
-                        "retryable": False,
-                    }
-                )
+            if result.status in {"failed", "declined", "denied"}:
+                error = {
+                    "kind": "approval_denied" if result.status == "denied" else "tool_failure",
+                    "message": sanitize_failure_text(result.failure_text),
+                    "retryable": False,
+                }
                 return await self._publish_async(
                     call,
                     state=ScriptCallState.FAILED,
                     error=error,
                 )
-            return await self._publish_async(call, state=ScriptCallState.COMPLETED, result=_strict_json_result(result))
+            return await self._publish_async(
+                call,
+                state=ScriptCallState.COMPLETED,
+                result=_strict_json_result(result.value),
+            )
         except asyncio.CancelledError:
             raise
         except _CurrentGrantRevokedError:
@@ -608,15 +601,15 @@ class ScriptToolBroker:
         call: ScriptCallRecord,
         origin: BackgroundScriptToolOrigin,
         arguments: dict[str, object],
-    ) -> object:
-        """Run the call through the tool-call policy; return the tool's value, its denial, or why it failed."""
+    ) -> CallResult:
+        """Run the call through the tool-call policy; return what it came to."""
         context = prepared.context
         toolkit = prepared.toolkit
         function = prepared.function
         completion_tracker = SyncToolCompletionTracker()
         cleanup_transferred = False
 
-        async def execute_function() -> object:
+        async def execute_function() -> CallResult:
             with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
                 authored_decision = await _request_authored_confirmation(
                     runtime_resolver=self.runtime_resolver,
@@ -656,12 +649,7 @@ class ScriptToolBroker:
                     user_id=run.owner_user_id,
                     call_id=call.call_id,
                 )
-                try:
-                    result = await run_tool_call(function, arguments, call_context, middleware=(policy,))
-                except Exception as error:
-                    return _ToolFailure(failure_text(error))
-                # The policy answers a call a plugin hook declined with a failed outcome, which fails the call too.
-                return _ToolFailure(result.content) if isinstance(result, ToolOutcome) and result.is_error else result
+                return await run_tool_call(function, arguments, call_context, middleware=(policy,))
 
         try:
             return await run_with_tool_execution_identity(

@@ -10,8 +10,9 @@ itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
 ``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
 its own call id reads it there instead of taking it as a parameter.
-``run_tool_call`` is the same execution for runners outside the loop that need the tool's own return value, and
-``client_tool_result`` reads that value for a runner that hands it to a client.
+``run_tool_call`` is the same execution for runners outside the loop: it returns a ``CallResult`` that says what the
+call came to and keeps the tool's own value, and ``client_tool_result`` reads that value for a runner that hands it to
+a client.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
+from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.agno_toolkits import (
     StreamCollector,
     framework_arguments,
@@ -99,6 +101,43 @@ class ToolCall:
     function: ToolFunction
     arguments: dict[str, Any]
     context: ToolCallContext
+
+
+CallStatus = Literal["ok", "failed", "declined", "denied", "connection_required"]
+
+
+@dataclass(frozen=True, slots=True)
+class CallResult:
+    """What one tool call came to, for a runner outside the model loop, with the value it answered with.
+
+    ``failed`` is a call that raised, whose ``error`` is set, or one answered with a failed ``ToolOutcome`` of its
+    own. ``declined`` is a call a plugin hook refused and ``denied`` one the run's approval gate refused; both answer
+    with a failed ``ToolOutcome`` whose text says why. ``connection_required`` is a call that needs its requester to
+    connect an OAuth account, answered with the connection payload. ``value`` is the answer unchanged, None when the
+    call raised.
+    """
+
+    status: CallStatus
+    value: object = None
+    error: Exception | None = None
+
+    @property
+    def failure_text(self) -> str:
+        """Return the text a failed or refused call answers its caller with."""
+        if self.error is not None:
+            return failure_text(self.error)
+        return self.value.content if isinstance(self.value, ToolOutcome) else str(self.value)
+
+
+def _call_result(value: object) -> CallResult:
+    if isinstance(value, ToolOutcome) and value.refused_by is not None:
+        return CallResult("declined" if value.refused_by == "plugin_hook" else "denied", value)
+    if isinstance(value, ToolOutcome) and value.is_error:
+        return CallResult("failed", value)
+    readable = read_tool_value(value)
+    if is_oauth_connection_required_result(value if readable is None else readable.content):
+        return CallResult("connection_required", value)
+    return CallResult("ok", value)
 
 
 type ToolNext = Callable[[dict[str, Any]], Awaitable[object]]
@@ -250,11 +289,12 @@ async def run_tool_call(
     context: ToolCallContext,
     *,
     middleware: Sequence[ToolMiddleware],
-) -> object:
-    """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it returned.
+) -> CallResult:
+    """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it came to.
 
-    Runners outside the model loop that need the tool's own value use this; one that hands the value to a client reads
-    it through ``client_tool_result``. An exception the call raises propagates.
+    Runners outside the model loop answer their callers from the result; one that hands the tool's value to a client
+    reads it through ``client_tool_result``. An exception the call raises becomes a failed result; cancellation
+    propagates.
     Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
@@ -262,9 +302,12 @@ async def run_tool_call(
     token = _CURRENT_CALL.set(call)
     try:
         with tool_runtime_model_context(context.model_name):
-            return await _run_chain(call, middleware)
+            value = await _run_chain(call, middleware)
+    except Exception as error:
+        return CallResult("failed", error=error)
     finally:
         _CURRENT_CALL.reset(token)
+    return _call_result(value)
 
 
 def client_tool_result(result: object) -> object:
@@ -297,10 +340,10 @@ async def execute_tool_call(
     minimal mode's Bash answers when its shell call failed. The run stops after the call when the function always
     stops it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
     """
-    try:
-        value = tool_value(await run_tool_call(function, arguments, context, middleware=middleware))
-    except Exception as error:
-        return ToolOutcome(content=failure_text(error), stop_after_call=function.stop_after_call, is_error=True)
+    result = await run_tool_call(function, arguments, context, middleware=middleware)
+    if result.error is not None:
+        return ToolOutcome(content=result.failure_text, stop_after_call=function.stop_after_call, is_error=True)
+    value = tool_value(result.value)
     return tool_outcome(
         value,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
@@ -388,6 +431,8 @@ async def _drain_async(stream: AsyncIterator[object]) -> object:
 __all__ = [
     "DETACHED_SESSION_ID",
     "MISSING_TOOL_ERROR_TEXT",
+    "CallResult",
+    "CallStatus",
     "ToolArgumentError",
     "ToolCall",
     "ToolCallContext",

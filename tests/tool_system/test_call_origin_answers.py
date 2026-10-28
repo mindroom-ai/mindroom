@@ -1,8 +1,8 @@
 """What each call origin answers for outcomes its own tests leave unpinned, read at that origin's seam.
 
 The origins are the model loop, CLI-dispatched calls, scheduled calls, background script calls, the MCP gateway,
-voice calls, and tool jobs. Each runs a call through ``run_tool_call`` and reads its untyped result its own way, so
-these pins hold each origin's answer in place while that result becomes typed.
+voice calls, and tool jobs. Each runs a call through ``run_tool_call`` and answers from its ``CallResult`` its own
+way, so these pins hold each origin's answer in place.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from tests.test_mcp_gateway_tools import (
     _replace_calculator,
     context,  # noqa: F401 - the gateway tests' agent fixture
 )
-from tests.test_scheduled_tool_approval import _TASK, _armed, _binding_column, _live_agent, _manager, _run
+from tests.test_scheduled_tool_approval import _armed, _binding_column, _live_agent, _manager, _run
 from tests.test_script_tool_broker import _broker, _call_through_gateway, _replace_calculator_toolkit, _request
 from tests.test_tool_hooks import _plugin
 from tests.test_tool_job_execution import _managed_context
@@ -136,15 +136,15 @@ class _AsyncOAuthSlackTools(Toolkit):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", ["async", "sync"])
-async def test_a_scheduled_call_answers_an_oauth_requirement_by_whether_its_body_is_sync(
+async def test_a_scheduled_call_answers_an_oauth_requirement_with_the_payload_whatever_its_body(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     body: Literal["async", "sync"],
 ) -> None:
-    """An async body's OAuth requirement answers the runner with the payload dict, journaled completed; a sync one fails.
+    """An OAuth requirement answers the runner with the payload dict, journaled completed, for an async or sync body.
 
-    The runner waits for a sync body it started and re-raises that body's exception, which the policy had already
-    answered with the payload, so the runner reports the requirement's message as the call's failure.
+    The runner waits for a sync body it started without re-raising that body's exception, which the policy had already
+    answered with the payload.
     """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
@@ -159,15 +159,8 @@ async def test_a_scheduled_call_answers_an_oauth_requirement_by_whether_its_body
 
         result = await _run(manager, agent)
 
-        if body == "async":
-            assert result == _OAUTH_PAYLOAD
-            assert await _binding_column(journal, "outcome") == "completed"
-        else:
-            assert result == ToolOutcome(
-                content=f"❌ Scheduled call `{_TASK}` failed: {_OAUTH_MESSAGE}",
-                is_error=True,
-            )
-            assert await _binding_column(journal, "outcome") == "failed"
+        assert result == _OAUTH_PAYLOAD
+        assert await _binding_column(journal, "outcome") == "completed"
     finally:
         await manager.shutdown()
 
@@ -196,13 +189,13 @@ class _BlockingSlackTools(Toolkit):
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_scheduled_call_whose_body_then_raises_answers_with_the_failure_instead_of_cancelling(
+async def test_a_cancelled_scheduled_call_whose_body_then_raises_stays_cancelled(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """A scheduled call cancelled mid-body whose body then raises returns the failed outcome instead of cancelling.
+    """A scheduled call cancelled mid-body whose body then raises stays cancelled, and is not journaled failed.
 
-    The runner waits for the body before the cancellation propagates, and the body's exception replaces it.
+    The runner waits for the body before the cancellation propagates, and the body's exception does not replace it.
     """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
@@ -214,10 +207,10 @@ async def test_a_cancelled_scheduled_call_whose_body_then_raises_answers_with_th
 
         running.cancel()
         slack.release.set()
-        result = await running
+        with pytest.raises(asyncio.CancelledError):
+            await running
 
-        assert result == ToolOutcome(content=f"❌ Scheduled call `{_TASK}` failed: slack is down", is_error=True)
-        assert await _binding_column(journal, "outcome") == "failed"
+        assert await _binding_column(journal, "outcome") is None
     finally:
         await manager.shutdown()
 
@@ -248,11 +241,11 @@ async def test_a_script_call_completes_an_oauth_requirement_with_the_payload_as_
 
 
 @pytest.mark.asyncio
-async def test_a_gateway_call_whose_tool_answers_a_failed_outcome_reads_as_declined(
+async def test_a_gateway_call_whose_tool_answers_a_failed_outcome_reads_as_failed(
     context: AgentToolContext,  # noqa: F811 - the imported fixture
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An MCP gateway call whose tool itself returns a failed outcome answers ``tool_declined`` with the tool's text."""
+    """An MCP gateway call whose tool itself returns a failed outcome answers ``tool_failed`` with the tool's text."""
 
     def account() -> ToolOutcome:
         return ToolOutcome(content="The account is locked.", is_error=True)
@@ -261,7 +254,7 @@ async def test_a_gateway_call_whose_tool_answers_a_failed_outcome_reads_as_decli
 
     result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
 
-    assert result == {"error": {"code": "tool_declined", "message": "The account is locked."}}
+    assert result == {"error": {"code": "tool_failed", "message": "The account is locked."}}
 
 
 async def _voice_answer(tmp_path: Path, entrypoint: Callable[[], str], policy: ToolMiddleware) -> str:

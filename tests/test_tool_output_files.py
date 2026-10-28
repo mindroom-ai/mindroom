@@ -1135,7 +1135,7 @@ def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> No
 
 async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments: dict[str, object]) -> object:
     """Run the toolkit's first function through the tool-call policy and return what the call returned."""
-    return await run_tool_call(
+    result = await run_tool_call(
         adapt_function(_first_function(toolkit)),
         arguments,
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
@@ -1149,6 +1149,7 @@ async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments
             ),
         ),
     )
+    return result.value
 
 
 @pytest.mark.asyncio

@@ -57,7 +57,7 @@ from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
@@ -312,20 +312,10 @@ async def _run_here(call_next: ToolNext, arguments: dict[str, Any], *, unassembl
     """
     if not job_owns_execution():
         return await call_next(arguments)
+    # A managed job keeps its resources until a synchronous leaf the call started finishes.
     with enclosing_grant() if unassembled else nullcontext():
-        return await _owned_by_job(lambda: call_next(arguments))
-
-
-async def _owned_by_job(run: Callable[[], Awaitable[object]]) -> object:
-    """Run one call inside a managed job, which keeps its resources until a synchronous leaf it started finishes."""
-    tracker = SyncToolCompletionTracker(executor=JOB_CALL_EXECUTOR)
-    try:
-        with track_sync_tool_completion(tracker):
-            return await run()
-    finally:
-        started = tracker.started_task()
-        if started is not None:
-            await wait_for_future_until_complete(asyncio.gather(started, return_exceptions=True))
+        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+            return await call_next(arguments)
 
 
 def _detached(call: JobCall) -> JobCall:
@@ -498,14 +488,12 @@ async def _run_job_call(
 
     It fails when it raised, or when the policy answered it with a failed outcome, as for a call a plugin hook declined.
     """
-    try:
-        returned = await _owned_by_job(lambda: run_tool_call(function, call.arguments, call.context, middleware=inner))
-    except Exception as error:
-        return None, failure_text(error)
-    value = read_tool_value(returned)
-    if isinstance(value, ToolOutcome) and value.is_error:
-        return None, value.content
-    return (returned if value is None else value), None
+    async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+        result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
+    if result.status in {"failed", "declined", "denied"}:
+        return None, result.failure_text
+    value = read_tool_value(result.value)
+    return (result.value if value is None else value), None
 
 
 def _saved_outcome(
