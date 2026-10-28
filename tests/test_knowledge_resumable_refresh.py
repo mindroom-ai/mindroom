@@ -29,6 +29,7 @@ from agno.knowledge.reader.markdown_reader import MarkdownReader
 from structlog.testing import capture_logs
 
 import mindroom.embeddings.batching as embedding_batching_module
+import mindroom.embeddings.openai_embedder as openai_embedder_module
 import mindroom.knowledge.candidate_checkpoint as knowledge_checkpoint_module
 import mindroom.knowledge.indexing_config as knowledge_indexing_config
 import mindroom.knowledge.manager as knowledge_manager_module
@@ -45,6 +46,7 @@ from mindroom.embeddings.errors import (
     embedder_retry_after_seconds,
     openai_embedder_error,
 )
+from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import (
@@ -1155,6 +1157,44 @@ async def test_a_batch_above_the_tokens_per_minute_limit_is_embedded_one_chunk_p
         1,
         [f"content {index}" for index in range(3)],
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_embedder_clients")
+async def test_a_refresh_sends_a_request_the_account_s_billing_stops_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refresh retries a failed request itself, so the OpenAI SDK must not resend it underneath."""
+    import httpx2  # noqa: PLC0415
+
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        sent.append(request)
+        error = {
+            "message": "You exceeded your current quota.",
+            "type": "insufficient_quota",
+            "code": "insufficient_quota",
+        }
+        return httpx2.Response(429, headers={"retry-after-ms": "1"}, json={"error": error})
+
+    sdk_client = openai_embedder_module.OpenAI
+    monkeypatch.setattr(
+        openai_embedder_module,
+        "OpenAI",
+        lambda **kwargs: sdk_client(**kwargs, http_client=httpx2.Client(transport=httpx2.MockTransport(respond))),
+    )
+    monkeypatch.setattr(knowledge_manager_module, "create_configured_embedder", create_configured_embedder)
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    embedder_config = {"model": "text-embedding-3-small", "api_key": "test-key", "host": "http://embeddings.local/v1"}
+    config = _config(tmp_path, docs_path, memory={"embedder": {"provider": "openai", "config": embedder_config}})
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths_for(config))
+
+    assert result.index_published is False
+    assert len(sent) == 1
 
 
 class _InFlightEmbedder(_RecordingEmbedder):
