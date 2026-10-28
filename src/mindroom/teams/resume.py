@@ -351,7 +351,7 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
-            # A continuation saved before member models were recorded resolves them by the team rule now.
+            # A pause a resume made saves no member models, so its own resume resolves them by the team rule.
             active_model_names=member_model_names
             if member_model_names is not None
             else resolve_team_turn_models(

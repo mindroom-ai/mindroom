@@ -587,7 +587,7 @@ def _build_managed_tool_init_kwargs(
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
-    workspace_in_worker: bool,
+    workspace_in_worker: bool | None,
     agent_state_root: Path | None,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool."""
@@ -598,7 +598,11 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.WORKER_TARGET: lambda: worker_target,
         ToolManagedInitArg.RUNTIME_CONFIG: lambda: runtime_config,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT: lambda: tool_output_workspace_root,
-        ToolManagedInitArg.WORKSPACE_IN_WORKER: lambda: workspace_in_worker,
+        ToolManagedInitArg.WORKSPACE_IN_WORKER: lambda: (
+            _sandbox_settings_route_workspace_tools(runtime_paths)
+            if workspace_in_worker is None
+            else workspace_in_worker
+        ),
         ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
             execution_identity.room_id if execution_identity is not None else None
         ),
@@ -661,6 +665,16 @@ def _constructing_agent_runs_in_worker(
     )
 
 
+def _sandbox_settings_route_workspace_tools(runtime_paths: RuntimePaths) -> bool:
+    """Return whether the sandbox settings route any tool that works on workspace paths to a worker."""
+    placement = tool_placement(runtime_paths)
+    return any(
+        placement.runs_in_worker(name, None)
+        for name, metadata in TOOL_METADATA.items()
+        if metadata.consumes_workspace_paths
+    )
+
+
 def get_tool_by_name(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -677,7 +691,7 @@ def get_tool_by_name(
     tool_output_workspace_root: Path | None = None,
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
-    workspace_in_worker: bool = False,
+    workspace_in_worker: bool | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its registered name.
@@ -686,6 +700,8 @@ def get_tool_by_name(
     ``worker_target`` names under ``runtime_config``, as that agent's own toolkits are placed.
     ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
     worker runtimes leave it unset because their own storage root is the state they own.
+    ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
+    None follows the sandbox settings for those tools.
     """
     if tool_name not in TOOL_REGISTRY:
         available = ", ".join(sorted(TOOL_REGISTRY.keys()))

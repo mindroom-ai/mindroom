@@ -29,6 +29,7 @@ from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -503,6 +504,32 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
     assert payload["status"] == "ok"
     assert (workspace / "inputs" / "sample.txt").read_bytes() == b"hello"
     mocked_save.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("proxy_tools", "uses_worker"),
+    [pytest.param("shell", True, id="workspace-tool-routes"), pytest.param("calculator", False, id="none-routes")],
+)
+def test_attachments_a_tool_builds_save_where_the_sandbox_settings_route_workspace_tools(
+    tmp_path: Path,
+    proxy_tools: str,
+    uses_worker: bool,
+) -> None:
+    """Attachments a plugin builds without the agent's placement save where the sandbox routes workspace tools."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+            "MINDROOM_SANDBOX_PROXY_TOOLS": proxy_tools,
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+
+    attachments = get_tool_by_name("attachments", runtime_paths, worker_target=_shared_worker_target())
+
+    assert attachments._workspace_in_worker is uses_worker
 
 
 @pytest.mark.asyncio

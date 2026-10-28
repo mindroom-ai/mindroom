@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
-from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import tool_registry_origin
@@ -66,11 +66,11 @@ def locally_allowed(
     construction = authority.get("construction")
     if not isinstance(construction, dict):
         return False
-    in_room = owner.room_id is not None
+    room_tools, matrix_room_tools = turn_room_flags(owner)
     candidates = resolve_agent_tools(config, owner.agent_name).candidates(
         depth=depth,
-        room_tools=in_room,
-        matrix_room_tools=in_room,
+        room_tools=room_tools,
+        matrix_room_tools=matrix_room_tools,
         portable_search=True,
     )
     entry = next(
