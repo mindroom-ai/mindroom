@@ -127,18 +127,10 @@ def _scripted(monkeypatch: pytest.MonkeyPatch, text: str, *, sums_attempts: bool
     install_model_providers(monkeypatch, {"default": ScriptedModel([turn], identity=_IDENTITY)})
 
 
-async def _routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+async def _routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, sums_attempts: bool = False) -> Path:
     paths = test_runtime_paths(tmp_path)
     config = _system_config(paths)
-    _scripted(monkeypatch, json.dumps({"entity_name": "helper", "reasoning": "Matched"}))
-    await routing.suggest_responder("Help", ["helper"], config, paths)
-    return paths.storage_root
-
-
-async def _routing_retried(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    paths = test_runtime_paths(tmp_path)
-    config = _system_config(paths)
-    _scripted(monkeypatch, json.dumps({"entity_name": "helper", "reasoning": "Matched"}), sums_attempts=True)
+    _scripted(monkeypatch, json.dumps({"entity_name": "helper", "reasoning": "Matched"}), sums_attempts=sums_attempts)
     await routing.suggest_responder("Help", ["helper"], config, paths)
     return paths.storage_root
 
@@ -343,7 +335,7 @@ _CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], Awaitable[Path]]] = {
     "memory_extraction_system": lambda tmp_path, _monkeypatch: _memory_extraction(tmp_path, owned=False),
     "room_topic": _room_topic,
     "routing": _routing,
-    "routing_retried": _routing_retried,
+    "routing_retried": lambda tmp_path, monkeypatch: _routing(tmp_path, monkeypatch, sums_attempts=True),
     "schedule_parse": _schedule_parse,
     "skill_learning": _skill_learning,
     "team_mode": _team_mode,

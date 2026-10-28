@@ -282,8 +282,9 @@ class RunMetrics(_Counts):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestUsage:
-    """The usage one provider request reported: when it was answered, its metrics, and the model that answered it.
+    """The usage one provider request reported: its time, its metrics, and the model that answered it.
 
+    ``created_at`` is when the request was answered, except voice transcription, which dates it when it was sent.
     ``model`` is None when the usage report names no model.
     """
 
@@ -301,7 +302,8 @@ class HelperUsage:
     ``ModelIdentity.provider``, while other writers store a label of their own, such as the name Mem0's usage is
     priced by (``"OpenAI Chat"``). ``metrics`` sums its requests by model, and ``requests`` lists each request whose
     usage describes it alone: a retried request's usage sums its attempts, so ``metrics`` counts it but ``requests``
-    does not list it.
+    does not list it. ``created_at`` defaults to when the value is built, which is when a helper prompt finished;
+    Mem0 dates it by its first call, and voice transcription by when its request was sent.
     """
 
     run_id: str
