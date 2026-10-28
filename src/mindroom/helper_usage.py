@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
-from mindroom.llm.messages import model_provenance
+from mindroom.llm.messages import is_own_model_message, read_model_provenance, usage_sums_attempts
+from mindroom.llm.usage import HelperUsage, RequestUsage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import RunRecord
-    from mindroom.llm.usage import HelperUsage, RequestUsage
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.usage.storage import IndependentUsageKind
@@ -79,8 +79,18 @@ async def record_helper_usage(
     kind: IndependentUsageKind,
     requester_id: str | None,
 ) -> None:
-    """Keep returned usage before output validation, without inventing request boundaries."""
-    await _save_usage(_usage_run(usage), usage.run_id, owner=owner, kind=kind, requester_id=requester_id)
+    """Record ``usage`` in ``owner``'s conversation for ``requester_id``, as ``kind`` under ``<kind>:<run id>``."""
+    await run_session_storage_operation(
+        owner.storage_factory,
+        lambda storage: storage.save_independent_usage(
+            session_id=owner.session_id,
+            usage_id=f"{kind}:{usage.run_id}",
+            kind=kind,
+            requester_id=requester_id,
+            usage=usage,
+            initial_session=owner.initial_session,
+        ),
+    )
 
 
 async def record_run_usage(
@@ -91,52 +101,28 @@ async def record_run_usage(
     requester_id: str | None,
 ) -> None:
     """Keep the usage of a helper that ran as a whole agent run: a workflow participant's turn or a skill review."""
-    await _save_usage(run.to_dict(), run.run_id, owner=owner, kind=kind, requester_id=requester_id)
+    await record_helper_usage(_run_usage(run), owner=owner, kind=kind, requester_id=requester_id)
 
 
-async def _save_usage(
-    run: dict[str, object],
-    invocation_id: str,
-    *,
-    owner: HelperUsageOwner,
-    kind: IndependentUsageKind,
-    requester_id: str | None,
-) -> None:
-    await run_session_storage_operation(
-        owner.storage_factory,
-        lambda storage: storage.save_independent_usage(
-            session_id=owner.session_id,
-            usage_id=f"{kind}:{invocation_id}",
-            kind=kind,
-            requester_id=requester_id,
-            run=run,
-            initial_session=owner.initial_session,
+def _run_usage(run: RunRecord) -> HelperUsage:
+    """Return the usage of ``run``: its model, time, and metrics, with a request for each answer of its own model."""
+    assert run.metrics is not None
+    return HelperUsage(
+        run_id=run.run_id,
+        model=run.model,
+        provider=run.model_provider,
+        metrics=run.metrics,
+        requests=tuple(
+            RequestUsage(
+                created_at=message.created_at,
+                metrics=message.metrics,
+                model=read_model_provenance(message.provider_data),
+            )
+            for message in run.messages
+            if is_own_model_message(message) and not usage_sums_attempts(message.provider_data)
         ),
+        created_at=run.created_at,
     )
-
-
-def _usage_run(usage: HelperUsage) -> dict[str, object]:
-    """Return ``usage`` as the run dict the usage ledger projects: its model, time, metrics, and requests."""
-    # TODO(simplify): the ledger projects helper usage from a run dict, so each request is written as an assistant
-    # message. Have `save_independent_usage` project a `HelperUsage` itself (#3109). Stored rows would not notice.
-    attribution = {"model": usage.model, "model_provider": usage.provider}
-    return {
-        **{key: value for key, value in attribution.items() if value is not None},
-        "created_at": usage.created_at,
-        "metrics": usage.metrics.to_dict(),
-        "messages": [_request_message(request) for request in usage.requests],
-    }
-
-
-def _request_message(request: RequestUsage) -> dict[str, object]:
-    message: dict[str, object] = {
-        "role": "assistant",
-        "created_at": request.created_at,
-        "metrics": request.metrics.to_dict(),
-    }
-    if request.model is not None:
-        message["provider_data"] = model_provenance(request.model.model_id, request.model.provider)
-    return message
 
 
 async def record_system_usage(

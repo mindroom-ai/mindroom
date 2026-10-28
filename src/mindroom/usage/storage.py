@@ -10,6 +10,8 @@ from mindroom.llm.usage import TOKEN_FIELDS
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.llm.usage import HelperUsage, RequestUsage
+
 # Run metadata key holding the projected usage of requests mid-turn compaction folded out of the run's messages.
 COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
 
@@ -96,13 +98,7 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(metrics, dict):
         result["metrics"] = None
         return result
-    run_metrics = cast("dict[str, object]", metrics)
-    selected = _project_metrics(run_metrics)
-    details = run_metrics.get("details")
-    if details is not None:
-        # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
-        selected["details"] = _project_model_details(details)
-    result["metrics"] = selected
+    result["metrics"] = _project_run_metrics(cast("dict[str, object]", metrics))
     requests = project_requests(run.get("messages"))
     carried = _carried_requests(run, metadata)
     if carried:
@@ -111,6 +107,44 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
     if requests is not None:
         result["requests"] = requests
     return result
+
+
+def project_helper_usage(
+    usage: HelperUsage,
+    *,
+    usage_id: str,
+    kind: IndependentUsageKind,
+    requester_id: str | None,
+) -> dict[str, object]:
+    """Return the snapshot of helper usage recorded as ``usage_id`` for ``requester_id``, in a run snapshot's key order.
+
+    A model or provider left unknown is omitted, and a request that reported no counters is not listed.
+    """
+    snapshot: dict[str, object] = {"run_id": usage_id, "parent_run_id": None, "team_id": None, "user_id": requester_id}
+    if usage.provider is not None:
+        snapshot["model_provider"] = usage.provider
+    if usage.model is not None:
+        snapshot["model"] = usage.model
+    snapshot["created_at"] = usage.created_at
+    if usage.voice is not None:
+        snapshot["voice_seconds"] = usage.voice.seconds
+        snapshot["voice_finalized"] = usage.voice.finalized
+    snapshot["metrics"] = _project_run_metrics(usage.metrics.to_dict())
+    if usage.voice is None:
+        snapshot["requests"] = [request for request in map(_project_request, usage.requests) if request is not None]
+    snapshot["kind"] = kind
+    return snapshot
+
+
+def _project_request(request: RequestUsage) -> dict[str, object] | None:
+    metrics = _project_metrics(request.metrics.to_dict())
+    if not metrics:
+        return None
+    projected: dict[str, object] = {"created_at": request.created_at, "metrics": metrics}
+    if request.model is not None:
+        projected["model"] = request.model.model_id
+        projected["model_provider"] = request.model.provider
+    return projected
 
 
 def _carried_requests(run: Mapping[str, object], metadata: object) -> list[dict[str, object]]:
@@ -172,6 +206,15 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
                 request["model_provider"] = model.provider if model is not None else False
             requests.append(request)
     return requests
+
+
+def _project_run_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
+    selected = _project_metrics(metrics)
+    details = metrics.get("details")
+    if details is not None:
+        # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
+        selected["details"] = _project_model_details(details)
+    return selected
 
 
 def _project_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
