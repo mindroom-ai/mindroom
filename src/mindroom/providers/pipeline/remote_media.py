@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 import httpx2
 
@@ -92,10 +93,23 @@ async def _download(url: str, kind: MediaKind, provider: str) -> tuple[bytes, st
             data = await collect_bounded_bytes(response.aiter_bytes(), max_bytes=_DOWNLOAD_LIMIT_BYTES)
             declared = canonical_mime_type(response.headers.get("content-type"))
     except (httpx2.HTTPError, httpx2.InvalidURL, ByteLimitExceededError) as error:
-        logger.warning("remote_media_unavailable", kind=kind, url=url, error=str(error))
+        _log_unavailable(url, kind, error)
         msg = f"The {kind} at a remote URL could not be downloaded for the model"
         raise InvalidRequest(msg, provider=provider) from error
     if not data:
         msg = f"The {kind} at a remote URL is empty"
         raise InvalidRequest(msg, provider=provider)
     return data, declared
+
+
+def _log_unavailable(url: str, kind: MediaKind, error: Exception) -> None:
+    """Log a failed download by the URL's scheme, host, and path, since a signed URL's credentials ride in the rest.
+
+    A refused download logs its status, because the status error's text repeats the whole URL.
+    """
+    parts = urlsplit(url)
+    logged_url = f"{parts.scheme}://{parts.hostname or ''}{parts.path}"
+    if isinstance(error, httpx2.HTTPStatusError):
+        logger.warning("remote_media_unavailable", kind=kind, url=logged_url, status_code=error.response.status_code)
+    else:
+        logger.warning("remote_media_unavailable", kind=kind, url=logged_url, error=str(error))
