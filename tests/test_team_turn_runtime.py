@@ -1856,24 +1856,26 @@ async def _lose_the_provider() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "leader",
+    ("leader", "recorded"),
     [
         pytest.param(
             [delegate("call-check", "checker", "Check"), [Await(_lose_the_provider)]],
+            "**Checker**: Checker overloaded",
             id="after-a-member-failed",
         ),
-        pytest.param([[Await(_lose_the_provider)]], id="on-the-first-request"),
+        pytest.param([[Await(_lose_the_provider)]], "", id="on-the-first-request"),
     ],
 )
 async def test_a_team_turn_whose_leader_request_fails_records_the_text_its_reply_showed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
+    recorded: str,
 ) -> None:
-    """A turn whose leader request fails stores its record of the text its reply showed, here none, in the run's place.
+    """A turn whose leader request fails stores its record of the document its run built, in the run's place.
 
-    The member that failed before any text showed no reason yet, since the team run never ended, and the leader said
-    nothing; the run's error reaches the requester as the reply's error text instead.
+    A member that failed shows its reason in its slot however the team run ended, and the leader said nothing; the
+    run's error reaches the requester as the reply's error text.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, checker=[[Await(_checker_overloaded)]])
 
@@ -1882,7 +1884,7 @@ async def test_a_team_turn_whose_leader_request_fails_records_the_text_its_reply
     assert "provider connection lost" in text
     record, _ = team.stored_runs()
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == ""
+    assert team.recorder.assistant_text == recorded
     assert (record.status, record.content) == (
         RunStatus.completed,
         _render_interrupted_replay_content(team.recorder.interrupted_snapshot()),
@@ -2505,7 +2507,7 @@ async def test_a_stopped_team_turn_records_the_text_its_members_streamed(
 ) -> None:
     """A Stop records what the reply showed: the writer, stopped while its call ran, records what it wrote before.
 
-    The checker failed before any text; its reason shows only once the team run ends, so the stopped turn records none.
+    The checker failed before any text; the stopped turn records its reason in its slot all the same.
     """
     team = squad_turn(
         tmp_path,
@@ -2525,7 +2527,7 @@ async def test_a_stopped_team_turn_records_the_text_its_members_streamed(
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "cancelled"
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Writer**: Drafting."
+    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
 
 
 @pytest.mark.asyncio
