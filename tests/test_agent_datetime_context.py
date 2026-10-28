@@ -18,7 +18,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.llm.messages import system_text
 from mindroom.system_prompt import render_session_context
-from mindroom.teams.members import build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.conftest import (
     bind_runtime_paths,
@@ -184,7 +184,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
-        members = materialize_exact_team_members(
+        members = resolve_exact_team_members(
             ["general"],
             config=config,
             runtime_paths=runtime_paths,
@@ -203,8 +203,8 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             configured_team_name=None,
             timezone="UTC",
         )
+        member = members.build("general", members.model_names["general"])
 
-    [member] = members.builds
     assert member.prompt.role is not None
     assert "## Current Date and Time" not in member.prompt.role
     leader_prompt = system_text(team.spec.leader.system_messages)

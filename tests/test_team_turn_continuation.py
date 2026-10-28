@@ -22,7 +22,7 @@ from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import resolve_exact_team_members
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
 from tests.team_turn_helpers import (
@@ -94,14 +94,17 @@ def _completed_tool_names(team: TeamTurn) -> list[str | None]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("stream", "show_tool_calls"), [(False, True), (True, True), (True, False)])
-async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_members(
+async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the_members_it_delegates_to(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
     show_tool_calls: bool,
 ) -> None:
-    """The second attempt has its own run id and continuation prompt; only its answer is the reply."""
+    """The second attempt has its own run id and continuation prompt; only its answer is the reply.
+
+    Only the first attempt delegates, so only it builds a member.
+    """
     team = _team(
         tmp_path,
         monkeypatch,
@@ -117,7 +120,7 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_with_rebuilt_memb
     assert text.endswith("Finished the task.")
     assert "Switching." not in text
     assert "No team response generated." not in text
-    assert build.call_count == 2
+    assert build.call_count == 1
     leader = team.models["default"]
     second_prompt = str(leader.requests[-1].messages[-1].content)
     assert CONTINUATION_MARK in second_prompt
@@ -419,7 +422,7 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
     team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
 
     def tool_names(**kwargs: Any) -> set[str]:  # noqa: ANN401
-        members = materialize_exact_team_members(
+        members = resolve_exact_team_members(
             ["general"],
             config=team.config,
             runtime_paths=team.runtime_paths,
@@ -428,7 +431,7 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
             active_model_names=None,
             **kwargs,
         )
-        return {name for _agent, name in tool_owners_by_agent(members.builds[0])}
+        return {name for _agent, name in tool_owners_by_agent(members.build("general", members.model_names["general"]))}
 
     assert "touch" not in tool_names()
     assert {"touch", "scope"} <= tool_names(supports_native_tool_approval=True)

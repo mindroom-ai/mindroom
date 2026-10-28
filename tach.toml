@@ -2697,6 +2697,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.history.conversation_text",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
     "mindroom.history.request_messages",
@@ -2767,7 +2768,6 @@ depends_on = [
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
-    "mindroom.error_handling",
     "mindroom.history.conversation_text",
     "mindroom.history.replay",
     "mindroom.history.storage",
@@ -3714,10 +3714,13 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials.manager",
+    "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
     "mindroom.memory._mem0_usage",
+    # Deferred (function-level) import that loads the Ollama SDK only once Mem0's Ollama embedder fails.
+    "mindroom.providers.ollama.errors",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
@@ -6541,7 +6544,7 @@ expose = [
     "members.ResolvedExactTeamMembers",
     "members.TeamTurnModelSelection",
     "members.build_team_spec",
-    "members.materialize_exact_team_members",
+    "members.resolve_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
     "presentation.finished_run_text",
@@ -8086,10 +8089,12 @@ depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
+    "mindroom.llm",
     "mindroom.prompt_message_tags",
     "mindroom.turn_origin",
 ]
 visibility = [
+    "mindroom.execution_preparation",
     "mindroom.history.compaction",
     "mindroom.knowledge_graph.episodes",
     "mindroom.memory.auto_flush",
@@ -8174,6 +8179,7 @@ depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
+    "mindroom.constants",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
@@ -8205,11 +8211,12 @@ depends_on = [
     "mindroom.providers.tool_policy",
 ]
 
-# Importing this module loads the Ollama SDK, so only the two Ollama modules, each imported on first use, may import it.
+# Importing this module loads the Ollama SDK, so only the Ollama modules, each imported on first use, and Mem0's
+# memory build, which imports it once Mem0's own Ollama embedder fails, may import it.
 [[modules]]
 path = "mindroom.providers.ollama.errors"
 depends_on = ["mindroom.providers.errors"]
-visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama.adapter"]
+visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.memory.config", "mindroom.providers.ollama.adapter"]
 
 [[modules]]
 path = "mindroom.providers.ollama.settings"
@@ -9507,6 +9514,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
     "mindroom.helper_usage",
+    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.providers.registry",

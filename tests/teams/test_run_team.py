@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
@@ -22,7 +24,7 @@ from mindroom.llm.runs import RunMetrics, RunRecord, RunRequirement, RunStatus, 
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_paused_content, team_usage
-from mindroom.teams.spec import TeamMode
+from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode
 from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.providers.gemini_ollama_support import build_adapter, ollama_ndjson
@@ -806,6 +808,157 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     [failed] = [member for member in store.members if member.agent_id == "checker"]
     stored_content = "I will check." if wrote_text else "checker provider down: api_key=example-secret"
     assert (failed.status, failed.content) == (RunStatus.error, stored_content)
+
+
+def _counted(member: TeamMember, builds: list[str], *, failures: int = 0) -> TeamMember:
+    """Return ``member`` with its builds recorded in ``builds``, the first ``failures`` of them raising."""
+
+    def build() -> MemberBuild:
+        builds.append(member.id)
+        if len(builds) <= failures:
+            msg = f"{member.name} is misconfigured: api_key=example-secret"
+            raise RuntimeError(msg)
+        return member.build()
+
+    return TeamMember(id=member.id, name=member.name, role=member.role, build=build)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        pytest.param(TeamMode.COORDINATE, "Checker is misconfigured: api_key=***redacted***", id="coordinate"),
+        pytest.param(
+            TeamMode.COLLABORATE,
+            "Agent Writer: Five is prime.\n\nAgent Checker: Checker is misconfigured: api_key=***redacted***",
+            id="collaborate",
+        ),
+    ],
+)
+async def test_a_member_that_cannot_be_built_fails_its_delegation_and_the_leader_reads_why(
+    mode: TeamMode,
+    expected: str,
+) -> None:
+    """A member whose build raises ends its run as failed, so the leader reads why, as for a run that fails.
+
+    Its stored row is the failed run of the task it was given, naming no model, and the team run goes on.
+    """
+    delegation = (
+        calls(tool_call("delegate_task_to_members", "call-all", task="Check 5."), metrics=usage(10, 2))
+        if mode is TeamMode.COLLABORATE
+        else _delegate("call-all", "checker", "Check 5.", metrics=usage(10, 2))
+    )
+    leader = scripted("leader-model", delegation, answer("The checker could not start."))
+    team = squad(leader, scripted("writer-model", answer("Five is prime.")), scripted("checker-model"), mode=mode)
+    writer, checker = team.members
+    builds: list[str] = []
+    unbuildable = _counted(checker, builds, failures=1)
+    store = Store()
+
+    _, record = await collect(
+        start_team(
+            replace(team, members=(writer, unbuildable)),
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+            persist=store,
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert record.tools is not None
+    assert record.tools[0].result == expected
+    assert leader.requests[1].messages[-1].content == expected
+    assert (builds, unbuildable.built) == (["checker"], None)
+    [failed] = [member for member in store.members if member.agent_id == "checker"]
+    assert (failed.status, failed.parent_run_id, failed.agent_display_name) == (RunStatus.error, "r", "Checker")
+    assert failed.content == "Checker is misconfigured: api_key=example-secret"
+    assert (failed.model, failed.model_provider) == (None, None)
+    assert [(message.role, message.content) for message in failed.messages] == [("user", "Check 5.")]
+
+
+async def test_runs_that_start_together_wait_for_one_build_of_their_member() -> None:
+    """The first run builds the member off the event loop, and a run that starts meanwhile waits for that build."""
+    writer = squad(scripted("leader-model"), scripted("writer-model"), scripted("checker-model")).members[0]
+    release = threading.Event()
+    builds: list[str] = []
+
+    def build() -> MemberBuild:
+        builds.append(writer.id)
+        release.wait(timeout=10)
+        return writer.build()
+
+    member = TeamMember(id=writer.id, name=writer.name, role=writer.role, build=build)
+    first = asyncio.ensure_future(member.ensure_built())
+    second = asyncio.ensure_future(member.ensure_built())
+    # Both runs reach the member before its build ends.
+    await asyncio.sleep(0)
+    release.set()
+    built = await first
+
+    assert await second is built
+    assert member.built is built
+    assert builds == ["writer"]
+
+
+async def test_a_member_is_built_once_on_its_first_delegation_and_an_idle_member_never() -> None:
+    """A member's first delegations build it once, a later one reuses the build, and an idle member builds nothing."""
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-1", member_id="writer", task="Draft."),
+            tool_call("delegate_task_to_member", "call-2", member_id="writer", task="Title."),
+            metrics=usage(10, 2),
+        ),
+        _delegate("call-3", "writer", "Revise.", metrics=usage(10, 2)),
+        answer("Done."),
+    )
+    team = squad(
+        leader,
+        scripted("writer-model", answer("Draft one."), answer("A title."), answer("Draft two.")),
+        scripted("checker-model"),
+    )
+    writer, checker = team.members
+    builds: list[str] = []
+    counted = (_counted(writer, builds), _counted(checker, builds))
+
+    _, record = await collect(
+        start_team(
+            replace(team, members=counted),
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert record.status is RunStatus.completed
+    assert [tool.result for tool in record.tools or ()] == ["Draft one.", "A title.", "Draft two."]
+    assert builds == ["writer"]
+    assert counted[1].built is None
+
+
+async def test_a_member_whose_build_failed_is_built_again_on_its_next_delegation() -> None:
+    """A failed build is not kept: the leader may delegate to the member again, and that delegation builds it."""
+    leader = scripted(
+        "leader-model",
+        _delegate("call-1", "writer", "Draft.", metrics=usage(10, 2)),
+        _delegate("call-2", "writer", "Draft again.", metrics=usage(10, 2)),
+        answer("Done."),
+    )
+    team = squad(leader, scripted("writer-model", answer("Draft one.")), scripted("checker-model"))
+    writer, checker = team.members
+    builds: list[str] = []
+
+    _, record = await collect(
+        start_team(
+            replace(team, members=(_counted(writer, builds, failures=1), checker)),
+            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            ctx=run_context("r", SQUAD),
+        ),
+    )
+
+    assert [tool.result for tool in record.tools or ()] == [
+        "Writer is misconfigured: api_key=***redacted***",
+        "Draft one.",
+    ]
+    assert builds == ["writer", "writer"]
 
 
 @pytest.mark.parametrize(

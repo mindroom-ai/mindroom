@@ -26,6 +26,7 @@ from mindroom.delegation.background import delegation_child, reconcile_delegatio
 from mindroom.delegation.recovery import interrupt_stopped_child, read_child_run
 from mindroom.event_journal import BackgroundApprovalDecision, EventJournalStore, tool_job_run_id
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage import lanes
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
@@ -216,10 +217,11 @@ class DelegationFuzzRunner:
         self.agents.install(monkeypatch)
         self._run_real_child = ai.run_delegated_child_response
         monkeypatch.setattr(approval_manager, "get_approval_store", lambda: self.approvals)
-        # Blocking work, agent builds included, runs on the event loop, so an idle loop marks the end of each step and a
-        # crash lands between two awaits.
+        # Blocking work, agent builds and storage lanes included, runs on the event loop, so an idle loop marks the end
+        # of each step and a crash lands between two awaits.
         monkeypatch.setattr(asyncio, "to_thread", _inline)
         monkeypatch.setattr(pre_model_preparation, "_AGENT_BUILD_EXECUTOR", _InlineExecutor())
+        monkeypatch.setattr(lanes, "_lane", lambda _store: _InlineExecutor())
         run_journal_statements_inline(monkeypatch)
 
     async def open(self) -> None:

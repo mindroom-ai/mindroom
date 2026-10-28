@@ -72,7 +72,7 @@ async def test_team_approval_finalizes_consumption_after_member_assembly_fails(t
 
     with (
         patch("mindroom.teams.resume.load_scope_session", return_value=scope),
-        patch("mindroom.teams.resume.materialize_exact_team_members", side_effect=RuntimeError("assembly failed")),
+        patch("mindroom.teams.resume.resolve_exact_team_members", side_effect=RuntimeError("assembly failed")),
         patch("mindroom.teams.resume.finalize_consumption", new=fail_finalization),
         pytest.raises(RuntimeError, match="consumption finalization failed"),
     ):

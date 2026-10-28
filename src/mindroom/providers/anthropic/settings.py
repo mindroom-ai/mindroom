@@ -28,11 +28,6 @@ ENDPOINT_VARIABLES: dict[ClaudeRouteKind, str] = {
 # reaches it is answered as cut off instead of run (the loop's policy). Default to the model's maximum or a documented
 # per-model default (#3113). Users would notice longer Claude replies.
 _DEFAULT_MAX_TOKENS = 8192
-# The anthropic SDK rejects non-streaming requests whose max_tokens project past ten minutes unless the
-# client has an explicit timeout; 3600 s is the SDK's own ceiling for non-streaming operations.
-# TODO(simplify): every request streams, so the SDK guard this timeout satisfies no longer applies. Drop it for the
-# SDK's default timeout. Operators would notice the shorter default (#3119).
-_DEFAULT_TIMEOUT_SECONDS = 3600.0
 
 _COMMON_KEYS = frozenset(
     {
@@ -84,7 +79,7 @@ class ClaudeSettings:
     betas: Sequence[str] | None = None
     context_management: Mapping[str, Any] | None = None
     request_params: Mapping[str, Any] | None = None
-    timeout: float | None = _DEFAULT_TIMEOUT_SECONDS
+    timeout: float | None = None
     default_headers: Mapping[str, str] | None = field(default=None, metadata=SECRET)
     client_params: Mapping[str, Any] | None = field(default=None, metadata=SECRET)
     # Direct API credentials; Vertex and Bedrock authenticate with Google and AWS credentials and ignore a key.

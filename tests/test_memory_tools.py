@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
-from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.memory import MemorySearchOutcome, search_agent_memories
 from mindroom.tool_system.metadata import TOOL_METADATA
@@ -27,10 +27,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _auth_error_with_secret(secret: str) -> AuthenticationError:
+def _auth_error_with_secret(secret: str) -> EmbedderRequestError:
+    """Return what the embedder raises for a rejected key, classified at its boundary from the SDK error."""
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(401, request=request, json={"error": {"message": f"rejected {secret}"}})
-    return AuthenticationError(f"rejected {secret}", response=response, body=None)
+    return openai_embedder_error(AuthenticationError(f"rejected {secret}", response=response, body=None))
 
 
 class TestMemoryTools:

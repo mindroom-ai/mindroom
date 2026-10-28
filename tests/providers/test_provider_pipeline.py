@@ -26,6 +26,7 @@ from mindroom.llm.errors import (
     ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
+    RateLimited,
 )
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
@@ -172,6 +173,29 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
 
 
 @pytest.mark.asyncio
+async def test_a_retried_turn_keeps_the_answering_attempt_s_context_usage() -> None:
+    """Counters sum across attempts, but the context the model saw is the answering attempt's, not the failed one's."""
+
+    def usage(input_tokens: int) -> MessageMetrics:
+        return MessageMetrics(
+            tokens=TokenCounts(input_tokens=input_tokens, total_tokens=input_tokens),
+            provider_metrics={"context_usage": {"input_tokens": input_tokens}, "server_tool_requests": 1},
+        )
+
+    inner = _ScriptedProvider([[UsageReported(usage(40)), _transient()], [TextDelta("done"), _turn(usage=usage(90))]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    finished = (await _drain(provider, ModelRequest(messages=[_user()])))[-1]
+
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.provider_metrics == {
+        "context_usage": {"input_tokens": 90},
+        "server_tool_requests": 2,
+    }
+    assert finished.message.metrics.tokens.input_tokens == 130
+
+
+@pytest.mark.asyncio
 async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.2)
     inner = _ScriptedProvider([[_transient()], [_turn()]])
@@ -182,6 +206,23 @@ async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: py
     await _drain(provider, ModelRequest(messages=[_user()]))
 
     assert (len(inner.requests), loop.time() - started >= 0.2) == (2, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("hint", "delay"), [(0.25, 0.25), (61.0, 0.0), (None, 0.0)])
+async def test_a_retry_after_hint_of_at_most_a_minute_replaces_the_backoff(hint: float | None, delay: float) -> None:
+    """The provider's ``Retry-After`` decides the wait, as the SDK did when it retried; a longer hint is no hint."""
+    throttled = RateLimited("slow down", provider="Scripted Chat", status_code=429, retry_after_seconds=hint)
+    inner = _ScriptedProvider([[throttled], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with capture_logs() as logs:
+        await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert [entry["delay_seconds"] for entry in logs if entry["event"] == "provider_request_retried"] == [delay]
+    assert (len(inner.requests), loop.time() - started >= delay) == (2, True)
 
 
 @pytest.mark.asyncio
@@ -456,13 +497,12 @@ async def test_input_specific_rejection_retries_without_learning() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [413, 501])
-async def test_a_payload_or_server_rejection_retries_without_learning(status: int) -> None:
-    """A 413 or a final server error proves nothing about the model, even when its text names a capability gap."""
+async def test_a_payload_rejection_retries_without_learning() -> None:
+    """A 413 proves nothing about the model, even when its text names a capability gap."""
     rejection = classify_provider_error(
         "This model does not support image input",
         provider="Scripted Chat",
-        status_code=status,
+        status_code=413,
     )
     inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
     provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))

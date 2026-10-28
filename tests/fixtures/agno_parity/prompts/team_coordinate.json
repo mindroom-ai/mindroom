@@ -63,6 +63,157 @@
       },
       "messages": [
         {
+          "content": "<your_role>\n## Your Identity\nYou are Launch Team, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.\nTeam purpose: Plan and announce product launches.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n<team>\nYou lead this team to fulfill the user's request. Its members are listed below. Delegate to members when their expertise or tools are needed; answer directly when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role fits it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "name": "delegate_task_to_member",
+          "description": "Use this function to delegate a task to the selected team member.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "member_id": {
+                "type": "string",
+                "description": "(str) The ID of the member to delegate the task to, exactly as it appears in <team_members>."
+              },
+              "task": {
+                "type": "string",
+                "description": "(str) A clear and concise description of the task the member should achieve, including what a good result looks like."
+              }
+            },
+            "required": [
+              "member_id",
+              "task"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Launch Team, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.\nTeam purpose: Plan and announce product launches.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n<team>\nYou lead this team to fulfill the user's request. Its members are listed below. Delegate to members when their expertise or tools are needed; answer directly when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role fits it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
+          "role": "user"
+        },
+        {
+          "provider_data": {
+            "mindroom_model": {
+              "id": "claude-sonnet-5-5",
+              "provider": "Anthropic"
+            }
+          },
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_team_1",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_member",
+                "arguments": "{\"member_id\": \"planner\", \"task\": \"List the steps.\"}"
+              }
+            },
+            {
+              "id": "call_team_2",
+              "type": "function",
+              "function": {
+                "name": "delegate_task_to_member",
+                "arguments": "{\"member_id\": \"writer\", \"task\": \"Draft the note.\"}"
+              }
+            }
+          ]
+        },
+        {
+          "content": "ok",
+          "role": "tool",
+          "tool_args": {
+            "member_id": "planner",
+            "task": "List the steps."
+          },
+          "tool_call_error": false,
+          "tool_call_id": "call_team_1",
+          "tool_name": "delegate_task_to_member"
+        },
+        {
+          "content": "ok",
+          "role": "tool",
+          "tool_args": {
+            "member_id": "writer",
+            "task": "Draft the note."
+          },
+          "tool_call_error": false,
+          "tool_call_id": "call_team_2",
+          "tool_name": "delegate_task_to_member"
+        }
+      ],
+      "tools": [
+        {
+          "name": "delegate_task_to_member",
+          "description": "Use this function to delegate a task to the selected team member.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "member_id": {
+                "type": "string",
+                "description": "(str) The ID of the member to delegate the task to, exactly as it appears in <team_members>."
+              },
+              "task": {
+                "type": "string",
+                "description": "(str) A clear and concise description of the task the member should achieve, including what a good result looks like."
+              }
+            },
+            "required": [
+              "member_id",
+              "task"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
           "content": "<your_role>\n## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Planner and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `scheduler`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (this agent has no workspace, so path tools in the primary runtime reach only attachments).\n\nBreak work into ordered steps.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\nNumber every step.",
           "role": "system"
         },
@@ -652,157 +803,6 @@
               "execute_at",
               "description"
             ]
-          }
-        }
-      ],
-      "tool_choice": null,
-      "output_schema": null,
-      "deferred_tool_names": []
-    },
-    {
-      "model": {
-        "id": "claude-sonnet-5-5",
-        "provider": "Anthropic"
-      },
-      "messages": [
-        {
-          "content": "<your_role>\n## Your Identity\nYou are Launch Team, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.\nTeam purpose: Plan and announce product launches.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n<team>\nYou lead this team to fulfill the user's request. Its members are listed below. Delegate to members when their expertise or tools are needed; answer directly when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role fits it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>",
-          "role": "system"
-        },
-        {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
-          "role": "system"
-        },
-        {
-          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
-          "role": "user"
-        },
-        {
-          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
-          "role": "user"
-        }
-      ],
-      "tools": [
-        {
-          "name": "delegate_task_to_member",
-          "description": "Use this function to delegate a task to the selected team member.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "member_id": {
-                "type": "string",
-                "description": "(str) The ID of the member to delegate the task to, exactly as it appears in <team_members>."
-              },
-              "task": {
-                "type": "string",
-                "description": "(str) A clear and concise description of the task the member should achieve, including what a good result looks like."
-              }
-            },
-            "required": [
-              "member_id",
-              "task"
-            ],
-            "additionalProperties": false
-          }
-        }
-      ],
-      "tool_choice": null,
-      "output_schema": null,
-      "deferred_tool_names": []
-    },
-    {
-      "model": {
-        "id": "claude-sonnet-5-5",
-        "provider": "Anthropic"
-      },
-      "messages": [
-        {
-          "content": "<your_role>\n## Your Identity\nYou are Launch Team, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.\nTeam purpose: Plan and announce product launches.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n<team>\nYou lead this team to fulfill the user's request. Its members are listed below. Delegate to members when their expertise or tools are needed; answer directly when they are not.\n\n<team_members>\n<member id=\"planner\" name=\"Planner\">\n  Role: Break work into ordered steps.\n</member>\n<member id=\"writer\" name=\"Writer\">\n  Role: Write clear announcements.\n</member>\n</team_members>\n\n<delegation>\nYou work in coordinate mode: you hand sub-tasks to members with `delegate_task_to_member` and write the answer yourself.\n\n- Match each sub-task to the member whose role fits it best. When sub-tasks do not depend on each other, delegate them in the same turn instead of one per turn.\n- A member's output is evidence, not your answer. When a member fails, refuses, or returns nothing, say so plainly and name what it reported — never supply a cause, source, or finding the member did not state.\n- If a response is off-target, re-delegate with clearer instructions or try a better-suited member. If it still misses, answer with what you have and say what is missing — do not work through the roster.\n- Write one answer. Resolve contradictions, add structure, and fill gaps only where you can state the basis for it. Never concatenate member outputs.\n\nMembers do not see this conversation. Each one gets only the text you write for it, so carry over every name, number and earlier answer it needs, and say what a good result looks like.\nMember ids are the ids shown in the roster above, used exactly as written.\n</delegation>\n</team>",
-          "role": "system"
-        },
-        {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
-          "role": "system"
-        },
-        {
-          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
-          "role": "user"
-        },
-        {
-          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Plan the launch and draft the announcement.]]></msg>",
-          "role": "user"
-        },
-        {
-          "provider_data": {
-            "mindroom_model": {
-              "id": "claude-sonnet-5-5",
-              "provider": "Anthropic"
-            }
-          },
-          "role": "assistant",
-          "tool_calls": [
-            {
-              "id": "call_team_1",
-              "type": "function",
-              "function": {
-                "name": "delegate_task_to_member",
-                "arguments": "{\"member_id\": \"planner\", \"task\": \"List the steps.\"}"
-              }
-            },
-            {
-              "id": "call_team_2",
-              "type": "function",
-              "function": {
-                "name": "delegate_task_to_member",
-                "arguments": "{\"member_id\": \"writer\", \"task\": \"Draft the note.\"}"
-              }
-            }
-          ]
-        },
-        {
-          "content": "ok",
-          "role": "tool",
-          "tool_args": {
-            "member_id": "planner",
-            "task": "List the steps."
-          },
-          "tool_call_error": false,
-          "tool_call_id": "call_team_1",
-          "tool_name": "delegate_task_to_member"
-        },
-        {
-          "content": "ok",
-          "role": "tool",
-          "tool_args": {
-            "member_id": "writer",
-            "task": "Draft the note."
-          },
-          "tool_call_error": false,
-          "tool_call_id": "call_team_2",
-          "tool_name": "delegate_task_to_member"
-        }
-      ],
-      "tools": [
-        {
-          "name": "delegate_task_to_member",
-          "description": "Use this function to delegate a task to the selected team member.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "member_id": {
-                "type": "string",
-                "description": "(str) The ID of the member to delegate the task to, exactly as it appears in <team_members>."
-              },
-              "task": {
-                "type": "string",
-                "description": "(str) A clear and concise description of the task the member should achieve, including what a good result looks like."
-              }
-            },
-            "required": [
-              "member_id",
-              "task"
-            ],
-            "additionalProperties": false
           }
         }
       ],

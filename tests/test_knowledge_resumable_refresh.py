@@ -43,6 +43,7 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
     embedder_request_error,
     embedder_retry_after_seconds,
+    openai_embedder_error,
 )
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
@@ -313,12 +314,13 @@ def _server_error() -> EmbedderRequestError:
 
 
 def _api_error() -> Exception:
+    """Return what the OpenAI embedder raises for a 503 with a ``Retry-After`` hint, classified at its boundary."""
     import httpx  # noqa: PLC0415
     from openai import APIStatusError  # noqa: PLC0415
 
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(503, request=request, headers={"retry-after": "7"})
-    return APIStatusError("overloaded", response=response, body=None)
+    return openai_embedder_error(APIStatusError("overloaded", response=response, body=None))
 
 
 # --------------------------------------------------------------------------
@@ -595,7 +597,7 @@ def test_embedding_failure_classification_splits_transient_from_permanent() -> N
     assert not embedder_failure_is_transient(_classified(401))
     assert not embedder_failure_is_transient(_classified(403))
     assert not embedder_failure_is_transient(_classified(400))
-    assert not embedder_failure_is_transient(_classified(501))
+    assert embedder_failure_is_transient(_classified(524))
     assert not embedder_failure_is_transient(_classified())
     assert not embedder_failure_is_transient(embedder_request_error(RuntimeError("out of memory"), None))
     assert not embedder_failure_is_transient(EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL))

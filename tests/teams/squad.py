@@ -24,9 +24,9 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import TeamRunRecord
-from mindroom.teams.members import BuiltTeam
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import TeamDecisions, continue_team, run_team
-from mindroom.teams.spec import TeamMember, TeamMode, TeamSpec
+from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from tests.fakes.scripted_model import ScriptedModel
 from tests.run_record_helpers import PROVIDER
@@ -34,6 +34,7 @@ from tests.run_record_helpers import PROVIDER
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.run import ApprovedCall, Persist
     from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, RunRecord
@@ -100,7 +101,23 @@ def member(
         system_messages=(Message(role="system", content=system or f"You are {name}."),),
         toolkits=toolkits,
     )
-    return TeamMember(spec=spec, role=f"{name} role.", new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST)
+    build = MemberBuild(spec=spec, new_hooks=lambda: NO_HOOKS, request_template=EMPTY_REQUEST, toolkit_owners={})
+    return TeamMember(id=agent_id, name=name, role=f"{name} role.", build=lambda: build)
+
+
+def resolved_members(display_names: Mapping[str, str], *, model_name: str = "default") -> ResolvedExactTeamMembers:
+    """Return the resolved set of these members, display names by config name, on ``model_name``; none ever builds."""
+
+    def build(agent_name: str, model_name: str) -> AgentBuild:
+        msg = f"member {agent_name!r} on {model_name!r} is built only by a team turn"
+        raise AssertionError(msg)
+
+    return ResolvedExactTeamMembers(
+        requested_agent_names=list(display_names),
+        display_names=list(display_names.values()),
+        model_names=dict.fromkeys(display_names, model_name),
+        build=build,
+    )
 
 
 def team_spec(
@@ -244,7 +261,14 @@ def resume_team(
     persist: Persist[AnyRunRecord] = no_store,
     request_template: ModelRequest = EMPTY_REQUEST,
 ) -> AsyncIterator[TeamRunEvent]:
-    """Resume ``paused`` (``continue_team``) with the test's decisions under no hooks, storing nothing unless asked."""
+    """Resume ``paused`` (``continue_team``) with the test's decisions under no hooks, storing nothing unless asked.
+
+    The members whose paused runs the resume continues are built first, as a saved approval's resume builds them.
+    """
+    paused_members = {requirement.member_agent_id for requirement in paused.requirements or ()}
+    for member in team.members:
+        if member.id in paused_members and member.built is None:
+            member.built = member.build()
     return continue_team(
         team,
         paused,

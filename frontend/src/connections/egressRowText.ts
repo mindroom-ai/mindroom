@@ -48,8 +48,15 @@ export interface ServiceEditing {
   onLimitToRepositories?: (service: EgressCredentialService) => void;
   /** Turns Limit to repositories and Add another account off while the editor is open. */
   limitDisabled?: boolean;
-  /** Add another account on a row: opens Add service for another account of its provider; null where none can be added. */
+  /** Add another account on a row: adds a service with another account of its provider; null where none can be added. */
   addAccount?: (service: EgressCredentialService) => (() => void) | null;
+  /**
+   * A service just saved with an account of its own, and that account's login: its row asks to sign in once the
+   * listing shows it with that login, not while the row it replaces still shows.
+   */
+  signInNext?: { name: string; provider: string } | null;
+  /** Called once that row has asked, so it asks only once. */
+  onSignInOpened?: () => void;
 }
 
 /** Whether a service or limit gets its edit actions: it has the `editableSource` and the viewer manages it. */
@@ -111,10 +118,10 @@ export function statusLabel(service: EgressCredentialService): string {
       return refusedReadOnly(service)
         ? "Needs read and write"
         : "Using connected account";
+    // The tools use the account the agent's commands are not let use yet; they never use a service's own.
     if (oauth.connected && !oauth.reuse_enabled)
-      // The tools never use a service's own account.
       return service.separate_account
-        ? "Connected, not used for Agent Keys yet"
+        ? "Not used by commands yet"
         : "Connected for tools only";
     if (oauth.reset_required) return "Reset required";
     return service.separate_account ? "Not connected" : "Not set";
@@ -175,13 +182,13 @@ export function unsetNote(service: EgressCredentialService): string | null {
   // A service with its own account takes no key, only that account.
   if (service.separate_account)
     return oauth?.connected && !oauth.reset_required
-      ? "Requests are refused until this account is used for Agent Keys."
+      ? "The agent's commands cannot use this account until you let them."
       : "Requests are refused until its own account is connected.";
   // An account Agent Keys can use stops refusals as well as a key does. A service account is
-  // never one, but a personal account connected before it still is.
-  if (oauth) {
+  // never one, but a personal account connected before it still is. One the sandbox refuses is none.
+  if (oauth?.unavailable_reason === null) {
     if (oauth.connected && !oauth.reset_required)
-      return "Requests are refused until a key is set or this account is used for Agent Keys.";
+      return "The agent's commands cannot use this account until you let them.";
     // The server only says an account can be connected where this viewer may connect one.
     if (!oauth.service_account && (oauth.can_connect || oauth.reset_required))
       return "Requests are refused until a key is set or an account is connected.";
