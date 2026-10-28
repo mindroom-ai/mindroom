@@ -17,8 +17,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from pydantic import validate_call
-
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, EndRun, LoopHooks, SendRequest, run_model_loop
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.run import own_model_messages
@@ -38,6 +36,7 @@ from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_c
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_schema import validated_entrypoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -128,10 +127,10 @@ def _review_tools(
     # The functions run the review's own methods, which validate their arguments as the agent's coercing functions
     # would, such as refusing an action outside the enum.
     entrypoints: dict[str, Callable[..., Any]] = {
-        "skill_manage": validate_call(tools.skill_manage),
-        "get_skill_instructions": validate_call(tools.get_skill_instructions),
-        "get_skill_reference": validate_call(tools.get_skill_reference),
-        "get_skill_script": validate_call(tools.get_skill_script),
+        "skill_manage": validated_entrypoint(tools.skill_manage),
+        "get_skill_instructions": validated_entrypoint(tools.get_skill_instructions),
+        "get_skill_reference": validated_entrypoint(tools.get_skill_reference),
+        "get_skill_script": validated_entrypoint(tools.get_skill_script),
     }
     answered = {definition.name: definition for definition in definitions if definition.name not in awaiting_decision}
     runnable = [name for name in _SKILL_TOOL_LINES if name in answered]

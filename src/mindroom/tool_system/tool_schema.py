@@ -36,8 +36,11 @@ _JSON_TYPES = {
     "frozenset": "array",
 }
 _UNNAMED_PARAMETERS = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-# Types pydantic has no schema for, such as a client object, are checked with isinstance.
-_VALIDATION_CONFIG = ConfigDict(arbitrary_types_allowed=True)
+# Built once at import, which leaves pydantic no caller's namespace to keep: called inside a function, validate_call
+# keeps that frame's locals to resolve forward references, and from Python 3.13 those locals are a proxy that keeps the
+# frame and every frame below it alive for as long as the wrapper, and so the tool, lives. A tool's annotations resolve
+# in its own module either way. Types pydantic has no schema for, such as a client object, are checked with isinstance.
+_validate_call = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
 
 
 def tool_description(entrypoint: Callable[..., Any]) -> str:
@@ -79,7 +82,7 @@ def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
     An argument that does not validate raises pydantic's ``ValidationError``, whose text the model reads. A streaming
     tool stays an async generator function, so callers still recognize it as one.
     """
-    validated = validate_call(config=_VALIDATION_CONFIG)(entrypoint)
+    validated = _validate_call(entrypoint)
     if not inspect.isasyncgenfunction(entrypoint):
         return validated
 

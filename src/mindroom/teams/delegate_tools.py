@@ -15,14 +15,13 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from pydantic import validate_call
-
 from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+from mindroom.tool_system.tool_schema import validated_entrypoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -124,7 +123,7 @@ def delegate_functions(
         name=definition.name,
         description=definition.description,
         parameters=definition.parameters,
-        entrypoint=validate_call(entrypoint),
+        entrypoint=validated_entrypoint(entrypoint),
     )
     return AdaptedToolkit(name="team_delegation", functions=(function,), instructions=None)
 

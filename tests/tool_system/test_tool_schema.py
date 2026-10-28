@@ -11,8 +11,10 @@ takes no framework object runs through owned toolkit functions.
 
 from __future__ import annotations
 
+import gc
 import inspect
 import json
+import weakref
 from collections.abc import AsyncIterator  # noqa: TC003 - Validation resolves the probe's annotations.
 from enum import Enum
 from typing import (  # noqa: UP035 - The bare typing aliases are annotation-kind cases.
@@ -397,6 +399,28 @@ async def test_a_validated_stream_closes_the_stream_it_wraps() -> None:
     assert await anext(stream) == 0
     await stream.aclose()
     assert closed == [True]
+
+
+def _takes_a_count(count: int) -> str:
+    return str(count)
+
+
+class _CallerState:
+    """Stands for what the code that builds an agent holds on its stack, such as the reply's event and run state."""
+
+
+def test_a_validated_entrypoint_keeps_nothing_of_the_code_that_wrapped_it_alive() -> None:
+    """The wrapper lives as long as the tool it validates, so it must not hold the frames that built it."""
+
+    def build() -> tuple[Callable[..., Any], weakref.ref[_CallerState]]:
+        state = _CallerState()
+        return validated_entrypoint(_takes_a_count), weakref.ref(state)
+
+    validated, state = build()
+    gc.collect()
+
+    assert state() is None
+    assert validated("3") == "3"
 
 
 def test_an_annotation_that_does_not_resolve_raises() -> None:
