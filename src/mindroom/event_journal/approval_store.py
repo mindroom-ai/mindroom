@@ -301,7 +301,7 @@ class ApprovalStore:
         )
 
     async def retire_approval_card(self, *, delivery_id: str) -> bool:
-        """Retire a request card whose terminal edit Matrix acknowledged."""
+        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit or the card."""
         return await self._backend.write(
             lambda transaction: approval_cards.retire(transaction, self._principal_id, delivery_id=delivery_id),
         )

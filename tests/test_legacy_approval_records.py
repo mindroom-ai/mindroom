@@ -407,6 +407,49 @@ async def test_undelivered_terminal_edits_stay_owed(recorded_journal: Callable[[
 
 
 @pytest.mark.asyncio
+async def test_a_decided_card_matrix_refused_for_good_retires(recorded_journal: Callable[[str], _Journal]) -> None:
+    """A card whose terminal edit or whose own send Matrix refused for good retires, so it holds no settlement back."""
+    store = recorded_journal("08_denied_edit_unacknowledged.sql").open()
+    try:
+        router = store.principal(_ROUTER).approvals
+
+        async def refuse(delivery_id: str, stage: str) -> None:
+            await store.backend.write(
+                lambda transaction: transaction.execute(
+                    "UPDATE matrix_delivery_outbox SET permanent_failure_reason = 'refused'"
+                    " WHERE delivery_id = ? AND stage = ?",
+                    (delivery_id, stage),
+                ),
+            )
+
+        await refuse("denied-refused-0-0", "final")
+        assert await router.retire_approval_card(delivery_id="denied-refused-0-0")
+        assert not await router.retire_approval_card(delivery_id="denied-unsent-0-0")
+        assert {card.delivery_id for card in await router.pending_approval_cards(room_id=_ROOM)} == {
+            "denied-unsent-0-0",
+        }
+    finally:
+        await store.close()
+
+    store = recorded_journal("02_waiting_card_unacknowledged.sql").open()
+    try:
+        router = store.principal(_ROUTER).approvals
+        await store.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE matrix_delivery_outbox SET permanent_failure_reason = 'refused'"
+                " WHERE delivery_id = 'unacknowledged-0-0' AND stage = 'initial'",
+            ),
+        )
+        # A card nobody decided keeps its call answerable to the deadline, however its send went.
+        assert not await router.retire_approval_card(delivery_id="unacknowledged-0-0")
+        [card] = await router.pending_approval_cards(room_id=_ROOM)
+        await router.resolve_approval_call(card.call, requested_status="expired", reason=None)
+        assert await router.retire_approval_card(delivery_id="unacknowledged-0-0")
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_a_retired_card_click_is_still_terminal(
     recorded_journal: Callable[[str], _Journal],
     tmp_path: Path,

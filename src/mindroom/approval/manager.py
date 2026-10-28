@@ -1009,8 +1009,11 @@ class ApprovalManager:
         )
 
     async def _expire_stored(self, card: ApprovalCardView, *, reason: str = TIMEOUT_REASON) -> bool:
-        if self.cards is None or (card.card_event_id is None and card.decided):
+        if self.cards is None:
             return False
+        if card.card_event_id is None and card.decided:
+            # Outbox recovery owns sending it; it is finished here only once Matrix refused it for good.
+            return await self.cards.approvals.retire_approval_card(delivery_id=card.delivery_id)
         if card.card_event_id is None:
             recorded = await self.cards.approvals.resolve_approval_call(
                 card.call,

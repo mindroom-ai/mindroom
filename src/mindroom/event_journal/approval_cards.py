@@ -592,11 +592,26 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
 
 
 def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> bool:
-    """Retire a request card whose terminal edit Matrix acknowledged; return whether it is retired."""
+    """Retire a decided request card Matrix is done with; return whether it is retired.
+
+    Matrix is done with it once its terminal edit is acknowledged or refused for good, or once its card itself was
+    refused for good, so no edit can ever reach it; a card whose delivery Matrix refuses must not keep the paused
+    reply it shows from settling.
+    """
     row = transaction.fetchone(
         """
-        SELECT cards.retired, final.acknowledged_event_id AS final_event_id
+        SELECT cards.retired, final.acknowledged_event_id AS final_event_id,
+               final.permanent_failure_reason AS final_refused, initial.permanent_failure_reason AS initial_refused,
+               calls.owner_id IS NOT NULL AND calls.decision IS NULL AS undecided
         FROM approval_cards AS cards
+        LEFT JOIN approval_calls AS calls
+          ON calls.owner_id = cards.owner_id
+         AND calls.generation = cards.generation
+         AND calls.tool_call_id = cards.tool_call_id
+        LEFT JOIN matrix_delivery_outbox AS initial
+          ON initial.principal_id = cards.principal_id
+         AND initial.delivery_id = cards.delivery_id
+         AND initial.stage = 'initial'
         LEFT JOIN matrix_delivery_outbox AS final
           ON final.principal_id = cards.principal_id
          AND final.delivery_id = cards.delivery_id
@@ -609,7 +624,9 @@ def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> 
         return False
     if bool(row["retired"]):
         return True
-    if row["final_event_id"] is None:
+    if bool(row["undecided"]) or (
+        row["final_event_id"] is None and row["final_refused"] is None and row["initial_refused"] is None
+    ):
         return False
     _retire(transaction, principal_id, delivery_id)
     return True

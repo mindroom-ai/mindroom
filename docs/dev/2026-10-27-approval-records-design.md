@@ -32,6 +32,7 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - A call's key leaves the principal out, so the database guarantees the global uniqueness card joins already relied on (`approval_id` was unique; detached run ids are UUID-based or install-unique job and task ids).
 - A reply-owned call outlives its paused reply until every card that shows it retires, because a responder departure deletes the paused reply but keeps the router's terminal-edit debt, whose decision would otherwise have no owner.
   The call keeps its principal for the same reason.
+- A decided request card retires once Matrix acknowledged or refused for good its terminal edit or the card itself, because a card Matrix will never update must not hold back the settlement of the paused reply it shows.
 - A card stores no `decided` or `finished` state: a request card is decided exactly when its call is, and finished when the outbox acknowledges its terminal edit; storing either again would recreate the two-owner bug.
 - Every Matrix event known to show a card is a row in `approval_card_events`, written by the acknowledgement of the card's first delivery, because one delivery can have several events (transport-verified receipt copies) and a retired card must still be recognized on a click.
 - A card's delivery tenure is its INITIAL outbox row's membership epoch, with no copy on the card, because departure cleanup moves a card's outbox rows to a rejoined membership and a copy would be a second owner of that tenure.
