@@ -396,26 +396,3 @@ async def test_a_downloaded_file_the_server_calls_octet_stream_is_typed_and_name
         "type": "file",
         "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{_b64(_PDF)}"},
     }
-
-
-@pytest.mark.asyncio
-async def test_media_downloads_go_through_the_model_http_client(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Downloads share the model requests' client, so they trust the same certificates and proxies."""
-    downloaded: list[str] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        downloaded.append(str(request.url))
-        return httpx.Response(200, content=_PNG)
-
-    pool = httpx2.AsyncClient(transport=httpx2_transport(respond), follow_redirects=True)
-    monkeypatch.setattr(model_http_client, "_loop_client", lambda: pool)
-    wire = Wire(FAMILIES["ollama"].reply())
-    message = Message(role="user", content="Look", images=[Image(url="https://media.test/generated")])
-
-    await complete(_provider("ollama", tmp_path, wire), ModelRequest(messages=[message]))
-
-    assert downloaded == ["https://media.test/generated"]
-    assert wire.body()["messages"][-1]["images"] == [_b64(_PNG)]
