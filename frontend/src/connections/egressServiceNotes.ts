@@ -1,8 +1,10 @@
 import { formatList } from "./accountCopy";
 import { type EgressServiceForm, usesOwnRules } from "./egressServiceForm";
+import { hostPort } from "./egressRowText";
 import type {
   EgressCredentialService,
   EgressPreset,
+  EgressRuleSummary,
   EgressScope,
 } from "./types";
 
@@ -64,12 +66,45 @@ export function configPlaceholderOwners(
   return owners;
 }
 
+/** Where a rule applies, as the form, a preset, and a listing each hold it. */
+interface RuleTarget {
+  host: string;
+  port?: number | null;
+  path_prefix?: string | null;
+}
+
+/** A rule as a short host and path, such as `www.googleapis.com/drive/`. */
+export function ruleCoverage(rule: EgressRuleSummary): string {
+  const path = rule.path_prefix === "/" ? "" : rule.path_prefix;
+  return `${hostPort(rule)}${path}`;
+}
+
 /**
- * What to tell the user when another service of the agent already sends a key
- * to a website this form covers: one text per such service, with all the
- * hosts it shares, and the broker's order for picking between them. Services
- * that only limit paths send no key, and the service being edited does not
- * compete with itself.
+ * Whether two rules can match the same request: the same host, ports that
+ * agree (a missing port matches any), and one path prefix covering the other
+ * by whole segments (an empty prefix covers the whole host), so `/gmail`
+ * covers `/gmail/x` but not `/gmailx`.
+ */
+export function rulesOverlap(a: RuleTarget, b: RuleTarget): boolean {
+  if (a.host.toLowerCase() !== b.host.toLowerCase()) return false;
+  if (a.port != null && b.port != null && a.port !== b.port) return false;
+  const [x, y] = [a, b].map((rule) =>
+    (rule.path_prefix ?? "").replace(/\/$/, ""),
+  );
+  return (
+    x === "" ||
+    y === "" ||
+    x === y ||
+    x.startsWith(`${y}/`) ||
+    y.startsWith(`${x}/`)
+  );
+}
+
+/**
+ * What to tell the user when another service of the agent already sends a
+ * credential where this form does: one text per such service, with each of its
+ * addresses that overlaps one of the form's. Services that only limit paths
+ * send nothing, and the service being edited does not compete with itself.
  */
 export function overlapWarnings(
   form: EgressServiceForm,
@@ -80,25 +115,31 @@ export function overlapWarnings(
   >[],
   editingName: string | undefined,
 ): string[] {
-  const covered = new Set(
-    (usesOwnRules(form) ? form.rules : (preset?.rules ?? []))
-      .map((rule) => rule.host.trim().toLowerCase())
-      .filter((host) => host !== ""),
-  );
-  if (covered.size === 0) return [];
+  const covered: RuleTarget[] = (
+    usesOwnRules(form)
+      ? form.rules.map((rule) => ({
+          host: rule.host.trim(),
+          port: rule.port.trim() === "" ? null : Number(rule.port),
+          path_prefix: rule.pathPrefix.trim(),
+        }))
+      : (preset?.rules ?? [])
+  ).filter((rule) => rule.host !== "");
   return others.flatMap((other) => {
     if (other.restrict_only || other.name === editingName) return [];
     const shared = [
       ...new Set(
         other.rules
-          .filter((rule) => rule.auth_type !== null)
-          .map((rule) => rule.host.toLowerCase())
-          .filter((host) => covered.has(host)),
+          .filter(
+            (rule) =>
+              rule.auth_type !== null &&
+              covered.some((mine) => rulesOverlap(mine, rule)),
+          )
+          .map(ruleCoverage),
       ),
     ];
     return shared.length > 0
       ? [
-          `${other.display_name} already sends a key to ${formatList(shared)} for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.`,
+          `${other.display_name} already handles ${formatList(shared)} for this agent, so requests there may use it instead of this service.`,
         ]
       : [];
   });

@@ -618,7 +618,7 @@ describe("the editor form", () => {
     const instead =
       "Users can connect an account (Google Calendar) instead of an API key.";
     expect(screen.getByText(instead)).toBeVisible();
-    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
+    expect(screen.getAllByText(/already handles/)).toHaveLength(2);
     // Its own account is all it uses, so there is no key to connect one instead of.
     fireEvent.click(
       screen.getByLabelText(
@@ -626,17 +626,35 @@ describe("the editor form", () => {
       ),
     );
     expect(screen.queryByText(instead)).toBeNull();
-    // A request picks it by the header, so one note replaces the warnings,
+    // A request picks it by the header, so there is no overlap to warn about,
     // and the box's own hint stays the one place that names the header.
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
-    expect(
-      screen.getByText(
-        "Without this service's header, the usual routing order applies.",
-      ),
-    ).toBeVisible();
+    expect(screen.queryByText(/already handles/)).toBeNull();
+    expect(screen.queryByText(/usual routing order/)).toBeNull();
     expect(
       screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
     ).toHaveLength(1);
+  });
+
+  it("warns about no overlap for a service with its own account", async () => {
+    const gmail = credentialService({
+      name: "google_gmail",
+      display_name: "Gmail",
+      rules: [
+        {
+          host: "gmail.googleapis.com",
+          port: null,
+          path_prefix: "/",
+          auth_type: "bearer",
+        },
+      ],
+    });
+    await renderEditor({
+      service: { preset: "google_gmail", oauth_separate_account: true },
+      name: "google_gmail-2",
+      agentServices: [gmail],
+    });
+    expect(screen.queryByText(/already handles/)).toBeNull();
+    expect(screen.queryByText(/usual routing order/)).toBeNull();
   });
 
   it("drops the API key from a custom service's login hint while it uses its own account", async () => {
@@ -3321,7 +3339,7 @@ describe("the display name of a new service", () => {
   });
 });
 
-describe("a website another service of the agent already sends a key to", () => {
+describe("a website another service of the agent already handles", () => {
   const sending = (changes: Partial<EgressCredentialService> = {}) =>
     credentialService({
       description: "",
@@ -3347,15 +3365,15 @@ describe("a website another service of the agent already sends a key to", () => 
       ...changes,
     });
   const WARNING =
-    " already sends a key to api.github.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.";
+    " already handles api.github.com for this agent, so requests there may use it instead of this service.";
 
   it("warns, naming the service and the website, as soon as the website is typed", async () => {
     await renderEditor({ agentServices: [sending()] });
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
     type("Website", "api.github.com");
     expect(screen.getByText(`GitHub${WARNING}`)).toBeVisible();
     type("Website", "API.example.com");
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
   });
 
   it("is announced as a status, not an alert, since the service can still be saved", async () => {
@@ -3373,7 +3391,7 @@ describe("a website another service of the agent already sends a key to", () => 
     type("Preset", "github");
     expect(
       screen.getByText(
-        "GitHub already sends a key to api.github.com and github.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.",
+        "GitHub already handles api.github.com and github.com for this agent, so requests there may use it instead of this service.",
       ),
     ).toBeVisible();
   });
@@ -3405,15 +3423,15 @@ describe("a website another service of the agent already sends a key to", () => 
       ],
     });
     type("Website", "api.github.com");
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
     cleanup();
     await renderGithub({ agentServices: [sending()] });
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
   });
 
   it("says nothing on the dashboard, which has no agent", async () => {
     await renderEditor({ context: "operator" });
     type("Website", "api.github.com");
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
   });
 });

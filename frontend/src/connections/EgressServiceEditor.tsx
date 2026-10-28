@@ -32,6 +32,7 @@ import {
 import {
   overlapWarnings,
   presetPlaceholderWarnings,
+  ruleCoverage,
   scopeNote,
 } from "./egressServiceNotes";
 import {
@@ -41,7 +42,7 @@ import {
   ruleField,
   validateService,
 } from "./egressServiceValidation";
-import { hostPort, limitOverlap } from "./egressRowText";
+import { limitOverlap } from "./egressRowText";
 import { looksLikeGithub } from "./githubLimits";
 import {
   GITHUB_API_HOST,
@@ -74,7 +75,6 @@ import type {
   EgressOAuthProviderOption,
   EgressPreset,
   EgressPresetCatalog,
-  EgressRuleSummary,
   EgressScope,
 } from "./types";
 
@@ -90,12 +90,6 @@ function limitedServiceName(taken: readonly string[]): string {
     const name = n === 1 ? base : `${base}-${n}`;
     if (!taken.includes(name)) return name;
   }
-}
-
-/** A rule as a short host and path, such as `www.googleapis.com/drive/`. */
-function ruleCoverage(rule: EgressRuleSummary): string {
-  const path = rule.path_prefix === "/" ? "" : rule.path_prefix;
-  return `${hostPort(rule)}${path}`;
 }
 
 export interface EgressServiceEditorProps {
@@ -393,15 +387,13 @@ export function EgressServiceEditor({
           scopeAgents,
         )
       : null;
-  // The services this form would send a key to the same website as, for this agent.
-  const overlaps = limiting
-    ? []
-    : overlapWarnings(form, preset, agentServices, name);
-  // A request picks a service with its own account by the header its box names, so one note stands in for the warnings.
-  const headerNote =
-    form.separateAccount && overlaps.length > 0
-      ? "Without this service's header, the usual routing order applies."
-      : null;
+  // The services that already send a credential where this form would, for
+  // this agent. A request picks a service with its own account by its header,
+  // so such a service competes with none.
+  const overlaps =
+    limiting || form.separateAccount
+      ? []
+      : overlapWarnings(form, preset, agentServices, name);
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -577,17 +569,11 @@ export function EgressServiceEditor({
               <RuleSendFields {...ruleEditing(0, primaryRule)} />
             </div>
           )}
-          {headerNote ? (
-            <p role="status" className="text-xs text-muted-foreground">
-              {headerNote}
+          {overlaps.map((warning) => (
+            <p key={warning} role="status" className={warningClass}>
+              {warning}
             </p>
-          ) : (
-            overlaps.map((warning) => (
-              <p key={warning} role="status" className={warningClass}>
-                {warning}
-              </p>
-            ))
-          )}
+          ))}
         </>
       )}
       <Field
