@@ -476,6 +476,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     ``execution_env_set`` names the ``execution_env`` variables a ``shell`` call set itself, from
     plugin hooks or a CLI grant, and ``execution_env_unset`` the variables its hooks removed; both
     apply over the worker's own environment and the workspace's ``.mindroom/worker-env.sh``.
+    ``execution_path_prepend`` holds the directories its hooks put first on the command's ``PATH``.
     """
 
     tool_name: str
@@ -494,6 +495,7 @@ class SandboxRunnerExecuteRequest(BaseModel):
     execution_env: dict[str, str] = Field(default_factory=dict)
     execution_env_set: list[str] = Field(default_factory=list)
     execution_env_unset: list[str] = Field(default_factory=list)
+    execution_path_prepend: list[str] = Field(default_factory=list)
     extra_env_passthrough: str | None = None
     config_snapshot: dict[str, Any] | None = None
     # Lets the primary stop this call through /execute/cancel when it stops waiting for it.
@@ -530,8 +532,10 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     execution_env: dict[str, str] = Field(default_factory=dict)
-    # The call's own values (None for a removal), which its shell applies over the worker's environment.
+    # The call's own values (None for a removal), which its shell applies over the worker's environment, and the
+    # directories it puts first on the command's PATH.
     call_environment: dict[str, str | None] = Field(default_factory=dict)
+    call_path_prepend: list[str] = Field(default_factory=list)
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
     run_as_job: bool = False
@@ -1199,6 +1203,7 @@ def _prepare_execute_request(
         ),
         execution_env=dict(execution_env),
         call_environment=call_environment,
+        call_path_prepend=list(request.execution_path_prepend),
         runtime_overrides=(
             {name: value for name, value in serialized_runtime_overrides.items() if isinstance(name, str)}
             if isinstance(serialized_runtime_overrides, dict)
@@ -1280,7 +1285,11 @@ async def _execute_prepared_request_inprocess(
             return SandboxRunnerExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
 
         try:
-            with collected_tool_environment(ToolEnvironment(values=prepared.call_environment)):
+            call_environment = ToolEnvironment(
+                values=prepared.call_environment,
+                path_prepend=tuple(prepared.call_path_prepend),
+            )
+            with collected_tool_environment(call_environment):
                 result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:

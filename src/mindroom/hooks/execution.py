@@ -385,10 +385,15 @@ async def emit_collect(
 
 
 async def emit_collect_environment(registry: HookRegistry, context: ToolEnvironmentContext) -> ToolEnvironment:
-    """Run tool:environment hooks concurrently and return their changes, a later hook's over an earlier one's."""
+    """Run tool:environment hooks concurrently and return their changes, a later hook's over an earlier one's.
+
+    The first hook in hook order that declines the call marks ``context`` declined with its reason.
+    """
     environment = ToolEnvironment()
     for hook_context, _result in await _collect(registry, EVENT_TOOL_ENVIRONMENT, context):
         environment = environment.then(hook_context._environment)
+        if hook_context.declined and not context.declined:
+            context.decline(hook_context.decline_reason)
     return environment
 
 

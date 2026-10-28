@@ -972,6 +972,60 @@ For hosted MindRoom, the homeserver is `https://mindroom.chat`.
 
 To pair a local MindRoom runtime with that account, follow [Getting Started](https://docs.mindroom.chat/getting-started/#2-approve-pairing); on a computer, approve the pairing at `https://chat.mindroom.chat`.
 
+## Homeservers Behind Cloudflare Access
+
+The app cannot hold the [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/) cookie, so a homeserver behind Access redirects the app's requests to the Access login and sign-in fails.
+When the homeserver advertises a handoff page, the app instead sends the Access token in a `cf-access-token` header, which Access accepts.
+
+With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
+When the Access session ends, the bar at the top asks for that sign-in again.
+An Access session revoked before it expires shows as a lost connection until the token's expiry time.
+Calls need `/.well-known/matrix/client`, which these steps leave behind Access, so calls do not work on iOS for such a homeserver.
+The sign-in sheet shares Safari's cookies, so if it ends on Cloudflare's "Invalid session" page, delete the website data for `cloudflareaccess.com` and the homeserver's domain, then sign in again.
+That data is under Settings › Apps › Safari › Advanced › Website Data, or Settings › Safari › Advanced › Website Data on iOS 17 and earlier.
+Push notifications for such a homeserver carry no message content and read "New message".
+The public push gateway still receives the event and room IDs, the unread count and the device's push token, and each push tells it that the homeserver is active; the advert can turn push off instead.
+
+Set up the homeserver (examples use `chat.example.com`):
+
+1. Publish the advert at `https://chat.example.com/.well-known/mindroom/cloudflare-access`, outside Access, as JSON with `Access-Control-Allow-Origin: *`:
+   `{"handoff_url": "https://chat.example.com/native/cloudflare-access"}`.
+   The handoff URL must use HTTPS on the homeserver's own origin.
+   Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
+   Signed-in accounts pick up a change of the advert only when they sign out and in again.
+2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
+
+    ```nginx
+    location = /native/cloudflare-access {
+      add_header Cache-Control "no-store" always;
+      return 302 "mindroom://cloudflare-access#token=$cookie_CF_Authorization";
+    }
+    ```
+
+   If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
+   The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
+   That token gets past Access for every host of the Access application until the session ends, so give the homeserver its own Access application.
+3. Turn on "Bypass OPTIONS requests to origin" (`options_preflight_bypass`) on the Access application, because browsers send CORS preflights without credentials.
+   Every `OPTIONS` request then reaches the origin without an Access session, so make sure no route answers `OPTIONS` with private content; nginx `return` answers any method.
+   Leave the application's binding cookie off, because the app sends only the token.
+4. Let the advert path, `/_matrix/client/versions`, `/_matrix/client/v1/media` and `/_matrix/media/v3/upload` bypass Access.
+   The app checks `/versions` before the organization's sign-in, images and uploads cannot carry the header, and the homeserver refuses the media paths without a Matrix access token.
+   A bypass covers everything below its path, so answer 404 for anything below the advert path.
+   Cloudflare also matches a bypass before nginx decodes `%2F` and resolves `..`, so `/.well-known/mindroom/cloudflare-access/..%2F..%2Fsecret` would reach `/secret` without Access.
+   Reject such requests in the nginx `server` block, before any `location`; the check looks only at the path, so encoded URLs in query strings still pass:
+
+    ```nginx
+    if ($request_uri ~* "^[^?#]*(?:%2f|%5c|%2e|/\.\.?(?:[/?#]|$))") { return 404; }
+    ```
+
+   If `/_matrix` also passes through this nginx, the check refuses Matrix requests that encode `/` in a path parameter, such as some state keys, so send `/_matrix` to the homeserver without this nginx where you can.
+5. Run a homeserver that allows the `cf-access-token` header in CORS, such as the MindRoom fork of Tuwunel (`v1.9.4-mindroom.18` or later).
+
+Before moving an existing homeserver behind Access, delete its pushers for the app (app ID `chat.mindroom.app`) that point at the public push gateway, for example with Tuwunel's `!admin query pusher get-pushers <user>` and `!admin query pusher remove-pusher <user> <pushkey>`.
+Those pushers send full message content, and an account signed in before the move cannot remove them, because its sign-out cannot pass Access.
+Such accounts need to sign out and in again.
+To take a homeserver off Access later, keep answering the advert path with a 404 and `Access-Control-Allow-Origin: *`, and have iOS accounts sign out and in again; until then the app keeps waiting for an Access sign-in that can no longer finish.
+
 ## Reporting Issues
 
 Report problems through the [support page](https://docs.mindroom.chat/support/#what-to-include-in-a-support-request), which lists the device, app, and homeserver details to include.
@@ -17044,7 +17098,7 @@ async def block_secret_reads(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
-| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()` | 200 |
+| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
 Custom events default to 1000 ms.
@@ -17175,10 +17229,16 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough` or the workspace's `.mindroom/worker-env.sh`.
   `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
 - `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
+- `ctx.prepend_path(directory)` puts `directory`, an absolute path, first on the command's `PATH`, ahead of the shell tool's `shell_path_prepend`, the entries a worker adds, and a `PATH` a hook sets, so a wrapper such as a `gh` there is the one the command runs.
+  A later call or hook puts its directory ahead of earlier ones; only a locally run command's [agent CLI](https://docs.mindroom.chat/tools/agent-cli/) directory comes before them all, and in a worker a hook's directory comes first.
+- `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
+  When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
 - Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
-- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
-- A failing or timed-out hook loses its changes and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
+- A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+  A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
+  A hook that waits on the network bounds that wait below its `timeout_ms`, because a timeout also discards its decline.
 
 ## Custom events
 
@@ -17276,7 +17336,7 @@ All contexts except the three tool contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
-| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)` |
+| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
@@ -18314,6 +18374,7 @@ Every environment variable is listed in [Configuration — Environment Variables
 ## Related Setup
 
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - connect Telegram and other messaging platforms to Matrix.
+- [Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) - Chat, Matrix, calls, and the runtime on one host behind Cloudflare Access.
 - [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Google tools on a paired local install, with no Google Cloud setup.
 - [Google OAuth Apps & Scopes](https://docs.mindroom.chat/deployment/google-services-oauth/) - your own Google OAuth client for remote, public, or shared deployments.
 - [Upgrade Notes](https://docs.mindroom.chat/deployment/upgrades/) - required steps when upgrading, including the [Nio 1.0 cutover](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-nio-10).
@@ -20505,6 +20566,7 @@ The [usage export service](https://docs.mindroom.chat/usage/#usage-export-servic
 The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use it, and users signed in to MindRoom Chat can open it without a gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway that publishes a JWKS endpoint and adds a short-lived signed JWT to each authenticated browser request, such as an identity-aware proxy or an OAuth2 proxy.
+[Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) lists the values for Cloudflare Access.
 MindRoom takes the user only from the verified JWT claims and ignores identity headers, so a request that bypasses the gateway cannot pose as a user.
 While trusted upstream auth is enabled, it replaces Supabase platform auth and `MINDROOM_API_KEY` auth for the dashboard and its API.
 
@@ -20607,6 +20669,114 @@ Host the dashboard on the app's public origin or on [its own host](#dashboard-on
 | `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin, or from `MINDROOM_DASHBOARD_URL` when set |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |
+
+# Cloudflare Access & Tunnel
+
+This page puts MindRoom Chat, the Tuwunel homeserver, MatrixRTC calls, and the MindRoom runtime on one host behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/), reached through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
+Examples use `chat.example.com` for that host, `admin.example.com` for the dashboard, and the Service names of the [Kubernetes charts](https://docs.mindroom.chat/deployment/kubernetes/#charts).
+
+## Tunnel
+
+`cloudflared` uses the first ingress rule that matches, so order the rules for `chat.example.com` like this:
+
+| Order | Paths | Service |
+| --- | --- | --- |
+| 1 | Paths with a `.` or `..` segment between `/` or `\` separators, or with a control character | `http_status:404` |
+| 2 | `/_matrix/`, `/_synapse/`, `/_tuwunel/`, and `/.well-known/matrix/server` with everything below it | Tuwunel |
+| 3 | The public paths of each runtime feature you use, as that feature's page lists them | MindRoom runtime |
+| 4 | Everything else, including `/.well-known/matrix/client`, `/livekit/jwt/`, and `/livekit/sfu/` | MindRoom Chat |
+
+The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
+The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
+Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
+`admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
+
+```yaml
+ingress:
+  - hostname: chat.example.com
+    path: '[/\\][.]{1,2}([/\\]|$)|[\x00-\x1F\x7F]'
+    service: http_status:404
+  - hostname: chat.example.com
+    path: ^/(_matrix|_synapse|_tuwunel)/|^/\.well-known/matrix/server(/|$)
+    service: http://matrix-mindroom-tuwunel:8008
+  - hostname: chat.example.com
+    path: ^/(connections|api/connections)(/.*)?$|^/api/oauth/
+    service: http://mindroom-runtime:8765
+  - hostname: chat.example.com
+    service: http://mindroom-client:80
+  - hostname: admin.example.com
+    path: '[/\\][.]{1,2}([/\\]|$)|[\x00-\x1F\x7F]'
+    service: http_status:404
+  - hostname: admin.example.com
+    service: http://mindroom-runtime:8765
+  - service: http_status:404
+```
+
+The example routes only the Connections paths to the runtime; add a rule like it for each other feature you use.
+
+Point the runtime's `MATRIX_HOMESERVER` (runtime chart `matrix.homeserverUrl`) at Tuwunel's in-cluster Service, as in [Pairing With mindroom-runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#pairing-with-mindroom-runtime), because its Matrix, OpenID, and `/_matrix/client/versions` requests carry no Access session.
+
+## Paths That Bypass Access
+
+Protect both hosts with one Access application that covers each host as a whole, then add an application with a Bypass policy for each path below.
+Access applies the most specific path application, so every other path keeps the host's policy.
+
+| Path | Requested without an Access session by |
+| --- | --- |
+| `/runtime-config.js`, `/authentication-recovery.js` | A cached Chat page whose Access session expired, to [recover sign-in](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery) |
+| `/sw.js`, under `basePath` when set | The browser's service worker update check, which after the session expires gets the Access login instead of the script, so an old worker keeps serving its cached app |
+| `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
+| `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
+| The MCP paths that the [route table](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](https://docs.mindroom.chat/deployment/mcp-gateway/#external-authorization) instead |
+| `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
+
+Machine callers of runtime routes need their own Access application with a service token, as the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](https://docs.mindroom.chat/external-triggers/) or the API keys of the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
+Everything else stays behind Access, including `/authentication-recovery-probe` and `/connections`.
+Published reports under `/reports/public/` need no MindRoom login, so behind Access only the people Access admits can open them.
+An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery), and the tunnel sends everything below `/.well-known/matrix/server` to Tuwunel, which answers 404.
+
+## Service Worker
+
+Chat's service worker answers browser navigations on its origin with its cached app.
+Chat images built from [mindroom-chat#516](https://github.com/mindroom-ai/mindroom-chat/pull/516) or later leave `/connections`, `/mcp`, and `/reports` to the network, so list only the other browser pages on this host in the client chart:
+
+```yaml
+serviceWorker:
+  navigationFallbackExcludePaths:
+    - /cdn-cgi
+    - /_tuwunel
+```
+
+`/cdn-cgi` holds Access's own pages on the host, such as `/cdn-cgi/access/logout`, and `/_tuwunel` holds Tuwunel's browser pages, such as its OIDC sign-in and account pages.
+
+## Edge Settings
+
+- **Managed WAF rules** can block Matrix media uploads, which then fail at Cloudflare although the homeserver would accept them.
+  Add a WAF skip rule for `POST` requests to `/_matrix/media/v3/upload` and `/_matrix/media/r0/upload`; Tuwunel still requires a Matrix access token for them.
+- **Browser Cache TTL** on the zone overrides the `max-age=0` that Chat sends for `/runtime-config.js`, `/authentication-recovery.js`, and `/sw.js` with its own longer lifetime, so browsers can keep stale copies.
+  Set it to Respect Existing Headers, or add a response header rule that sets `Cache-Control: no-store, max-age=0` on those paths.
+- **Health checks** from scripts can get a Cloudflare challenge instead of the page when they send no User-Agent or a non-standard one, such as a scripting library's default, while browsers pass.
+  Send curl's or a browser's User-Agent, and point external checks at a bypassed path such as `/_matrix/client/versions`.
+
+## MindRoom Settings
+
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup) with the Access assertion:
+
+```bash
+MINDROOM_PUBLIC_URL=https://chat.example.com
+MINDROOM_DASHBOARD_URL=https://admin.example.com
+MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
+MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=Cf-Access-Jwt-Assertion
+MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://<team>.cloudflareaccess.com/cdn-cgi/access/certs
+MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://<team>.cloudflareaccess.com
+MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=<AUD tag>
+```
+
+`<team>` is the Zero Trust team name, and `<AUD tag>` is the Application Audience (AUD) tag of the host-wide application, which must cover both hosts.
+Each feature behind its own Access application, such as MCP external authorization or the usage export and budget services, takes that application's AUD tag as its audience.
+
+For voice agents, set `calls.livekit_service_url: https://chat.example.com/livekit/jwt` in `config.yaml`, because the runtime cannot read `/.well-known/matrix/client` through Access and agents otherwise ignore calls ([Calls configuration](https://docs.mindroom.chat/voice-calls/#calls-configuration)).
+Desktop bridge clients sign in through Access as described in [Homeservers Behind an Identity-Aware Proxy](https://docs.mindroom.chat/tools/desktop/#homeservers-behind-an-identity-aware-proxy).
 
 # Data Storage & Journal
 

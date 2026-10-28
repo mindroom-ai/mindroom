@@ -198,7 +198,7 @@ async def block_secret_reads(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
-| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()` | 200 |
+| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
 Custom events default to 1000 ms.
@@ -329,10 +329,16 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough` or the workspace's `.mindroom/worker-env.sh`.
   `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
 - `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
+- `ctx.prepend_path(directory)` puts `directory`, an absolute path, first on the command's `PATH`, ahead of the shell tool's `shell_path_prepend`, the entries a worker adds, and a `PATH` a hook sets, so a wrapper such as a `gh` there is the one the command runs.
+  A later call or hook puts its directory ahead of earlier ones; only a locally run command's [agent CLI](https://docs.mindroom.chat/tools/agent-cli/) directory comes before them all, and in a worker a hook's directory comes first.
+- `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
+  When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
 - Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
-- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
-- A failing or timed-out hook loses its changes and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
+- A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+  A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
+  A hook that waits on the network bounds that wait below its `timeout_ms`, because a timeout also discards its decline.
 
 ## Custom events
 
@@ -430,7 +436,7 @@ All contexts except the three tool contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
-| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)` |
+| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
