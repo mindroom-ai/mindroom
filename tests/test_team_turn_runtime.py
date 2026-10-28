@@ -103,6 +103,7 @@ from tests.team_turn_helpers import (
 from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
+from tests.turn_dispatch_helpers import nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -2872,6 +2873,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
             for event_id, body, timestamp_ms in (messages if coalesced else messages[1:])
         ],
         timestamp_formatter=bot._coalescing_gate._timestamp_formatter,
+        queues_other_run=nothing_else_queued,
     )
     assert batch.current_prompt_is_structured is coalesced
     request = _request(batch.event.body)

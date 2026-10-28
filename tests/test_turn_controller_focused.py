@@ -146,7 +146,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.journal_helpers import admit_dispatch_event
-from tests.turn_dispatch_helpers import make_test_turn
+from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Iterable
@@ -629,14 +629,9 @@ def _build_harness(
 
     runner = _RecordingResponseRunner(answered=_answered)
     gateway = _RecordingDeliveryGateway(answered=_answered)
-    dispatcher_ref: list[TurnDispatcher] = []
     gate_batches: list[PreparedTurn] = []
     ignored_dispatch_sources: list[tuple[str, ...]] = []
     retried_dispatch_sources: list[tuple[str, ...]] = []
-
-    async def _dispatch_batch(turn: PreparedTurn) -> None:
-        gate_batches.append(turn)
-        await dispatcher_ref[0].handle_prepared_turn(turn)
 
     async def _settle_ignored_dispatch_sources(source_event_ids: tuple[str, ...]) -> None:
         ignored_dispatch_sources.append(source_event_ids)
@@ -695,12 +690,6 @@ def _build_harness(
         ),
     )
 
-    gate = CoalescingGate(
-        dispatch_turn=_dispatch_batch,
-        debounce_seconds=lambda: debounce_seconds,
-        is_shutting_down=lambda: False,
-        on_dispatch_failure=_retry_failed_coalesced_dispatch,
-    )
     ingress_validator = IngressValidator(
         IngressValidatorDeps(
             runtime=runtime,
@@ -771,7 +760,6 @@ def _build_harness(
             response_runner=cast("ResponseRunner", runner),
             delivery_gateway=cast("DeliveryGateway", gateway),
             turn_store=turn_store,
-            coalescing_gate=gate,
             ingress=ingress_validator,
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
@@ -779,7 +767,17 @@ def _build_harness(
             selections=selections,
         ),
     )
-    dispatcher_ref.append(dispatcher)
+
+    async def _dispatch_batch(turn: PreparedTurn) -> None:
+        gate_batches.append(turn)
+        await dispatcher.handle_prepared_turn(turn)
+
+    gate = CoalescingGate(
+        dispatch_turn=_dispatch_batch,
+        debounce_seconds=lambda: debounce_seconds,
+        is_shutting_down=lambda: False,
+        on_dispatch_failure=_retry_failed_coalesced_dispatch,
+    )
     ingress = TurnIngress(
         TurnIngressDeps(
             runtime=runtime,
@@ -1244,6 +1242,7 @@ async def test_a_batch_source_deleted_during_its_pending_write_leaves_the_rest_o
             make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND, requester_user_id=_SENDER)
             for event in events
         ],
+        queues_other_run=nothing_else_queued,
     )
     real_record_pending = harness.turn_store.record_pending_turn
 
@@ -1303,6 +1302,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
                 strict=True,
             )
         ],
+        queues_other_run=nothing_else_queued,
     )
     real_generate_response = harness.runner.generate_response
 
@@ -1363,6 +1363,7 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
                 strict=True,
             )
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     await harness.dispatcher.handle_prepared_turn(batch)
@@ -1409,6 +1410,7 @@ async def test_single_router_relay_persists_human_prompt_ownership(config: Confi
                 discovery_event_id="$human:localhost",
             ),
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     await harness.dispatcher.handle_prepared_turn(batch)
@@ -1748,7 +1750,11 @@ async def test_a_selection_coalesced_with_another_message_is_refused(config: Con
         room=room,
         facts=make_ingress_facts(_SENDER),
     )
-    turn = build_prepared_turn(requester_coalescing_key(room.room_id, None, _SENDER), [message, selection])
+    turn = build_prepared_turn(
+        requester_coalescing_key(room.room_id, None, _SENDER),
+        [message, selection],
+        queues_other_run=nothing_else_queued,
+    )
 
     with pytest.raises(ValueError, match="single FIFO barrier"):
         await harness.dispatcher.handle_prepared_turn(turn)
@@ -6280,6 +6286,7 @@ async def test_edited_second_of_two_queued_messages_keeps_every_message_answered
     turn = build_prepared_turn(
         requester_coalescing_key(room.room_id, _THREAD_ROOT, _SENDER),
         [make_pending_event(event, room, source_kind=MESSAGE_SOURCE_KIND) for event in (first, edited)],
+        queues_other_run=nothing_else_queued,
     )
     execute_if_owned = AsyncMock(return_value=True)
     monkeypatch.setattr(harness.dispatcher.deps.command_executor, "execute_if_owned", execute_if_owned)

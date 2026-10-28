@@ -331,7 +331,7 @@ def _assert_voice_fallback_dispatch(
 
 def _install_test_coalescing_gate(bot: AgentBot, *, debounce_seconds: float = 0.02) -> None:
     gate = CoalescingGate(
-        dispatch_turn=bot._dispatch_prepared_turn,
+        dispatch_turn=bot._turn_dispatcher.handle_prepared_turn,
         debounce_seconds=lambda: debounce_seconds,
         is_shutting_down=lambda: False,
     )

@@ -45,6 +45,7 @@ from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
 from tests.conftest import live_turn_claim, make_ingress_facts, make_pending_event, turn_claim_is_live
+from tests.turn_dispatch_helpers import nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -141,6 +142,7 @@ def test_single_message_batch_is_not_structured() -> None:
         CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@user:localhost")),
         [_pending(_text_event("$only:localhost", "just one", 1_774_019_700_000))],
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.current_prompt_is_structured is False
@@ -166,6 +168,7 @@ def test_coalesced_message_tags_carry_current_member_display_names() -> None:
             CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(sender)),
             pending_events,
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+            queues_other_run=nothing_else_queued,
         )
 
     named = turn_from("@user:localhost")
@@ -203,6 +206,7 @@ def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human(
         CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner(agent)),
         pending_events,
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+        queues_other_run=nothing_else_queued,
     )
 
     assert turn.facts.run_requester_id == "@owner:localhost"
@@ -229,6 +233,7 @@ def test_prepared_turn_carries_structured_flag_and_metadata() -> None:
             _pending(_text_event("$a2:localhost", "second", 1_774_019_760_000)),
         ],
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+        queues_other_run=nothing_else_queued,
     )
 
     assert turn.current_prompt_is_structured is True
@@ -248,6 +253,7 @@ def test_prepared_turn_keeps_physical_event_and_carries_logical_batch() -> None:
             timestamp_ms,
             timezone="America/Los_Angeles",
         ),
+        queues_other_run=nothing_else_queued,
     )
 
     assert turn.event.event_id == primary.event.event_id
@@ -280,6 +286,7 @@ def test_active_follow_up_prompt_renders_timestamp_attributes() -> None:
             ),
         ],
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.event.body == (
@@ -312,6 +319,7 @@ def test_build_prepared_turn_rejects_batch_mixing_requesters() -> None:
                     ("$b1:localhost", "thanks", "@bob:localhost"),
                 )
             ],
+            queues_other_run=nothing_else_queued,
         )
 
 
@@ -362,6 +370,7 @@ def test_tagged_coalesced_prompt_is_safe_inside_current_message_wrapper() -> Non
                 requester_user_id="@alice:localhost",
             ),
         ],
+        queues_other_run=nothing_else_queued,
         timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone="America/Los_Angeles"),
     )
 
@@ -621,7 +630,7 @@ def test_single_prepared_turn_owns_final_dispatch_event_and_turn_record() -> Non
         source_kind=MESSAGE_SOURCE_KIND,
     )
 
-    turn = build_prepared_turn(key, [pending])
+    turn = build_prepared_turn(key, [pending], queues_other_run=nothing_else_queued)
 
     assert turn.event.body == "sidecar preview"
     assert turn.event.source is pending.event.source
@@ -1490,6 +1499,90 @@ async def test_an_upload_between_messages_for_different_participants_stays_with_
     await gate.drain_all()
 
     assert calls == [["$ask:localhost"], ["$img:localhost", "$caption:localhost"]]
+
+
+@pytest.mark.asyncio
+async def test_active_follow_up_turn_carries_the_notices_of_follow_ups_still_queued_behind_it() -> None:
+    """A follow-up batch hands dispatch the queued notices of the follow-ups its flush left queued, and nothing more."""
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    flushed: list[tuple[list[str], tuple[QueuedHumanNoticeReservation, ...]]] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        flushed.append((list(batch.handled_turn.source_event_ids), batch.queued_follow_up_notices))
+
+    gate = CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 0.0, is_shutting_down=lambda: False)
+    notices: dict[str, QueuedHumanNoticeReservation] = {}
+    for event_id, requester in (("$a1:localhost", "@alice:localhost"), ("$b1:localhost", "@bob:localhost")):
+        pending = make_pending_event(
+            _text_event(event_id, "more", 1_000_000),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=requester,
+            active_follow_up=True,
+        )
+        pending.notice = notices[event_id] = MagicMock(spec=QueuedHumanNoticeReservation)
+        await _admit_ready(gate, key, pending)
+    await gate.drain_all()
+
+    assert flushed == [(["$a1:localhost"], (notices["$b1:localhost"],)), (["$b1:localhost"], ())]
+
+
+@pytest.mark.asyncio
+async def test_requester_turn_carries_no_queued_follow_up_notices() -> None:
+    """Only an active response's follow-up batch releases the notices of what still waits behind it."""
+    key = CoalescingKey("!room:localhost", "$thread:localhost", RequesterCoalescingOwner("@alice:localhost"))
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    flushed: list[tuple[QueuedHumanNoticeReservation, ...]] = []
+    gate = CoalescingGate(
+        dispatch_turn=AsyncMock(side_effect=lambda batch: flushed.append(batch.queued_follow_up_notices)),
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+    for event_id, for_another_participant in (("$a1:localhost", False), ("$a2:localhost", True)):
+        pending = make_pending_event(
+            _text_event(event_id, "more", 1_000_000),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id="@alice:localhost",
+        )
+        pending.event = replace(pending.event, for_another_participant=for_another_participant)
+        pending.notice = MagicMock(spec=QueuedHumanNoticeReservation)
+        await _admit_ready(gate, key, pending)
+    await gate.drain_all()
+
+    assert flushed == [(), ()]
+
+
+@pytest.mark.asyncio
+async def test_a_flushed_turn_sees_a_run_queued_after_its_flush() -> None:
+    """Dispatch asks whether another run waits after awaiting its context, so the turn's answer stays live."""
+    key = active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+    room = nio.MatrixRoom("!room:localhost", "@mindroom:localhost")
+    answers: list[tuple[bool, bool]] = []
+    gate: CoalescingGate
+
+    def follow_up(event_id: str, requester: str) -> PendingEvent:
+        return make_pending_event(
+            _text_event(event_id, "more", 1_000_000),
+            room,
+            source_kind=MESSAGE_SOURCE_KIND,
+            requester_user_id=requester,
+            active_follow_up=True,
+        )
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        if batch.handled_turn.source_event_ids != ("$a1:localhost",):
+            return
+        before = batch.queues_other_run("@alice:localhost")
+        await _admit_ready(gate, key, follow_up("$b1:localhost", "@bob:localhost"))
+        answers.append((before, batch.queues_other_run("@alice:localhost")))
+
+    gate = CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 0.0, is_shutting_down=lambda: False)
+    await _admit_ready(gate, key, follow_up("$a1:localhost", "@alice:localhost"))
+    await gate.drain_all()
+
+    assert answers == [(False, True)]
 
 
 @pytest.mark.asyncio
@@ -2603,7 +2696,11 @@ def test_batch_facts_take_latest_evidence_priority_modality_and_deepest_hook_cha
         facts=make_ingress_facts("@user:localhost", message_received_depth=2, discovery_event_id="$routed:localhost"),
     )
 
-    turn = build_prepared_turn(requester_coalescing_key(room.room_id, None, "@user:localhost"), [voice, text])
+    turn = build_prepared_turn(
+        requester_coalescing_key(room.room_id, None, "@user:localhost"),
+        [voice, text],
+        queues_other_run=nothing_else_queued,
+    )
 
     assert turn.facts.source_kind == VOICE_SOURCE_KIND
     assert turn.facts.origin.source_kind == VOICE_SOURCE_KIND
@@ -2634,7 +2731,11 @@ def test_batch_facts_keep_the_first_relayed_original_sender() -> None:
         facts=make_ingress_facts("@mindroom_router:localhost", requester_user_id="@user:localhost"),
     )
 
-    turn = build_prepared_turn(requester_coalescing_key(room.room_id, None, "@user:localhost"), [relayed, plain])
+    turn = build_prepared_turn(
+        requester_coalescing_key(room.room_id, None, "@user:localhost"),
+        [relayed, plain],
+        queues_other_run=nothing_else_queued,
+    )
 
     assert (turn.facts.original_sender, turn.facts.original_sender_is_human) == ("@user:localhost", True)
 
@@ -2661,6 +2762,7 @@ def test_build_prepared_turn_rejects_batch_mixing_an_agent_reply_with_its_humans
                     source_kind=MESSAGE_SOURCE_KIND,
                 ),
             ],
+            queues_other_run=nothing_else_queued,
         )
 
 
@@ -2683,6 +2785,7 @@ def test_build_prepared_turn_rejects_batch_mixing_hook_sources() -> None:
                     ("$b:localhost", "two", "plugin-b"),
                 )
             ],
+            queues_other_run=nothing_else_queued,
         )
 
 
@@ -2693,8 +2796,8 @@ def test_only_a_single_source_turn_carries_a_command() -> None:
     first = make_pending_event(_text_event("$a:localhost", "hello", 1_774_019_700_000), room, source_kind="message")
     command = make_pending_event(_text_event("$b:localhost", "!help", 1_774_019_760_000), room, source_kind="message")
 
-    single = build_prepared_turn(key, [command])
-    batch = build_prepared_turn(key, [first, command])
+    single = build_prepared_turn(key, [command], queues_other_run=nothing_else_queued)
+    batch = build_prepared_turn(key, [first, command], queues_other_run=nothing_else_queued)
 
     assert single.command is not None
     assert single.command.type is CommandType.HELP
@@ -2730,7 +2833,7 @@ async def test_queued_message_edited_into_a_command(queued: int) -> None:
     )
     queued_events = list(gate.queued_pending_events(key))
     assert [pending.event.event_id for pending in queued_events] == [event.event_id for event in events]
-    turn = build_prepared_turn(key, queued_events)
+    turn = build_prepared_turn(key, queued_events, queues_other_run=nothing_else_queued)
     await gate.drain_all()
 
     if queued == 1:

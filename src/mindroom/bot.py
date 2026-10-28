@@ -180,7 +180,6 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync, ReplyMembershipPreAdmission
-    from mindroom.coalescing.batch import PreparedTurn
     from mindroom.config.main import Config
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
@@ -597,18 +596,6 @@ class AgentBot:
         def format_local_timestamp(timestamp_ms: float | None) -> str | None:
             return format_timestamp_ms(timestamp_ms, timezone=self.config.get_entity_timezone(self.agent_name))
 
-        self._coalescing_gate = CoalescingGate(
-            dispatch_turn=self._dispatch_prepared_turn,
-            debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
-            is_shutting_down=lambda: self._sync_shutting_down,
-            wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
-            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
-            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
-            timestamp_formatter=format_local_timestamp,
-            on_dispatch_failure=self._retry_failed_coalesced_dispatch,
-            on_undelivered_source=self._retry_pending_dispatch_source,
-            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
-        )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
             runtime_paths=self.runtime_paths,
@@ -929,13 +916,24 @@ class AgentBot:
                 response_runner=self._response_runner,
                 delivery_gateway=self._delivery_gateway,
                 turn_store=self._turn_store,
-                coalescing_gate=self._coalescing_gate,
                 ingress=self._ingress_validator,
                 visible_responses=self._visible_responses,
                 retry_dispatch_sources=self._journal_dispatcher.retry_turn_sources,
                 settle_dispatch_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 selections=self._interactive_selections,
             ),
+        )
+        self._coalescing_gate = CoalescingGate(
+            dispatch_turn=self._turn_dispatcher.handle_prepared_turn,
+            debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
+            is_shutting_down=lambda: self._sync_shutting_down,
+            wait_until_dispatch_allowed=self._wait_until_coalesced_dispatch_allowed,
+            room_scope_is_single_conversation=self._room_scope_is_single_conversation,
+            dispatch_allowed_now=self._coalesced_dispatch_allowed_now,
+            timestamp_formatter=format_local_timestamp,
+            on_dispatch_failure=self._retry_failed_coalesced_dispatch,
+            on_undelivered_source=self._retry_pending_dispatch_source,
+            on_intentionally_ignored_source=self._settle_ignored_dispatch_source,
         )
         self._turn_ingress = TurnIngress(
             TurnIngressDeps(
@@ -2513,10 +2511,6 @@ class AgentBot:
         if client is not None and room_id in client.rooms:
             return client.rooms[room_id]
         return nio.MatrixRoom(room_id, self.matrix_id.full_id)
-
-    async def _dispatch_prepared_turn(self, turn: PreparedTurn) -> None:
-        """Delegate one prepared turn to the turn engine."""
-        await self._turn_dispatcher.handle_prepared_turn(turn)
 
     def _retry_failed_coalesced_dispatch(self, pending_events: tuple[PendingEvent, ...]) -> None:
         """Return failed gate sources to their exact durable callback owner."""

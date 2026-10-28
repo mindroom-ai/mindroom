@@ -36,6 +36,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_record import TurnRecord
 from tests.conftest import make_pending_event
+from tests.turn_dispatch_helpers import nothing_else_queued
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
@@ -137,6 +138,7 @@ async def test_single_message_persisted_prompt_is_byte_identical_to_live_prompt(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         [_pending_text("$event1", body, server_timestamp=1_700_000_000_000)],
         timestamp_formatter=_timestamp_formatter,
+        queues_other_run=nothing_else_queued,
     )
     live_prompt = _live_prompt_for_batch(batch)
     assert live_prompt == body
@@ -161,6 +163,7 @@ async def test_verbatim_body_persisted_prompt_is_byte_identical_through_ledger(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         [_pending_text("$event1", body, server_timestamp=1_700_000_000_000)],
         timestamp_formatter=_timestamp_formatter,
+        queues_other_run=nothing_else_queued,
     )
     live_prompt = _live_prompt_for_batch(batch)
     assert live_prompt == body
@@ -207,6 +210,7 @@ async def test_coalesced_batch_replay_prompt_is_byte_identical_to_live_merged_pr
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=_timestamp_formatter,
+        queues_other_run=nothing_else_queued,
     )
     live_prompt = _live_prompt_for_batch(batch)
     assert batch.current_prompt_is_structured is True
@@ -250,6 +254,7 @@ async def test_coalesced_batch_unstructured_replay_fallback_matches_live_prompt(
         CoalescingKey(_ROOM_ID, _THREAD_ID, RequesterCoalescingOwner(_REQUESTER)),
         pending_events,
         timestamp_formatter=None,
+        queues_other_run=nothing_else_queued,
     )
     live_prompt = _live_prompt_for_batch(batch)
     assert batch.current_prompt_is_structured is False

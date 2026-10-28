@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.authorization import ensure_room_membership_synced
@@ -601,9 +602,11 @@ class TurnIngress:
             room=room,
             facts=facts,
         )
+        key = requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id)
         turn = build_prepared_turn(
-            requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id),
+            key,
             [pending_event],
+            queues_other_run=partial(self.deps.coalescing_gate.queues_other_run, key),
         )
         await self.deps.dispatcher.dispatch_control_turn(replace(turn, claims=(ticket.take_claim(),)))
 

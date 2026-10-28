@@ -130,6 +130,13 @@ class PreparedTurn:
     claims: tuple[TurnClaim, ...]
     notices: tuple[QueuedHumanNoticeReservation, ...]
     selection: InteractiveSelectionDispatch | None
+    # The queued notices of follow-ups still waiting behind this batch when it flushed, which dispatch
+    # releases with its own. Only a batch of an active response's follow-ups has any.
+    queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...]
+    # Whether this turn's queue still holds a run other than the given requester's own messages for this
+    # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
+    # meanwhile counts.
+    queues_other_run: Callable[[str], bool]
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -415,6 +422,8 @@ def build_prepared_turn(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
     *,
+    queues_other_run: Callable[[str], bool],
+    queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...] = (),
     timestamp_formatter: TimestampFormatter | None = None,
 ) -> PreparedTurn:
     """Build the logical turn represented by one coalescing-gate flush."""
@@ -459,4 +468,6 @@ def build_prepared_turn(
         claims=tuple(event.claim for event in ordered_pending_events if event.claim is not None),
         notices=tuple(event.notice for event in ordered_pending_events if event.notice is not None),
         selection=next((event.selection for event in ordered_pending_events if event.selection is not None), None),
+        queued_follow_up_notices=queued_follow_up_notices,
+        queues_other_run=queues_other_run,
     )

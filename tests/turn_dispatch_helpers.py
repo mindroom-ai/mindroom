@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     from mindroom.turns.facts import IngressFacts
 
 
+def nothing_else_queued(_requester_user_id: str) -> bool:
+    """Stand in for the queue of a turn built outside the gate: it holds no other run."""
+    return False
+
+
 def _prepared_ingress(
     event: PreparedIngress | nio.RoomMessageFormatted | PrecheckedEvent,
     requester_user_id: str | None,
@@ -93,6 +98,7 @@ def make_test_turn(
     turn = build_prepared_turn(
         key,
         [PendingEvent(event=prepared, room=room, facts=facts, claim=claim, notice=queued_notice_reservation)],
+        queues_other_run=nothing_else_queued,
     )
     return replace(
         turn,

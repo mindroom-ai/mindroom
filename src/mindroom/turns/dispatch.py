@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.authorization import is_requester_joined_to_room
-from mindroom.coalescing.batch import is_active_follow_up_coalescing_key
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
@@ -65,7 +64,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.coalescing.batch import PreparedTurn
-    from mindroom.coalescing.gate import CoalescingGate
     from mindroom.command_turn_executor import CommandTurnExecutor
     from mindroom.commands.parsing import Command
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
@@ -260,7 +258,6 @@ class TurnDispatchDeps:
     response_runner: ResponseRunner
     delivery_gateway: DeliveryGateway
     turn_store: TurnStore
-    coalescing_gate: CoalescingGate
     ingress: IngressValidator
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
@@ -285,17 +282,8 @@ class TurnDispatcher:
         """Dispatch one logical turn emitted directly by the coalescing gate."""
         if await self.deps.selections.dispatch_selection_turn(turn):
             return
-        coalescing_key = turn.ingress.coalescing_key
-        assert coalescing_key is not None
-        for notice in turn.notices:
+        for notice in (*turn.notices, *turn.queued_follow_up_notices):
             notice.release()
-        if is_active_follow_up_coalescing_key(coalescing_key):
-            # Follow-ups held back by a requester split waited on the response
-            # that just finished; left pending, they would cut this turn short
-            # and hand its unfinished work to the next requester's turn.
-            for pending_event in self.deps.coalescing_gate.queued_pending_events(coalescing_key):
-                if pending_event.notice is not None:
-                    pending_event.notice.release()
         timing_scope = event_timing_scope(turn.event.event_id)
         dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
         if dispatch_timing is not None:
@@ -469,7 +457,6 @@ class TurnDispatcher:
             await visible_responses.settle_source_events_ignored(prepared.handled_turn)
             return True
 
-        coalescing_key = prepared.turn.ingress.coalescing_key
         may_be_superseded = (
             prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
             and prepared.handled_turn.sources_all_from_requester(requester_user_id)
@@ -478,13 +465,7 @@ class TurnDispatcher:
             # requester, or this requester's message for another participant, a
             # newer message from this requester may only be answered after it, so
             # letting it absorb this turn would answer out of receipt order or not at all.
-            and not (
-                coalescing_key is not None
-                and self.deps.coalescing_gate.queues_other_run(
-                    coalescing_key,
-                    requester_user_id,
-                )
-            )
+            and not prepared.turn.queues_other_run(requester_user_id)
         )
         if prepared.replay_guard.degraded:
             skips_turn = await self._has_newer_unresponded_journal_thread_event(

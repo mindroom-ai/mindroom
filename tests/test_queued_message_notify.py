@@ -112,7 +112,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
-from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
+from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -562,6 +562,7 @@ def test_active_follow_up_batch_prompt_uses_queued_receive_order() -> None:
     batch = build_prepared_turn(
         active_follow_up_coalescing_key(room.room_id, "$thread"),
         pending_events,
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.handled_turn.source_event_ids == ("$a1", "$a2", "$a3")
@@ -609,6 +610,7 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
                 notice=second_reservation,
             ),
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()):
@@ -2758,6 +2760,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
                     notice=reservation,
                 ),
             ],
+            queues_other_run=nothing_else_queued,
         )
         with (
             patch.object(
@@ -2835,6 +2838,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
                     notice=post_reservation,
                 ),
             ],
+            queues_other_run=nothing_else_queued,
         )
 
         with patch.object(
@@ -2901,6 +2905,7 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
                     notice=voice_reservation,
                 ),
             ],
+            queues_other_run=nothing_else_queued,
         )
 
         with patch.object(

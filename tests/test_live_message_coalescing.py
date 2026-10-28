@@ -125,7 +125,7 @@ from tests.conftest import (
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_hydrated_conversation, seed_unhydrated_room_event
-from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
+from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
@@ -1191,6 +1191,7 @@ def test_build_prepared_turn_keeps_normalized_voice_out_of_media_events() -> Non
     batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(voice_event, room, source_kind="voice")],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.event.body == "transcribed voice"
@@ -1216,6 +1217,7 @@ def test_build_prepared_turn_preserves_fifo_order_with_synthetic_events() -> Non
             make_pending_event(synthetic_event, room, source_kind="voice", enqueue_time=50_000.0),
             make_pending_event(real_event, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.handled_turn.source_event_ids == ("$synthetic", "$real")
@@ -1235,6 +1237,7 @@ def test_build_prepared_turn_prefers_media_source_kind_over_text_primary() -> No
             make_pending_event(image_event, room, source_kind="image"),
             text_pending,
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.event.event_id == text_pending.event.event_id
@@ -1262,6 +1265,7 @@ def test_build_prepared_turn_prefers_voice_source_kind_over_media_and_text() -> 
             make_pending_event(image_event, room, source_kind="image"),
             text_pending,
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.event.event_id == text_pending.event.event_id
@@ -3914,6 +3918,7 @@ async def test_handle_prepared_turn_timing_events_include_dispatch_scope(tmp_pat
                 source_kind="message",
             ),
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     with (
@@ -3950,6 +3955,7 @@ async def test_handle_prepared_turn_uses_batch_key_for_text_primary(tmp_path: Pa
             make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
             make_pending_event(typed, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     with patch.object(TurnDispatcher, "_dispatch_text_turn", new=AsyncMock()) as mock_dispatch:
@@ -3986,6 +3992,7 @@ def test_room_resolved_voice_turn_keeps_target_separate_from_physical_relation()
             make_pending_event(voice, room, source_kind=VOICE_SOURCE_KIND),
             make_pending_event(typed, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.ingress.coalescing_key.thread_id is None
@@ -4007,6 +4014,7 @@ def test_room_level_batch_preserves_plain_reply_relation_without_thread_target()
     batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.event.source["content"]["m.relates_to"] == {"m.in_reply_to": {"event_id": "$voice"}}
@@ -4026,6 +4034,7 @@ def test_room_level_turn_preserves_mentions_without_rewriting_physical_relation(
     batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.ingress.coalescing_key.thread_id is None
@@ -4046,6 +4055,7 @@ def test_room_level_mention_batch_preserves_plain_reply_relation() -> None:
     batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
+        queues_other_run=nothing_else_queued,
     )
 
     content = batch.event.source["content"]
@@ -4068,6 +4078,7 @@ async def test_coalesced_room_plain_reply_target_uses_prompt_thread_not_reply_th
     batch = build_prepared_turn(
         CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed_reply, room, source_kind=MESSAGE_SOURCE_KIND)],
+        queues_other_run=nothing_else_queued,
     )
     dispatches: list[PreparedDispatch] = []
 
@@ -4098,6 +4109,7 @@ def test_single_mentioned_followup_turn_uses_canonical_key_without_rewriting_sou
     batch = build_prepared_turn(
         CoalescingKey(room.room_id, "$new-thread", RequesterCoalescingOwner("@user:localhost")),
         [make_pending_event(typed, room, source_kind=MESSAGE_SOURCE_KIND)],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.ingress.coalescing_key.thread_id == "$new-thread"
@@ -4119,6 +4131,7 @@ def test_single_followup_batch_uses_coalescing_thread_relation() -> None:
     batch = build_prepared_turn(
         post_key,
         [make_pending_event(typed, room, source_kind="message")],
+        queues_other_run=nothing_else_queued,
     )
 
     assert batch.ingress.coalescing_key.thread_id == "$post-stt-thread"
@@ -5983,6 +5996,7 @@ def test_prepared_turn_merges_mentions_across_events() -> None:
             make_pending_event(mention_event, room, source_kind="message"),
             make_pending_event(followup_event, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.payload.mentioned_user_ids == ("@mindroom_test_agent:localhost",)
 
@@ -6016,6 +6030,7 @@ def test_prepared_turn_preserves_voice_fallback_metadata() -> None:
             ),
             make_pending_event(text_event, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.payload.raw_audio_fallback is True
 
@@ -6041,6 +6056,7 @@ def test_single_prepared_turn_preserves_source_kind() -> None:
                 active_follow_up=True,
             ),
         ],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.facts.source_kind == "message"
     assert batch.ingress.active_follow_up
@@ -6066,6 +6082,7 @@ def test_single_text_turn_preserves_dispatch_policy_source_kind() -> None:
     batch = build_prepared_turn(
         CoalescingKey("!room:localhost", None, RequesterCoalescingOwner("@user:localhost")),
         [pending],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.facts.source_kind == "message"
     assert batch.ingress.active_follow_up
@@ -6106,6 +6123,7 @@ def test_prepared_turn_preserves_original_sender() -> None:
             ),
             make_pending_event(followup, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.payload.original_sender == "@real_user:remote"
 
@@ -6154,6 +6172,7 @@ def test_prepared_turn_preserves_attachment_ids() -> None:
                 payload_trusted=True,
             ),
         ],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.payload.attachment_ids == ("att-001", "att-002")
 
@@ -6703,6 +6722,7 @@ def test_prepared_turn_preserves_formatted_body_mentions() -> None:
             make_pending_event(pill_event, room, source_kind="message"),
             make_pending_event(followup, room, source_kind="message"),
         ],
+        queues_other_run=nothing_else_queued,
     )
     assert batch.payload.formatted_bodies is not None
     assert "@mindroom_test_agent:localhost" in batch.payload.formatted_bodies[0]

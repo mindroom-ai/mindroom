@@ -7,6 +7,7 @@ import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
@@ -725,7 +726,24 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> _FlushDiagnostics:
-        turn = build_prepared_turn(key, pending_events, timestamp_formatter=self._timestamp_formatter)
+        turn = build_prepared_turn(
+            key,
+            pending_events,
+            queues_other_run=partial(self.queues_other_run, key),
+            # Follow-ups held back by a requester split waited on the response that just
+            # finished; left pending, their notices would cut this turn short and hand its
+            # unfinished work to the next requester's turn.
+            queued_follow_up_notices=(
+                tuple(
+                    pending_event.notice
+                    for pending_event in self.queued_pending_events(key)
+                    if pending_event.notice is not None
+                )
+                if is_active_follow_up_coalescing_key(key)
+                else ()
+            ),
+            timestamp_formatter=self._timestamp_formatter,
+        )
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(turn.event.event_id)
         return _FlushDiagnostics(
