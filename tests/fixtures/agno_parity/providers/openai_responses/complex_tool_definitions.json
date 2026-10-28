@@ -276,6 +276,16 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "arguments": "{\"attendees\": [{\"contact\": {\"email\": \"ana@example.com\", \"name\": \"Ana\"}, \"role\": \"organizer\"}, {\"contact\": {\"email\": \"ben@example.com\"}, \"optional\": true}], \"labels\": {\"trip\": \"paris\"}, \"location\": {\"address\": \"Gare du Nord, Paris\", \"room\": null}, \"starts_at\": \"2026-10-21T08:30:00+02:00\", \"title\": \"Paris train\"}",
+            "call_id": "call_parity_event",
+            "id": "fc_parity_event",
+            "name": "calendar_create_event",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
         "mindroom_response_stored": true,
         "response_id": "resp_parity"
       },

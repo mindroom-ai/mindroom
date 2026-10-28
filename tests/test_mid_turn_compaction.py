@@ -61,6 +61,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_usage import message_context_tokens
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.store import persist_to
@@ -538,7 +539,7 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
     if provider == "openai":
         replay_estimator = responses_adapter(tmp_path, "gpt-6-luna", store=False)
         provider_data: dict[str, Any] = {
-            "tool_search_items": [
+            RESPONSE_OUTPUT_KEY: [
                 {
                     "type": "tool_search_call",
                     "id": "ts_1",
