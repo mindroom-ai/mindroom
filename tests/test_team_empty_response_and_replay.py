@@ -249,6 +249,37 @@ async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """A reply that shows nothing ends with the fallback line, display chrome rather than an answer to replay.
+
+    The attempt ran tools, so it is not retried; a reply that shows its tool calls shows them instead of the line.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Run the tool"), answer("")],
+        general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
+    )
+    tool_trace: list[ToolTraceEntry] = []
+
+    text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls, tool_trace=tool_trace)
+
+    if show_tool_calls:
+        assert text.startswith("🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**:\n\n🔧 `touch` [1]")
+        assert [entry.tool_name for entry in tool_trace] == ["touch", "delegate_task_to_member"]
+    else:
+        assert text == HEADER + "No team response generated."
+    assert len(team.models["default"].requests) == 2
+    assert team.recorder.outcome == "completed"
+    assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
 async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -312,39 +343,6 @@ async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_membe
         assert text == f"{HEADER}**GeneralAgent**: {member_finding}\n\n\n**Team Consensus**:\n\nNO_REPLY"
     # The turn records what it delivered: the bare token, or the document that carries the finding.
     assert team.recorder.assistant_text == text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("show_tool_calls", "shown"),
-    [
-        (
-            True,
-            f"{HEADER}**GeneralAgent**:\n\n🔧 `touch` [1]\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]",
-        ),
-        (False, ""),
-    ],
-)
-async def test_a_tool_only_team_reply_shows_only_its_tool_calls_and_records_no_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    show_tool_calls: bool,
-    shown: str,
-) -> None:
-    """The reply shows the tool calls it shows and no answer to replay; the attempt ran tools, so it is not retried."""
-    team = _team(
-        tmp_path,
-        monkeypatch,
-        leader=[delegate("call-team", "general", "Run the tool"), answer("")],
-        general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
-    )
-
-    text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls)
-
-    assert text == shown
-    assert len(team.models["default"].requests) == 2
-    assert team.recorder.outcome == "completed"
-    assert team.recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio

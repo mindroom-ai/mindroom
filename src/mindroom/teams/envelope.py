@@ -628,12 +628,14 @@ class _TeamTurn:
             # A quiet scheduled check that found nothing replies with the bare token, which delivery then suppresses,
             # instead of a team document around it.
             # The document's trace stays, as the streamed reply keeps it.
-            yield StructuredStreamChunk(content=finished_run_text(record).strip(), tool_trace=None)
+            shown = finished_run_text(record).strip()
+            yield StructuredStreamChunk(content=shown, tool_trace=None)
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
+            shown = chunk.content
             yield chunk
-        yield AttemptResolved(await self.resolve_completed(run, attempt, record))
+        yield AttemptResolved(await self.resolve_completed(run, attempt, record, shown=shown is not None))
 
     def silent_no_report(self, record: TeamRunRecord) -> bool:
         """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
@@ -684,12 +686,15 @@ class _TeamTurn:
         run: TurnRunState,
         attempt: TeamAttempt,
         record: TeamRunRecord,
+        *,
+        shown: bool,
     ) -> CompletedAttempt:
-        """Return the completed attempt: its rendered body, what replays, and the turn's metadata.
+        """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
-        An attempt that produced anything, text or tool calls, records the Matrix events the turn consumed as seen on
-        the stored session row; an empty one, whose run is discarded, leaves them unseen, so the next turn still reads
-        them.
+        ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
+        no-response line. An attempt that produced anything, text or tool calls, records the Matrix events the turn
+        consumed as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen, so the
+        next turn still reads them.
         """
         tool_executions = team_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
@@ -716,6 +721,7 @@ class _TeamTurn:
         if len(rendered) > _MAX_LOG_MESSAGE_LENGTH:
             logger.debug("team_response_full", agents=attempt.members.display_names, response=rendered)
         return CompletedAttempt(
+            response_text="" if shown else rendered,
             replayable_text=replayable_text,
             has_visible_content=has_visible_output,
             is_empty=is_empty,

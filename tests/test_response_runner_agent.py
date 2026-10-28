@@ -1005,8 +1005,8 @@ class TestAgentBot(AgentBotTestBase):
                     pass
             except asyncio.CancelledError:
                 pass
-            # In production, send_streaming_response catches CancelledError,
-            # sends the final edit, then re-raises. We simulate the re-raise.
+            # In production, send_streaming_response writes nothing for a cancelled
+            # stream and re-raises; the reply's span exit ends it. We simulate the re-raise.
             raise asyncio.CancelledError
 
         with (

@@ -19,7 +19,7 @@ Matrix sync callback
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
-            -> response_turn.py                                  (shared blocking/streaming turn drivers)
+            -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
 ```

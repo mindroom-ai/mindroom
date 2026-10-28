@@ -476,10 +476,11 @@ class TurnRunState:
 class CompletedAttempt:
     """One attempt that ran to a terminal provider response."""
 
-    # Final text the attempt's chunks did not stream, which only an approval
-    # resume's restored attempt carries; the driver emits it once the attempt
-    # settles (an in-attempt yield would leak text that an empty-run retry or
-    # continuation is about to supersede).
+    # Final text the attempt's chunks did not stream: an approval resume's
+    # restored text, or a team's no-response line when its chunks showed
+    # nothing. The driver emits it once the attempt settles (an in-attempt
+    # yield would leak text that an empty-run retry or continuation is about
+    # to supersede).
     response_text: str = ""
     replayable_text: str = ""
     has_visible_content: bool = False
