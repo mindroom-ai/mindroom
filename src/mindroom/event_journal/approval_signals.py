@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
@@ -24,7 +25,7 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from .approval_calls import CallKey
     from .backend import Transaction
@@ -151,12 +152,30 @@ class _PausedReplyListener(_Listener):
     ended: Callable[[str], None] = field(kw_only=True)
 
 
+@dataclass(eq=False, slots=True)
+class _Wakeup:
+    loop: asyncio.AbstractEventLoop
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def set(self) -> None:
+        """Set the event on its own loop."""
+        if self.loop is _running_loop():
+            self.event.set()
+        elif not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(self.event.set)
+            except RuntimeError:
+                logger.debug("approval_signal_waiter_loop_closed")
+
+
 @dataclass
 class ApprovalSignals:
-    """One store's paused replies, derived only from what its writes committed."""
+    """One store's paused replies and decision wake-ups, derived only from what its writes committed."""
 
     _paused: dict[str, dict[str, PausedReply]] = field(default_factory=dict, init=False, repr=False)
     _paused_listeners: dict[str, list[_PausedReplyListener]] = field(default_factory=dict, init=False, repr=False)
+    # One wake-up per detached call someone waits on.
+    _wakeups: dict[CallKey, _Wakeup] = field(default_factory=dict, init=False, repr=False)
     # Publication runs on the writer's loop; subscribers may sit on others.
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -185,6 +204,9 @@ class ApprovalSignals:
             ]
             return deliveries + [delivery for reply in signal.replies for delivery in self._add(reply)]
         assert isinstance(signal, _Decided), f"unknown approval signal {signal!r}"
+        wakeup = self._wakeups.get(signal.call)
+        if wakeup is not None:
+            wakeup.set()
         return []
 
     def _add(self, reply: PausedReply) -> list[tuple[_Listener, Callable[[], None]]]:
@@ -233,6 +255,20 @@ class ApprovalSignals:
                     listeners.remove(listener)
 
         return stop
+
+    @contextmanager
+    def decision_wakeup(self, call: CallKey) -> Iterator[asyncio.Event]:
+        """Hold the wake-up a decision of ``call`` sets, until the block exits; it replaces another waiter's."""
+        wakeup = _Wakeup(asyncio.get_running_loop())
+        with self._lock:
+            self._wakeups[call] = wakeup
+        try:
+            yield wakeup.event
+        finally:
+            with self._lock:
+                # Only this waiter's own registration goes.
+                if self._wakeups.get(call) is wakeup:
+                    del self._wakeups[call]
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:

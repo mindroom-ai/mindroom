@@ -36,8 +36,8 @@ if TYPE_CHECKING:
 
     from mindroom.approval.manager import ApprovalManager
 
-# A background approval waiter rereads its durable decision once a second, so a
-# settlement can take a whole poll interval to reach it.
+# A background approval waiter wakes as its decision commits; this bound only
+# keeps a lost wake from hanging the test until the call's 30-second deadline.
 _SETTLED_DECISION_WAIT_SECONDS = 5.0
 
 
@@ -406,6 +406,50 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
             await journal.principal("router@shared").approvals.detached_decision(CallKey.detached("run-1", "call-1"))
             is None
         )
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_call_wakes_as_its_decision_commits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A waiter that already read no decision ends when one commits, long before its deadline."""
+    manager, journal, _initial_sent = await _approval_manager(tmp_path)
+    waiting = asyncio.Event()
+    original_read = ApprovalStore.detached_decision
+
+    async def note_undecided(approvals: ApprovalStore, call: CallKey) -> BackgroundApprovalDecision | None:
+        decision = await original_read(approvals, call)
+        if decision is None:
+            waiting.set()
+        return decision
+
+    monkeypatch.setattr(ApprovalStore, "detached_decision", note_undecided)
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="script",
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert await manager.settle_background_approval(_origin(), reason="Cancelled.") is True
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+        assert decision == BackgroundApprovalDecision(status="denied", reason="Cancelled.")
     finally:
         if not decision_task.done():
             decision_task.cancel()

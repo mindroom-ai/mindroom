@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.event_journal import EventJournalStore, approval_signals
+from mindroom.event_journal import CallKey, EventJournalStore, approval_signals
 from mindroom.event_journal.approval_signals import PausedReply
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 
@@ -195,4 +196,24 @@ async def test_a_load_replaces_what_the_signals_held_and_reports_the_difference(
     await store.load_approval_signals()
 
     assert ended == ["approval-1"]
+    await store.close()
+
+
+async def test_a_decision_wakes_the_waiter_registered_for_its_call(tmp_path: Path) -> None:
+    """A decided call sets its one wake-up, and a waiter that leaves removes only its own registration."""
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    signals = store.approval_signals
+    call = CallKey.detached("tool-job:job-1", "call-1")
+
+    with ExitStack() as earlier:
+        replaced = earlier.enter_context(signals.decision_wakeup(call))
+        with signals.decision_wakeup(call) as current:
+            # The earlier waiter leaves while the later one waits, which keeps its wake-up.
+            earlier.close()
+            await store.backend.write(lambda transaction: approval_signals.decided(transaction, call, None))
+            assert current.is_set()
+            assert not replaced.is_set()
+    with signals.decision_wakeup(CallKey.detached("tool-job:job-1", "call-2")) as other:
+        await store.backend.write(lambda transaction: approval_signals.decided(transaction, call, None))
+        assert not other.is_set()
     await store.close()

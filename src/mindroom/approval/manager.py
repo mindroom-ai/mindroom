@@ -349,42 +349,48 @@ class ApprovalManager:
         if reservation is None:
             return BackgroundApprovalDecision(status="denied", reason="Tool approval card could not be prepared.")
         call = CallKey.detached(origin.run_id, origin.call_id)
-        reserved = await cards.approvals.reserve_detached_card(
-            call=call,
-            owner_kind=owner_kind,
-            tool_name=tool_name,
-            toolkit_name=origin.toolkit_name,
-            invoking_agent=agent_name,
-            room_id=room_id,
-            thread_id=thread_id,
-            expires_at_ns=expires_at_ns,
-            card=reservation,
-            grant_scope=grant_scope,
-        )
-        if not reserved:
-            return BackgroundApprovalDecision(
-                status="denied",
-                reason="Approval card could not be published in this room.",
+        # Registered before the card is reserved, so a decision that commits at any point after it, an active grant's
+        # included, ends the wait.
+        with cards.approvals.signals.decision_wakeup(call) as decided:
+            reserved = await cards.approvals.reserve_detached_card(
+                call=call,
+                owner_kind=owner_kind,
+                tool_name=tool_name,
+                toolkit_name=origin.toolkit_name,
+                invoking_agent=agent_name,
+                room_id=room_id,
+                thread_id=thread_id,
+                expires_at_ns=expires_at_ns,
+                card=reservation,
+                grant_scope=grant_scope,
             )
-        await self._publish_reserved_cards([delivery_id])
-        deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
-        while True:
-            decision = await cards.approvals.detached_decision(call)
-            if decision is not None:
-                return decision
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                expired = await cards.approvals.resolve_approval_call(
-                    call,
-                    requested_status="expired",
-                    reason=TIMEOUT_REASON,
+            if not reserved:
+                return BackgroundApprovalDecision(
+                    status="denied",
+                    reason="Approval card could not be published in this room.",
                 )
-                await self._flush_decided(expired)
+            await self._publish_reserved_cards([delivery_id])
+            while True:
+                # Cleared before each read, so a decision that commits on either side of the read is seen.
+                decided.clear()
                 decision = await cards.approvals.detached_decision(call)
                 if decision is not None:
                     return decision
-                return BackgroundApprovalDecision(status="denied", reason=TIMEOUT_REASON)
-            await asyncio.sleep(min(1.0, remaining))
+                remaining = (expires_at_ns - time.time_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    expired = await cards.approvals.resolve_approval_call(
+                        call,
+                        requested_status="expired",
+                        reason=TIMEOUT_REASON,
+                    )
+                    await self._flush_decided(expired)
+                    decision = await cards.approvals.detached_decision(call)
+                    if decision is not None:
+                        return decision
+                    return BackgroundApprovalDecision(status="denied", reason=TIMEOUT_REASON)
+                with suppress(TimeoutError):
+                    async with asyncio.timeout(remaining):
+                        await decided.wait()
 
     def _grant_scope(
         self,
