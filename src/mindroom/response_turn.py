@@ -474,10 +474,10 @@ class TurnRunState:
 class CompletedAttempt:
     """One attempt that ran to a terminal provider response."""
 
-    # The attempt's deliverable final text. Streaming attempts whose chunks
-    # already delivered the document leave it empty; otherwise the driver
-    # emits it only after the attempt settles (an in-attempt yield would leak
-    # text that an empty-run retry or continuation is about to supersede).
+    # Final text the attempt's chunks did not stream, which only an approval
+    # resume's restored attempt carries; the driver emits it once the attempt
+    # settles (an in-attempt yield would leak text that an empty-run retry or
+    # continuation is about to supersede).
     response_text: str = ""
     replayable_text: str = ""
     has_visible_content: bool = False
@@ -1059,10 +1059,9 @@ class _CompletionSettle:
     # can differ from response_text (e.g. tool-rendered visible output).
     recorded_text: str = ""
     recorded_tools: tuple[ToolTraceEntry, ...] = ()
-    # The turn's deliverable final text (notice, limit message, or terminal
-    # document): the driver emits it as a final chunk when non-empty
-    # (live-streamed attempts leave it empty because their chunks already
-    # delivered the document).
+    # Final text the turn's chunks did not stream: the empty-reply notice, a
+    # continuation limit message, or an approval resume's restored text; the
+    # driver emits it as a final chunk when non-empty.
     response_text: str = ""
 
 

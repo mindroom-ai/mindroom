@@ -326,7 +326,7 @@ def _replaceable_placeholder(request: ResponseRequest) -> bool:
     return _shows_placeholder(request) and _resumed_reply() is None
 
 
-def _agent_run_metadata(request: ResponseRequest) -> dict[str, Any]:
+def _turn_run_metadata(request: ResponseRequest) -> dict[str, Any]:
     """Record what started this turn, so stored runs show which automation asked or that MindRoom wrote the prompt.
 
     The turn recorder gets it too, so a turn stopped before its run starts keeps it.
@@ -2106,7 +2106,7 @@ class ResponseRunner:
             )
             request.pipeline_timing.mark("response_complete")
 
-    async def _settle_collected_cancellation(
+    def _settle_collected_cancellation(
         self,
         exc: asyncio.CancelledError,
         *,
@@ -3108,7 +3108,7 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_agent_run_metadata(request),
+            matrix_run_metadata=_turn_run_metadata(request),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
@@ -3962,7 +3962,7 @@ class ResponseRunner:
             room_id=request.room_id,
             thread_id=resolved_target.resolved_thread_id,
             requester_id=request.user_id or execution_identity.requester_id,
-            matrix_run_metadata=None if request.matrix_run_metadata is None else dict(request.matrix_run_metadata),
+            matrix_run_metadata=_turn_run_metadata(request),
             current_sender_id=request.response_envelope.origin.acting_sender_id,
             history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
@@ -4325,7 +4325,7 @@ class ResponseRunner:
         except asyncio.CancelledError as exc:
             if current_task_is_process_shutdown():
                 raise
-            return await self._settle_collected_cancellation(
+            return self._settle_collected_cancellation(
                 exc,
                 message_id=_existing_event_id(request),
                 restart_message=f"{label} response interrupted by sync restart",

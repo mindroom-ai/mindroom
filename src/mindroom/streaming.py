@@ -764,7 +764,7 @@ class StreamingResponse:
         ):
             self.accumulated_text = self.resumed_text + canonical_final_body_candidate
 
-    async def finalize(self, client: nio.AsyncClient) -> StreamTransportOutcome:  # noqa: C901, PLR0911
+    async def finalize(self, client: nio.AsyncClient) -> StreamTransportOutcome:
         """Send a finished stream's terminal update and return immutable transport facts.
 
         Only a stream that ran to its end finalizes; a cancelled or failed one writes nothing, and its reply's span
@@ -790,9 +790,8 @@ class StreamingResponse:
             self.event_id is not None and self.placeholder_progress_sent and not self.accumulated_text.strip()
         )
         self._place_final_only_continuation(self.canonical_final_body_candidate)
-        text_to_send = self.accumulated_text
         if (
-            not text_to_send.strip()
+            not self.accumulated_text.strip()
             and canonical_final_body_candidate is not None
             and self._last_committed_visible_body_state != "visible_body"
         ):
@@ -804,24 +803,8 @@ class StreamingResponse:
                 canonical_final_body_candidate=canonical_final_body_candidate,
                 interactive_metadata=self._last_committed_interactive_metadata,
             )
-        if not text_to_send.strip():
-            text_to_send = canonical_final_body_candidate or ""
-        if not text_to_send.strip() and not has_placeholder:
-            return StreamTransportOutcome(
-                last_physical_stream_event_id=self.event_id,
-                rendered_body=None,
-                visible_body_state="none",
-                canonical_final_body_candidate=canonical_final_body_candidate,
-            )
-        if not text_to_send.strip():
-            text_to_send = _PROGRESS_PLACEHOLDER
-        response = interactive.parse_and_format_interactive(text_to_send, extract_mapping=True)
-        attempted_rendered_body = (
-            response.formatted_text
-            if (self.accumulated_text.strip() or has_placeholder or response.formatted_text.strip())
-            else None
-        )
-        if attempted_rendered_body is None:
+        if not self.accumulated_text.strip() and not has_placeholder:
+            # Nothing to send: no text arrived and no placeholder waits for an ending.
             return StreamTransportOutcome(
                 last_physical_stream_event_id=self.event_id,
                 rendered_body=None,

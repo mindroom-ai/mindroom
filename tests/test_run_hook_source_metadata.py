@@ -17,6 +17,7 @@ from tests.conftest import patch_response_runner_module, unwrap_extracted_collab
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.response_runner import ResponseRequest
@@ -58,6 +59,49 @@ async def test_agent_turn_records_its_origin_in_run_metadata(
 ) -> None:
     """A stored run says which automation asked, if any, and whether MindRoom wrote its prompt, as a job follow-up."""
     metadata = (await _turn(tmp_path, hook_source, intent)).matrix_run_metadata or {}
+    assert metadata.get(HOOK_SOURCE_RUN_METADATA_KEY) == hook_source
+    assert metadata[TURN_INTENT_RUN_METADATA_KEY] == intent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hook_source", "intent"),
+    [("automation/exploration", TurnIntent.USER_MESSAGE), (None, TurnIntent.JOB_FOLLOW_UP)],
+)
+async def test_team_turn_records_its_origin_in_run_metadata(
+    tmp_path: Path,
+    hook_source: str | None,
+    intent: TurnIntent,
+) -> None:
+    """A team's stored run says which automation asked and whether MindRoom wrote its prompt, as an agent's does."""
+    bot = _bot(tmp_path)
+    bot.orchestrator = MagicMock(config=bot.config)
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    seen: list[ResponseTurnContext] = []
+
+    def team_stream(_spec: object, ctx: ResponseTurnContext, **_kwargs: object) -> AsyncIterator[str]:
+        seen.append(ctx)
+
+        async def answer() -> AsyncIterator[str]:
+            yield "Team answer."
+
+        return answer()
+
+    with patch_response_runner_module(
+        team_response_stream=team_stream,
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+        apply_post_response_effects=AsyncMock(),
+    ):
+        await runner.generate_team_response_helper(
+            _request(hook_source, intent),
+            member_names=[bot.agent_name],
+            team_mode="coordinate",
+        )
+
+    [ctx] = seen
+    metadata = ctx.matrix_run_metadata or {}
     assert metadata.get(HOOK_SOURCE_RUN_METADATA_KEY) == hook_source
     assert metadata[TURN_INTENT_RUN_METADATA_KEY] == intent
 

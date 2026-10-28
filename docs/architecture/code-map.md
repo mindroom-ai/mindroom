@@ -287,7 +287,7 @@ Matrix sync callback
 | `history/summary_rows.py` | The conversation log's summary rows: compare-and-append of compaction chunks and mid-turn folds, the event ids each row covers, the tool calls folds took, and edit and redaction cuts |
 | `history/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
-| `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which only the turn driver writes, and the interrupted-replay snapshot it stores when the turn stops |
+| `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
 | `history/legacy_summary_system_prompt.py` | Approval resume of runs paused with the summary inside their saved system message |
 | `history/legacy_stored_tool_calls.py` | Tool-call shapes earlier releases stored, which the conversion to storage v2 stores in the current shape in every message a converted run replays |
 | `history/summary_message.py` | The compaction summary as a user message: its text, its scope or run-local marker, and the marker that replays the scope's summary after a mid-turn compacted prompt |

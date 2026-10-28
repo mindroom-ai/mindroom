@@ -25,7 +25,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 - The cancel source has one owner, the cancellation's message; the per-task source registry nobody read is gone, and with it the promise to keep the first source, which `Task.cancel` never kept.
 - Agent and team turns run one locked sequence; what differs is decided in one preparation step per kind, which returns the values the shared generation and settlement read.
   A team Stop therefore takes the agent's path and is no longer logged as an error.
-- Tool-call visibility is read once per turn, from the reply the turn claimed, instead of from live configuration three times.
+- Tool-call visibility is read once per turn, from the reply the turn claimed, because reading live configuration after later awaits let a reload split one turn between two visibilities.
 - The streamer writes only a stream that ran to its end; a cancelled or failed stream raises, and the span exit writes the note as a note segment below what the reply's records say it shows, through `interrupted_end`, for both delivery modes.
   A stopped stream's final message therefore keeps what it last showed plus the note; text generated after its last progress edit stays in history, not in the message.
 - A whole delivery with nothing to show ends as a stream that showed only its placeholder does: the placeholder goes, instead of the placeholder text standing as a completed answer.
@@ -40,10 +40,9 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
   It needed every consumer (Matrix streamer, collector, API first-event status, approval collection, voice, children) and changes error replies from answers to cancellations; it stays a follow-up of #3119.
 - Turning a final-only `RunFinished` body into a delta, which would move final-only replies from `before_response` to `final_response_transform`.
 - Routing the OpenAI-compatible team endpoints through the Matrix team driver, which would add document rendering the API strips again.
-- Turning `response_runner.py` into a package while the approval session moves its approval methods out of the same file.
+- Turning `response_runner.py` into a package while the approval-records refactor moves its approval methods out of the same file.
 
 ## Open
 
 - An ordinary answer whose final write is recorded but not yet acknowledged reports `suspended`, so its after-response work never runs (only approvals re-run it after acknowledgement); whether its run-only effects should run at once is a product decision.
 - After a Stop the streamer waits 0.5 s for its stream task to unwind, and that task now stores the interrupted turn; a store slower than that still lands the row, but possibly after the conversation's next turn started.
-- The empty-reply and failure outcomes still differ between delivery modes in `failure_reason` strings that plugins read (`stream_completed_without_visible_body` for a reply with nothing to show; `str(error)` for a delivery failure in either mode).
