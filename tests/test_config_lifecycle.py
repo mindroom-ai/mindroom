@@ -200,6 +200,47 @@ async def test_a_reload_ends_the_script_launch_fence_once_published_or_failed(
     assert applied_when_released == [current_config if apply_fails else new_config]
 
 
+@pytest.mark.asyncio
+async def test_another_update_waiting_for_the_config_lock_starts_after_the_launch_fence_ends(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A plugin reload queued behind a config reload never shares the launch fence that reload then ends."""
+    monkeypatch.setattr(
+        "mindroom.orchestration.config_lifecycle.load_config",
+        MagicMock(return_value=Config(defaults={"enable_streaming": False})),
+    )
+    lifecycle = _make_lifecycle(tmp_path, current_config=Config())
+    applying = asyncio.Event()
+    release_apply = asyncio.Event()
+    order: list[str] = []
+
+    async def apply_plan(*_args: object) -> bool:
+        applying.set()
+        await release_apply.wait()
+        return True
+
+    async def finish_reload() -> None:
+        # The real release runs in its own task, so it yields before it ends the fence.
+        await asyncio.sleep(0)
+        order.append("fence ended")
+
+    async def queued_update() -> None:
+        async with lifecycle.config_update_lock:
+            order.append("queued update")
+
+    lifecycle.apply_update_plan = AsyncMock(side_effect=apply_plan)
+    lifecycle.finish_reload = AsyncMock(side_effect=finish_reload)
+    reload_task = asyncio.create_task(lifecycle._update_config())
+    await asyncio.wait_for(applying.wait(), timeout=1)
+    queued = asyncio.create_task(queued_update())
+    await asyncio.sleep(0)
+    release_apply.set()
+    await asyncio.wait_for(asyncio.gather(reload_task, queued), timeout=1)
+
+    assert order == ["fence ended", "queued update"]
+
+
 _AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
 
 

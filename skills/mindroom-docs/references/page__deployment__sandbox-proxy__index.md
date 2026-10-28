@@ -136,7 +136,8 @@ Install proxied plugin tools in the runner image, or mount only the plugin direc
 
 Use this to run the primary runtime on the host, including with `uvx mindroom run`, and give each worker key its own persistent Docker container, without Kubernetes.
 A container is reused until its launch configuration changes.
-That covers only the config fields, files, and tools the worker sees, so edits to models, prompts, or other agents do not restart it, and an edit reaches workers once MindRoom has applied it.
+That covers only the config fields and files the worker sees, so edits to models, prompts, or other agents do not restart it, and an edit reaches workers once MindRoom has applied it.
+A change to the registered tools, such as adding a plugin or an MCP server, restarts every Docker worker on its next use, which ends background commands running in it.
 Idle containers keep running unless `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` is set to a positive interval, which then stops containers idle longer than `MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS`.
 When MindRoom shuts down, it removes its worker containers but keeps each worker's files, and the worker's next call starts a new container.
 

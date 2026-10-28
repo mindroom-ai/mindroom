@@ -251,17 +251,13 @@ class ConfigReloadLifecycle:
 
             async def apply_update_steps() -> None:
                 nonlocal updated
-                try:
-                    updated = await self._apply_config_update_steps(
-                        fully_applied_config=current_config,
-                        requested_config=new_config,
-                        repair_config=repair_config,
-                        requested_transition=requested_transition,
-                    )
-                    self.record_applied(new_config)
-                finally:
-                    # Only now may a new script launch read the applied config, whether this reload published or failed.
-                    await self.finish_reload()
+                updated = await self._apply_config_update_steps(
+                    fully_applied_config=current_config,
+                    requested_config=new_config,
+                    repair_config=repair_config,
+                    requested_transition=requested_transition,
+                )
+                self.record_applied(new_config)
 
             applied = await self._apply_after_response_drain(
                 apply_update_steps,
@@ -282,20 +278,26 @@ class ConfigReloadLifecycle:
         """Restore the last-good state when needed, then apply the requested config."""
         updated = False
         async with self.config_update_lock:
-            if repair_config is not None:
-                self._incomplete_config = repair_config
-                updated = await self._apply_config_transition(repair_config, fully_applied_config)
-                self._incomplete_config = None
-            if fully_applied_config.runtime_model_dump() != requested_config.runtime_model_dump():
-                self._incomplete_config = requested_config
-                requested_updated = await self._apply_config_transition(
-                    fully_applied_config,
-                    requested_config,
-                    requested_transition,
-                )
-                updated = updated or requested_updated
-                self._incomplete_config = None
-            self._fully_applied_config = requested_config
+            try:
+                if repair_config is not None:
+                    self._incomplete_config = repair_config
+                    updated = await self._apply_config_transition(repair_config, fully_applied_config)
+                    self._incomplete_config = None
+                if fully_applied_config.runtime_model_dump() != requested_config.runtime_model_dump():
+                    self._incomplete_config = requested_config
+                    requested_updated = await self._apply_config_transition(
+                        fully_applied_config,
+                        requested_config,
+                        requested_transition,
+                    )
+                    updated = updated or requested_updated
+                    self._incomplete_config = None
+                self._fully_applied_config = requested_config
+            finally:
+                # New script launches read the applied config, so the reload's launch fence ends only once it is
+                # published or the reload failed, and still under the lock, so a plugin reload waiting for it never
+                # shares a fence this reload then ends.
+                await self.finish_reload()
         return updated
 
     async def _apply_config_transition(
