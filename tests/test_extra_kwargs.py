@@ -22,6 +22,7 @@ from mindroom.providers.anthropic.messages import build_provider as build_claude
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
 from mindroom.providers.anthropic.settings import ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
+from mindroom.providers.claude_wire_blocks import RebuiltBlock
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -365,6 +366,23 @@ def test_thinking_and_empty_text_never_carry_a_marker() -> None:
 
     assert "cache_control" not in json.dumps(prepared["messages"][1])
     assert prepared["messages"][0]["content"][0]["cache_control"] == _FIVE_MINUTES
+
+
+def test_only_a_stored_assistant_block_carries_a_marker() -> None:
+    """Text a stored Claude response holds can take a rung; text rebuilt from a message's fields cannot."""
+    stored = _text("stored answer")
+    rebuilt = RebuiltBlock(text="rebuilt answer", type="text")
+
+    def marked(answer: dict[str, Any]) -> list[bool]:
+        messages = [
+            {"role": "user", "content": [_text("earlier turn")]},
+            {"role": "assistant", "content": [answer]},
+            {"role": "user", "content": [_text("this turn")]},
+        ]
+        return [has_cache_marker(message["content"][0]) for message in _prepared({"messages": messages})["messages"]]
+
+    assert marked(stored) == [False, True, True]
+    assert marked(rebuilt) == [True, False, True]
 
 
 def test_the_ladder_never_mutates_the_request_it_marks() -> None:

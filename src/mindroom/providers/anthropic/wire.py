@@ -30,7 +30,7 @@ from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE_PREFIX_CHECKED_THINKING_MODELS
-from mindroom.providers.claude_wire_blocks import as_dict
+from mindroom.providers.claude_wire_blocks import RebuiltBlock, as_dict
 from mindroom.providers.media_files import read_media_file
 
 if TYPE_CHECKING:
@@ -205,11 +205,6 @@ def format_claude_messages(
     return FormattedConversation(messages=merged, system=system_texts(messages))
 
 
-def _block_type(block: Any) -> str | None:  # noqa: ANN401
-    """Return the type of a request block, whether it is a dict or one of the SDK's block models."""
-    return block.get("type") if isinstance(block, dict) else block.type
-
-
 def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge consecutive same-role turns; two assistant turns share one message only without the earlier thinking."""
     merged: list[dict[str, Any]] = []
@@ -217,7 +212,7 @@ def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if merged and merged[-1]["role"] == turn["role"]:
             previous = merged[-1]["content"]
             if turn["role"] == "assistant":
-                previous = [block for block in previous if _block_type(block) not in _THINKING_BLOCK_TYPES]
+                previous = [block for block in previous if block.get("type") not in _THINKING_BLOCK_TYPES]
             merged[-1] = {"role": turn["role"], "content": [*previous, *turn["content"]]}
         else:
             merged.append(turn)
@@ -237,7 +232,7 @@ def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any
         if index >= start or turn["role"] != "assistant":
             kept.append(turn)
             continue
-        content = [block for block in turn["content"] if _block_type(block) not in _THINKING_BLOCK_TYPES]
+        content = [block for block in turn["content"] if block.get("type") not in _THINKING_BLOCK_TYPES]
         if content:
             kept.append({**turn, "content": content})
     return kept
@@ -245,7 +240,7 @@ def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any
 
 def _answers_tool_calls(turn: dict[str, Any]) -> bool:
     """Return whether a user turn carries tool results, which continue the tool loop instead of starting a turn."""
-    return any(_block_type(block) == "tool_result" for block in turn["content"])
+    return any(block.get("type") == "tool_result" for block in turn["content"])
 
 
 def _user_blocks(message: Message, provider: str) -> list[Any]:
@@ -331,24 +326,22 @@ def _stored_assistant_blocks(message: Message) -> list[dict[str, Any]] | None:
     ]
 
 
-def _assistant_blocks(message: Message) -> list[Any]:
+def _assistant_blocks(message: Message) -> list[dict[str, Any]]:
     """Return an assistant turn's blocks: the stored response blocks, or a rebuild from the message fields.
 
-    Rebuilt thinking, text, and tool-use blocks are the SDK's block models rather than dicts. The cache ladder
-    places breakpoints on dict blocks only, so a turn rebuilt from another provider's fields never takes a
-    breakpoint while an echoed stored turn can, which keeps breakpoint placement where the goldens pin it.
+    Rebuilt thinking, text, and tool-use blocks are ``RebuiltBlock`` dicts, which never take a cache breakpoint.
     """
     stored = _stored_assistant_blocks(message)
     if stored is not None:
         return stored
     provider_data = message.provider_data or {}
-    blocks: list[Any] = []
+    blocks: list[dict[str, Any]] = []
     signature = provider_data.get("signature")
     if message.reasoning_content is not None and isinstance(signature, str) and signature:
-        blocks.append(ThinkingBlock(thinking=message.reasoning_content, signature=signature, type="thinking"))
+        blocks.append(RebuiltBlock(signature=signature, thinking=message.reasoning_content, type="thinking"))
     # Reasoning without a signature (another provider's, or a partially stored response) cannot be replayed.
     if message.redacted_reasoning_content is not None:
-        blocks.append(RedactedThinkingBlock(data=message.redacted_reasoning_content, type="redacted_thinking"))
+        blocks.append(RebuiltBlock(data=message.redacted_reasoning_content, type="redacted_thinking"))
     # LEGACY_COMPAT: Claude turns stored with server-tool blocks but without the response's content blocks.
     # Legacy format: an assistant message whose provider_data carries "server_tool_blocks" (each response block
     # other than text, thinking, and tool_use, as the SDK's model_dump) and no "content_blocks"; selected
@@ -362,11 +355,11 @@ def _assistant_blocks(message: Message) -> list[Any]:
     if isinstance(server_blocks, list):
         blocks.extend(block for block in server_blocks if isinstance(block, dict))
     if isinstance(message.content, str) and message.content.strip():
-        blocks.append(TextBlock(text=message.content, type="text"))
+        blocks.append(RebuiltBlock(text=message.content, type="text"))
     for call in message.tool_calls or []:
         function = call["function"]
         blocks.append(
-            ToolUseBlock(id=call["id"], input=call_arguments(function), name=function["name"], type="tool_use"),
+            RebuiltBlock(id=call["id"], input=call_arguments(function), name=function["name"], type="tool_use"),
         )
     return blocks
 

@@ -6,8 +6,8 @@ rejects such a request with HTTP 400, so every later turn of that thread would f
 repair the wire body instead, which also heals histories stored before the rules existed. Inline media
 Claude cannot read, or past the provider's size limits, becomes a short text note for the same reason.
 Each transform reads the body ``format_claude_messages`` built, whose ``messages`` are role dicts with a block
-list as ``content``; a block is a stored dict or one of the SDK's block models. None of the transforms mutate
-their input.
+list as ``content``. An assistant turn's blocks are dicts; a user turn can also carry the content list a message
+stored. None of the transforms mutate their input.
 """
 
 from __future__ import annotations
@@ -65,12 +65,10 @@ def without_replayed_citations(body: dict[str, Any]) -> dict[str, Any]:
 
     def uncited_content(message: dict[str, Any]) -> list[Any] | None:
         content = message["content"]
-        if message["role"] != "assistant" or not any(_cited_text_block(block) is not None for block in content):
+        if message["role"] != "assistant" or not any(_is_cited_text(block) for block in content):
             return None
         return [
-            block
-            if (cited := _cited_text_block(block)) is None
-            else {k: v for k, v in cited.items() if k != "citations"}
+            {k: v for k, v in block.items() if k != "citations"} if _is_cited_text(block) else block
             for block in content
         ]
 
@@ -170,35 +168,28 @@ def with_replay_safe_tool_search_results(body: dict[str, Any]) -> dict[str, Any]
 
 
 def _replay_safe_search_content(message: dict[str, Any]) -> list[Any] | None:
+    if message["role"] != "assistant":
+        return None
     content = message["content"]
-    prepared_content: list[Any] = []
+    prepared_content: list[dict[str, Any]] = []
     changed = False
     for block in content:
-        block_dict = as_dict(block)
-        if (
-            block_dict is not None
-            and block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
-            and not block_dict.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS
-        ):
-            prepared_content.append({k: v for k, v in block_dict.items() if k in _TOOL_SEARCH_RESULT_INPUT_KEYS})
+        if block.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE and not block.keys() <= _TOOL_SEARCH_RESULT_INPUT_KEYS:
+            prepared_content.append({k: v for k, v in block.items() if k in _TOOL_SEARCH_RESULT_INPUT_KEYS})
             changed = True
         else:
             prepared_content.append(block)
     paired_result_ids = {
-        block_dict["tool_use_id"]
+        block["tool_use_id"]
         for block in prepared_content
-        if (block_dict := as_dict(block)) is not None
-        and block_dict.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE
-        and isinstance(block_dict.get("tool_use_id"), str)
+        if block.get("type") == TOOL_SEARCH_RESULT_BLOCK_TYPE and isinstance(block.get("tool_use_id"), str)
     }
-    sanitized_content: list[Any] = []
+    sanitized_content: list[dict[str, Any]] = []
     for block in prepared_content:
-        block_dict = as_dict(block)
         if (
-            block_dict is not None
-            and block_dict.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
-            and block_dict.get("name") == TOOL_SEARCH_TOOL_NAME
-            and block_dict.get("id") not in paired_result_ids
+            block.get("type") == SERVER_TOOL_USE_BLOCK_TYPE
+            and block.get("name") == TOOL_SEARCH_TOOL_NAME
+            and block.get("id") not in paired_result_ids
         ):
             changed = True
             continue
@@ -220,13 +211,14 @@ def without_unavailable_tool_references(body: dict[str, Any]) -> dict[str, Any]:
     )
 
     def content_without_stale_references(message: dict[str, Any]) -> list[Any] | None:
+        if message["role"] != "assistant":
+            return None
         content = message["content"]
         prepared: list[Any] | None = None
         for index, block in enumerate(content):
-            block_dict = as_dict(block)
-            if block_dict is None or block_dict.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
+            if block.get("type") != TOOL_SEARCH_RESULT_BLOCK_TYPE:
                 continue
-            filtered = _search_result_with_available_references(block_dict, available)
+            filtered = _search_result_with_available_references(block, available)
             if filtered is None:
                 continue
             if prepared is None:
@@ -261,11 +253,8 @@ def _is_tool_result_block(block: object) -> bool:
     return block_dict is not None and block_dict.get("type") == "tool_result"
 
 
-def _cited_text_block(block: object) -> dict[str, Any] | None:
-    block_dict = as_dict(block)
-    if block_dict is None or block_dict.get("type") != "text" or "citations" not in block_dict:
-        return None
-    return block_dict
+def _is_cited_text(block: dict[str, Any]) -> bool:
+    return block.get("type") == "text" and "citations" in block
 
 
 __all__ = [

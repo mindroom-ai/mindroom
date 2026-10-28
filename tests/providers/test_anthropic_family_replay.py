@@ -357,7 +357,7 @@ async def test_cited_answers_replay_as_plain_text(tmp_path: Path, route: str, ci
 
 @pytest.mark.asyncio
 async def test_a_turn_stored_without_content_blocks_replays_its_server_tool_blocks(tmp_path: Path) -> None:
-    """A web-search answer stored only as its fields and server-tool blocks replays the search ahead of the answer."""
+    """A web-search answer stored only as its fields and server-tool blocks replays its reasoning and search first."""
     search_use = {"type": "server_tool_use", "id": "srvtoolu_01", "name": "web_search", "input": {"query": "Paris"}}
     search_result = {
         "type": "web_search_tool_result",
@@ -376,6 +376,7 @@ async def test_a_turn_stored_without_content_blocks_replays_its_server_tool_bloc
         role="assistant",
         content="It is sunny in Paris.",
         reasoning_content="Search first.",
+        redacted_reasoning_content="opaque",
         provider_data={"signature": "sig-1", "server_tool_blocks": [search_use, search_result]},
         from_history=True,
     )
@@ -388,15 +389,16 @@ async def test_a_turn_stored_without_content_blocks_replays_its_server_tool_bloc
 
     body = await _sent(route_provider("anthropic", tmp_path, wire), wire, messages)
 
-    assert [
-        {key: value for key, value in block.items() if key != "cache_control"}
-        for block in body["messages"][1]["content"]
-    ] == [
-        {"type": "thinking", "thinking": "Search first.", "signature": "sig-1"},
-        search_use,
-        search_result,
-        {"type": "text", "text": "It is sunny in Paris."},
-    ]
+    # Rebuilt blocks keep the key order the SDK's block models sent, so the request bytes stay as they were.
+    assert json.dumps(body["messages"][1]["content"]) == json.dumps(
+        [
+            {"signature": "sig-1", "thinking": "Search first.", "type": "thinking"},
+            {"data": "opaque", "type": "redacted_thinking"},
+            search_use,
+            search_result,
+            {"text": "It is sunny in Paris.", "type": "text"},
+        ],
+    )
 
 
 # --- Tool result order ----------------------------------------------------------------------------------------
