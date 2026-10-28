@@ -51,6 +51,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams import envelope
 from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
+from mindroom.teams.presentation import NO_TEAM_RESPONSE
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
@@ -1262,7 +1263,7 @@ async def _writer_unavailable() -> None:
             "**Writer**: Writer unavailable\n\n\n*No team consensus - showing individual responses only*",
             id="member-failed-before-text",
         ),
-        pytest.param([answer("\n")], [], "\n", id="blank-leader-text"),
+        pytest.param([answer("\n")], [], NO_TEAM_RESPONSE, id="blank-leader-text"),
     ],
 )
 async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
@@ -1272,10 +1273,11 @@ async def test_an_approved_resume_that_shows_no_text_renders_its_finished_runs(
     writer: list[list[ScriptStep]],
     body: str,
 ) -> None:
-    """A resume whose runs write no text shows what they hand over, as the Agno-backed resume did.
+    """A resume whose runs write no text shows what they hand over, else the no-reply note, as a new team turn does.
 
-    A member the resumed leader hands a task and that fails before any text shows its error; without member text the
-    leader's own text stands. The approved checker says nothing, so the paused notice it carried over shows nowhere.
+    A member the resumed leader hands a task and that fails before any text shows its error; a leader that writes only
+    blank text leaves the no-reply note. The approved checker says nothing, so the paused notice it carried over shows
+    nowhere.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)

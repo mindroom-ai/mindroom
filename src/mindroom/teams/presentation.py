@@ -14,7 +14,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_loop.run import own_answers
 from mindroom.delegation.state import member_slot_id
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.message_builder import opens_with_markdown_block
@@ -34,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from mindroom.llm.events import ReportedCall
-    from mindroom.llm.runs import AnyRunRecord
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamRunEvent
 
@@ -105,15 +103,6 @@ def render_team_member_slots(
         if per_member[member_id].strip()
     ]
     return _with_consensus(contributions, consensus.strip(), finished=finished)
-
-
-def finished_run_text(record: AnyRunRecord) -> str:
-    """Return a finished run's text: what it shows (``handover_content``), or else its own answers (``own_answers``).
-
-    A failed run shows why it failed, credentials redacted, and a run without content never shows an earlier reply
-    of the thread that its input carried.
-    """
-    return record.handover_content or "\n\n".join(own_answers(record))
 
 
 _INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
@@ -428,7 +417,6 @@ __all__ = [
     "NO_TEAM_RESPONSE",
     "TeamStreamPresentation",
     "apply_team_event",
-    "finished_run_text",
     "format_team_header",
     "publish_team_presentation",
     "render_team_member_slots",

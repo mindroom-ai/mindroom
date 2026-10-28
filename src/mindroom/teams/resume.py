@@ -41,7 +41,6 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
     TeamStreamPresentation,
-    finished_run_text,
     format_team_header,
     publish_team_presentation,
 )
@@ -436,11 +435,10 @@ async def continue_paused_team_run(
             raise pause_without_approval_error(continued, entity_label="team")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
-        # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
-        # note. The document already holds what each run handed over since the resume, so rendering the member runs
-        # again would add nothing.
+        # The document already holds what each run handed over since the resume, the leader's text included, so one
+        # that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
         response_text = presentation.render_body(finished=True) or (
-            format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
+            format_team_header(members.display_names) + NO_TEAM_RESPONSE
         )
         return CompletedApprovalRun(
             response_text=response_text,

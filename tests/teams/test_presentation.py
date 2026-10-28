@@ -10,7 +10,6 @@ import pytest
 
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
@@ -19,7 +18,6 @@ from mindroom.teams.members import ResolvedExactTeamMembers
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
-    finished_run_text,
     format_team_header,
     render_team_member_slots,
     strip_team_display,
@@ -137,30 +135,6 @@ def test_members_without_a_consensus_get_the_no_consensus_note_once_finished_and
         finished=finished,
     ) == ["\n**Team Consensus**:", "Team consensus only"]
     assert format_team_header(["Ledger", "Scout"]) == "🤝 **Team Response** (Ledger, Scout):\n\n"
-
-
-def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> None:
-    """A run whose content is empty shows the text its own model requests wrote.
-
-    An earlier reply in the thread reaches the run's input as an assistant message no model answered, so it is not
-    the run's text.
-    """
-    answered = {"mindroom_model": {"id": "scout-model", "provider": "Synthetic"}}
-    scout = RunRecord(
-        run_id="scout-run",
-        agent_id="scout",
-        agent_display_name="Scout",
-        messages=[
-            Message(role="assistant", content="\n\nAn earlier reply."),
-            Message(role="user", content="Find vendors."),
-            Message(role="assistant", content="Three vendors.", provider_data=answered),
-            Message(role="assistant", tool_calls=[{"id": "call-1"}], provider_data=answered),
-            Message(role="tool", content="two more", tool_call_id="call-1"),
-            Message(role="assistant", content="Two more.", provider_data=answered),
-        ],
-    )
-
-    assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
 
 
 _RAW_FAILURE = "checker provider down: api_key=example-secret"

@@ -74,7 +74,6 @@ from mindroom.teams.members import (
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
     TeamStreamPresentation,
-    finished_run_text,
     format_team_header,
 )
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
@@ -696,11 +695,11 @@ class _TeamTurn:
         rendered = format_team_header(attempt.members.display_names) + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if body_text else ""
         response_text = "" if shown else rendered
-        leader_text = finished_run_text(record)
+        leader_text = record.handover_content or ""
         if (
             self.ctx.allow_no_report_response
             and is_silent_schedule_no_report_response(leader_text)
-            and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
+            and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
         ):
             # A quiet scheduled reply delivers and records the bare token, not the team document.
             response_text = replayable_text = leader_text.strip()

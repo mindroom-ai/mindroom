@@ -432,11 +432,6 @@ def own_model_messages(record: AnyRunRecord) -> list[Message]:
     return [message for message in record.messages if is_own_model_message(message)]
 
 
-def own_answers(record: AnyRunRecord) -> list[str]:
-    """Return the text of each of the run's own model messages (``own_model_messages``) that has any, oldest first."""
-    return [message.get_content_string() for message in own_model_messages(record) if message.content]
-
-
 __all__ = [
     "ApprovedCall",
     "Persist",
@@ -444,7 +439,6 @@ __all__ = [
     "check_approved_tools_offered",
     "decide_requirements",
     "drive_run",
-    "own_answers",
     "own_model_messages",
     "plan_resume",
     "resume_agent",
