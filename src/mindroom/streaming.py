@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
@@ -166,15 +166,11 @@ def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTrac
 
 
 class StreamingDeliveryError(Exception):
-    """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it.
+    """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it."""
 
-    ``tool_trace`` is the trace the stream had when it stopped.
-    """
-
-    def __init__(self, error: BaseException, *, tool_trace: list[ToolTraceEntry]) -> None:
+    def __init__(self, error: BaseException) -> None:
         super().__init__(str(error))
         self.error = error
-        self.tool_trace = tool_trace.copy()
 
 
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
@@ -526,6 +522,8 @@ type ProgressPublisher = Callable[[StructuredStreamChunk], Awaitable[None]]
 class StreamingResponse:
     """Manages a streaming response with incremental message updates."""
 
+    # Whether a text chunk replaces the reply's body, as a team's whole documents do, instead of continuing it.
+    replaces_text: ClassVar[bool] = False
     target: MessageTarget
     config: Config
     runtime_paths: RuntimePaths
@@ -646,10 +644,6 @@ class StreamingResponse:
             *self.tool_trace[:resumed_count],
             *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
         ]
-
-    def uses_replacement_updates(self) -> bool:
-        """Return whether text chunks replace the current visible body."""
-        return False
 
     def _append_incremental_text(self, new_chunk: str) -> None:
         """Append additive streaming text regardless of snapshot replacement mode."""
@@ -1336,9 +1330,7 @@ class ReplacementStreamingResponse(StreamingResponse):
     not incremental concatenation.
     """
 
-    def uses_replacement_updates(self) -> bool:
-        """Return whether each visible chunk replaces the current body."""
-        return True
+    replaces_text: ClassVar[bool] = True
 
     def _update(self, new_chunk: str) -> None:
         """Replace the text below any stopped attempt's text with new chunk, numbering its tools after that attempt's."""
@@ -1508,7 +1500,7 @@ async def _apply_visible_text_chunk(
     streaming._warmup_state.clear_terminal_failures()
     prior_delta_at = streaming.last_delta_at
     apply_chunk(text_chunk)
-    if replacement_suffixes and streaming.uses_replacement_updates():
+    if replacement_suffixes and streaming.replaces_text:
         for suffix in replacement_suffixes:
             if suffix not in streaming.accumulated_text:
                 streaming._append_incremental_text(suffix)
@@ -1582,8 +1574,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     apply_chunk=streaming._append_incremental_text,
                     boundary_refresh=True,
                     wait_for_capture=(
-                        streaming.uses_replacement_updates()
-                        and streaming.matching_inflight_nonterminal_capture() is None
+                        streaming.replaces_text and streaming.matching_inflight_nonterminal_capture() is None
                     ),
                 )
                 continue
@@ -2093,10 +2084,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         "Stream delivery controller raised during suspension cleanup",
                         error=str(delivery_cleanup_error),
                     )
-                    raise StreamingDeliveryError(
-                        delivery_cleanup_error,
-                        tool_trace=streaming.tool_trace,
-                    ) from delivery_cleanup_error
+                    raise StreamingDeliveryError(delivery_cleanup_error) from delivery_cleanup_error
                 if streaming.has_uncommitted_presentation():
                     try:
                         await streaming._send_or_edit_message(
@@ -2109,10 +2097,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                         suspension_error = RuntimeError(
                             f"Stream suspension presentation delivery failed: {delivery_error}",
                         )
-                        raise StreamingDeliveryError(
-                            suspension_error,
-                            tool_trace=streaming.tool_trace,
-                        ) from delivery_error
+                        raise StreamingDeliveryError(suspension_error) from delivery_error
                 exc.capture_presentation(streaming.committed_presentation())
                 raise
             delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
@@ -2134,7 +2119,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
                     error=str(delivery_cleanup_error),
                 )
             # The stream writes no ending of its own: the reply's span exit notes the failure.
-            raise StreamingDeliveryError(delivery_error, tool_trace=streaming.tool_trace) from delivery_error
+            raise StreamingDeliveryError(delivery_error) from delivery_error
         else:
             transport_outcome = await streaming.finalize(client)
         finally:

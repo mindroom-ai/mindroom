@@ -566,7 +566,7 @@ type _CollectedChunk = str | TextDelta | StructuredStreamChunk | ToolStarted | T
 def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: _CollectedChunk) -> None:
     """Fold one stream chunk into a collected presentation; a team's document arrives whole in each structured chunk."""
     if isinstance(chunk, str):
-        presentation.append_text(chunk)
+        presentation.show_text(chunk)
     elif isinstance(chunk, TextDelta):
         presentation.append_text(chunk.text)
     elif isinstance(chunk, StructuredStreamChunk):
@@ -613,8 +613,7 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
 
     Only the delegate tools run outside the loop, and the delegation driver resumes a run paused on them; a run
     paused on any other externally executed call has nothing that can resume it, so the reply fails loudly. The
-    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it, and a blocking
-    reply also raises it through the runner.
+    loop stored the ``PAUSED`` row; the reply's lifecycle owner then records the failure over it.
     """
     pending = [
         requirement.tool_execution.tool_name

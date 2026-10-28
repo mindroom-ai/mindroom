@@ -794,9 +794,8 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
-# TODO(simplify): ResponseRunner mixes the agent and team turn drivers, approval pause, resume, and recovery,
-# and the locked span lifecycle. Split approval handling and the team driver into focused modules, as teams/
-# and reply_turn/ were. Contributors only; no behavior change (#3075).
+# TODO(simplify): ResponseRunner mixes the locked turn with approval pause, resume, and recovery. Split approval
+# handling into focused modules, as teams/ and reply_turn/ were. Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
     """Run one response lifecycle while keeping bot seams patchable."""
@@ -4276,8 +4275,6 @@ class ResponseRunner:
             if current_task_is_process_shutdown():
                 raise
             error = raised.error if isinstance(raised, StreamingDeliveryError) else raised
-            if isinstance(raised, StreamingDeliveryError):
-                tool_trace[:] = raised.tool_trace
             self.deps.logger.exception(f"Error in {label.lower()} streaming response", error=str(error))
             # A failure before the participation decision stays quiet, wherever the stream failed.
             if skipped := _skip_unapproved_response(participation):
@@ -4286,7 +4283,7 @@ class ResponseRunner:
 
         if participation is not None and participation.is_silent:
             return _skipped_participation_outcome()
-        progress.note_delivery_started(transport_outcome.last_physical_stream_event_id)
+        progress.note_delivery_started()
         return await self._finalize_streamed_turn(
             request=request,
             delivery_target=runtime.resolved_target,
@@ -4319,6 +4316,7 @@ class ResponseRunner:
                 presentation=CollectedStreamPresentation(
                     show_tool_calls=runtime.show_tool_calls,
                     track_hidden_tools=True,
+                    replaces_text=turn.streaming_cls.replaces_text,
                 ),
             )
             tool_trace.extend(collected_trace)
@@ -4353,7 +4351,7 @@ class ResponseRunner:
 
         if runtime.participation is not None and runtime.participation.is_silent:
             return _skipped_participation_outcome()
-        progress.note_delivery_started(_existing_event_id(request))
+        progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
                 target=runtime.resolved_target,

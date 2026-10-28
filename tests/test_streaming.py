@@ -915,7 +915,6 @@ async def test_a_stream_cut_short_writes_no_ending_of_its_own(
     if terminal == "error":
         assert isinstance(raised.value, StreamingDeliveryError)
         assert str(raised.value.error) == "Provider failed"
-        assert raised.value.tool_trace == []
     else:
         assert raised.value.args == (SYNC_RESTART_CANCEL_MSG if terminal == "restart" else USER_STOP_CANCEL_MSG,)
     assert gateway.ops == []
@@ -1177,6 +1176,7 @@ async def _run_resumed_stream(
     hooks: ReplyStreamHooks,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     resumed: UnfinishedStreamedReply = _STOPPED_REPLY,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -1188,6 +1188,7 @@ async def _run_resumed_stream(
         existing_event_id="$reply",
         adopt_existing_placeholder=True,
         resumed=resumed,
+        tool_trace_collector=tool_trace_collector,
         **hooks,
     )
 
@@ -1290,15 +1291,16 @@ async def test_a_failed_first_resumed_edit_keeps_the_stopped_text(config: Config
         message = "Provider failed"
         raise RuntimeError(message)
 
+    trace: list[ToolTraceEntry] = []
     with (
         patch("mindroom.streaming.edit_message_result", new=edit_failing_first),
-        pytest.raises(StreamingDeliveryError) as raised,
+        pytest.raises(StreamingDeliveryError),
     ):
-        await _run_resumed_stream(config, failing_continuation(), hooks=gateway.hooks())
+        await _run_resumed_stream(config, failing_continuation(), hooks=gateway.hooks(), tool_trace_collector=trace)
 
-    # Nothing landed, so the reply still shows the stopped attempt, whose tool calls the failure reports.
+    # Nothing landed, so the reply still shows the stopped attempt, whose tool calls the failed stream reports.
     assert gateway.ops == []
-    assert [entry.tool_name for entry in raised.value.tool_trace] == ["counter"]
+    assert [entry.tool_name for entry in trace] == ["counter"]
 
 
 @pytest.mark.asyncio

@@ -664,8 +664,8 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        A blocking pause and a streamed one freeze the same document, so neither shows the paused notices its runs
-        hold as their content (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
+        The pause freezes that document, which does not show the paused notices its runs hold as their content
+        (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(
             record,

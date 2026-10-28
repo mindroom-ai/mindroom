@@ -5928,7 +5928,7 @@ async def test_streaming_midstream_failure_records_the_stopped_turn_and_leaves_i
                 break
         # The streamer closes the response stream before it reports the failure.
         await cast("Any", stream).aclose()
-        raise StreamingDeliveryError(RuntimeError("boom"), tool_trace=[])
+        raise StreamingDeliveryError(RuntimeError("boom"))
 
     finalize = AsyncMock()
     persist = MagicMock()

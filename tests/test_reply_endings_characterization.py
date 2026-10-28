@@ -962,6 +962,25 @@ async def test_a_completed_team_reply(
     assert not await turn.pending()
 
 
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+async def test_a_team_leader_failure_shows_the_error_in_place_of_the_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """Pins a team whose leader fails after its members answered: the error replaces the document, streamed or whole."""
+    turn = await _turn(tmp_path, monkeypatch, streaming=streaming, scripts=_team_scripts(consensus=[Await(_explode)]))
+
+    assert await _team_reply(turn) == "$sent0"
+
+    body = turn.homeserver.bodies[-1]
+    assert "model exploded" in body
+    assert "Writer fact." not in body
+    [team_run] = [run for run in turn.team_runs() if isinstance(run, TeamRunRecord)]
+    assert is_interrupted_replay_run(team_run)
+    assert _original_status(team_run) == "error"
+
+
 async def test_a_user_stop_mid_stream_cancels_the_team_reply(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1068,7 +1068,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=StreamingDeliveryError(RuntimeError("boom"), tool_trace=[]),
+                side_effect=StreamingDeliveryError(RuntimeError("boom")),
             ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,

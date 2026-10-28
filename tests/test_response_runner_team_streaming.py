@@ -231,7 +231,7 @@ async def _fail_after_the_first_chunk(request: StreamingDeliveryRequest) -> Stre
     """Fail a stream's delivery after its first chunk, as the streamer does: it closes the stream, then raises."""
     async with closing_async_stream(request.response_stream):
         await anext(request.response_stream)
-    raise StreamingDeliveryError(RuntimeError("boom"), tool_trace=[])
+    raise StreamingDeliveryError(RuntimeError("boom"))
 
 
 @pytest.mark.asyncio

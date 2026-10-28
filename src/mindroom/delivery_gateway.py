@@ -298,15 +298,6 @@ def _shown_before(reply: rl.Reply, handle: SpanHandle | None) -> Presentation:
     return shown
 
 
-def _reply_state_for_stream_status(status: object) -> ReplyState:
-    """Return the reply state a terminal stream update's wire status stands for."""
-    if status == constants.STREAM_STATUS_COMPLETED:
-        return ReplyState.COMPLETED
-    if status == constants.STREAM_STATUS_CANCELLED:
-        return ReplyState.CANCELLED
-    return ReplyState.FAILED
-
-
 def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     """Return the event one claimed row sends, wrapping a reply edit whose target was bound late.
 
@@ -2167,30 +2158,23 @@ class DeliveryGateway:
             content: dict[str, Any],
             new_text: str | None,
         ) -> DeliveredMatrixEvent | None:
-            """Deliver one stream row, rendering it again once when the Stop path's own row met its Stop."""
-            for rendered_again in (False, True):
-                self._ready_client()
-                try:
-                    outcome = await self._deliver_reply_write(
-                        build(),
-                        target=target,
-                        content=content,
-                        # A create's text is its content's body; an edit names its new text.
-                        new_text=new_text,
-                        result=None,
-                    )
-                except ReplyWriteRefusedError as refused:
-                    if rendered_again or refused.transition.outcome is not ReplyOutcome.RECOMPUTE:
-                        return None
-                    if content.get(constants.STREAM_STATUS_KEY) != constants.STREAM_STATUS_CANCELLED:
-                        # A Stop committed after this update was rendered; the
-                        # span's Stop path writes the reply from here.
-                        raise asyncio.CancelledError(USER_STOP_CANCEL_MSG) from refused
-                    # This is the Stop path's own cancelled row, rendered before the
-                    # handle saw the Stop's revision; the refusal refreshed the handle.
-                    continue
-                return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
-            return None
+            """Deliver one stream row; a Stop committed after it was rendered ends the stream instead."""
+            self._ready_client()
+            try:
+                outcome = await self._deliver_reply_write(
+                    build(),
+                    target=target,
+                    content=content,
+                    # A create's text is its content's body; an edit names its new text.
+                    new_text=new_text,
+                    result=None,
+                )
+            except ReplyWriteRefusedError as refused:
+                if refused.transition.outcome is not ReplyOutcome.RECOMPUTE:
+                    return None
+                # The span's Stop path writes the reply from here.
+                raise asyncio.CancelledError(USER_STOP_CANCEL_MSG) from refused
+            return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
         async def initial_send(
             client: nio.AsyncClient,
@@ -2208,17 +2192,12 @@ class DeliveryGateway:
                 new_text=None,
             )
 
-        def answered_nothing(state_content: dict[str, Any], progress: ProgressState) -> bool:
-            # A stream that completed showing only its placeholder answered
-            # nothing; the span's exit removes the placeholder.
-            status = state_content.get(constants.STREAM_STATUS_KEY)
-            return status == constants.STREAM_STATUS_COMPLETED and progress.placeholder_only
+        # A stream writes a terminal update only once it finished, so the update is the reply's answer; one that
+        # showed only its placeholder answered nothing, and the span's exit removes the placeholder.
 
-        def terminal(state_content: dict[str, Any], progress: ProgressState) -> ReplyWrite:
-            status = state_content.get(constants.STREAM_STATUS_KEY)
-            state = _reply_state_for_stream_status(status)
+        def terminal(progress: ProgressState) -> ReplyWrite:
             if progress.untransformed_text is None:
-                return terminal_write(handle, shown(progress), state=state)
+                return terminal_write(handle, shown(progress), state=ReplyState.COMPLETED)
             # The final transform reshaped the whole reply: that is what it
             # shows from now on, and the span's own answer stays canonical.
             whole = Presentation(
@@ -2229,7 +2208,7 @@ class DeliveryGateway:
                 show_tool_calls=handle.base.show_tool_calls,
             )
             canonical = shown(replace(progress, text=progress.untransformed_text))
-            return terminal_write(handle, canonical, state=state, frozen_display=whole)
+            return terminal_write(handle, canonical, state=ReplyState.COMPLETED, frozen_display=whole)
 
         async def terminal_send(
             client: nio.AsyncClient,
@@ -2241,10 +2220,10 @@ class DeliveryGateway:
         ) -> DeliveredMatrixEvent | None:
             # A create sends its content as rendered; only an edit names its new text.
             del client, room_id, display_text
-            if answered_nothing(content, progress):
+            if progress.placeholder_only:
                 return None
             return await deliver(
-                lambda: terminal(content, progress),
+                lambda: terminal(progress),
                 content=content,
                 new_text=None,
             )
@@ -2259,10 +2238,10 @@ class DeliveryGateway:
             progress: ProgressState,
         ) -> DeliveredMatrixEvent | None:
             del client, room_id
-            if answered_nothing(content, progress):
+            if progress.placeholder_only:
                 return DeliveredMatrixEvent(event_id=event_id, content_sent=content)
             return await deliver(
-                lambda: terminal(content, progress),
+                lambda: terminal(progress),
                 content=content,
                 new_text=display_text,
             )

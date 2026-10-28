@@ -124,8 +124,8 @@ class TeamAttempt:
         apply_team_event(self.presentation, event)
         return True
 
-    def show_unshown_handover(self, run: AnyRunRecord) -> bool:
-        """Add to ``run``'s slot what the run hands over and its events did not show; return whether anything was added.
+    def show_unshown_handover(self, run: AnyRunRecord) -> None:
+        """Add to ``run``'s slot what the run hands over and its events did not show.
 
         The team run is the leader, whose text only the consensus holds; a member run goes to its member's slot and is
         matched by its run id, so an earlier run of the same member keeps its text without standing for a later one.
@@ -138,19 +138,16 @@ class TeamAttempt:
             member_id = self.presentation.resolve_member_id(run.agent_id, run.agent_display_name)
             handover = _unshown_handover(run, streamed=run.run_id in self.streamed_member_runs)
             self.presentation.append_member(member_id, handover, separate=True)
-        return bool(handover)
 
-    def show_failure_reasons(self, record: TeamRunRecord) -> bool:
+    def show_failure_reasons(self, record: TeamRunRecord) -> None:
         """Add the reason each failed member run of ``record`` recorded, credentials redacted, that its deltas did not show.
 
         A live streamed turn shows its runs' deltas and, when the team run ends, each failed member run's reason, as a
-        resumed reply shows it (``show_unshown_handover``). Return whether any reason was added.
+        resumed reply shows it (``show_unshown_handover``).
         """
-        shown = False
         for member in record.ended_member_runs:
             if member.status is RunStatus.error:
-                shown = self.show_unshown_handover(member) or shown
-        return shown
+                self.show_unshown_handover(member)
 
     def chunk(self, *, finished: bool) -> StructuredStreamChunk | None:
         """Return the rendered document as a stream chunk, or None while it is still empty.

@@ -126,7 +126,7 @@ def _stopping_delivery(*, after: Callable[[object], bool]) -> Callable[[object],
             if after(chunk):
                 break
         await stream.aclose()
-        raise StreamingDeliveryError(RuntimeError("boom"), tool_trace=[])
+        raise StreamingDeliveryError(RuntimeError("boom"))
 
     return deliver
 
@@ -610,7 +610,7 @@ async def test_session_started_fires_after_a_streaming_delivery_error_once_the_s
         chunks = [chunk async for chunk in request.response_stream]
         accumulated = "".join(chunks)
         sequence.append(f"deliver:{accumulated}")
-        raise StreamingDeliveryError(RuntimeError("boom"), tool_trace=[])
+        raise StreamingDeliveryError(RuntimeError("boom"))
 
     coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery_and_fail
 

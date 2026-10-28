@@ -327,3 +327,19 @@ async def test_a_collected_team_pause_keeps_the_document_state_its_resume_restor
 
     assert pause.presentation is not None
     assert (pause.presentation.response_text, pause.presentation.state) == ("Team document.", state)
+
+
+@pytest.mark.asyncio
+async def test_text_after_a_whole_document_replaces_it_in_a_document_stream() -> None:
+    """A team's failure or notice replaces the document it collected, as the streamed team reply shows it."""
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield StructuredStreamChunk(content="Team document.", tool_trace=[])
+        yield "⚠️ Error: the leader failed"
+
+    body, _trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True, replaces_text=True),
+    )
+
+    assert body == "⚠️ Error: the leader failed"

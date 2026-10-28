@@ -19,7 +19,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
   It settles the record before it yields the text that ends a turn, because a consumer may close the stream as soon as it reads that text.
   A consumer that stops reading (a Stop in the streamer, a delivery failure) leaves the turn recorded as stopped; process shutdown records nothing, because the successor replays the turn.
   A whole delivery collects the turn to its end before its delivery hooks run, so a Stop in `message:before_response` leaves the completed run in history while the reply ends stopped; recording it again after delivery would make the runner a second writer of the record.
-- The streamer now closes the response stream in its consumer task, and forwards the supervising task's cancel source and shutdown tag to that task.
+- The streamer now closes the response stream in its consumer task, and forwards the supervising task's shutdown tag to that task.
   Before, a Stop that landed while the streamer awaited Matrix left the driver suspended until garbage collection closed it in a different task, which carried no shutdown tag.
 - A turn rejected before any attempt ran (team members that cannot be built, a team name sent to the agent path) records nothing; its message and the rejection reach the next turn through the thread as unseen events.
 - The cancel source has one owner, the cancellation's message; the per-task source registry nobody read is gone, and with it the promise to keep the first source, which `Task.cancel` never kept.
