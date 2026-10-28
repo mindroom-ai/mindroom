@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import httpx
 import pytest
-import yaml
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 from nio.exceptions import LocalProtocolError, RemoteTransportError
@@ -25,7 +24,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import computers, config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.api.computers import router
-from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
 from mindroom.origins import allowed_client_origins
@@ -528,36 +526,6 @@ def test_missing_stream_ticket_denies_upgrade_with_401(gateway: Gateway) -> None
         pass
     assert error.value.status_code == 401
     assert error.value.headers["cache-control"] == "no-store"
-
-
-def test_prebound_computer_authorizer_survives_initial_api_config_load(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Initial API startup must retain the orchestrator's already-bound authorization."""
-    config = Config()
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
-    paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_WORKER_COMPUTER_ENABLED": "1"},
-    )
-    app = FastAPI(lifespan=api_main._lifespan)
-    app.include_router(router)
-    api_main.initialize_api_app(app, paths)
-    state = config_lifecycle.app_state(app)
-    state.computer_runtime = computers.ComputerRuntime(
-        AsyncMock(side_effect=ComputerError(403, "Policy denied.")),
-        0,
-        config,
-    )
-    monkeypatch.setattr(computers, "verify_matrix_openid", AsyncMock(return_value="@alice:example.org"))
-    with TestClient(app) as client:
-        loaded = config_lifecycle.require_api_state(app).snapshot.runtime_config
-        assert loaded is not None
-        assert config.model_dump() == loaded.model_dump()
-        assert create(client).status_code == 403
 
 
 def test_worker_maintenance_touches_computer_stream_before_cleanup(

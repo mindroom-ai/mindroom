@@ -65,7 +65,8 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
         ),
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    # Without the embedded API, reloads read the YAML through the plain loader.
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
     orchestrator.config = config
     matrix_ids = entity_ids(config, runtime_paths)
     for name in ("general", "team", ROUTER_AGENT_NAME):

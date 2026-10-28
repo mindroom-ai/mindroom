@@ -134,12 +134,11 @@ from mindroom.workers.runtime import (
 
 from . import file_watcher
 from .bot import AgentBot, TeamBot, create_bot_for_entity
-from .config.main import Config, load_config
 from .credentials.sync import sync_env_to_credentials
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
-from .orchestration.config_lifecycle import ConfigReloadLifecycle
+from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from .orchestration.config_updates import catalog_change_restarts, configured_entity_names, mcp_dependents
 from .orchestration.config_warnings import warn_about_config_risks
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
@@ -183,6 +182,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 
+    from .config.main import Config
     from .constants import RuntimePaths
     from .event_journal import EventJournalStore
     from .orchestration.config_updates import ConfigUpdatePlan
@@ -478,7 +478,6 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
         )
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
-            runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
             agent_reply_memberships=self.agent_reply_memberships,
         )
@@ -532,9 +531,9 @@ class _MultiAgentOrchestrator:
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
             is_running=lambda: self.running,
-            current_config=lambda: self.config,
+            current_config=self._require_config,
             agent_bots=lambda: self.agent_bots,
-            load_initial_config=self._load_initial_config,
+            load_config=partial(load_published_config, self.runtime_paths, api_enabled=self.api_enabled),
             apply_update_plan=self._apply_config_update_plan,
             response_admission_gate=self._response_admission_gate,
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
@@ -1434,12 +1433,11 @@ class _MultiAgentOrchestrator:
             self._create_managed_bot(entity_name, config, entity_users[entity_name])
         return await self._start_entities_once(entity_names, start_sync_tasks=start_sync_tasks)
 
-    async def initialize(self) -> None:
-        """Initialize all managed bots from configuration."""
-        set_runtime_starting("Loading config and preparing agents")
+    async def initialize(self, config: Config) -> None:
+        """Initialize all managed bots from the config startup loaded."""
+        set_runtime_starting("Preparing agents")
         logger.info("Initializing multi-agent system...")
 
-        config = await asyncio.to_thread(load_config, self.runtime_paths, tolerate_plugin_load_errors=True)
         await preload_matrix_call_dependencies(config)
         freeze_startup_heap()
         hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
@@ -1460,10 +1458,10 @@ class _MultiAgentOrchestrator:
 
         logger.info("Initialized agent bots", count=len(self.agent_bots))
 
-    async def start(self) -> None:
-        """Start all agent bots and publish readiness state."""
+    async def start(self, config: Config) -> None:
+        """Start all agent bots from the config startup loaded and publish readiness state."""
         try:
-            await self._start_runtime()
+            await self._start_runtime(config)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1654,7 +1652,7 @@ class _MultiAgentOrchestrator:
             now_ns=time.time_ns(),
         )
 
-    async def _start_runtime(self) -> None:
+    async def _start_runtime(self, config: Config) -> None:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._runtime_ready_event.clear()
@@ -1666,7 +1664,7 @@ class _MultiAgentOrchestrator:
 
         if not self.agent_bots:
             phase_started = log_startup_phase_started("initialize_runtime")
-            await self.initialize()
+            await self.initialize(config)
             log_startup_phase_finished("initialize_runtime", phase_started)
 
         phase_started = log_startup_phase_started("start_router_bot")
@@ -1776,26 +1774,6 @@ class _MultiAgentOrchestrator:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(ready_wait, shutdown_wait, return_exceptions=True)
-
-    async def _load_initial_config(self, new_config: Config) -> bool:
-        """Handle config loading before the runtime has an active config."""
-        hook_registry = self._build_hook_registry(new_config)
-        entity_names = configured_entity_names(new_config)
-        self._preflight_account_provisioning(
-            new_config,
-            entity_names=entity_names,
-            include_internal_user=True,
-        )
-        await self._prepare_user_account(new_config, update_runtime_state=not self.running)
-        await self._prepare_entity_accounts(new_config, entity_names)
-        self.config = new_config
-        warn_about_config_risks(new_config, self.runtime_paths)
-        self.agent_reply_memberships.invalidate(new_config, reason="initial_config_reload")
-        self._activate_hook_registry(hook_registry)
-        await self._sync_mcp_manager(new_config)
-        await self._sync_runtime_support_services(new_config, start_watcher=self.running)
-        clear_worker_validation_snapshot_cache()
-        return False
 
     async def _update_unchanged_bots(self, plan: ConfigUpdatePlan) -> None:
         """Apply the new config to bots that do not require restart."""
@@ -2144,7 +2122,6 @@ class _MultiAgentOrchestrator:
             )
             warn_about_config_risks(new_config, self.runtime_paths)
             self._computer_runtime.unbind()
-            await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             plan = await self._restart_refreshed_mcp_dependents(plan, changed_runtime_mcp_servers)
             await self._update_unchanged_bots(plan)
             if plan.router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.restart:
@@ -2729,7 +2706,6 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    api_main.initialize_api_app(api_main.app, runtime_paths)
     bind_agent_cli_registry(api_main.app, agent_cli_registry)
     api_state = api_main.config_lifecycle.app_state(api_main.app)
     api_state.thread_export_runner = thread_export_runner
@@ -2787,6 +2763,7 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
         bind_agent_cli_registry(api_main.app, None)
+        api_state.orchestrator_knowledge_refresh_scheduler = None
         api_state.thread_export_runner = None
         api_state.leave_matrix_room = None
         api_state.response_admission_gate = None
@@ -3209,6 +3186,8 @@ async def _run_runtime(  # noqa: PLR0915
         probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
         with probes or nullcontext():
             await migrate_conversation_storage(runtime_paths)
+            # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
+            startup_config = await load_startup_config(runtime_paths, api_enabled=api)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
@@ -3244,7 +3223,7 @@ async def _run_runtime(  # noqa: PLR0915
                 reason="the egress broker runs with the embedded API server, which is disabled",
             )
 
-        orchestrator_task = asyncio.create_task(orchestrator.start(), name="orchestrator")
+        orchestrator_task = asyncio.create_task(orchestrator.start(startup_config), name="orchestrator")
         shutdown_wait_task = asyncio.create_task(shutdown_requested.wait(), name="application_shutdown_wait")
         await _wait_for_runtime_completion(
             orchestrator_task=orchestrator_task,

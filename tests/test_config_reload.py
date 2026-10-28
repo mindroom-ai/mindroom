@@ -60,8 +60,10 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    initialize_from_config_file,
     install_send_response_mock,
     orchestrator_runtime_paths,
+    published_config_load,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -1166,7 +1168,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
@@ -1190,7 +1192,7 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
     orchestrator.running = True
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(
             orchestrator,
             "_prepare_entity_accounts",
@@ -1228,7 +1230,7 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)) as prepare,
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
@@ -1252,12 +1254,11 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
-        patch("mindroom.orchestrator.load_config", return_value=config),
         patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)),
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.initialize()
+        await orchestrator.initialize(config)
 
     assert orchestrator.config is None
 
@@ -1299,7 +1300,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
     orchestrator.running = True
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch.object(orchestrator, "_prepare_user_account", new=AsyncMock()),
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock()) as prepare_entities,
         pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
@@ -1544,7 +1545,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         _write_plugin_removal_test_config(tmp_path, with_plugin=True)
         _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-        await orchestrator.initialize()
+        await initialize_from_config_file(orchestrator)
 
         hooks_module = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module
         package_root = plugin_module._MODULE_IMPORT_CACHE[hooks_path.resolve()].module_name.split(".", 1)[0]
@@ -1599,7 +1600,7 @@ async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
     write_config(administrators=["@owner:localhost"], invite_users=["@test:m-test-4.mindroom.chat"])
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await orchestrator.initialize()
+        await initialize_from_config_file(orchestrator)
 
     write_config(administrators=["@owner:localhost", "@admin:remote.example"], invite_users=["@owner:localhost"])
     with capture_logs() as reload_logs:
@@ -1642,7 +1643,7 @@ async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to
     write_config("coder")
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await orchestrator.initialize()
+        await initialize_from_config_file(orchestrator)
 
     write_config("builder")
     with capture_logs() as reload_logs:
@@ -1727,7 +1728,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
             return set()
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
@@ -1795,7 +1796,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
 
     reload_result = PluginReloadResult(HookRegistry.empty(), (), 0)
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=reloaded_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(reloaded_config)),
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
         patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
     ):
@@ -1888,8 +1889,8 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         config.model_copy(update={"defaults": config.defaults.model_copy(update={"enable_streaming": False})}),
         tmp_path,
     )
-    load_config_mock = MagicMock(return_value=reloaded_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    load_config_mock = MagicMock(return_value=published_config_load(reloaded_config))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", load_config_mock)
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
@@ -3301,20 +3302,6 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     """Test that the orchestrator properly handles config reloads and updates all bots."""
-    # Track config loads
-    config_loads = [initial_config, updated_config]
-    load_count = [0]
-
-    def mock_load_config(
-        _runtime_paths: object | None = None,
-        **_kwargs: object,
-    ) -> Config:
-        result = config_loads[min(load_count[0], len(config_loads) - 1)]
-        load_count[0] += 1
-        return result
-
-    monkeypatch.setattr("mindroom.orchestrator.load_config", mock_load_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", mock_load_config)
 
     def mock_resolve_room_aliases(aliases: list[str], _runtime_paths: object | None = None) -> list[str]:
         return list(aliases)
@@ -3345,9 +3332,10 @@ async def test_orchestrator_handles_config_reload(  # noqa: PLR0915
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._setup_rooms_and_memberships", AsyncMock())
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
 
     # Initialize with initial config
-    await orchestrator.initialize()
+    await orchestrator.initialize(initial_config)
 
     # Verify initial state
     assert "agent1" in orchestrator.agent_bots
@@ -3871,8 +3859,8 @@ async def test_shutdown_during_active_drain_cancels_reload(
     orchestrator.agent_bots["agent1"] = mock_bot
     # An admitted response that never finishes, so the drain never goes idle.
     assert orchestrator.config_reload.response_admission_gate.admit()
-    load_config_mock = MagicMock(return_value=reloaded_config)
-    monkeypatch.setattr("mindroom.orchestration.config_lifecycle.load_config", load_config_mock)
+    load_config_mock = MagicMock(return_value=published_config_load(reloaded_config))
+    monkeypatch.setattr(orchestrator.config_reload, "load_config", load_config_mock)
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
     orchestrator.config_reload.request_reload()
     task = orchestrator.config_reload._reload_task

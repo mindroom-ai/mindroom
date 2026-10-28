@@ -599,7 +599,7 @@ def test_unavailable_optional_plugin_does_not_block_healthy_provider(portal: dic
     """Mirror runtime degraded startup while retaining healthy account connections."""
     portal["payload"]["plugins"] = ["./plugins/missing"]
     portal["paths"].config_path.write_text(yaml.safe_dump(portal["payload"]))
-    assert config_lifecycle.load_config_into_app(portal["paths"], main.app)
+    assert config_lifecycle.load_config_into_app(portal["paths"], main.app).loaded
     client = TestClient(main.app, base_url="https://portal.example.org", raise_server_exceptions=False)
     for url in ("/api/connections", "/api/connections/agents/personal/google_drive/status"):
         assert client.get(url, headers=portal["headers"]["alice"]).status_code == 200
