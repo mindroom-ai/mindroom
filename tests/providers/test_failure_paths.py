@@ -1,13 +1,12 @@
 """Failure paths: how each provider route fails, pinned row by row.
 
 Each row scripts the wire's answer to every request of one route, sends one request through the
-route's real adapter inside the production pipeline, and pins how many HTTP requests it makes before it fails
-(the SDK's own retries included), the normalized error it ends with, and how the error reply the user reads begins.
-A failure that is not transient is final at once. After a transient failure the pipeline reissues a streamed request,
-and every request of a route that only streams, at most four times and only until the attempt commits, by producing
+route's real adapter inside the production pipeline, and pins how many HTTP requests it makes before it fails,
+the normalized error it ends with, and how the error reply the user reads begins.
+A failure that is not transient is final at once. After a transient failure the pipeline, the only retry owner since
+no SDK client retries, reissues the request at most four times and only until the attempt commits, by producing
 output the caller could have shown or by starting a hosted tool that acts or costs; a stall it reissues only once.
-A blocking request gets only its SDK's own HTTP retries: two on the OpenAI and Anthropic SDKs, none on Gemini's and
-Ollama's. A comment explains each other case.
+A comment explains each other case.
 Error replies follow the typed error: a rate limit reads as one, any other transient failure as temporary
 unavailability, and a request that no longer fits the context window says so.
 """
@@ -80,11 +79,9 @@ CONTEXT_WINDOW = "⚠️ The conversation no longer fits the model's context win
 
 @pytest.fixture(autouse=True)
 def _instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip every retry's backoff; the SDKs still retry as often as they do in production."""
+    """Skip every retry's backoff."""
     hide_provider_environment(monkeypatch)
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
-    for sdk in ("openai", "anthropic"):
-        monkeypatch.setattr(f"{sdk}._base_client.BaseClient._calculate_retry_timeout", lambda *_args: 0.0)
 
 
 # --- Routes -------------------------------------------------------------------------------------------------------
@@ -374,7 +371,7 @@ def _read_timeout() -> Exception:
 class Row:
     """One route and failure, and how the owned pipeline ends it.
 
-    ``requests`` counts HTTP requests, the SDK's retries included; ``code`` pins the MindRoom marker that later handling
+    ``requests`` counts HTTP requests; ``code`` pins the MindRoom marker that later handling
     reads.
     """
 
@@ -409,9 +406,7 @@ def _rows(route: str, cases: list[_Case]) -> list[Row]:
     return [Row(route, case.failure, case.reply, case.requests, case.error, case.message, case.code) for case in cases]
 
 
-# The SDK sends a request three times, its two retries included, before an HTTP 408, 409, 429, or 5xx status or a
-# connection failure reaches the pipeline, which reissues the request four more times.
-_SDK_AND_PIPELINE = 15
+# The pipeline reissues a request four times after an HTTP 408, 409, 429, or 5xx status or a connection failure.
 _PIPELINE = 5
 _STALLED = 2
 
@@ -435,35 +430,35 @@ _CLAUDE_CASES = [
         _claude_status(429, "rate_limit_error", "Slow down"),
         RateLimited,
         RATE_LIMITED,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_529",
         _claude_status(529, "overloaded_error", "Overloaded"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_500",
         _claude_status(500, "api_error", "Internal server error"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_503_proxy_text",
         _json(503, "upstream connect error"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_408",
         _claude_status(408, "timeout_error", "Request timed out"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case("http_400", _claude_status(400, "invalid_request_error", "messages: bad"), InvalidRequest, ERROR, 1),
     _Case(
@@ -520,10 +515,10 @@ _CLAUDE_CASES = [
         _connect_error,
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
         code="connection_error",
     ),
-    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _SDK_AND_PIPELINE, code="timeout"),
+    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code="timeout"),
     _Case(
         "event_overloaded_error",
         _claude_stream(_claude_error("overloaded_error")),
@@ -661,35 +656,35 @@ _OPENAI_HTTP_CASES = [
         ),
         RateLimited,
         RATE_LIMITED,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_500",
         _openai_status(500, "The server had an error while processing your request.", "server_error"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_503",
         _openai_status(503, "The server is overloaded or not ready yet.", "server_error"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_409",
         _openai_status(409, "The request conflicted with another request.", "conflict"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_529",
         _openai_status(529, "The service is overloaded.", "server_error"),
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
     ),
     _Case(
         "http_400",
@@ -773,10 +768,10 @@ _OPENAI_HTTP_CASES = [
         _connect_error,
         ProviderUnavailable,
         UNAVAILABLE,
-        _SDK_AND_PIPELINE,
+        _PIPELINE,
         code="connection_error",
     ),
-    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _SDK_AND_PIPELINE, code="timeout"),
+    _Case("read_timeout", _read_timeout, ProviderUnavailable, UNAVAILABLE, _PIPELINE, code="timeout"),
 ]
 # Until visible text or a complete tool call arrives, a Chat stream keeps its retry budget, so an opening empty-text
 # chunk does not make a failure final.
@@ -1425,14 +1420,14 @@ async def test_a_call_the_output_limit_cut_off_is_answered_without_running_it(ro
     assert [entry.get("stop_reason") for entry in logs if entry["event"] == "LLM usage"] == ["output_limit", "end"]
 
 
-# Each route's answer to a request its server failed, which the SDK and the stream retry would both reissue.
+# Each route's answer to a request its server failed, which the stream retry would reissue.
 _SERVER_FAILURES = {row.route: row.reply for row in ROWS if row.failure in {"http_500", "http_503"}}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", sorted(_SERVER_FAILURES))
 async def test_a_compaction_summary_attempt_sends_one_request_on_every_route(route: str, tmp_path: Path) -> None:
-    """Compaction retries a failed summary itself, so neither the SDK nor the stream retry reissues an attempt."""
+    """Compaction retries a failed summary itself, so the stream retry does not reissue an attempt."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -1483,7 +1478,7 @@ async def test_a_compaction_summary_cut_off_after_its_text_is_not_returned(tmp_p
     assert len(sent) == 1
 
 
-# Each route's answer that ends one request with "ok", for the routes whose SDK does not retry a server failure.
+# The answer that ends one request with "ok" on two routes.
 _OK_STREAMS: dict[str, Reply] = {
     "gemini": _gemini_stream(_gemini_chunk({"text": "ok"}, finish="STOP")),
     "ollama": _ollama_stream(_ollama_chunk("ok"), _ollama_chunk(done=True)),

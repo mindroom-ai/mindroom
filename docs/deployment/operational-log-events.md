@@ -262,7 +262,7 @@ Each retry delays the reply, and a reply whose request fails every retry logs [`
 | `error` | The failure's message, redacted and truncated |
 | `attempt` | Number of this retry for its `reason`, starting at `1` |
 | `max_retries` | Retries allowed for its `reason` |
-| `delay_seconds` | Seconds waited before this retry |
+| `delay_seconds` | Seconds waited before this retry: the provider's `Retry-After` when it asked for at most a minute, otherwise a backoff that doubles with each retry |
 
 Count it grouped by `model_id` and alert when one model is retried far more often than usual.
 `error_type`, `status_code`, and `error` tell throttling apart from an outage or an unresponsive endpoint.

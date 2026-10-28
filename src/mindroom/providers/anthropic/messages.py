@@ -88,7 +88,12 @@ from mindroom.providers.anthropic.wire import (
 from mindroom.providers.assistant_turn import stamp_finished_turn
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
 from mindroom.providers.credentials import model_api_key
-from mindroom.providers.errors import classify_provider_error, missing_api_key_error, provider_failure
+from mindroom.providers.errors import (
+    classify_provider_error,
+    missing_api_key_error,
+    provider_failure,
+    retry_after_seconds,
+)
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -494,7 +499,7 @@ class ClaudeProvider:
         if output_tool:
             body = {**body, "tool_choice": {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}}
         return _PreparedRequest(
-            client=self._client(caller_retries=overrides.caller_retries),
+            client=self._client(),
             kwargs=body,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
@@ -507,12 +512,12 @@ class ClaudeProvider:
             return self.settings.default_headers
         return (self.settings.client_params or {}).get("default_headers")
 
-    def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:
+    def _client(self) -> _AsyncClaudeClient:
         """Build this request's SDK client over the shared HTTP client.
 
         The route's own credentials and endpoint come first and ``client_params`` may override any of them;
-        ``default_headers`` and the shared HTTP client then win over ``client_params``, and a caller that retries
-        the request itself turns the SDK's retries off over everything the model authored.
+        ``default_headers``, the shared HTTP client, and no SDK retries then win over ``client_params``, since the
+        request pipeline alone retries a failed request.
         """
         settings = self.settings
         kwargs = _route_client_kwargs(self.route, settings)
@@ -522,8 +527,7 @@ class ClaudeProvider:
         if (default_headers := self._authored_default_headers()) is not None:
             kwargs["default_headers"] = dict(default_headers)
         kwargs["http_client"] = self.http_client
-        if caller_retries:
-            kwargs["max_retries"] = 0
+        kwargs["max_retries"] = 0
         if self.route == "anthropic":
             return AsyncAnthropic(**kwargs)
         if self.route == "vertexai_claude":
@@ -586,7 +590,12 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
         return classify_provider_error(error.message, provider=provider, error_type=_event_error_type(error.body))
     if isinstance(error, anthropic.APIStatusError):
-        return classify_provider_error(error.message, provider=provider, status_code=error.status_code)
+        return classify_provider_error(
+            error.message,
+            provider=provider,
+            status_code=error.status_code,
+            retry_after_seconds=retry_after_seconds(error.response.headers),
+        )
     if isinstance(error, anthropic.APIError):
         return ProviderError(str(error), provider=provider)
     raise error

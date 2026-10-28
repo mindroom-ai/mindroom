@@ -1,8 +1,8 @@
 """One portable summary call and its bounded retry policy.
 
-The summary request goes through the provider pipeline as one call with every retry below this module, the SDK's and
-the pipeline's, and the prompt cache turned off, and on the Claude routes without the model's authored thinking setting,
-bounded by the compaction deadline. This module owns the call's lifecycle, cancellation, complete-output validation,
+The summary request goes through the provider pipeline as one call, with every retry below this module and the prompt
+cache turned off, and on the Claude routes without the model's authored thinking setting, bounded by the compaction
+deadline. This module owns the call's lifecycle, cancellation, complete-output validation,
 and the retry decision chunk execution uses.
 """
 

@@ -26,6 +26,7 @@ from mindroom.llm.errors import (
     ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
+    RateLimited,
 )
 from mindroom.llm.media import Audio, Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
@@ -182,6 +183,23 @@ async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: py
     await _drain(provider, ModelRequest(messages=[_user()]))
 
     assert (len(inner.requests), loop.time() - started >= 0.2) == (2, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("hint", "delay"), [(0.25, 0.25), (61.0, 0.0), (None, 0.0)])
+async def test_a_retry_after_hint_of_at_most_a_minute_replaces_the_backoff(hint: float | None, delay: float) -> None:
+    """The provider's ``Retry-After`` decides the wait, as the SDK did when it retried; a longer hint is no hint."""
+    throttled = RateLimited("slow down", provider="Scripted Chat", status_code=429, retry_after_seconds=hint)
+    inner = _ScriptedProvider([[throttled], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with capture_logs() as logs:
+        await _drain(provider, ModelRequest(messages=[_user()]))
+
+    assert [entry["delay_seconds"] for entry in logs if entry["event"] == "provider_request_retried"] == [delay]
+    assert (len(inner.requests), loop.time() - started >= delay) == (2, True)
 
 
 @pytest.mark.asyncio

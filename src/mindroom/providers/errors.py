@@ -26,7 +26,7 @@ from mindroom.llm.errors import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
 __all__ = [
     "CliLoginError",
@@ -34,6 +34,7 @@ __all__ = [
     "is_context_window_error",
     "missing_api_key_error",
     "provider_failure",
+    "retry_after_seconds",
 ]
 
 _RATE_LIMIT_STATUS = 429
@@ -121,13 +122,14 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     status_code: int | None = None,
     code: str | None = None,
     error_type: str | None = None,
+    retry_after_seconds: float | None = None,
 ) -> ProviderError:
     """Return the normalized error of one failed provider response; the first rule that matches decides.
 
     ``status_code`` is the HTTP status. An error event inside a stream that already succeeded has none, and a
     numeric ``code``, as OpenAI-compatible servers send in one, counts as its status. ``code`` and ``error_type``
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
-    as its ``provider_code``.
+    as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
     1. A 429 status or a rate-limit name is ``RateLimited``.
     2. A transient status is ``ProviderUnavailable``.
@@ -146,7 +148,13 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
 
     def typed(kind: type[ProviderError]) -> ProviderError:
-        return kind(message, provider=provider, status_code=status_code, provider_code=code)
+        return kind(
+            message,
+            provider=provider,
+            status_code=status_code,
+            provider_code=code,
+            retry_after_seconds=retry_after_seconds,
+        )
 
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
         return typed(RateLimited)
@@ -163,6 +171,18 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     if status in _INVALID_REQUEST_STATUSES:
         return typed(InvalidRequest)
     return typed(ProviderError)
+
+
+def retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    """Return a response's numeric ``Retry-After`` header in seconds; an HTTP-date form or a negative value is none."""
+    raw_value = headers.get("retry-after") or headers.get("Retry-After")
+    if raw_value is None:
+        return None
+    try:
+        seconds = float(raw_value.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:

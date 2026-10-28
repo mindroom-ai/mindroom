@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -126,3 +126,20 @@ _REJECTED_TOOL_OVERRIDES = {
 def retired_tool_override(overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry authors, and its replacement guidance."""
     return next(((field, guidance) for field, guidance in _REJECTED_TOOL_OVERRIDES.items() if field in overrides), None)
+
+
+# LEGACY_COMPAT: Retired max_retries setting of OpenAI-family models.
+# Legacy format: models.<name>.extra_kwargs.max_retries on an OpenAI-family route set the OpenAI SDK's own HTTP retries,
+#   beneath the request pipeline's retries.
+# Last legacy release: v2026.10.629; replacement: unreleased; the request pipeline alone retries a failed model request
+#   and every SDK client sends each request once.
+# Handling: Reject it at config load on every provider, naming the key and saying to remove it.
+# Coverage: tests/test_extra_kwargs.py::test_a_retired_max_retries_fails_config_load_with_its_reason.
+_RETIRED_MODEL_SETTINGS = {
+    "max_retries": "MindRoom retries a failed model request itself, so remove the setting",
+}
+
+
+def retired_model_setting(keys: Iterable[str]) -> tuple[str, str] | None:
+    """Return the first retired ``extra_kwargs`` setting among ``keys``, and its guidance."""
+    return next(((key, _RETIRED_MODEL_SETTINGS[key]) for key in keys if key in _RETIRED_MODEL_SETTINGS), None)

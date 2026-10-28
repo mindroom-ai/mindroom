@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import ProviderError
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.errors import classify_provider_error, provider_failure, retry_after_seconds
 
 __all__ = [
     "provider_error",
@@ -52,7 +52,13 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         message, code, _ = _error_fields(error.body)
         if message is None:
             message = error.response.text or str(error)
-        return classify_provider_error(message, provider=provider, status_code=error.status_code, code=code)
+        return classify_provider_error(
+            message,
+            provider=provider,
+            status_code=error.status_code,
+            code=code,
+            retry_after_seconds=retry_after_seconds(error.response.headers),
+        )
     if isinstance(error, openai.APIError):
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
         message, code, error_type = _error_fields(error.body)

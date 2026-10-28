@@ -753,7 +753,6 @@ def test_bedrock_claude_records_none_of_the_aws_keys_it_reads_from_the_runtime_e
         "max_tokens": 8192,
         "cache_system_prompt": True,
         "extended_cache_time": True,
-        "timeout": 3600.0,
         "aws_region": "us-east-1",
     }
 
@@ -905,6 +904,20 @@ def test_a_retired_agno_model_field_fails_config_load_and_names_the_model(
     assert str(exc_info.value).startswith(
         f"models.default: Unsupported extra_kwargs for provider '{provider}': {field}; remove or correct them. "
         "Accepted keys: ",
+    )
+
+
+@pytest.mark.parametrize("provider", ["openai", "azure", "openrouter", "codex", "anthropic"])
+def test_a_retired_max_retries_fails_config_load_with_its_reason(tmp_path: Path, provider: str) -> None:
+    """The SDK's own retries are gone, so a model that sets them is told why and what to do."""
+    data = {"models": {"default": {"provider": provider, "id": "m", "extra_kwargs": {"max_retries": 3}}}}
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    assert str(exc_info.value) == (
+        f"models.default: Unsupported extra_kwargs for provider '{provider}': max_retries was removed; "
+        "MindRoom retries a failed model request itself, so remove the setting."
     )
 
 

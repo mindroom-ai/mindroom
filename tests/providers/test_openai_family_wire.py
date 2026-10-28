@@ -674,16 +674,27 @@ async def test_http_errors_map_to_typed_provider_errors(
     retryable: bool,
 ) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _json_reply(body, status=status))
-    # A caller that retries the request itself turns the SDK's retries off, so the adapter's own error arrives at once.
-    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(ProviderError) as info:
-        await _turn(built, request)
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert type(info.value) is error_type
     assert (info.value.status_code, info.value.retryable, info.value.provider) == (status, retryable, "OpenAI Chat")
     assert str(info.value) == body["error"]["message"]
-    assert len(built.requests) == 1
+    assert len(built.requests) == 1, "the SDK client never retries; the pipeline alone does"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_header_rides_on_the_typed_error(tmp_path: Path) -> None:
+    """The provider's ``Retry-After`` hint reaches the pipeline, which waits it out instead of the SDK."""
+    reply = _json_reply({"error": {"message": "slow down"}}, status=429)
+    reply["headers"]["retry-after"] = "2"
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+
+    with pytest.raises(RateLimited) as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert (info.value.retry_after_seconds, len(built.requests)) == (2.0, 1)
 
 
 @pytest.mark.asyncio
@@ -704,7 +715,7 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
 ) -> None:
     """An error event inside a committed stream is retried for the shared rate-limit and transient statuses."""
     reply = _chat_reply({"data": {"error": error}})
-    built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
 
     with pytest.raises(ProviderError) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
@@ -742,7 +753,7 @@ async def test_a_stream_error_event_reads_as_the_status_its_code_names(
 ) -> None:
     """A stream's error event reads as the HTTP status its code names does: 429 rate-limited, 529 and 503 unavailable."""
     reply = _chat_reply({"data": {"error": error}})
-    built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
 
     with pytest.raises(ProviderError) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
@@ -948,7 +959,7 @@ async def test_responses_stream_without_completion_fails(
 ) -> None:
     """An early end is retried like a dropped connection only while nothing reached the caller."""
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, _responses_reply(*events))
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*events))
 
     with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await _turn(built, ModelRequest(messages=[_user()]))
@@ -1029,7 +1040,7 @@ async def test_responses_failure_is_final_once_a_hosted_tool_started(
     """
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     reply = {**_responses_reply(*events), "drop_connection": drop_connection}
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, reply)
+    built = _Built(tmp_path, _OPENAI_RESPONSES, reply)
 
     with pytest.raises(ProviderUnavailable):
         await _turn(built, ModelRequest(messages=[_user()]))
@@ -1604,7 +1615,7 @@ async def test_configured_groq_host_keeps_the_sdk_path(tmp_path: Path) -> None:
 
 
 def _client_options(prefix: str) -> dict[str, Any]:
-    return {"timeout": 30, "max_retries": 0, "default_headers": {"X-Origin": prefix}, "organization": f"org-{prefix}"}
+    return {"timeout": 30, "default_headers": {"X-Origin": prefix}, "organization": f"org-{prefix}"}
 
 
 _CONFIGURED_CLIENT = {"base_url": "http://configured.test/v1", **_client_options("configured")}
@@ -1694,13 +1705,13 @@ async def test_a_client_params_key_needs_no_shared_key(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_azure_model_sends_with_its_configured_timeout_and_retries(tmp_path: Path) -> None:
-    """``timeout`` and ``max_retries`` set in ``extra_kwargs`` reach the Azure client, as on the other routes."""
+async def test_an_azure_model_sends_once_with_its_configured_timeout(tmp_path: Path) -> None:
+    """``timeout`` set in ``extra_kwargs`` reaches the Azure client, which never retries, as on the other routes."""
     model_config = {
         "provider": "azure",
         "id": "gpt-6-astra",
         "api_key": "test-key",
-        "extra_kwargs": {**_AZURE_CLIENT, "timeout": 30, "max_retries": 0},
+        "extra_kwargs": {**_AZURE_CLIENT, "timeout": 30, "client_params": {"max_retries": 2}},
     }
     built = _Built(tmp_path, model_config, _json_reply({"error": {"message": "down"}}, status=500))
 

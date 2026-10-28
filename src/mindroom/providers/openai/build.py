@@ -226,7 +226,6 @@ def _client_options(
         "organization": settings.organization if organization else None,
         "base_url": base_url,
         "timeout": settings.timeout,
-        "max_retries": settings.max_retries,
         "default_headers": settings.default_headers,
         "default_query": settings.default_query,
     }
@@ -240,12 +239,12 @@ def _sdk_client_kwargs(
     """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
     ``client_params.base_url`` is already in the configured endpoint (Groq and Cerebras append their API path
-    to it), and the shared HTTP client always wins.
+    to it). The shared HTTP client and no SDK retries always win, since the request pipeline alone retries a failed
+    request.
     """
     authored = {key: value for key, value in (settings.client_params or {}).items() if key != "base_url"}
-    return (
-        {key: value for key, value in configured.items() if value is not None} | authored | {"http_client": http_client}
-    )
+    configured_values = {key: value for key, value in configured.items() if value is not None}
+    return configured_values | authored | {"http_client": http_client, "max_retries": 0}
 
 
 def _cli_login_error(error: CliLoginError, *, provider: str) -> ProviderError:

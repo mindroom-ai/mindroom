@@ -9,8 +9,6 @@ from mindroom.llm.errors import ProviderUnavailable
 from mindroom.providers.openai.errors import provider_error
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.llm.errors import ProviderError
 
 _EMBEDDER_AUTH_FAILED_DETAIL = "embedder authentication failed (HTTP 401)"
@@ -81,12 +79,7 @@ _UNAUTHORIZED_STATUS = 401
 _FORBIDDEN_STATUS = 403
 
 
-def embedder_request_error(
-    error: BaseException,
-    failure: ProviderError | None,
-    *,
-    retry_after_seconds: float | None = None,
-) -> EmbedderRequestError:
+def embedder_request_error(error: BaseException, failure: ProviderError | None) -> EmbedderRequestError:
     """Return the credential-safe error of one failed embedding request.
 
     ``failure`` is the typed provider error the embedder's SDK mapping made of
@@ -94,7 +87,7 @@ def embedder_request_error(
     failure final. The detail names only the HTTP status, an unreachable
     endpoint, or ``error``'s type, never provider text, and ``failure``'s type
     alone decides whether the request is retried, by the rule model requests
-    follow.
+    follow, after the ``Retry-After`` hint it carries.
     """
     status_code = failure.status_code if failure is not None else None
     if status_code == _UNAUTHORIZED_STATUS:
@@ -107,23 +100,14 @@ def embedder_request_error(
         detail = EMBEDDER_UNREACHABLE_DETAIL
     else:
         detail = f"embedder request failed ({type(error).__name__})"
-    retryable = failure is not None and failure.retryable
-    return EmbedderRequestError(detail, retryable=retryable, retry_after_seconds=retry_after_seconds)
+    if failure is None:
+        return EmbedderRequestError(detail)
+    return EmbedderRequestError(detail, retryable=failure.retryable, retry_after_seconds=failure.retry_after_seconds)
 
 
 def openai_embedder_error(error: Exception) -> EmbedderRequestError:
-    """Return the classified error of one OpenAI SDK or transport failure, keeping the provider's ``Retry-After`` hint."""
-    # Deferred like the SDK import in ``as_embedder_error``.
-    from openai import APIStatusError  # noqa: PLC0415
-
-    retry_after_seconds = (
-        _retry_after_seconds_from_headers(error.response.headers) if isinstance(error, APIStatusError) else None
-    )
-    return embedder_request_error(
-        error,
-        provider_error(error, provider="openai"),
-        retry_after_seconds=retry_after_seconds,
-    )
+    """Return the classified error of one OpenAI SDK or transport failure."""
+    return embedder_request_error(error, provider_error(error, provider="openai"))
 
 
 def embedder_failure_is_transient(exc: BaseException) -> bool:
@@ -159,18 +143,6 @@ def embedder_retry_after_seconds(exc: BaseException) -> float | None:
     """Return the provider's ``Retry-After`` hint in seconds, when it gave one."""
     error = as_embedder_error(exc)
     return None if error is None else error.retry_after_seconds
-
-
-def _retry_after_seconds_from_headers(headers: Mapping[str, str]) -> float | None:
-    """Parse a numeric ``Retry-After`` header; HTTP-date forms are ignored."""
-    raw_value = headers.get("retry-after") or headers.get("Retry-After")
-    if raw_value is None:
-        return None
-    try:
-        seconds = float(raw_value.strip())
-    except ValueError:
-        return None
-    return seconds if seconds >= 0 else None
 
 
 def describe_embedder_error(exc: BaseException) -> str:
