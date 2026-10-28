@@ -457,7 +457,7 @@ def test_search_items_replay_ahead_of_the_discovered_function_call() -> None:
     ]
 
 
-def test_search_replay_anchors_on_its_own_turn_not_an_identical_earlier_one() -> None:
+def test_search_items_replay_with_their_own_turn_not_an_identical_earlier_one() -> None:
     """An earlier assistant turn with the same text cannot claim a later turn's search items."""
     later = Message(role="assistant", content="same text", provider_data={"tool_search_items": [dict(_SEARCH_CALL)]})
     messages = [
@@ -473,6 +473,14 @@ def test_search_replay_anchors_on_its_own_turn_not_an_identical_earlier_one() ->
         {"role": "user", "content": "q2"},
         _without_item_id(_SEARCH_CALL),
         {"role": "assistant", "content": "same text"},
+    ]
+
+
+def test_a_reply_without_text_or_calls_replays_as_an_empty_answer() -> None:
+    """An assistant message with neither text nor calls still replays as the turn it was, with empty text."""
+    assert _input([Message(role="user", content="Hi."), Message(role="assistant")]) == [
+        {"role": "user", "content": "Hi."},
+        {"role": "assistant", "content": ""},
     ]
 
 
@@ -520,6 +528,83 @@ def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) ->
 
     assert (request["store"], request["previous_response_id"]) == (True, "resp_1")
     assert request["input"] == [{"type": "function_call_output", "call_id": "call_1", "output": "ready"}]
+
+
+# --- Replay after a provider switch ---------------------------------------------------------------------------
+
+
+def _claude_tool_turn() -> list[Message]:
+    """Return a Claude tool turn as a thread stores it: text beside a ``toolu_`` call, its result, then the answer."""
+    claude = {"mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"}}
+    call = {
+        "id": "toolu_01Weather",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": json.dumps({"city": "Paris"})},
+    }
+    return [
+        Message(role="user", content="What should I pack for Paris?"),
+        Message(role="assistant", content="Let me check the forecast first.", tool_calls=[call], provider_data=claude),
+        Message(role="tool", tool_call_id="toolu_01Weather", content="light rain"),
+        Message(role="assistant", content="Pack a rain jacket.", provider_data=claude),
+        Message(role="user", content="And for the evening?"),
+    ]
+
+
+# The Claude turn as a Responses request sends it: the text ahead of the call, the call under the request's own id.
+_CLAUDE_TOOL_TURN_INPUT = [
+    {"role": "user", "content": "What should I pack for Paris?"},
+    {"role": "assistant", "content": "Let me check the forecast first."},
+    {
+        "type": "function_call",
+        "call_id": "call_00000000",
+        "name": "get_weather",
+        "arguments": json.dumps({"city": "Paris"}),
+        "status": "completed",
+    },
+    {"type": "function_call_output", "call_id": "call_00000000", "output": "light rain"},
+    {"role": "assistant", "content": "Pack a rain jacket."},
+    {"role": "user", "content": "And for the evening?"},
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"provider": "codex", "id": "gpt-6.1-sol", "extra_kwargs": {"codex_home": "<codex_home>"}},
+        {"provider": "openai", "id": "gpt-6-astra", "api": "responses", "api_key": "test-key"},
+    ],
+    ids=["codex", "stored-openai"],
+)
+async def test_a_claude_tool_turn_keeps_its_text_after_the_thread_switches_to_responses(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    """The text a Claude turn wrote beside its tool call reaches the Codex or OpenAI request that replays the turn."""
+    sent: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return streamed_reply(_response([_ANSWER]).model_dump(mode="json"))
+
+    adapter = openai_family_adapter(model_config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+
+    await _reply(adapter, _claude_tool_turn())
+
+    assert sent[0]["input"] == _CLAUDE_TOOL_TURN_INPUT
+
+
+def test_a_claude_tool_turn_after_a_continued_response_sends_its_calls(tmp_path: Path) -> None:
+    """A request continuing a stored response sends the Claude tool turn after it whole, each call beside its result."""
+    adapter = responses_adapter(tmp_path, store=True)
+    before = [Message(role="user", content="Hello.")]
+    stored = Message(role="assistant", content="Hi.", provider_data=_stored_response("resp_1", before))
+
+    request = _request(adapter, [*before, stored, *_claude_tool_turn()])
+
+    assert request["previous_response_id"] == "resp_1"
+    assert request["input"] == _CLAUDE_TOOL_TURN_INPUT
 
 
 def _stored_reply_route(
@@ -925,7 +1010,7 @@ def test_disabled_storage_replays_explicitly_with_encrypted_reasoning(tmp_path: 
     """A stateless request never continues a stored response and asks for the reasoning it must replay."""
     adapter = responses_adapter(tmp_path, model_id="reasoning-alias", reasoning_effort="high", **storage)
     messages = [
-        Message(role="assistant", content="Earlier reply", provider_data={"response_id": "resp_1"}),
+        Message(role="assistant", content="Earlier reply", provider_data=_stored_response("resp_1")),
         Message(role="user", content="Follow up"),
     ]
 
@@ -1359,6 +1444,29 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
 
     body = {**kwargs.pop("extra_body", {}), **kwargs}
     assert {name: body.get(name) for name in body_fields} == authored
+
+
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path: Path) -> None:
+    """Every Chat dialect leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
+    adapter = build_provider(
+        ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+    )
+    assert isinstance(adapter, ChatAdapter)
+
+    kwargs = chat_request_kwargs(
+        model_id="m",
+        messages=[Message(role="user", content="Hi")],
+        tools=(),
+        tool_choice=None,
+        output_schema=None,
+        structured_output=adapter.capabilities.structured_output,
+        settings=adapter.settings,
+        wire=adapter.wire,
+    )
+
+    assert "tools" not in {**kwargs.get("extra_body", {}), **kwargs}
 
 
 # --- Codex ----------------------------------------------------------------------------------------------------

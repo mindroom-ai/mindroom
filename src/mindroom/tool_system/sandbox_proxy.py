@@ -25,6 +25,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
+from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -34,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
     get_worker_runtime_context,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
@@ -66,8 +68,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -328,6 +331,9 @@ def _build_worker_routing_payload(
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
     if worker_scope is None:
         if not primary_worker_backend_is_dedicated(runtime_paths):
+            # The shared runner is the only backend that is not dedicated, and an unscoped call reaches it without a
+            # worker handle, so its protocol check happens here.
+            cast("StaticSandboxRunnerBackend", resolved_worker_manager).require_compatible_runner()
             payload: dict[str, object] = {}
             if routing_agent_name is not None:
                 payload["routing_agent_name"] = routing_agent_name
@@ -546,20 +552,13 @@ def save_attachment_to_worker(
     *,
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget | None,
-    worker_tools_override: list[str] | None = None,
     attachment_id: str,
     mindroom_output_path: str,
     payload_bytes: bytes,
     mime_type: str | None,
     filename: str | None,
-) -> WorkerAttachmentSaveReceipt | None:
-    """Write attachment bytes to the selected worker, returning None when no worker endpoint exists."""
-    if not attachment_save_uses_worker(
-        runtime_paths=runtime_paths,
-        worker_tools_override=worker_tools_override,
-    ):
-        return None
-
+) -> WorkerAttachmentSaveReceipt:
+    """Write attachment bytes to the selected worker, for agents whose ``attachment_save_uses_worker`` holds."""
     byte_limit = inline_attachment_byte_limit(runtime_paths)
     byte_count = len(payload_bytes)
     if byte_count > byte_limit:
@@ -580,9 +579,6 @@ def save_attachment_to_worker(
             progress_sink=None,
             worker_manager=worker_manager,
         )
-        if worker_handle is None and proxy_config.proxy_url is None:
-            return None
-
         attachment_fields = _attachment_save_payload_fields(payload_bytes)
         request_payload: dict[str, object] = {
             **worker_payload,
@@ -627,17 +623,10 @@ def view_file_from_worker(
     *,
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget | None,
-    worker_tools_override: list[str] | None = None,
     workspace_root: Path | None = None,
     path: str,
-) -> ToolResult | None:
-    """View one file in the selected worker, returning None when no worker endpoint exists."""
-    if not attachment_save_uses_worker(
-        runtime_paths=runtime_paths,
-        worker_tools_override=worker_tools_override,
-    ):
-        return None
-
+) -> ToolValue:
+    """View one file in the selected worker, for agents whose ``attachment_save_uses_worker`` holds."""
     proxy_config = sandbox_proxy_config(runtime_paths)
     manager_context = _primary_worker_manager_context(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config, manager_context) as worker_manager:
@@ -649,9 +638,6 @@ def view_file_from_worker(
             progress_sink=None,
             worker_manager=worker_manager,
         )
-        if worker_handle is None and proxy_config.proxy_url is None:
-            return None
-
         worker_key = worker_payload.get("worker_key")
         tool_init_overrides = _portable_tool_init_overrides(
             {"base_dir": str(workspace_root)} if workspace_root is not None else None,
@@ -679,10 +665,6 @@ def view_file_from_worker(
             operation="view-file",
             failure="Sandbox file view failed.",
         )
-        # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
-        from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
-        from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
-
         try:
             result = decode_media_result(response_data.get("result"))
         except ValueError as exc:
@@ -693,7 +675,7 @@ def view_file_from_worker(
                 failure_kind=None,
             )
             raise
-        if not isinstance(result, ToolResult):
+        if not isinstance(result, ToolValue):
             msg = "Sandbox view-file returned a non-media result."
             record_proxy_response_failure_for_worker(
                 worker_handle=worker_handle,
@@ -1001,15 +983,12 @@ def _call_proxy_sync(
             worker_grantable_credentials=manager_context.worker_grantable_credentials,
             cancellation=cancellation,
         )
-        # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
+        # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
-        from mindroom.tool_system.media_transport import (  # noqa: PLC0415
-            decode_media_result,
-            is_media_result_envelope,
-        )
 
         if tool_name == "browser_mcp" or is_media_result_envelope(result):
-            return finalize_tool_media(decode_media_result(result))
+            decoded = decode_media_result(result)
+            return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
         return result
 
 

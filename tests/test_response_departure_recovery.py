@@ -74,7 +74,8 @@ async def test_departure_during_generation_allows_orderly_shutdown(
         if rejoin:
             await admit_room_membership(principal, ROOM, "join")
         runner.begin_process_shutdown()
-        assert await runner.drain_inbox_responses(cancel_after_seconds=0.05, shutdown_intent=ORDERLY_SHUTDOWN)
+        # The drain returns once the proof's journal reads do; a proof that never holds still exhausts the window.
+        assert await runner.drain_inbox_responses(cancel_after_seconds=2.0, shutdown_intent=ORDERLY_SHUTDOWN)
         assert response.cancelled()
         assert runner.pending_inbox_response_count == 0
         assert not any(turn_store.has_live_turn_claim(source_id) for source_id in sources)

@@ -127,7 +127,6 @@ def _response_hook_service(tmp_path: Path, registry: HookRegistry) -> tuple[Conf
     rp = runtime_paths_for(config)
     hook_context = HookContextSupport(
         runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
-        logger=get_logger("tests"),
         runtime_paths=rp,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
@@ -360,7 +359,6 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
 
     hook_context = HookContextSupport(
         runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
-        logger=get_logger("tests"),
         runtime_paths=rp,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
@@ -391,7 +389,6 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 
     hook_context = HookContextSupport(
         runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
-        logger=get_logger("tests"),
         runtime_paths=rp,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),

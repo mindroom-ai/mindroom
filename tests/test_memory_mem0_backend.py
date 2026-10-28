@@ -170,7 +170,8 @@ async def test_store_conversation_memory_redacts_embedder_provider_error(
 
     class FailingMemory:
         async def add(self, *_args: object, **_kwargs: object) -> None:
-            raise error
+            # Mem0's embedder is MindRoom's, which raises the classified error at its boundary.
+            raise openai_embedder_error(error) from error
 
     async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
         return FailingMemory()
@@ -254,12 +255,33 @@ async def test_store_conversation_memory_detects_embedding_failure_swallowed_by_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("classified", [False, True], ids=["raw_sdk_error", "embedder_error"])
-async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(
-    storage_path: Path,
-    config: Config,
-    classified: bool,
-) -> None:
+async def test_a_failure_of_mem0_s_memory_model_is_not_an_embedder_failure(storage_path: Path, config: Config) -> None:
+    """A rejected memory LLM key propagates as the model's error and leaves the embedder's health alone."""
+    config.memory.backend = "mem0"
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(401, request=request, json={"error": {"message": "Incorrect API key provided"}})
+    rejected = AuthenticationError("Incorrect API key provided", response=response, body=None)
+
+    class FailingMemory:
+        async def add(self, *_args: object, **_kwargs: object) -> None:
+            # Mem0's own model calls raise the raw SDK error.
+            raise rejected
+
+    async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
+        return FailingMemory()
+
+    capture_embedder_health_recorder().record(None)
+    with (
+        patch("mindroom.memory._backend.create_memory_instance", side_effect=create_failing_memory),
+        pytest.raises(AuthenticationError),
+    ):
+        await add_agent_memory("Atlas ships Friday.", "general", storage_path, config, runtime_paths_for(config))
+
+    assert get_embedder_failure() is None
+
+
+@pytest.mark.asyncio
+async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(storage_path: Path, config: Config) -> None:
     """A failed Mem0 write raises the classified error with its retry flag and hint, and without the raw error."""
     config.memory.backend = "mem0"
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
@@ -268,10 +290,7 @@ async def test_mem0_write_failure_keeps_the_embedder_retry_judgment(
 
     class FailingMemory:
         async def add(self, *_args: object, **_kwargs: object) -> None:
-            # Mem0's own model calls raise the raw SDK error; MindRoom's embedder raises the classified one.
-            if classified:
-                raise openai_embedder_error(raw_error) from raw_error
-            raise raw_error
+            raise openai_embedder_error(raw_error) from raw_error
 
     async def create_failing_memory(*_args: object, **_kwargs: object) -> FailingMemory:
         return FailingMemory()

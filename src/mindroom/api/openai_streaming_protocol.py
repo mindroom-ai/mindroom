@@ -124,11 +124,11 @@ def error_response(
 # ---------------------------------------------------------------------------
 
 
-# TODO(simplify): a failed run is recognized by sniffing its reply text, so a real reply that starts with an error
-# emoji or "Error code:" reads as a failure. Have ai_response and the stream report failure as a typed outcome.
-# API clients would notice.
+# TODO(simplify): a streamed or team completion recognizes a failed run by sniffing its reply text, so a real reply
+# that starts with an error emoji or "Error code:" reads as a failure. Have the streams and the team completion report
+# failure as a typed outcome, as a blocking agent completion reads its completed attempt. API clients would notice.
 def is_error_response(text: str) -> bool:
-    """Detect error strings returned by ai_response() / stream_agent_response().
+    """Detect the error strings a turn's stream or a team's answer carries.
 
     Checks for:
     - Emoji-prefixed errors from get_user_friendly_error_message()

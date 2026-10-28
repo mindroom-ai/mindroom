@@ -759,6 +759,7 @@ elif mode == 'mem0_reader':
 
     class Memory:
         llm = SimpleNamespace(config=SimpleNamespace(model='gemma4'), client=SimpleNamespace(chat=lambda **_: None))
+        embedding_model = SimpleNamespace()
 
         @classmethod
         def from_config(cls, config):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 
 import pytest
-from agno.tools.function import ToolResult
 from mcp.types import (
     AudioContent,
     BlobResourceContents,
@@ -18,13 +17,13 @@ from mcp.types import (
 )
 
 from mindroom.mcp.errors import MCPToolCallError
-from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.results import tool_value_from_call_result
 
 
-def test_tool_result_from_call_result_converts_text_images_and_resources() -> None:
-    """Convert mixed MCP content blocks into one Agno tool result."""
+def test_tool_value_from_call_result_converts_text_images_and_resources() -> None:
+    """Convert mixed MCP content blocks into one tool value."""
     image_bytes = b"fake-image"
-    result = tool_result_from_call_result(
+    result = tool_value_from_call_result(
         "demo",
         CallToolResult(
             content=[
@@ -49,19 +48,18 @@ def test_tool_result_from_call_result_converts_text_images_and_resources() -> No
             structured_content={"ok": True},
         ),
     )
-    assert isinstance(result, ToolResult)
     assert result.content.startswith("hello")
     assert "embedded text" in result.content
     assert "structuredContent" not in result.content
     assert '{"ok": true}' in result.content
-    assert result.images is not None
+    assert result.images
     assert result.images[0].content == image_bytes
 
 
-def test_tool_result_from_call_result_raises_on_error() -> None:
+def test_tool_value_from_call_result_raises_on_error() -> None:
     """Raise a typed error when the MCP server reports a failed tool call."""
     with pytest.raises(MCPToolCallError, match="tool exploded"):
-        tool_result_from_call_result(
+        tool_value_from_call_result(
             "demo",
             CallToolResult(
                 content=[TextContent(type="text", text="tool exploded")],
@@ -71,9 +69,9 @@ def test_tool_result_from_call_result_raises_on_error() -> None:
         )
 
 
-def test_tool_result_from_call_result_summarizes_binary_embedded_resources() -> None:
+def test_tool_value_from_call_result_summarizes_binary_embedded_resources() -> None:
     """Summarize embedded binary resources instead of inlining opaque bytes."""
-    result = tool_result_from_call_result(
+    result = tool_value_from_call_result(
         "demo",
         CallToolResult(
             content=[
@@ -91,10 +89,10 @@ def test_tool_result_from_call_result_summarizes_binary_embedded_resources() -> 
     assert "binary blob" in result.content
 
 
-def test_tool_result_from_call_result_converts_audio_blocks() -> None:
-    """Convert MCP audio content blocks into Agno audio artifacts."""
+def test_tool_value_from_call_result_converts_audio_blocks() -> None:
+    """Convert MCP audio content blocks into audio media."""
     audio_bytes = b"fake-audio"
-    result = tool_result_from_call_result(
+    result = tool_value_from_call_result(
         "demo",
         CallToolResult(
             content=[
@@ -106,17 +104,16 @@ def test_tool_result_from_call_result_converts_audio_blocks() -> None:
             ],
         ),
     )
-    assert isinstance(result, ToolResult)
-    assert result.audios is not None
+    assert result.audios
     assert result.audios[0].content == audio_bytes
     assert result.audios[0].mime_type == "audio/ogg"
 
 
-def test_tool_result_from_call_result_keeps_invalid_base64_media_as_utf8_bytes() -> None:
+def test_tool_value_from_call_result_keeps_invalid_base64_media_as_utf8_bytes() -> None:
     """Keep permissive MCP media decoding for non-base64 payloads."""
     image_data = "not-base64-image"
     audio_data = "not-base64-audio"
-    result = tool_result_from_call_result(
+    result = tool_value_from_call_result(
         "demo",
         CallToolResult(
             content=[
@@ -125,9 +122,9 @@ def test_tool_result_from_call_result_keeps_invalid_base64_media_as_utf8_bytes()
             ],
         ),
     )
-    assert result.images is not None
+    assert result.images
     assert result.images[0].content == image_data.encode("utf-8")
     assert result.images[0].mime_type == "image/png"
-    assert result.audios is not None
+    assert result.audios
     assert result.audios[0].content == audio_data.encode("utf-8")
     assert result.audios[0].mime_type == "audio/wav"

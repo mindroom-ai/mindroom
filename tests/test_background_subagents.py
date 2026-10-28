@@ -17,7 +17,6 @@ from agno.tools.toolkit import Toolkit
 from mindroom.delegation.background import (
     delegation_child,
     delegation_outcome,
-    delegation_result,
     reconcile_delegation,
     start_delegation,
 )
@@ -31,6 +30,7 @@ from mindroom.tool_jobs.control import (
     job_stopped_by_shutdown,
     pending_human_messages_context,
 )
+from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import adapt_function
@@ -83,14 +83,14 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
         child_ref = await start()
         job_id = job_child().delegation_id
         waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
-        assert await delegation_result(runtime, waited.job) == delivered
+        assert (await read_result_payload(runtime, waited.job)).value == delivered
         await runtime.acknowledge_wait(job_id, waited.claim)
         gc.collect()
         assert child_ref() is None
         discovered = await runtime.list_jobs(owner=job_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         reread = await runtime.wait(job_id, owner=job_owner(), depth=0)
-        assert await delegation_result(runtime, reread.job) == delivered
+        assert (await read_result_payload(runtime, reread.job)).value == delivered
         await runtime.acknowledge_wait(job_id, reread.claim)
     finally:
         await runtime.shutdown()
@@ -121,7 +121,7 @@ async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path
     try:
         await restored.recover()
         saved = await lookup(restored, child.delegation_id, owner=job_owner(), depth=0)
-        assert await delegation_result(restored, saved) == delivered
+        assert (await read_result_payload(restored, saved)).value == delivered
         discovered = await restored.list_jobs(owner=job_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         await restored.expire_ended(

@@ -6,6 +6,8 @@ converting it, so both backends hold the same driver state over the two database
 observables, they take the same further random actions, and both must report the same outcome and show the same
 observables after each one. A sequence whose native run stored something else, through a deliberate change that
 comparison 1 masks, starts apart: ``_APART`` pins those, and each one's comparison 1 pin names such a change.
+Compaction summary requests compare without the model they name (comparison 1's ``summary_requests_name_their_model``):
+a converted database keeps the untagged requests it stored, which usage reports attribute to the same model.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import pytest
 
 from tests.storage_oracle.actions import Scenario, draw
 from tests.storage_oracle.determinism import deterministic
+from tests.storage_oracle.masks import untag_summary_requests
 from tests.storage_oracle.record import SEQUENCES, decode, first_difference, sequence_id
 from tests.storage_oracle.store_backend import StoreBackend
 
@@ -82,7 +85,10 @@ def _observed(determinism: Determinism, native: StoreBackend, converted: StoreBa
     """Observe both backends as of one moment: the second sees the ids the first saw minted."""
     with determinism.ids_repeated():
         seen = _json(native.observe())
-    return seen, _json(converted.observe())
+    shown = _json(converted.observe())
+    for observed in (seen, shown):
+        untag_summary_requests(observed["ledger"])
+    return seen, shown
 
 
 @pytest.mark.timeout(120)

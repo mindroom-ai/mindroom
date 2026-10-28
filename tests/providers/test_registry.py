@@ -24,7 +24,6 @@ from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
@@ -848,7 +847,6 @@ async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
         await _collect(provider, request, events)
 
     assert len(wire.requests) == 1
-    assert is_model_safeguard_refusal(raised.value)
     assert (raised.value.provider, raised.value.retryable) == ("Anthropic", False)
     assert not any(isinstance(event, TurnCompleted) for event in events)
     final_usage = [event.usage for event in events if isinstance(event, UsageReported) and event.final]

@@ -1,4 +1,4 @@
-"""Tests for the worker protocol check shared by the dedicated worker backends."""
+"""Tests for the worker protocol check shared by the worker backends."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def test_worker_health_accepts_matching_protocol() -> None:
         },
     )
 
-    assert worker_health_compatibility_error(response, backend_label="Docker", image="mindroom:2026.8.1") is None
+    assert worker_health_compatibility_error(response, worker="Docker worker image 'mindroom:2026.8.1'") is None
 
 
 @pytest.mark.parametrize(
@@ -41,7 +41,7 @@ def test_worker_health_rejects_older_or_invalid_protocol(payload: dict[str, obje
     """Missing and stale worker protocols should fail with image guidance."""
     response = httpx.Response(200, json=payload)
 
-    error = worker_health_compatibility_error(response, backend_label="Docker", image="mindroom:stale")
+    error = worker_health_compatibility_error(response, worker="Docker worker image 'mindroom:stale'")
 
     assert error is not None
     assert "mindroom:stale" in error
@@ -58,8 +58,7 @@ def test_worker_health_sends_a_newer_worker_to_the_primary_release() -> None:
 
     error = worker_health_compatibility_error(
         response,
-        backend_label="Docker",
-        image="mindroom:latest",
+        worker="Docker worker image 'mindroom:latest'",
         older_worker_hint="older-worker hint",
         newer_worker_hint="newer-worker hint",
     )
@@ -80,8 +79,7 @@ def test_worker_health_appends_the_older_worker_hint_to_an_older_worker() -> Non
 
     error = worker_health_compatibility_error(
         response,
-        backend_label="Docker",
-        image="mindroom:latest",
+        worker="Docker worker image 'mindroom:latest'",
         older_worker_hint="older-worker hint",
         newer_worker_hint="newer-worker hint",
     )
@@ -100,7 +98,7 @@ def test_worker_health_appends_the_older_worker_hint_to_an_older_worker() -> Non
 )
 def test_worker_health_rejects_malformed_payload(response: httpx.Response) -> None:
     """Malformed worker health responses should be treated as incompatible."""
-    error = worker_health_compatibility_error(response, backend_label="Docker", image="mindroom:malformed")
+    error = worker_health_compatibility_error(response, worker="Docker worker image 'mindroom:malformed'")
 
     assert error is not None
     assert "got missing" in error

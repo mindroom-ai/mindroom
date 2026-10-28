@@ -239,7 +239,7 @@ def _waiting_coordinate_call(
     # Handling: the first call that waits on the member answers its paused run, so an approval saved before the
     # upgrade still answers it with the member's result; two such calls to one member are answered in the order the
     # member's runs resume.
-    # Coverage: tests/teams/test_continue_team.py::test_an_approved_member_call_resumes_into_the_team_approved_rows,
+    # Coverage: tests/teams/test_continue_team.py::test_an_approved_member_call_resumes_the_member_and_then_the_leader,
     #   tests/teams/test_delegate_tools.py::test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_names,
     #   tests/teams/test_delegate_tools.py::test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume
     return next(iter(waiting), None)

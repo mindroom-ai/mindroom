@@ -133,7 +133,6 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
-    run_blocking_response_turn,
     stream_response_turn,
 )
 from mindroom.room_model_overrides import set_room_model_override
@@ -205,10 +204,11 @@ from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
     _AdapterLog,
-    _blocking_adapter,
+    _collected_turn,
     _continuation,
     _ctx,
     _model_switch_execution,
+    _resolving_adapter,
     _streaming_adapter,
 )
 from tests.tool_approval_helpers import gated_functions
@@ -1044,10 +1044,9 @@ async def test_recovery_proofs_wait_until_every_response_is_terminal() -> None:
 async def test_process_shutdown_drains_four_owned_response_lifecycles(
     tmp_path: Path,
 ) -> None:
-    """Process stop must unwind every tracked response before terminal cleanup can resist cancellation."""
+    """Process stop must unwind every tracked response without settling it, so restart recovery still owns each."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     all_attempts_started = asyncio.Event()
-    release_settlement = asyncio.Event()
     started_count = 0
 
     async def blocked_attempt(*_args: object, **_kwargs: object) -> None:
@@ -1056,13 +1055,6 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
         if started_count == 4:
             all_attempts_started.set()
         await asyncio.Event().wait()
-
-    async def cancellation_resistant_settlement(**_kwargs: object) -> None:
-        while not release_settlement.is_set():
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                continue
 
     async def owned_response(index: int) -> None:
         await coordinator.generate_response(
@@ -1086,7 +1078,7 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
         patch.object(
             coordinator,
             "_settle_missing_delivery_outcome",
-            new=AsyncMock(side_effect=cancellation_resistant_settlement),
+            wraps=coordinator._settle_missing_delivery_outcome,
         ) as settle,
         patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=False),
@@ -1102,25 +1094,27 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
             )
             for index in range(4)
         ]
-        await asyncio.wait_for(all_attempts_started.wait(), timeout=1.0)
+        # Each attempt opens its session store first, and concurrent opens of one state root queue on a polled lock.
+        await asyncio.wait_for(all_attempts_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         coordinator.begin_process_shutdown()
         try:
+            # The drain returns once the cancelled attempts unwind. One that kept running would exhaust both windows
+            # and raise; the outer bound stays above them, so it only reports a drain that ignores its windows.
             assert (
                 await asyncio.wait_for(
-                    coordinator.drain_inbox_responses(cancel_after_seconds=0.01),
-                    timeout=0.2,
+                    coordinator.drain_inbox_responses(cancel_after_seconds=2.0),
+                    timeout=SETTLE_TIMEOUT_SECONDS,
                 )
                 is True
             )
         finally:
-            release_settlement.set()
             for task in tasks:
                 if not task.done():
                     task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)
 
-    settle.assert_not_awaited()
+    settle.assert_not_called()
     assert coordinator.pending_inbox_response_count == 0
     assert not coordinator._inbox_response_tasks
 
@@ -8465,9 +8459,9 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
             ):
                 pass
         else:
-            await run_blocking_response_turn(
+            await _collected_turn(
                 _ctx(),
-                _blocking_adapter(_AdapterLog(), attempt),
+                _resolving_adapter(_AdapterLog(), attempt),
                 TurnSinks(),
                 continuation=_continuation(),
             )

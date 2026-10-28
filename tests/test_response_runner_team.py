@@ -14,6 +14,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.constants import TOOL_TRACE_CONTENT_KEY
 from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
@@ -43,6 +44,7 @@ from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import _ResponderAvailability
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -479,6 +481,63 @@ class TestAgentBot(AgentBotTestBase):
         assert edit["m.new_content"]["body"] == "Team reply [hooked]"
         assert mock_edit_message.await_count == 0
         assert after_results == [("$team", "Team reply [hooked]", "edited", "team")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("show_tool_calls", [True, False])
+    async def test_a_blocking_team_reply_delivers_its_tool_trace_when_tool_calls_show(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        show_tool_calls: bool,
+    ) -> None:
+        """A blocking team reply carries the trace of the document it shows, as a streamed one does."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        config.defaults.show_tool_calls = show_tool_calls
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths_for(config))
+        trace = ToolTraceEntry(type="tool_call_completed", tool_name="touch", args_preview="label=a")
+
+        async def fake_team_response(**kwargs: Any) -> str:  # noqa: ANN401
+            kwargs["tool_trace_collector"].append(trace)
+            return "Team reply"
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ) as mock_send_message,
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=fake_team_response,
+            ),
+        ):
+            await bot._response_runner.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                member_names=["calculator", "general"],
+                team_mode="collaborate",
+            )
+
+        _placeholder, edit = (call.args[2] for call in mock_send_message.await_args_list)
+        delivered = edit["m.new_content"]
+        assert delivered["body"] == "Team reply"
+        if show_tool_calls:
+            assert [event["tool_name"] for event in delivered[TOOL_TRACE_CONTENT_KEY]["events"]] == ["touch"]
+        else:
+            assert TOOL_TRACE_CONTENT_KEY not in delivered
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_preserves_enrichment_in_shared_team_session(

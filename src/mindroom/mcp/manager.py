@@ -36,7 +36,7 @@ from mindroom.mcp.errors import (
 )
 from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
 from mindroom.mcp.registry import mcp_tool_name
-from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.results import tool_value_from_call_result
 from mindroom.mcp.surface_projection import (
     MCPFunctionSurfaceContext,
     MCPScopedFunctionState,
@@ -72,13 +72,13 @@ from mindroom.tool_system.filters import tool_name_allowed
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 
-    from agno.tools.function import ToolResult
     from mcp.client.session import IncomingMessage, MessageHandlerFnT
     from mcp.shared.dispatcher import ProgressFnT
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.tool_function import ToolValue
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -478,7 +478,7 @@ class MCPServerManager:
         exclude_tools: Collection[str] | None = None,
         expected_config: Config | None = None,
         before_dispatch: Callable[[], Awaitable[None]] | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         """Call one remote MCP tool, checking caller authority after preparation and queueing."""
         self._require_expected_config(server_id, expected_config)
         state = self._require_state(server_id)
@@ -971,7 +971,7 @@ class MCPServerManager:
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
         before_dispatch: Callable[[], Awaitable[None]] | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         self._require_desired_oauth_lease(state, authorization_lease)
         self._require_active_state(state)
         if authorization_lease is not None:
@@ -1043,7 +1043,7 @@ class MCPServerManager:
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
         before_dispatch: Callable[[], Awaitable[None]] | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         # Attempt timings exclude initial connection setup and post-failure reconnects.
         started_at = monotonic()
         call_id = uuid4().hex
@@ -1170,7 +1170,7 @@ class MCPServerManager:
         *,
         timeout_seconds: float,
         progress_callback: ProgressFnT,
-    ) -> ToolResult:
+    ) -> ToolValue:
         session = state.session
         if session is None:
             msg = f"MCP server '{state.server_id}' is not connected"
@@ -1189,7 +1189,7 @@ class MCPServerManager:
             )
         except Exception as exc:
             raise self._wrap_runtime_exception(state.server_id, exc) from exc
-        return tool_result_from_call_result(state.server_id, result)
+        return tool_value_from_call_result(state.server_id, result)
 
     async def _record_catalog_refresh_error(
         self,

@@ -12,17 +12,15 @@ from mindroom.api.sandbox_runner import _run_toolkit_entrypoint
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+from mindroom.llm.media import Image
+from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tools.browser import browser_tools
 from mindroom.tools.browser_mcp import browser_mcp_tools
 
 
 def test_action_browser_encoder_preserves_media_and_ordinary_json() -> None:
     """Action-browser images use the bounded codec while ordinary JSON keeps its wire shape."""
-    from agno.media import Image  # noqa: PLC0415
-    from agno.tools.function import ToolResult  # noqa: PLC0415
-
-    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
-
     provider = select_browser_provider(
         "browser",
         "browser_control",
@@ -30,12 +28,12 @@ def test_action_browser_encoder_preserves_media_and_ordinary_json() -> None:
         lambda value: {"ordinary": value},
     )
     media = provider.encode_result(
-        ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")]),
+        ToolValue(content="screen", images=(Image(content=b"png", mime_type="image/png"),)),
     )
 
     decoded = decode_media_result(media)
-    assert isinstance(decoded, ToolResult)
-    assert decoded.images is not None
+    assert isinstance(decoded, ToolValue)
+    assert decoded.images
     assert decoded.images[0].content == b"png"
     assert provider.encode_result({"ok": True}) == {"ordinary": {"ok": True}}
 

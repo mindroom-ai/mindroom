@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.providers.openai.media import chat_file_part
-from mindroom.tool_system.agno_toolkits import tool_value
+from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tools.file_generation import file_generation_tools
 
 if TYPE_CHECKING:
@@ -49,7 +49,9 @@ def test_saved_file_reaches_the_model_as_the_bytes_the_tool_returned(tmp_path: P
     (workspace / "notes.txt").unlink()
     (workspace / "notes.txt").symlink_to(outside)
 
-    file = tool_value(result).files[0]
+    value = read_tool_value(result)
+    assert value is not None
+    file = value.files[0]
     part = chat_file_part(file)
 
     assert file.filepath is None

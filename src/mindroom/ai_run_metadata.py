@@ -37,11 +37,11 @@ _PUBLISHED_COUNTERS = (
 
 
 @dataclass(frozen=True, slots=True)
-class _ReplyUsage:
+class ReplyUsage:
     """The ``usage`` object of a reply's ``io.mindroom.ai_run`` metadata, kept apart from how runs store usage.
 
-    Zero counters and unset values are left out, and fractions are published as decimal strings, because Matrix
-    event JSON forbids floats.
+    A delegated child's record reports its usage in this shape too. Zero counters and unset values are left out, and
+    fractions are published as decimal strings, because Matrix event JSON forbids floats.
     """
 
     tokens: TokenCounts
@@ -51,8 +51,21 @@ class _ReplyUsage:
     uncached_input_tokens: int | None
 
     @classmethod
-    def of(cls, metrics: RunMetrics, *, uncached_input_tokens: int | None) -> _ReplyUsage:
-        """Return the usage a run's metrics publish."""
+    def of(
+        cls,
+        metrics: RunMetrics,
+        *,
+        provider: str | None,
+        configured_provider: str | None,
+        model_id: str | None,
+    ) -> ReplyUsage:
+        """Return the usage a run's metrics publish, for the model that answered when ``metrics`` has no breakdown."""
+        uncached_input_tokens = _uncached_input_tokens(
+            metrics,
+            provider=provider,
+            configured_provider=configured_provider,
+            model_id=model_id,
+        )
         return cls(metrics.tokens, metrics.cost, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
 
     def to_wire(self) -> dict[str, Any]:
@@ -241,13 +254,13 @@ def build_ai_run_metadata_content(
         model_payload["provider"] = provider
     payload["model"] = model_payload
     if metrics is not None:
-        uncached_input_tokens = _uncached_input_tokens(
+        usage = ReplyUsage.of(
             metrics,
             provider=provider,
             configured_provider=configured_provider,
             model_id=model_id,
-        )
-        if usage := _ReplyUsage.of(metrics, uncached_input_tokens=uncached_input_tokens).to_wire():
+        ).to_wire()
+        if usage:
             payload["usage"] = usage
     cost = run_cost_usd(
         metrics,

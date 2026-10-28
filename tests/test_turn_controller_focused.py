@@ -539,7 +539,6 @@ def _build_harness(
     )
     hook_context = HookContextSupport(
         runtime=runtime,
-        logger=logger,
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
