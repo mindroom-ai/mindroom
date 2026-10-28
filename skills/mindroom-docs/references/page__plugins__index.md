@@ -757,7 +757,7 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-conne
 ## MCP servers
 
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
-MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them, and agents skip them with a warning that names `mcp_servers:`.
+MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## Plugin skills
 
