@@ -9,7 +9,7 @@ import json
 import re
 import tempfile
 from concurrent.futures import CancelledError as FutureCancelledError
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import Context
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -2762,6 +2762,48 @@ async def test_openai_stream_response_skips_background_when_client_closes_before
         )
 
     assert events == []
+    assert not completion_lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+async def test_a_stream_the_client_left_closes_while_its_session_is_still_held(spec_version: str) -> None:
+    """Closing a stream the client left stores the turn it cut short, so that close ends before the lock releases.
+
+    Otherwise the session's next completion could store its turn first, and replay would read the two out of order.
+    """
+    completion_lock = asyncio.Lock()
+    await completion_lock.acquire()
+    held_at_close: list[bool] = []
+    partial_sent = asyncio.Event()
+
+    async def body() -> AsyncIterator[str]:
+        try:
+            yield "data: partial\n\n"
+            await asyncio.Event().wait()
+            yield "data: [DONE]\n\n"
+        finally:
+            held_at_close.append(completion_lock.locked())
+
+    streaming_response = openai_compat.OpenAIStreamingResponse(body(), media_type="text/event-stream")
+    streaming_response.completion_predicate = lambda: False
+    response = openai_compat._attach_openai_completion_lock_release(streaming_response, completion_lock, None)
+
+    async def receive() -> dict[str, str]:
+        await partial_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body" and message.get("body") == b"data: partial\n\n":
+            partial_sent.set()
+            if spec_version == "2.4":
+                error_message = "client closed"
+                raise OSError(error_message)
+
+    with suppress(ClientDisconnect):
+        await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
+
+    assert held_at_close == [True]
     assert not completion_lock.locked()
 
 
