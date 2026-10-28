@@ -1640,9 +1640,10 @@ async def test_prepare_history_for_run_uses_context_window_guard_without_authore
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2", "run-3"]
     assert prepared.compaction_reply_outcome == "none"
     assert prepared.replay_plan is not None
+    # Replay keeps the reserve, half of the 600-token window, free, so one of the 200-token runs fits.
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
-    assert prepared.replay_plan.num_history_runs == 2
+    assert prepared.replay_plan.num_history_runs == 1
     assert prepared.replay_plan.num_history_messages is None
 
 

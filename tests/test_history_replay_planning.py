@@ -483,6 +483,44 @@ def test_only_an_authored_enabled_compaction_config_compacts_automatically(
     assert execution_plan.automatic_compaction is automatic
 
 
+@pytest.mark.parametrize(
+    "defaults",
+    [
+        pytest.param({"compaction": {"enabled": False}}, id="disabled-defaults"),
+        pytest.param({"compaction": None}, id="null-defaults"),
+    ],
+)
+def test_a_config_that_never_compacts_on_its_own_replays_within_the_reserve(
+    tmp_path: Path,
+    defaults: dict[str, object],
+) -> None:
+    """Both ways of turning compaction off keep ``reserve_tokens`` free for the reply instead of fitting to a trigger.
+
+    On a 48k window with a 2k static prompt, the 80% trigger would replay 36,400 tokens and leave 9,600 for the
+    reply, below the 16,384 reserve.
+    """
+    config = Config.validate_with_runtime(
+        {
+            "agents": {"test_agent": {"display_name": "Test Agent"}},
+            "defaults": {"tools": [], **defaults},
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 48_000}},
+        },
+        _runtime_paths(tmp_path),
+    )
+
+    execution_plan = resolve_history_execution_plan(
+        config=config,
+        history_settings=_agent_settings(config),
+        active_model_name="default",
+        active_context_window=48_000,
+        static_prompt_tokens=2_000,
+    )
+
+    assert execution_plan.hard_replay_budget_tokens == 48_000 - 16_384 - 2_000
+    assert execution_plan.replay_budget_tokens == execution_plan.hard_replay_budget_tokens
+    assert execution_plan.trigger_threshold_tokens is None
+
+
 def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     with patch("mindroom.config.main.logger.warning") as mock_warning:
