@@ -17,7 +17,6 @@ from chromadb.api.rust import RustBindingsAPI
 from mem0.embeddings.base import EmbeddingBase
 from mem0.utils.factory import EmbedderFactory
 
-import mindroom.memory._mem0_backend as mem0_backend
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
@@ -294,19 +293,10 @@ async def test_a_save_and_a_search_that_first_open_one_store_together_both_succe
             finish_first_start.wait(5)
         start_store(api)
 
-    search_scope = mem0_backend._search_mem0_agent_scope
-
-    async def search_once_saved(*args: object, **kwargs: object) -> object:
-        # The search opened the store beside the save; it reads the store once the save wrote it, because Chroma's
-        # local store can fail a query that overlaps a new collection's first query and add.
-        await asyncio.wait({saving})
-        return await search_scope(*args, **kwargs)
-
     with (
         patch.dict(EmbedderFactory.provider_to_class, {"huggingface": f"{__name__}.{_TableLocalEmbedding.__name__}"}),
         patch("mindroom.memory.config.ensure_sentence_transformers_dependencies"),
         patch.object(RustBindingsAPI, "start", slow_first_start),
-        patch.object(mem0_backend, "_search_mem0_agent_scope", search_once_saved),
     ):
         saving = asyncio.create_task(_remember(config, claude_reply, ["PR review"]))
         assert await asyncio.to_thread(first_start.wait, 5)

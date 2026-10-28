@@ -7,9 +7,10 @@ import re
 import tempfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -17,6 +18,7 @@ import pytest
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import TextBlock
 from anthropic.types import Usage as AnthropicUsage
+from chromadb.api.rust import RustBindingsAPI
 from mem0 import AsyncMemory
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
@@ -34,14 +36,17 @@ from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder
-from mindroom.embeddings.errors import EmbedderRequestError
+from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.embeddings.factory import create_configured_embedder, resolve_embedder_settings
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
 from mindroom.memory.config import (
     _get_memory_config,
+    _Mem0Embedder,
     _Mem0StrictOpenAIEmbedder,
     _memory_collection_name,
+    _ollama_embedder_error,
     create_memory_instance,
+    recorded_embedder_failures,
 )
 from mindroom.model_defaults import (
     MEMORY_OLLAMA_LLM,
@@ -56,6 +61,9 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.path_globs import matches_root_glob
 from mindroom.tool_system.dependencies import optional_dependency_environment
 from tests.conftest import orchestrator_runtime_paths
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _fake_mem0_llm() -> SimpleNamespace:
@@ -236,7 +244,7 @@ class TestMemoryConfig:
         with patch.object(
             AsyncMemory,
             "from_config",
-            return_value=SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock()),
+            return_value=SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock(), vector_store=MagicMock()),
         ):
             instance = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
@@ -287,7 +295,7 @@ class TestMemoryConfig:
         with patch("mem0.llms.openai.OpenAI", return_value=fake_client):
             mem0_llm = OpenAILLM(_get_memory_config(tmp_path / "memory", config, runtime_paths)["llm"]["config"])
 
-        mem0_memory = SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock())
+        mem0_memory = SimpleNamespace(llm=mem0_llm, embedding_model=MagicMock(), vector_store=MagicMock())
         with patch.object(AsyncMemory, "from_config", return_value=mem0_memory):
             instance = await create_memory_instance(tmp_path / "memory", config, runtime_paths)
         instance.llm.generate_response([{"role": "user", "content": "remember this"}])
@@ -1057,7 +1065,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock(), vector_store=MagicMock())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -1086,7 +1094,11 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock())
+        mock_from_config.return_value = SimpleNamespace(
+            llm=_fake_mem0_llm(),
+            embedding_model=MagicMock(),
+            vector_store=MagicMock(),
+        )
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -1141,7 +1153,7 @@ class TestMemoryConfig:
             client=client,
             health_recorder=capture_embedder_health_recorder(),
         )
-        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=object())
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=object(), vector_store=MagicMock())
 
         with (
             patch.object(AsyncMemory, "from_config", return_value=memory),
@@ -1149,7 +1161,7 @@ class TestMemoryConfig:
         ):
             result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
-        assert isinstance(result.embedding_model, _Mem0StrictOpenAIEmbedder)
+        assert result.embedding_model.embedder == _Mem0StrictOpenAIEmbedder(strict_embedder)
         with pytest.raises(EmbedderRequestError, match="embedder returned 0 embeddings for 1 inputs"):
             result.embedding_model.embed("query", "search")
 
@@ -1170,7 +1182,7 @@ class TestMemoryConfig:
         mem0_embedder = MagicMock()
         mem0_embedder.embed.side_effect = refused
         mem0_embedder.embed_batch.return_value = [[0.5]]
-        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder)
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder, vector_store=MagicMock())
 
         with (
             patch.object(AsyncMemory, "from_config", side_effect=refused),
@@ -1212,7 +1224,7 @@ class TestMemoryConfig:
         refused.__cause__ = httpx.ConnectError("connection refused", request=request)
         mem0_embedder = MagicMock()
         mem0_embedder.embed.side_effect = refused
-        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder)
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder, vector_store=MagicMock())
 
         with patch.object(AsyncMemory, "from_config", return_value=memory):
             result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -1238,8 +1250,84 @@ class TestMemoryConfig:
         ):
             await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
 
-    def test_mem0_strict_adapter_remembers_swallowed_operation_failure(self) -> None:
-        """A later successful retry cannot hide a batch failure from the caller."""
+    @pytest.mark.asyncio
+    async def test_a_memory_reads_and_writes_a_store_only_between_another_memorys_writes(self, tmp_path: Path) -> None:
+        """Chroma can fail a query that overlaps a new collection's first write, so one store's memories take turns.
+
+        Chroma's error reads ``Error creating hnsw segment reader: Nothing found on disk``; it hit the first memory
+        search of a conversation whose previous turn was still saving into a fresh store.
+        """
+        config = Config(
+            memory=MemoryConfig(
+                embedder=_MemoryEmbedderConfig(
+                    provider="openai",
+                    config=EmbedderConfig(model="text-embedding-3-small", api_key="sk-test"),
+                ),
+                llm=_MemoryLLMConfig(provider="openai", config={"model": OPENAI_GPT_LUNA, "api_key": "sk-test"}),
+            ),
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = _runtime_paths(tmp_path)
+        saver = await create_memory_instance(tmp_path / "memory", config, runtime_paths)
+        other = await create_memory_instance(tmp_path / "memory", config, runtime_paths)
+        vector = [1.0, 0.0, 0.0, 0.0]
+        scope = {"user_id": "agent_general"}
+        payload = {**scope, "data": "PR review"}
+        other_calls = {
+            "search": partial(other.vector_store.search, query="PR review", vectors=vector, top_k=5, filters=scope),
+            "get": partial(other.vector_store.get, vector_id="memory-1"),
+            "list": partial(other.vector_store.list, filters=scope),
+            "update": partial(other.vector_store.update, vector_id="memory-1", payload=payload),
+            "delete": partial(other.vector_store.delete, vector_id="memory-2"),
+        }
+        adding = threading.Event()
+        all_called = threading.Event()
+        called_while_adding: list[bool] = []
+        add_records = RustBindingsAPI._add
+
+        def slow_add(api: RustBindingsAPI, *args: object, **kwargs: object) -> object:
+            adding.set()
+            # The other memory's calls reach Chroma now unless they wait for the write.
+            all_called.wait(0.5)
+            try:
+                return add_records(api, *args, **kwargs)
+            finally:
+                adding.clear()
+
+        def watched(call: Callable[..., object]) -> Callable[..., object]:
+            def watched_call(api: RustBindingsAPI, *args: object, **kwargs: object) -> object:
+                called_while_adding.append(adding.is_set())
+                if len(called_while_adding) == len(other_calls):
+                    all_called.set()
+                return call(api, *args, **kwargs)
+
+            return watched_call
+
+        with (
+            patch.object(RustBindingsAPI, "_add", slow_add),
+            patch.multiple(
+                RustBindingsAPI,
+                **{name: watched(getattr(RustBindingsAPI, name)) for name in ("_query", "_get", "_update", "_delete")},
+            ),
+        ):
+            saving = asyncio.create_task(
+                asyncio.to_thread(saver.vector_store.insert, vectors=[vector], ids=["memory-1"], payloads=[payload]),
+            )
+            assert await asyncio.to_thread(adding.wait, 5)
+            results = dict(
+                zip(
+                    other_calls,
+                    await asyncio.gather(*(asyncio.to_thread(call) for call in other_calls.values())),
+                    strict=True,
+                ),
+            )
+            await saving
+
+        assert called_while_adding == [False] * len(other_calls)
+        assert [hit.payload["data"] for hit in results["search"]] == ["PR review"]
+
+    def test_mem0_embedder_records_every_failure_of_the_operation(self) -> None:
+        """A later successful retry cannot hide a batch failure from the caller, whichever embedder Mem0 calls."""
         failure_detail = "embedder authentication failed (HTTP 401)"
 
         class BatchFailingEmbedder:
@@ -1254,17 +1342,28 @@ class TestMemoryConfig:
             async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
                 return self.embed(texts, purpose=purpose)
 
-        adapter = _Mem0StrictOpenAIEmbedder(BatchFailingEmbedder())
-        adapter.begin_operation()
+        strict = _Mem0Embedder(_Mem0StrictOpenAIEmbedder(BatchFailingEmbedder()), openai_embedder_error)
+        mem0_own = MagicMock()
+        mem0_own.embed_batch.side_effect = ConnectionError("Failed to connect to Ollama.")
+        mem0_own.embed.return_value = [0.3]
+        ollama = _Mem0Embedder(mem0_own, _ollama_embedder_error)
 
+        with recorded_embedder_failures() as failures:
+            for embedder in (strict, ollama):
+                with pytest.raises(EmbedderRequestError) as raised:
+                    embedder.embed_batch(["first", "second"])
+                embedder.embed("first")
+                # The raised error is the one recorded, so its retry judgment reaches the caller.
+                assert failures[-1] is raised.value
+
+        assert [(str(failure), failure.retryable) for failure in failures] == [
+            (failure_detail, False),
+            ("embedder endpoint unreachable", True),
+        ]
+        # Outside an operation nothing is recorded.
         with pytest.raises(EmbedderRequestError):
-            adapter.embed_batch(["first", "second"])
-        assert adapter.embed("first") == [0.1, 0.2]
-        with pytest.raises(EmbedderRequestError, match="embedder authentication failed"):
-            adapter.raise_for_operation_failure()
-
-        # Consuming the failure resets the next operation.
-        adapter.raise_for_operation_failure()
+            ollama.embed_batch(["first", "second"])
+        assert len(failures) == 2
 
     def test_mem0_strict_adapter_embeds_searches_as_queries_and_memories_as_documents(self) -> None:
         """Mem0 names the purpose of each embedding, so stored memories get the document prefix."""
