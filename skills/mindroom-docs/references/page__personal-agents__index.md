@@ -219,7 +219,8 @@ A created agent is built again from its creator at every config load, so changin
   Setting it to 0 stops them all and removes `create_agent`.
 - Removing the creator stops its agents with `reason=creator_missing`.
 - Stopped agents keep their roster entries and Matrix accounts, so restoring the creator or raising the cap starts them again.
-- An authored agent, team, or template added later under a created agent's name keeps the name, and the created agent stops with `reason=name_taken`.
+- Saving an agent, team, or template under a created agent's name from the dashboard or `config_manager` is refused with `<section>.<name> collides with the agent <creator> created for <owner>`.
+  One added to `config.yaml` by hand keeps the name, and the created agent stops with `reason=name_taken`.
 - A created agent copies a personal creator as its template defines it, so the owner's edits to that creator do not carry over, and the tools it may give come from the template.
 
 ## Troubleshooting Personal Agents
