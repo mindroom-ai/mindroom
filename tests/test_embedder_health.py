@@ -90,7 +90,7 @@ class _HealthyEmbedder:
 class _AuthFailingEmbedder:
     def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
         del purpose
-        raise _status_error(401)
+        raise embedding_errors.openai_embedder_error(_status_error(401))
 
 
 class _EmptyVectorEmbedder:
@@ -102,24 +102,39 @@ class _EmptyVectorEmbedder:
 def test_authentication_error_maps_to_fixed_401_detail() -> None:
     """401 maps to the fixed auth-failed detail."""
     exc = _status_error(401)
-    assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    assert describe_embedder_error(exc) == EMBEDDER_AUTH_FAILED_DETAIL
-    assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
+    assert is_embedder_auth_failure_detail(describe_embedder_error(embedding_errors.openai_embedder_error(exc)))
+    assert describe_embedder_error(embedding_errors.openai_embedder_error(exc)) == EMBEDDER_AUTH_FAILED_DETAIL
+    assert (
+        describe_embedder_error(embedding_errors.openai_embedder_error(exc))
+        == "embedder authentication failed (HTTP 401)"
+    )
+
+
+def test_a_key_rejected_with_another_client_status_reads_as_a_credential_rejection() -> None:
+    """Some OpenAI-compatible endpoints reject a key with HTTP 400, which still needs credential advice, not a retry."""
+    error = embedding_errors.openai_embedder_error(
+        _status_error(400, message="API key not valid. Please pass a valid API key."),
+    )
+
+    assert (str(error), error.retryable) == ("embedder authentication failed (HTTP 400)", False)
+    assert is_embedder_auth_failure_detail(str(error))
+    assert embedding_errors.extract_classified_embedder_detail(f"Last error: {error}") == str(error)
+    assert SECRET not in str(error)
 
 
 def test_permission_denied_maps_to_distinct_403_detail() -> None:
     """403 stays distinct from 401 so operators repair the right thing."""
     exc = _status_error(403)
-    assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    assert describe_embedder_error(exc) == EMBEDDER_PERMISSION_DENIED_DETAIL
-    assert describe_embedder_error(exc) != EMBEDDER_AUTH_FAILED_DETAIL
+    assert is_embedder_auth_failure_detail(describe_embedder_error(embedding_errors.openai_embedder_error(exc)))
+    assert describe_embedder_error(embedding_errors.openai_embedder_error(exc)) == EMBEDDER_PERMISSION_DENIED_DETAIL
+    assert describe_embedder_error(embedding_errors.openai_embedder_error(exc)) != EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_other_http_status_uses_fixed_message_without_body() -> None:
     """Non-auth HTTP failures use a fixed message without the response body."""
     exc = _status_error(500, message=f"internal error at http://user:{SECRET}@embeddings.local/v1")
-    assert not is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    detail = describe_embedder_error(exc)
+    assert not is_embedder_auth_failure_detail(describe_embedder_error(embedding_errors.openai_embedder_error(exc)))
+    detail = describe_embedder_error(embedding_errors.openai_embedder_error(exc))
     assert detail == "embedder request failed (HTTP 500)"
     assert SECRET not in detail
 
@@ -130,7 +145,7 @@ def test_transport_error_uses_fixed_message_without_host() -> None:
     exc = APIConnectionError(request=request)
     # The SDK raises its connection error from the transport failure.
     exc.__cause__ = httpx.ConnectError("connection refused", request=request)
-    detail = describe_embedder_error(exc)
+    detail = describe_embedder_error(embedding_errors.openai_embedder_error(exc))
     assert detail == "embedder endpoint unreachable"
     assert "embeddings.internal.example" not in detail
 

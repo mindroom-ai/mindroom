@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -224,6 +224,36 @@ def _is_text(mime_type: str | None) -> bool:
     return mime_type is not None and mime_type.startswith("text/")
 
 
+# The document types a tool may return a file as for the model to read; a model's provider adapter decides which of
+# them it sends.
+DOCUMENT_MIME_TYPES = frozenset(
+    {
+        "application/pdf",
+        "application/json",
+        "application/x-javascript",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/msword",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-outlook",
+        "application/zip",
+        "message/rfc822",
+        "text/javascript",
+        "application/x-python",
+        "text/x-python",
+        "text/plain",
+        "text/html",
+        "text/css",
+        "text/markdown",
+        "text/csv",
+        "text/xml",
+        "text/rtf",
+    },
+)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class File:
     """A document, usually given by ``url``, ``filepath``, or ``content``.
@@ -282,7 +312,21 @@ class File:
         return cls(id=_id_from(data), content=content, **_stored_fields(cls, data))
 
 
+def named_by_resource(file: File, resource_name: str, declared_mime: str | None = None) -> File:
+    """Return ``file`` with the filename and document type the resource its bytes came from gives it, as needed.
+
+    ``resource_name`` is the last part of that resource's path or URL, and ``declared_mime`` the type its server
+    declared. A filename or type the file already has stands, and a guessed type outside ``DOCUMENT_MIME_TYPES`` stays
+    unset.
+    """
+    filename = file.filename or file.name or resource_name or None
+    candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(resource_name)[0])
+    mime_type = file.mime_type or next((value for value in candidates if value in DOCUMENT_MIME_TYPES), None)
+    return replace(file, filename=filename, mime_type=mime_type)
+
+
 __all__ = [
+    "DOCUMENT_MIME_TYPES",
     "IMAGE_HEADER_BYTES",
     "VIEWED_IMAGE_ID_PREFIX",
     "Audio",
@@ -292,4 +336,5 @@ __all__ = [
     "canonical_mime_type",
     "image_format",
     "image_mime_type",
+    "named_by_resource",
 ]

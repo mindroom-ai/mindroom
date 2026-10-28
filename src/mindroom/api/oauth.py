@@ -71,6 +71,7 @@ from mindroom.oauth.credential_lifecycle import (
     refresh_oauth_credentials,
     resolve_oauth_credential_context,
 )
+from mindroom.oauth.google import with_google_account_picker
 from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 from mindroom.oauth.reset import (
     BrowserOAuthResetIntent,
@@ -170,7 +171,8 @@ def _load_provider(
     if provider is None:
         raise _UnknownOAuthProviderError(status_code=404, detail=f"Unknown OAuth provider: {provider_id}")
     if credential_service is not None:
-        provider = replace(provider, credential_service=credential_service)
+        # That connection is another account than the tools' one, so Google asks which.
+        provider = with_google_account_picker(replace(provider, credential_service=credential_service))
     return provider, snapshot.runtime_paths
 
 

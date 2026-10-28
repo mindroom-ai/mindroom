@@ -604,7 +604,6 @@ class AgentBot:
         )
         self._hook_context_support = HookContextSupport(
             runtime=self._runtime_view,
-            logger=self.logger,
             runtime_paths=self.runtime_paths,
             agent_name=self.agent_name,
             hook_registry_state=self._hook_registry_state,

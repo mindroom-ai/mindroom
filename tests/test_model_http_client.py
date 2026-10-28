@@ -93,7 +93,7 @@ async def server() -> AsyncIterator[_ModelsServer]:
 def _provider(tmp_path: Path, provider: str, base_url: str, api: str | None = None) -> ModelProvider:
     """Build the configured model as the runtime does, sending to ``base_url``."""
     runtime_paths = test_runtime_paths(tmp_path)
-    client_params = {"base_url": f"{base_url}/v1" if provider == "openai" else base_url, "max_retries": 0}
+    client_params = {"base_url": f"{base_url}/v1" if provider == "openai" else base_url}
     extra_kwargs = {"api_key": "test", "client_params": client_params}
     model = ModelConfig(provider=provider, id="test-model", api=api, extra_kwargs=extra_kwargs)
     config = bind_runtime_paths(Config(models={"default": model}), runtime_paths)

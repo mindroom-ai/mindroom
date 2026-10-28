@@ -10,9 +10,11 @@ from uuid import uuid4
 
 import pytest
 
+from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation import records
 from mindroom.delegation.audit import (
     child_audit_context,
@@ -29,7 +31,7 @@ from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -339,6 +341,75 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     assert child.result == "final response"
     assert run["usage"]["input_tokens"] == 8
     assert run["usage"]["output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("breakdown", [True, False], ids=["per_model", "totals_only"])
+async def test_a_childs_usage_is_recorded_as_its_reply_would_publish_it(tmp_path: Path, *, breakdown: bool) -> None:
+    """An agent reading a child's record sees the usage shape a reply publishes, not the stored per-model metrics.
+
+    Without a per-model breakdown, the run's own provider and model decide how its cache tokens count.
+    """
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    tokens = TokenCounts(input_tokens=8, output_tokens=4, total_tokens=12, cache_read_tokens=100, cache_write_tokens=20)
+    if breakdown:
+        metrics = RunMetrics(time_to_first_token=0.5, duration=1.5)
+        metrics.add(
+            MessageMetrics(tokens=tokens, cost=0.25, provider_metrics={"service_tier": "standard"}),
+            model_id="claude-test",
+            provider="VertexAI",
+        )
+    else:
+        metrics = RunMetrics(tokens=tokens, cost=0.25, time_to_first_token=0.5, duration=1.5)
+    response = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        status=RunStatus.completed,
+        content="final response",
+        model="claude-test",
+        model_provider="VertexAI",
+        metrics=metrics,
+    )
+
+    await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
+
+    published = build_ai_run_metadata_content(
+        config=config,
+        model_name="default",
+        run_id=child.run_id,
+        session_id=child.session_id,
+        status=RunStatus.completed,
+        model="claude-test",
+        model_provider="VertexAI",
+        prices={},
+        tool_count=0,
+        metrics=metrics,
+    )[AI_RUN_METADATA_KEY]["usage"]
+    expected = {
+        "input_tokens": 8,
+        "output_tokens": 4,
+        "total_tokens": 12,
+        "cache_read_tokens": 100,
+        "cache_write_tokens": 20,
+        "cost": "0.25",
+        "time_to_first_token": "0.5",
+        "duration": "1.5",
+        # Claude on Vertex AI counts cache tokens outside its input, so its cache writes are new input.
+        "uncached_input_tokens": 28,
+    }
+    assert published == expected
+    record_dir = await _record_dir(child, config, runtime_paths)
+    assert next(event for event in _events(record_dir) if event["kind"] == "usage")["data"] == expected
+    assert json.loads((record_dir / "run.json").read_text(encoding="utf-8"))["usage"] == expected
 
 
 @pytest.mark.asyncio

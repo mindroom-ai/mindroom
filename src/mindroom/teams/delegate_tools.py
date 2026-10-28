@@ -98,7 +98,7 @@ def delegate_functions(
     The arguments are checked against the entrypoint's signature before it runs, so a call with a missing or mistyped
     argument fails with the validation error the model reads.
     """
-    by_id = {member.spec.id: member for member in members}
+    by_id = {member.id: member for member in members}
 
     async def delegate_task_to_member(member_id: str, task: str) -> str:
         """Run the member ``member_id`` on ``task`` and return what the leader reads of its run."""
@@ -109,7 +109,7 @@ def delegate_functions(
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
             _running_call(record).child_run_id = child.run_id
-            return MEMBER_PAUSED_RESULT.format(name=member.spec.name)
+            return MEMBER_PAUSED_RESULT.format(name=member.name)
         return member_result_text(child)
 
     async def delegate_task_to_members(task: str) -> str:
@@ -159,9 +159,9 @@ def collaborate_result_text(
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
             propagate_member_pause(record, member, child)
-            pieces.append(_labeled_piece(member.spec.name, _COLLABORATE_PAUSED_NOTICE))
+            pieces.append(_labeled_piece(member.name, _COLLABORATE_PAUSED_NOTICE))
         else:
-            pieces.append(_labeled_piece(member.spec.name, member_result_text(child)))
+            pieces.append(_labeled_piece(member.name, member_result_text(child)))
     return "\n\n".join(pieces)
 
 
@@ -188,8 +188,8 @@ def answer_delegation(
     # execute, but I need confirmation.") after its call ran. Hand over only what the resume added
     # (``new_handover_content``) or a completion note. The leader model would notice.
     result = member_result_text(run)
-    name = run.agent_display_name or member.spec.name
-    coordinate = _waiting_coordinate_call(tools, member.spec.id, run, MEMBER_PAUSED_RESULT.format(name=name))
+    name = run.agent_display_name or member.name
+    coordinate = _waiting_coordinate_call(tools, member.id, run, MEMBER_PAUSED_RESULT.format(name=name))
     if coordinate is not None:
         coordinate.result = result
         return coordinate
@@ -239,7 +239,7 @@ def _waiting_coordinate_call(
     # Handling: the first call that waits on the member answers its paused run, so an approval saved before the
     # upgrade still answers it with the member's result; two such calls to one member are answered in the order the
     # member's runs resume.
-    # Coverage: tests/teams/test_continue_team.py::test_an_approved_member_call_resumes_into_the_team_approved_rows,
+    # Coverage: tests/teams/test_continue_team.py::test_an_approved_member_call_resumes_the_member_and_then_the_leader,
     #   tests/teams/test_delegate_tools.py::test_a_saved_coordinate_call_without_its_member_run_waits_on_the_member_it_names,
     #   tests/teams/test_delegate_tools.py::test_two_saved_calls_to_one_member_are_answered_in_the_order_its_runs_resume
     return next(iter(waiting), None)
@@ -274,8 +274,8 @@ def member_requirement(requirement: RunRequirement, member: TeamMember, run_id: 
     return replace(
         requirement,
         tool_execution=deepcopy(requirement.tool_execution),
-        member_agent_id=member.spec.id,
-        member_display_name=member.spec.name,
+        member_agent_id=member.id,
+        member_display_name=member.name,
         member_run_id=run_id,
     )
 

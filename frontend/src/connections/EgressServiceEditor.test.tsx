@@ -12,10 +12,12 @@ import {
   bearerRule,
   credentialService,
   limitRules,
+  oauthStatus,
   presets,
   presetsReady,
   storedLimit,
   validation,
+  wholeText,
 } from "@/test/egressServiceTestKit";
 import { githubRepositoryRules } from "./githubRepositoryRules";
 import {
@@ -63,12 +65,21 @@ async function renderEditor(props: Partial<EgressServiceEditorProps> = {}) {
 /** Open the section that holds everything but the basic fields. */
 const openMoreOptions = () =>
   fireEvent.click(screen.getByRole("button", { name: "More options" }));
+/** Open More options with one placeholder, which brings the rules for its name. */
+const addPlaceholder = () => {
+  openMoreOptions();
+  fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
+};
 const renderGithub = (props: Partial<EgressServiceEditorProps> = {}) =>
   renderEditor({ service: { preset: "github" }, name: "github", ...props });
 const type = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 const save = () =>
   fireEvent.click(screen.getByRole("button", { name: "Save service" }));
+/** The Account choice of a service of one's own that signs in, or null where the form has none. */
+const accountChoice = () =>
+  screen.queryByRole("radiogroup", { name: "Account" });
+const toolsAccount = () => screen.getByLabelText(/^The account your tools use/);
 const enter = (value: string) => type("GitHub repositories", value);
 const apply = () =>
   fireEvent.click(
@@ -342,23 +353,28 @@ describe("the editor form", () => {
     expect(screen.getByLabelText("Preset")).toHaveValue("future_api");
   });
 
-  it("shows the placeholder rules as hints under More options", async () => {
+  it("placeholder naming rules show only with a placeholder", async () => {
     await renderEditor();
-    expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
     openMoreOptions();
+    expect(
+      screen.getByText(/Use a fixed value such as mindroom-brokered/),
+    ).toBeVisible();
+    expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Add placeholder" }));
     expect(
       screen.getByText(
         /one word between underscores must be TOKEN, KEY, SECRET, PASSWORD, PAT, AUTH, or CREDENTIAL/,
       ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Use a fixed value such as mindroom-brokered/),
-    ).toBeInTheDocument();
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove placeholder 1" }),
+    );
+    expect(screen.queryByText(/must be TOKEN, KEY/)).toBeNull();
   });
 
   it("lists the words and prefixes a personal placeholder name cannot use", async () => {
     await renderEditor();
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/one word between underscores must be/);
     expect(hint).toHaveTextContent(
       "No word may be COMMAND, CMD, FILE, DIR, PROVIDER, HELPER, OPTS, OPTIONS, or EXTENSIONS",
@@ -373,7 +389,7 @@ describe("the editor form", () => {
 
   it("names every word, prefix, and value length the server sends in the hint", async () => {
     await renderEditor();
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/one word between underscores must be/);
     const { placeholder } = validation;
     for (const word of [
@@ -405,7 +421,7 @@ describe("the editor form", () => {
         },
       }),
     });
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/one word between underscores must be/);
     expect(hint).toHaveTextContent("must be SECRET or TICKET");
     expect(hint).toHaveTextContent("No word may be SCRIPT, and");
@@ -419,7 +435,7 @@ describe("the editor form", () => {
     await renderEditor({
       loadPresets: failingPresets(),
     });
-    openMoreOptions();
+    addPlaceholder();
     const hint = screen.getByText(/The server checks the rest when you save/);
     expect(hint).toHaveTextContent(
       "Names use capital letters, digits, and underscores, and must name a credential, such as MY_API_KEY.",
@@ -468,7 +484,7 @@ describe("the editor form", () => {
 
   it("shows the operator's placeholder rules instead on the dashboard", async () => {
     await renderEditor({ context: "operator" });
-    openMoreOptions();
+    addPlaceholder();
     expect(
       screen.getByText(/GIT_CONFIG_ or MINDROOM_ are reserved/),
     ).toBeInTheDocument();
@@ -480,7 +496,7 @@ describe("the editor form", () => {
       context: "operator",
       loadPresets: failingPresets(),
     });
-    openMoreOptions();
+    addPlaceholder();
     expect(
       screen.getByText(/Some names, such as PATH and HOME, are reserved/),
     ).toBeInTheDocument();
@@ -570,22 +586,20 @@ describe("the editor form", () => {
   });
 
   it("offers its own account only for a service of one's own that logs in", async () => {
-    const ownAccount = () =>
-      screen.queryByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      );
     const { onSave } = await renderEditor();
     type("Name", "team_calendar");
     openMoreOptions();
-    expect(ownAccount()).toBeNull();
+    expect(accountChoice()).toBeNull();
     type("Preset", "google_calendar");
-    fireEvent.click(ownAccount()!);
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
     expect(
       screen.getByText(
-        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar",
+        ),
       ),
-    ).toBeInTheDocument();
-    save();
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith("team_calendar", {
       preset: "google_calendar",
@@ -593,7 +607,7 @@ describe("the editor form", () => {
     });
   });
 
-  it("names the preset's login by its display name, and the header instead of the overlaps beside its own account", async () => {
+  it("asks which account in place of the login line, and drops the overlaps for its own account", async () => {
     const calendar = credentialService({
       name: "google_calendar",
       display_name: "Google Calendar",
@@ -615,31 +629,43 @@ describe("the editor form", () => {
       ],
     });
     openMoreOptions();
-    const instead =
-      "Users can connect an account (Google Calendar) instead of an API key.";
-    expect(screen.getByText(instead)).toBeVisible();
-    expect(screen.getAllByText(/already sends a key/)).toHaveLength(2);
-    // Its own account is all it uses, so there is no key to connect one instead of.
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
-    expect(screen.queryByText(instead)).toBeNull();
-    // A request picks it by the header, so one note replaces the warnings,
+    // The Account choice says what the line would, so the line is gone.
+    expect(screen.queryByText(/Users can connect an account/)).toBeNull();
+    expect(screen.getAllByText(/already handles/)).toHaveLength(2);
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
+    // A request picks it by the header, so there is no overlap to warn about,
     // and the box's own hint stays the one place that names the header.
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
-    expect(
-      screen.getByText(
-        "Without this service's header, the usual routing order applies.",
-      ),
-    ).toBeVisible();
+    expect(screen.queryByText(/already handles/)).toBeNull();
+    expect(screen.queryByText(/usual routing order/)).toBeNull();
     expect(
       screen.getAllByText(/X-Agent-Keys-Service: team_calendar/),
     ).toHaveLength(1);
   });
 
-  it("drops the API key from a custom service's login hint while it uses its own account", async () => {
+  it("warns about no overlap for a service with its own account, and says nothing about routing", async () => {
+    const gmail = credentialService({
+      name: "google_gmail",
+      display_name: "Gmail",
+      rules: [
+        {
+          host: "gmail.googleapis.com",
+          port: null,
+          path_prefix: "/",
+          auth_type: "bearer",
+        },
+      ],
+    });
+    await renderEditor({
+      service: { preset: "google_gmail", oauth_separate_account: true },
+      name: "google_gmail-2",
+      agentServices: [gmail, { ...gmail, name: "mine", source: "user" }],
+    });
+    expect(screen.queryByText(/already handles/)).toBeNull();
+    expect(screen.queryByText(/name no service|routing order/)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("drops the API key from a custom service's login hint while the form asks which account", async () => {
     await renderEditor();
     type("Name", "mine");
     type("Website", "www.googleapis.com");
@@ -647,16 +673,19 @@ describe("the editor form", () => {
     const keyHint =
       "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key.";
     expect(screen.getByText(keyHint)).toBeInTheDocument();
+    // The form offers no key on either account, so the hint names none.
     type("Account login (optional)", "google_calendar");
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
+    expect(toolsAccount()).toBeChecked();
     expect(screen.queryByText(keyHint)).toBeNull();
     expect(
       screen.getByText("Users can connect an account of this kind."),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Another Google Calendar account"));
+    expect(screen.queryByText(keyHint)).toBeNull();
+    // Atlassian accounts belong to each user, so a key is still asked for.
+    type("Account login (optional)", "atlassian");
+    expect(accountChoice()).toBeNull();
+    expect(screen.getByText(keyHint)).toBeInTheDocument();
   });
 
   it("keeps a replaced login across a switch to another preset and back, so the box and the save agree", async () => {
@@ -670,11 +699,7 @@ describe("the editor form", () => {
       if (!screen.queryByLabelText("Display name")) openMoreOptions();
       type("Preset", "google_drive");
       type("Preset", service.preset!);
-      expect(
-        screen.queryByLabelText(
-          "Use its own account, not the one the agent's tools use",
-        ) !== null,
-      ).toBe(offered);
+      expect(accountChoice() !== null).toBe(offered);
       save();
       await waitFor(() => expect(onSave).toHaveBeenCalled());
       expect(onSave).toHaveBeenCalledWith("svc", service);
@@ -692,11 +717,7 @@ describe("the editor form", () => {
     // GitHub accounts belong to each user, so it would hide the box.
     type("Account login (optional)", "github");
     type("Preset", "google_calendar");
-    expect(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    ).not.toBeChecked();
+    expect(toolsAccount()).toBeChecked();
     save();
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith("svc", service);
@@ -711,14 +732,19 @@ describe("the editor form", () => {
       await renderEditor({
         service: { preset: "google_calendar" },
         name: "calendar",
+        saveKey: vi.fn(async () => undefined),
         ...props,
       });
       openMoreOptions();
+      expect(accountChoice()).toBeNull();
+      // Their forms keep the key field and the login line.
+      expect(screen.getByLabelText("API key")).toBeVisible();
       expect(
-        screen.queryByLabelText(
-          "Use its own account, not the one the agent's tools use",
-        ),
-      ).toBeNull();
+        screen.getByText(/instead of an API key|uses an API key/),
+      ).toBeVisible();
+      expect(
+        screen.getByRole("button", { name: "Save service" }),
+      ).toBeVisible();
       cleanup();
     }
   });
@@ -1773,17 +1799,20 @@ describe("the name of a new service", () => {
     expect(name()).toHaveValue("mine");
     cleanup();
 
-    // Another account of a row's preset, from Add another account.
+    // A new service that starts from another, with an account of its own.
     await renderEditor({
       service: { preset: "google_calendar", oauth_separate_account: true },
       takenNames: ["google_calendar"],
     });
     expect(name()).toHaveValue("google_calendar-2");
+    openMoreOptions();
     type("Display name", "Team calendar");
     expect(name()).toHaveValue("team_calendar");
     expect(
       screen.getByText(
-        "Requests choose this service with the header X-Agent-Keys-Service: team_calendar.",
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: team_calendar",
+        ),
       ),
     ).toBeVisible();
   });
@@ -2073,26 +2102,17 @@ describe("saving the API key with the service", () => {
     expect(saveKey).toHaveBeenCalledWith("ghp_x", "github");
   });
 
-  it("has no key field while the service uses its own account, which signs in through Connect", async () => {
+  it("has no key field while the form asks which account, and saves no key typed before", async () => {
     const saveKey = vi.fn(async () => undefined);
     const onClose = vi.fn();
     const { onSave } = await renderEditor({ saveKey, onClose });
-    type("Preset", "google_calendar");
     type("API key", "sk-1");
-    openMoreOptions();
-    const ownAccount = screen.getByLabelText(
-      "Use its own account, not the one the agent's tools use",
-    );
-    fireEvent.click(ownAccount);
+    type("Preset", "google_calendar");
     expect(screen.queryByLabelText("API key")).toBeNull();
-    fireEvent.click(ownAccount);
-    expect(screen.getByLabelText("API key")).toHaveValue("sk-1");
-    fireEvent.click(ownAccount);
     save();
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(onSave).toHaveBeenCalledWith("google_calendar", {
       preset: "google_calendar",
-      oauth_separate_account: true,
     });
     expect(saveKey).not.toHaveBeenCalled();
   });
@@ -2180,24 +2200,29 @@ describe("the note on whose service this is", () => {
     ).toBeInTheDocument();
   });
 
-  it("speaks of its account, not a key, for a service with its own account", async () => {
-    await renderEditor({
-      scope: "user_agent",
+  it("speaks of its account, not a key, wherever the form asks which account", async () => {
+    const scoped = {
+      scope: "user_agent" as const,
       agentName: "Code Helper",
       scopeAgents: [],
+    };
+    await renderEditor({
+      ...scoped,
       service: { preset: "google_calendar", oauth_separate_account: true },
       name: "team_calendar",
     });
-    expect(
-      screen.getByText(
-        "Only your Code Helper uses this service and its account.",
-      ),
-    ).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
+    const account = "Only your Code Helper uses this service and its account.";
+    expect(screen.getByText(account)).toBeInTheDocument();
+    // The tools' account takes no key in this form either.
+    fireEvent.click(toolsAccount());
+    expect(screen.getByText(account)).toBeInTheDocument();
+    cleanup();
+    // A GitHub account belongs to each user, so the form asks for a key.
+    await renderEditor({
+      ...scoped,
+      service: { preset: "github" },
+      name: "gh",
+    });
     expect(
       screen.getByText("Only your Code Helper uses this service and its key."),
     ).toBeInTheDocument();
@@ -3283,17 +3308,13 @@ describe("the display name of a new service", () => {
     expect(over.onSave).not.toHaveBeenCalled();
   });
 
-  it("is the host for a new service that starts from another too, such as another account", async () => {
+  it("is the host for a new service that starts from another too", async () => {
     const { onSave } = await renderEditor({
       service: { preset: "google_calendar", oauth_separate_account: true },
     });
     type("Preset", "");
     type("Website", "cal.example.com");
-    fireEvent.click(
-      screen.getByLabelText(
-        "Use its own account, not the one the agent's tools use",
-      ),
-    );
+    openMoreOptions();
     expect(screen.getByLabelText("Display name")).toHaveAccessibleDescription(
       "Leave empty to use cal.example.com.",
     );
@@ -3321,7 +3342,7 @@ describe("the display name of a new service", () => {
   });
 });
 
-describe("a website another service of the agent already sends a key to", () => {
+describe("a website another service of the agent already handles", () => {
   const sending = (changes: Partial<EgressCredentialService> = {}) =>
     credentialService({
       description: "",
@@ -3347,15 +3368,15 @@ describe("a website another service of the agent already sends a key to", () => 
       ...changes,
     });
   const WARNING =
-    " already sends a key to api.github.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.";
+    " already handles api.github.com for this agent, so requests there may use it instead of this service.";
 
   it("warns, naming the service and the website, as soon as the website is typed", async () => {
     await renderEditor({ agentServices: [sending()] });
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
     type("Website", "api.github.com");
     expect(screen.getByText(`GitHub${WARNING}`)).toBeVisible();
     type("Website", "API.example.com");
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
   });
 
   it("is announced as a status, not an alert, since the service can still be saved", async () => {
@@ -3373,7 +3394,7 @@ describe("a website another service of the agent already sends a key to", () => 
     type("Preset", "github");
     expect(
       screen.getByText(
-        "GitHub already sends a key to api.github.com and github.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.",
+        "GitHub already handles api.github.com and github.com for this agent, so requests there may use it instead of this service.",
       ),
     ).toBeVisible();
   });
@@ -3405,15 +3426,601 @@ describe("a website another service of the agent already sends a key to", () => 
       ],
     });
     type("Website", "api.github.com");
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
     cleanup();
     await renderGithub({ agentServices: [sending()] });
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
   });
 
   it("says nothing on the dashboard, which has no agent", async () => {
     await renderEditor({ context: "operator" });
     type("Website", "api.github.com");
-    expect(screen.queryByText(/already sends a key/)).toBeNull();
+    expect(screen.queryByText(/already handles/)).toBeNull();
+  });
+});
+
+describe("the Account choice", () => {
+  // The administrator's Gmail, signed in with the account the agent's tools use.
+  const gmail = credentialService({
+    name: "google_gmail",
+    display_name: "Gmail",
+    rules: [
+      {
+        host: "gmail.googleapis.com",
+        port: null,
+        path_prefix: "/",
+        auth_type: "bearer",
+      },
+      {
+        host: "www.googleapis.com",
+        port: null,
+        path_prefix: "/gmail/",
+        auth_type: "bearer",
+      },
+    ],
+    configured: true,
+    active_source: "oauth",
+    oauth: oauthStatus({
+      provider: "google_gmail",
+      display_name: "Gmail",
+      connected: true,
+      account_label: "alex@example.com",
+    }),
+  });
+  const another = () => screen.getByLabelText("Another Gmail account");
+  const withGmail = {
+    agentServices: [gmail],
+    takenNames: ["google_gmail"],
+    saveKey: vi.fn(async () => undefined),
+  };
+
+  it("a Gmail preset asks which account, not for a key", async () => {
+    await renderEditor(withGmail);
+    expect(accountChoice()).toBeNull();
+    type("Preset", "google_gmail");
+    expect(accountChoice()).toBeVisible();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(toolsAccount()).toHaveAccessibleName(
+      "The account your tools use (alex@example.com)",
+    );
+    expect(another()).toBeChecked();
+    expect(
+      screen.getByText("The Gmail row already uses this account."),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: google_gmail-2",
+        ),
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("X-Agent-Keys-Service: google_gmail-2").tagName,
+    ).toBe("CODE");
+    expect(
+      screen.getByRole("button", { name: "Save and sign in" }),
+    ).toBeVisible();
+    // Its own account is picked by its header, so no service is warned
+    // about, and the administrator's Gmail wins every request without one.
+    expect(screen.queryByText(/already handles/)).toBeNull();
+    expect(screen.queryByText(/Requests that name no service/)).toBeNull();
+    openMoreOptions();
+    expect(screen.queryByText(/instead of an API key/)).toBeNull();
+  });
+
+  it("names the row that uses the tools' account only when that account is connected", async () => {
+    await renderEditor({
+      ...withGmail,
+      agentServices: [
+        {
+          ...gmail,
+          configured: false,
+          active_source: null,
+          oauth: { ...gmail.oauth!, connected: false, account_label: null },
+        },
+      ],
+    });
+    type("Preset", "google_gmail");
+    // The default still follows the row, but with no account there is nothing to say it uses.
+    expect(another()).toBeChecked();
+    expect(toolsAccount()).toHaveAccessibleName("The account your tools use");
+    expect(screen.queryByText(/already uses this account/)).toBeNull();
+  });
+
+  it("says when saving disconnects the service's own account", async () => {
+    const own = credentialService({
+      name: "mail",
+      display_name: "Gmail",
+      source: "user",
+      separate_account: true,
+      configured: true,
+      active_source: "oauth",
+      oauth: oauthStatus({
+        provider: "google_gmail",
+        display_name: "Gmail",
+        connected: true,
+        account_label: "team@example.com",
+      }),
+    });
+    const line = "Saving disconnects team@example.com.";
+    await renderEditor({
+      ...withGmail,
+      agentServices: [gmail, own],
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    // An unchanged save keeps the account.
+    expect(screen.queryByText(line)).toBeNull();
+    fireEvent.click(toolsAccount());
+    expect(screen.getByText(line)).toBeVisible();
+    fireEvent.click(another());
+    expect(screen.queryByText(line)).toBeNull();
+    // Another login has an account of its own to sign in to; this one goes.
+    type("Preset", "google_calendar");
+    expect(screen.getByText(line)).toBeVisible();
+    type("Preset", "google_gmail");
+    expect(screen.queryByText(line)).toBeNull();
+    cleanup();
+    // Without a connected account there is nothing to disconnect.
+    await renderEditor({
+      ...withGmail,
+      agentServices: [
+        gmail,
+        {
+          ...own,
+          configured: false,
+          active_source: null,
+          oauth: { ...own.oauth!, connected: false, account_label: null },
+        },
+      ],
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    fireEvent.click(toolsAccount());
+    expect(screen.queryByText(/Saving disconnects/)).toBeNull();
+  });
+
+  it("says when saving removes the API key of a service that moves to its own account", async () => {
+    const listed = credentialService({
+      name: "mail",
+      display_name: "Gmail",
+      source: "user",
+      configured: true,
+      active_source: "key",
+      key_configured: true,
+      oauth: oauthStatus({ provider: "google_gmail", display_name: "Gmail" }),
+    });
+    const line = "Saving removes its API key.";
+    await renderEditor({
+      ...withGmail,
+      agentServices: [gmail, listed],
+      name: "mail",
+      service: { preset: "google_gmail" },
+    });
+    expect(toolsAccount()).toBeChecked();
+    expect(screen.queryByText(line)).toBeNull();
+    fireEvent.click(another());
+    expect(screen.getByText(line)).toBeVisible();
+    fireEvent.click(toolsAccount());
+    expect(screen.queryByText(line)).toBeNull();
+    cleanup();
+    // Without a stored key there is nothing to remove.
+    await renderEditor({
+      ...withGmail,
+      agentServices: [
+        gmail,
+        {
+          ...listed,
+          configured: false,
+          active_source: null,
+          key_configured: false,
+        },
+      ],
+      name: "mail",
+      service: { preset: "google_gmail" },
+    });
+    fireEvent.click(another());
+    expect(screen.queryByText(line)).toBeNull();
+    cleanup();
+    // A new service has no key yet, whatever another row has.
+    await renderEditor({
+      ...withGmail,
+      agentServices: [{ ...gmail, key_configured: true }, listed],
+    });
+    type("Preset", "google_gmail");
+    expect(another()).toBeChecked();
+    expect(screen.queryByText(line)).toBeNull();
+  });
+
+  describe("editing through the Preset and Account login selects", () => {
+    const rules = [
+      { host: "api.example.com", auth: { type: "bearer" as const } },
+    ];
+    // The listed row of each saved service: own accounts are connected, so a save that removes one says so.
+    const ownRow = credentialService({
+      name: "mail",
+      display_name: "Gmail",
+      source: "user",
+      separate_account: true,
+      configured: true,
+      active_source: "oauth",
+      oauth: oauthStatus({
+        provider: "google_gmail",
+        display_name: "Gmail",
+        connected: true,
+        account_label: "team@example.com",
+      }),
+    });
+    const toolsRow = { ...ownRow, separate_account: false };
+    const starts = {
+      ownPreset: {
+        service: { preset: "google_gmail", oauth_separate_account: true },
+        row: ownRow,
+      },
+      ownCustom: {
+        service: {
+          rules,
+          oauth_provider: "google_gmail",
+          oauth_separate_account: true,
+        },
+        row: ownRow,
+      },
+      toolsPreset: { service: { preset: "google_gmail" }, row: toolsRow },
+    };
+    // `pick` clicks a radio of the Account field: "own" for another account, "tools" for the tools' one.
+    type Step = ["preset" | "login" | "website" | "pick", string];
+    type End = {
+      choice: "own" | "tools" | null;
+      button: "Save and sign in" | "Save service";
+      flag: boolean;
+      disconnects: boolean;
+    };
+    const own = (button: End["button"], disconnects: boolean): End => ({
+      choice: "own",
+      button,
+      flag: true,
+      disconnects,
+    });
+    const tools: End = {
+      choice: "tools",
+      button: "Save service",
+      flag: false,
+      disconnects: false,
+    };
+    // The server removes the own account when the flag goes off or the login changes.
+    const none = (disconnects: boolean): End => ({
+      choice: null,
+      button: "Save service",
+      flag: false,
+      disconnects,
+    });
+    const toCustom: Step[] = [
+      ["preset", ""],
+      ["website", "mail.example.com"],
+    ];
+    it.each<[string, keyof typeof starts, Step[], End]>([
+      ["own preset, unchanged", "ownPreset", [], own("Save service", false)],
+      ["own preset to OpenAI", "ownPreset", [["preset", "openai"]], none(true)],
+      ["own preset to GitHub", "ownPreset", [["preset", "github"]], none(true)],
+      [
+        "own preset to Calendar",
+        "ownPreset",
+        [["preset", "google_calendar"]],
+        own("Save and sign in", true),
+      ],
+      [
+        "own preset to OpenAI and back",
+        "ownPreset",
+        [
+          ["preset", "openai"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own preset to GitHub and back",
+        "ownPreset",
+        [
+          ["preset", "github"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own preset to Calendar and back",
+        "ownPreset",
+        [
+          ["preset", "google_calendar"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own preset to a custom service without a login",
+        "ownPreset",
+        toCustom,
+        none(true),
+      ],
+      [
+        "own preset to a custom Gmail login",
+        "ownPreset",
+        [...toCustom, ["login", "google_gmail"]],
+        own("Save service", false),
+      ],
+      [
+        "own preset to a custom GitHub login",
+        "ownPreset",
+        [...toCustom, ["login", "github"]],
+        none(true),
+      ],
+      ["own custom, unchanged", "ownCustom", [], own("Save service", false)],
+      ["own custom to no login", "ownCustom", [["login", ""]], none(true)],
+      ["own custom to GitHub", "ownCustom", [["login", "github"]], none(true)],
+      [
+        "own custom to Calendar",
+        "ownCustom",
+        [["login", "google_calendar"]],
+        own("Save and sign in", true),
+      ],
+      [
+        "own custom to no login and back",
+        "ownCustom",
+        [
+          ["login", ""],
+          ["login", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own custom to GitHub and back",
+        "ownCustom",
+        [
+          ["login", "github"],
+          ["login", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own custom to Calendar and back",
+        "ownCustom",
+        [
+          ["login", "google_calendar"],
+          ["login", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own custom to the Gmail preset",
+        "ownCustom",
+        [["preset", "google_gmail"]],
+        own("Save service", false),
+      ],
+      ["own custom to OpenAI", "ownCustom", [["preset", "openai"]], none(true)],
+      [
+        "tools' preset to Calendar",
+        "toolsPreset",
+        [["preset", "google_calendar"]],
+        tools,
+      ],
+      [
+        "tools' preset to OpenAI and back",
+        "toolsPreset",
+        [
+          ["preset", "openai"],
+          ["preset", "google_gmail"],
+        ],
+        tools,
+      ],
+      [
+        "tools' preset to GitHub",
+        "toolsPreset",
+        [["preset", "github"]],
+        none(false),
+      ],
+      [
+        "tools' preset to a custom Gmail login",
+        "toolsPreset",
+        [...toCustom, ["login", "google_gmail"]],
+        tools,
+      ],
+      // A detour through a login without an account of its own keeps the pick for the next login that has one.
+      [
+        "own preset to OpenAI, then Calendar",
+        "ownPreset",
+        [
+          ["preset", "openai"],
+          ["preset", "google_calendar"],
+        ],
+        own("Save and sign in", true),
+      ],
+      [
+        "own custom to no login, then a Calendar login",
+        "ownCustom",
+        [
+          ["login", ""],
+          ["login", "google_calendar"],
+        ],
+        own("Save and sign in", true),
+      ],
+      [
+        "own preset to a custom service without a login, then a Calendar login",
+        "ownPreset",
+        [...toCustom, ["login", "google_calendar"]],
+        own("Save and sign in", true),
+      ],
+      [
+        "own preset to GitHub, then Drive",
+        "ownPreset",
+        [
+          ["preset", "github"],
+          ["preset", "google_drive"],
+        ],
+        own("Save and sign in", true),
+      ],
+      // A pick holds across logins, like the saved choice does.
+      [
+        "tools' preset, another account picked, to Calendar and back",
+        "toolsPreset",
+        [
+          ["pick", "own"],
+          ["preset", "google_calendar"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save and sign in", false),
+      ],
+    ])("%s", async (_, start, steps, end) => {
+      const { service, row } = starts[start];
+      const { onSave } = await renderEditor({
+        ...withGmail,
+        agentServices: [gmail, row],
+        name: "mail",
+        service,
+      });
+      for (const [kind, value] of steps) {
+        if (kind === "preset") type("Preset", value);
+        else if (kind === "website") type("Website", value);
+        else if (kind === "pick")
+          fireEvent.click(
+            value === "own"
+              ? screen.getByRole("radio", { name: /^Another / })
+              : toolsAccount(),
+          );
+        else {
+          if (!screen.queryByLabelText("Account login (optional)"))
+            openMoreOptions();
+          type("Account login (optional)", value);
+        }
+      }
+      if (end.choice === null) expect(accountChoice()).toBeNull();
+      else
+        expect(
+          end.choice === "own"
+            ? screen.getByRole("radio", { name: /^Another / })
+            : toolsAccount(),
+        ).toBeChecked();
+      if (end.choice === "own")
+        expect(
+          screen.queryByText(/You sign in right after saving/) !== null,
+        ).toBe(end.button === "Save and sign in");
+      expect(
+        screen.queryByText("Saving disconnects team@example.com.") !== null,
+      ).toBe(end.disconnects);
+      fireEvent.click(screen.getByRole("button", { name: end.button }));
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      const body = vi.mocked(onSave).mock.calls[0][1] as AuthoredEgressService;
+      expect(body.oauth_separate_account === true).toBe(end.flag);
+    });
+  });
+
+  it("says <name> in the header while the name is empty", async () => {
+    await renderEditor(withGmail);
+    type("Preset", "google_gmail");
+    type("Name", "");
+    expect(
+      screen.getByText(
+        wholeText(
+          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: <name>",
+        ),
+      ),
+    ).toBeVisible();
+  });
+
+  it("without another Gmail service the tools' account is the default", async () => {
+    await renderEditor({ saveKey: vi.fn(async () => undefined) });
+    type("Preset", "google_gmail");
+    expect(toolsAccount()).toBeChecked();
+    expect(toolsAccount()).toHaveAccessibleName("The account your tools use");
+    expect(screen.queryByText(/already uses this account/)).toBeNull();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save service" })).toBeVisible();
+  });
+
+  it("each choice saves its flag", async () => {
+    const first = await renderEditor(withGmail);
+    type("Preset", "google_gmail");
+    fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
+    await waitFor(() =>
+      expect(first.onSave).toHaveBeenCalledWith("google_gmail-2", {
+        preset: "google_gmail",
+        oauth_separate_account: true,
+      }),
+    );
+    cleanup();
+    const second = await renderEditor(withGmail);
+    type("Preset", "google_gmail");
+    fireEvent.click(toolsAccount());
+    expect(
+      screen.getByText("The Gmail row already uses this account."),
+    ).toBeVisible();
+    save();
+    await waitFor(() =>
+      expect(second.onSave).toHaveBeenCalledWith("google_gmail-2", {
+        preset: "google_gmail",
+      }),
+    );
+  });
+
+  it("editing keeps the saved choice", async () => {
+    const { onSave } = await renderEditor({
+      ...withGmail,
+      name: "mail",
+      service: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    expect(another()).toBeChecked();
+    // It already has its own account, so saving signs in to nothing new.
+    expect(
+      screen.getByText(
+        wholeText("Agents choose it with X-Agent-Keys-Service: mail"),
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save service" })).toBeVisible();
+    fireEvent.click(toolsAccount());
+    save();
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("mail", { preset: "google_gmail" }),
+    );
+    cleanup();
+    // A service on the tools' account stays there, even with Gmail beside it
+    // and across a change of preset, until the user picks the other choice.
+    await renderEditor({
+      ...withGmail,
+      name: "cal",
+      service: { preset: "google_calendar" },
+    });
+    type("Preset", "google_gmail");
+    expect(toolsAccount()).toBeChecked();
+    fireEvent.click(another());
+    expect(
+      screen.getByRole("button", { name: "Save and sign in" }),
+    ).toBeVisible();
+  });
+
+  it("a custom service keeps the choice in More options", async () => {
+    const { onSave } = await renderEditor(withGmail);
+    type("Name", "mail");
+    type("Website", "mail.example.com");
+    openMoreOptions();
+    expect(accountChoice()).toBeNull();
+    type("Account login (optional)", "google_gmail");
+    const more = document.getElementById(
+      screen
+        .getByRole("button", { name: "More options" })
+        .getAttribute("aria-controls")!,
+    )!;
+    expect(
+      within(more).getByRole("radiogroup", { name: "Account" }),
+    ).toBeVisible();
+    // Gmail already uses the tools' account, so it starts on another, as a preset does.
+    expect(another()).toBeChecked();
+    expect(screen.queryByLabelText("API key")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save and sign in" }));
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith("mail", {
+        display_name: "mail.example.com",
+        rules: [{ host: "mail.example.com", auth: { type: "bearer" } }],
+        oauth_provider: "google_gmail",
+        oauth_separate_account: true,
+      }),
+    );
   });
 });

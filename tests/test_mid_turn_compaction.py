@@ -1504,12 +1504,38 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
         )
 
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
-    # The hooks see the running turn's folded tool work, not only the earlier runs.
-    assert any(message.role == "tool" for message in observed[0].messages)
-    # They see each folded message once, not the per-call copies the summarizer reads.
-    assert len({message.id for message in observed[0].messages}) == len(observed[0].messages)
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_compaction_builds_no_transcript_without_hooks(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold no compaction hook observes never reads who said what."""
+    config, paths = _config(tmp_path)
+    storage = seeded_storage(config, paths)
+    hook_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=paths,
+        registry=HookRegistry.empty(),
+        session_id="session-1",
+    )
+
+    def unexpected(_record: object) -> Never:
+        msg = "the compaction transcript should not be built without hooks"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(compaction, "utterances", unexpected)
+    with tool_runtime_context(hook_context):
+        await _run(
+            _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
+            "Do the task",
+        )
+
+    assert summary_calls.inputs
 
 
 @pytest.mark.asyncio

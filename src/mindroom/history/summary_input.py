@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
@@ -189,7 +188,7 @@ def _serialize_run_excerpt(
 
 
 def _compaction_replay_messages(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[Message]:
-    """Return the run's messages a summary reads, not copied: the input renders no thinking, so only hooks strip it."""
+    """Return the run's messages a summary reads, windowed as replay windows them; the stored objects, not copies."""
     messages = replayable_messages([run])
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
@@ -232,14 +231,6 @@ def _previous_summary_block(summary: str | None) -> str:
     if summary is None or not summary.strip():
         return ""
     return f"<previous_summary>\n{_escape_xml_content(summary)}\n</previous_summary>"
-
-
-def messages_for_runs(
-    runs: Sequence[AnyRunRecord],
-    history_settings: ResolvedHistorySettings,
-) -> list[Message]:
-    """Copy the conversation messages portable compaction hooks receive, stored thinking included."""
-    return [deepcopy(message) for run in runs for message in _compaction_replay_messages(run, history_settings)]
 
 
 def _serialize_run(run: AnyRunRecord, index: int, history_settings: ResolvedHistorySettings) -> str:

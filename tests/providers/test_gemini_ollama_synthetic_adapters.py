@@ -17,8 +17,11 @@ from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
+    MISSING_API_KEY,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -206,6 +209,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "project": "env-project",
         "location": "europe-west4",
         "credentials": credentials,
+        "http_options": {"retry_options": {"attempts": 1}},
     }
     assert loaded == [str((tmp_path / "adc.json").resolve())]
     authored = Credentials(token="authored-token")  # noqa: S106 - synthetic SDK credential
@@ -218,6 +222,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "project": "test-project",
         "location": "us-central1",
         "credentials": authored,
+        "http_options": {"retry_options": {"attempts": 1}},
     }
     assert len(loaded) == 1
 
@@ -387,12 +392,16 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
     """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
     adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
 
-    assert adapter._client_params() == {"api_key": "test-key", "vertexai": False, "http_options": {"timeout": 12500}}
+    assert adapter._client_params() == {
+        "api_key": "test-key",
+        "vertexai": False,
+        "http_options": {"timeout": 12500, "retry_options": {"attempts": 1}},
+    }
 
 
 @pytest.mark.asyncio
-async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itself(tmp_path: Path) -> None:
-    """The SDK retries only as ``http_options.retry_options`` authors it, and a summary's request gets one attempt."""
+async def test_gemini_sends_one_attempt_whatever_retries_the_config_authors(tmp_path: Path) -> None:
+    """The request pipeline retries, so authored ``http_options.retry_options`` never multiply a request."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -413,7 +422,7 @@ async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itsel
             await anext(adapter.stream(_request(overrides=overrides)))
         attempts.append(len(sent))
 
-    assert attempts == [3, 1]
+    assert attempts == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -452,6 +461,24 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
         "maxOutputTokens": 100,
         "thinkingConfig": {"thinking_budget": 0, "include_thoughts": False},
     }
+
+
+@pytest.mark.asyncio
+async def test_gemini_dedicated_settings_replace_authored_generation_config_keys_only_when_set(tmp_path: Path) -> None:
+    """An authored ``generation_config`` key is sent unless its dedicated setting or an override replaces it."""
+    authored_keys = {"temperature": 0.2, "top_k": 5, "seed": 3}
+    config = _config(GEMINI, generation_config=authored_keys, generative_model_kwargs={"top_p": 0.4}, seed=9)
+
+    authored, _ = await run_adapter(config, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+    overridden, _ = await run_adapter(
+        config,
+        _request(overrides=RequestOverrides(temperature=0.7)),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert authored["body"]["generationConfig"] == {"temperature": 0.2, "topK": 5, "topP": 0.4, "seed": 9}
+    assert overridden["body"]["generationConfig"] == {"temperature": 0.7, "topK": 5, "topP": 0.4, "seed": 9}
 
 
 @pytest.mark.asyncio
@@ -553,16 +580,19 @@ async def test_gemini_replays_undecodable_tool_arguments_as_empty(tmp_path: Path
 @pytest.mark.asyncio
 async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: Path) -> None:
     """Models that require their provider's sampling defaults never receive temperature, top_p, or top_k."""
-    config = _config({**GEMINI, "id": "gemini-3.8-flash"}, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+    model = {**GEMINI, "id": "gemini-3.8-flash"}
+    dedicated = _config(model, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+    authored = _config(model, generation_config={"temperature": 0.2, "top_p": 0.9, "top_k": 40, "seed": 7})
 
-    request, _ = await run_adapter(
-        config,
-        _request(overrides=RequestOverrides(temperature=0.5)),
-        tmp_path,
-        gemini_sse(_gemini_chunk({"text": "ok"})),
-    )
+    for config in (dedicated, authored):
+        request, _ = await run_adapter(
+            config,
+            _request(overrides=RequestOverrides(temperature=0.5)),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "ok"})),
+        )
 
-    assert request["body"]["generationConfig"] == {"seed": 7}
+        assert request["body"]["generationConfig"] == {"seed": 7}
 
 
 @pytest.mark.asyncio
@@ -1330,6 +1360,59 @@ async def test_gemini_upload_transport_failure_is_retryable(
 
 
 @pytest.mark.asyncio
+async def test_a_gemini_api_model_without_any_key_fails_as_a_missing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no key anywhere the SDK looks, the request fails unsent and the reply says how to connect one."""
+    for variable in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(variable, raising=False)
+    config = ModelConfig(provider="google", id="gemini-3.8-flash")
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    with pytest.raises(AuthenticationFailed) as raised:
+        await anext(adapter.stream(_request()))
+
+    assert (raised.value.code, raised.value.provider) == (MISSING_API_KEY, "Google")
+    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_file_lookup_sends_once_whatever_retries_the_config_authors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Files API lookup of a large attachment sends once, as generation does, whatever retries the config authors.
+
+    Only an upload's transfer keeps google-genai's own fixed retries, which no option turns off.
+    """
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(503, json={"error": {"code": 503, "message": "Overloaded", "status": "UNAVAILABLE"}})
+
+    http_options = {
+        "httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        "retry_options": {"attempts": 3, "initial_delay": 0.01, "max_delay": 0.01},
+    }
+    config = ModelConfig(**_config(GEMINI, client_params={"http_options": http_options}))
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    with pytest.raises(ProviderUnavailable):
+        await anext(adapter.stream(_request(message)))
+
+    assert [(request.method, request.url.path) for request in sent] == [
+        ("GET", f"/v1beta/{_upload_name('audio/ogg', b'OggS-voice')}"),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failing", "status", "state", "error_type"),
     [("lookup", 500, "INTERNAL", ProviderUnavailable), ("upload", 429, "RESOURCE_EXHAUSTED", RateLimited)],
@@ -2029,6 +2112,17 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     _completed([event async for event in provider.stream(_request())])
 
     assert sleeps == [2.0, 2.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_synthetic_times_its_turn_from_its_first_text(tmp_path: Path) -> None:
+    """The synthetic model's time to first token runs from the request to its first text, within its duration."""
+    provider = build_synthetic_provider(_synthetic_config(chars_per_second=0), runtime_paths_for(tmp_path))
+
+    metrics = _completed([event async for event in provider.stream(_request())]).message.metrics
+
+    assert metrics.time_to_first_token is not None
+    assert 0 <= metrics.time_to_first_token <= metrics.duration
 
 
 @pytest.mark.parametrize(

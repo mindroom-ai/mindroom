@@ -16,6 +16,7 @@ import { breakAfterUnderscores } from "./breakAfterUnderscores";
 import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
+import { firstFreeName } from "./egressServiceForm";
 import { configPlaceholderOwners } from "./egressServiceNotes";
 import {
   keysSetText,
@@ -55,8 +56,6 @@ type EditorState = (
       kind: "add";
       /** Add a limit on GitHub repositories, which has no key of its own. */
       restrictOnly?: boolean;
-      /** What the new service starts from, such as another account of a row's preset. */
-      service?: AuthoredEgressService;
     }
   | { kind: "edit"; name: string; service: AuthoredEgressService }
 ) & {
@@ -316,6 +315,10 @@ function AgentSection({
   const [editorDirty, setEditorDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signInNext, setSignInNext] = useState<{
+    name: string;
+    provider: string;
+  } | null>(null);
   const operation = useRef<AbortController | null>(null);
 
   useEffect(() => () => operation.current?.abort(), []);
@@ -415,13 +418,18 @@ function AgentSection({
       setEditor({ kind: "add", restrictOnly: true });
     },
     limitDisabled: editor !== null,
+    signInNext,
+    onSignInOpened: () => setSignInNext(null),
     // From the preset with the row's login, on a personal agent, where the
-    // accounts are not each user's own (GitHub, Atlassian) or a service account.
-    addAccount: ({ oauth }) => {
+    // accounts are not each user's own (GitHub, Atlassian) or a service account,
+    // for a row on the tools' account. The new service takes the preset's next
+    // free name and no display name, and its row asks to sign in next.
+    addAccount: ({ oauth, separate_account }) => {
       const login =
         agent.can_manage &&
         !agent.shared &&
-        oauth &&
+        !separate_account &&
+        oauth?.connected &&
         !oauth.service_account &&
         catalog?.oauth_providers.find(
           (option) => option.id === oauth.provider && !option.requester_scoped,
@@ -429,15 +437,26 @@ function AgentSection({
       const preset =
         login &&
         catalog?.presets.find((option) => option.oauth_provider === login.id);
-      return preset
-        ? () => {
-            setError(null);
-            setEditor({
-              kind: "add",
-              service: { preset: preset.id, oauth_separate_account: true },
-            });
-          }
-        : null;
+      if (!preset) return null;
+      const name = firstFreeName(preset.id, [
+        ...agent.services.map((service) => service.name),
+        ...agent.inactive_services.map((service) => service.name),
+      ]);
+      return () => {
+        setError(null);
+        write(servicePath(agent.agent_name, name), "PUT", {
+          preset: preset.id,
+          oauth_separate_account: true,
+        }).then(
+          (counts) => {
+            if (!counts) return;
+            onChanged();
+            setSignInNext({ name, provider: login.id });
+          },
+          (cause) =>
+            setError(errorText(cause, "Could not add the account. Try again.")),
+        );
+      };
     },
   };
   const rowAgent: RowAgent = {
@@ -507,7 +526,7 @@ function AgentSection({
             context="personal"
             sharedTarget={agent.shared}
             name={editor.kind === "edit" ? editor.name : undefined}
-            service={editor.service ?? null}
+            service={editor.kind === "edit" ? editor.service : null}
             initialRestrictOnly={
               editor.kind === "add" && editor.restrictOnly === true
             }
@@ -520,6 +539,8 @@ function AgentSection({
             loadPresets={loadPresets}
             onDirtyChange={setEditorDirty}
             onSave={save}
+            // A service that gets an account of its own signs in to it next, from its row.
+            onSignIn={(name, provider) => setSignInNext({ name, provider })}
             saveKey={saveKey}
             onDelete={
               editor.kind === "edit" ? () => remove(editor.name) : undefined

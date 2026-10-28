@@ -314,6 +314,8 @@ memory:
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
 
+The retired `max_dirty_age_seconds` and `max_cross_session_reprioritize` settings, which older dashboards saved under `auto_flush`, pass validation but have no effect, and the next dashboard save removes them.
+
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.

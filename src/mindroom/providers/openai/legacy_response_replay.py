@@ -16,12 +16,12 @@ __all__ = ["legacy_tool_search_items"]
 # response's search items there, and those from v2026.9.129 also the ordered output, but only of a completed unstored
 # or portable response that reasoned, so a stored reply, an unstored one without reasoning, and one that did not
 # complete have this shape.
-# Last legacy release: v2026.10.627; replacement: the first release after it records the ordered output of every
+# Last legacy release: v2026.10.647; replacement: the first release after it records the ordered output of every
 # response that ends, search items included, and no ``tool_search_items``.
 # Handling: the reply is rebuilt from its canonical text and calls after these search items, without reasoning or item
 # ids, as that release sent it. ``tool_search_items`` beside an ordered output is ignored, since the output holds the
 # same items.
-# Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_v2026_10_627_stored_replays_as_that_release_sent_it
+# Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_v2026_10_647_stored_replays_as_that_release_sent_it
 def legacy_tool_search_items(message: Message) -> list[dict[str, Any]]:
     """Return the hosted tool-search items a reply stored without an ordered output kept apart."""
     return (message.provider_data or {}).get("tool_search_items") or []

@@ -14,7 +14,6 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
@@ -35,8 +34,8 @@ from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     build_team_spec,
-    materialize_exact_team_members,
     materialized_team_label,
+    resolve_exact_team_members,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -68,7 +67,7 @@ if TYPE_CHECKING:
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
     from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
-    from mindroom.teams.spec import TeamMode
+    from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -138,14 +137,14 @@ class TeamResume:
     """Continue one paused team run as ``leader`` runs; the ``ContinueRun`` the delegation driver uses.
 
     ``plan`` selects the stored history the leader's resume request replays: the turn's own plan within a turn, the
-    configured policy for a saved approval.
+    configured policy for a saved approval. An approved call must still come from the toolkit its member's build
+    offers it from (``TeamSpec.tool_owners``).
     """
 
     leader: LeaderRun
     records: TerminalRecord[TeamRunRecord]
     plan: ResolvedReplayPlan | None
     user_id: str | None
-    toolkit_owners: Mapping[tuple[str, str], str]
 
     @property
     def storage(self) -> RunStorage:
@@ -160,7 +159,7 @@ class TeamResume:
         receipt. The stream carries the members' events too: the driver forwards a parent's events without reading
         them, so member events ride along.
         """
-        routed = _route_decisions(paused, decisions, toolkit_owners=self.toolkit_owners)
+        routed = _route_decisions(paused, decisions, toolkit_owners=self.leader.built.spec.tool_owners())
         decided = {*routed.approved, *routed.denied}
         for requirement in paused.requirements or ():
             key = (requirement.member_agent_id, requirement.tool_execution.tool_call_id)
@@ -250,6 +249,18 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
     )
 
 
+async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
+    """Build the members whose paused runs a saved approval's resume continues, before it checks its decisions.
+
+    The resume checks each member's decisions against the member's tools before anything runs; every other member
+    builds on its first delegation, as in a turn.
+    """
+    paused_members = {requirement.member_agent_id for requirement in paused.requirements or ()}
+    for member in team.members:
+        if member.id in paused_members:
+            await member.ensure_built()
+
+
 async def _finished(record: TeamRunRecord) -> AsyncIterator[TeamRunEvent]:
     """Yield a stored run as the end of a stream, for the driver to continue."""
     yield RunFinished(record)
@@ -330,7 +341,7 @@ async def continue_paused_team_run(
                 for name in member_names
             }
         members = await asyncio.to_thread(
-            materialize_exact_team_members,
+            resolve_exact_team_members,
             list(member_names),
             config=config,
             runtime_paths=runtime_paths,
@@ -353,7 +364,7 @@ async def continue_paused_team_run(
             configured_team_name=team_name,
             timezone=config.get_entity_timezone(configured_team_name),
         )
-        toolkit_owners = tool_owners_by_agent(*members.builds)
+        await _build_paused_members(built.spec, persisted)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)
         presentation = TeamStreamPresentation.restore(
             config_names=member_names,
@@ -365,8 +376,8 @@ async def continue_paused_team_run(
         attempt = TeamAttempt(
             run_id=run_id,
             members=members,
+            team=built.spec,
             presentation=presentation,
-            stream=True,
             team_name=entity_name,
             runtime_model_name=model_name,
             prepared_history=None,
@@ -395,7 +406,6 @@ async def continue_paused_team_run(
             records=attempt.records,
             plan=plan,
             user_id=user_id,
-            toolkit_owners=toolkit_owners,
         )
         # A run the delegation driver owns resumes through it with the decisions on its children's calls; any
         # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
@@ -426,10 +436,7 @@ async def continue_paused_team_run(
         # events did not show, such as a failed member run's reason; a run that paused again shows no paused notice.
         for run in (continued, *continued.ended_member_runs):
             attempt.show_unshown_handover(run)
-        paused = paused_attempt_from_response(
-            continued,
-            toolkit_owners=toolkit_owners,
-        )
+        paused = paused_attempt_from_response(continued, toolkit_owners=built.spec.tool_owners())
         if paused is not None:
             return continued_team_pause(presentation, paused)
         if continued.status is not RunStatus.completed:

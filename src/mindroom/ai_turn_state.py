@@ -92,22 +92,3 @@ class AITurnState:
             interrupted_tools=self.interrupted_tools,
             original_status=original_status,
         )
-
-    def record_interrupted_from_recorder(
-        self,
-        recorder: TurnRecorder,
-        *,
-        run_metadata: Mapping[str, Any] | None,
-        original_status: RunStatus = RunStatus.cancelled,
-    ) -> None:
-        """Mark the recorder interrupted using its already-canonical live state."""
-        self.assistant_text = recorder.assistant_text
-        self.completed_tools = list(recorder.completed_tools)
-        self.interrupted_tools = list(recorder.interrupted_tools)
-        recorder.record_interrupted(
-            run_metadata=run_metadata,
-            assistant_text=self.assistant_text,
-            completed_tools=self.completed_tools,
-            interrupted_tools=self.interrupted_tools,
-            original_status=original_status,
-        )

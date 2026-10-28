@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import completed_ai_response_mock, completing, install_model_providers, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
     from mindroom.ai import ResponseTurnContext
+    from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
 import pytest
@@ -35,6 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
@@ -65,7 +67,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.search import AgentKnowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
-from mindroom.llm.errors import ProviderError
+from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, ModelRequest, StreamEvent, TextDelta, TurnCompleted
@@ -79,7 +81,6 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
@@ -94,7 +95,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
-from tests.teams.squad import built_team, team_spec
+from tests.teams.squad import built_team, resolved_members, team_spec
 from tests.teams.squad import member as team_member
 
 _QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
@@ -1050,7 +1051,7 @@ class TestChatCompletions:
 
     def test_basic_completion(self, app_client: TestClient) -> None:
         """Basic non-streaming completion returns correct shape."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Hello! How can I help?"
 
             response = app_client.post(
@@ -1084,7 +1085,7 @@ class TestChatCompletions:
                 }
             return "Hello!"
 
-        with patch("mindroom.api.openai_compat.ai_response", side_effect=respond):
+        with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
@@ -1127,7 +1128,7 @@ class TestChatCompletions:
                 )
             return "Hello!"
 
-        with patch("mindroom.api.openai_compat.ai_response", side_effect=respond):
+        with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
@@ -1145,7 +1146,7 @@ class TestChatCompletions:
 
         with (
             patch("mindroom.api.openai_compat._openai_completion_lock", return_value=completion_lock),
-            patch("mindroom.api.openai_compat.ai_response", side_effect=cancelled_response),
+            patch("mindroom.api.openai_compat.ai_response", side_effect=completing(cancelled_response)),
             pytest.raises((asyncio.CancelledError, FutureCancelledError)),
         ):
             app_client.post(
@@ -1160,7 +1161,7 @@ class TestChatCompletions:
 
     def test_does_not_pass_include_default_tools_flag(self, app_client: TestClient) -> None:
         """Default tool behavior is now resolved from agent config, not a runtime flag."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Response"
 
             app_client.post(
@@ -1177,7 +1178,7 @@ class TestChatCompletions:
 
     def test_agent_completion_mints_fresh_uuid_correlation_id(self, app_client: TestClient) -> None:
         """Each OpenAI-compatible agent completion mints its own uuid-hex correlation id."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Response"
 
             for _ in range(2):
@@ -1196,7 +1197,7 @@ class TestChatCompletions:
 
     def test_passes_knowledge_none(self, app_client: TestClient) -> None:
         """Passes knowledge=None when agent has no knowledge_bases."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Response"
 
             app_client.post(
@@ -1211,7 +1212,7 @@ class TestChatCompletions:
 
     def test_request_body_user_is_not_passed_as_ai_requester(self, app_client: TestClient) -> None:
         """OpenAI user must not be written as Matrix requester metadata."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Response"
 
             app_client.post(
@@ -1235,7 +1236,7 @@ class TestChatCompletions:
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.side_effect = _capture
+            mock_ai.side_effect = completing(_capture)
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -1261,7 +1262,7 @@ class TestChatCompletions:
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.side_effect = _capture
+            mock_ai.side_effect = completing(_capture)
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -1320,6 +1321,119 @@ class TestChatCompletions:
         assert response.json()["choices"][0]["message"]["content"] == "Agent reply"
         assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_completion_that_fails_after_its_answer_began_reports_the_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        """A turn that fails after streaming part of its answer reports the failure in either mode.
+
+        A blocking completion answers with an error, since it has sent nothing yet; a streamed one already sent its
+        status, so it sends the partial answer and then the failure.
+        """
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[])},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+        )
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+
+        async def lose_the_provider() -> None:
+            msg = "provider connection lost"
+            raise ProviderError(msg, provider="Synthetic")
+
+        model = ScriptedModel([[TextDelta("Checking."), Await(lose_the_provider)]])
+        install_model_providers(monkeypatch, {"default": model})
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            TestClient(app, base_url="http://localhost") as client,
+            capture_logs() as logs,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+            )
+
+        if not stream:
+            assert response.status_code == 500
+            assert response.json()["error"]["message"] == "Agent execution failed"
+            assert response.json()["error"]["type"] == "server_error"
+            # The warning names why the turn failed, never the answer it had started, which is conversation content.
+            [warning] = [log for log in logs if log["event"] == "AI response failed"]
+            assert warning["error"] == "provider connection lost"
+            assert "Checking." not in str(warning)
+            return
+        assert response.status_code == 200
+        content = "".join(
+            chunk["choices"][0]["delta"].get("content", "")
+            for line in response.text.splitlines()
+            if line.startswith("data: {") and (chunk := json.loads(line.removeprefix("data: ")))
+        )
+        assert content.startswith("Checking.")
+        assert "provider connection lost" in content
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_completion_without_a_provider_key_answers_with_the_setup_guidance(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        """A turn that fails for want of a provider key answers with how to set one up, in either mode.
+
+        That reply is what the user has to read, so a blocking completion sends it as its answer, not a bare error.
+        """
+        config = Config(
+            agents={"general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[])},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        )
+        runtime_paths = resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "data",
+            process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+        )
+        app = FastAPI()
+        app.include_router(openai_compat.router)
+        initialize_api_app(app, runtime_paths)
+
+        async def no_key() -> None:
+            msg = "no API key"
+            raise AuthenticationFailed(msg, provider="openai", status_code=401, code=MISSING_API_KEY)
+
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(no_key)]])})
+        with (
+            patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+            TestClient(app, base_url="http://localhost") as client,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+            )
+
+        assert response.status_code == 200
+        if stream:
+            content = "".join(
+                chunk["choices"][0]["delta"].get("content", "")
+                for line in response.text.splitlines()
+                if line.startswith("data: {") and (chunk := json.loads(line.removeprefix("data: ")))
+            )
+        else:
+            content = response.json()["choices"][0]["message"]["content"]
+        assert "No AI provider key is set up yet" in content
+        assert "Connect your AI provider" in content
+
     def test_openai_execution_identity_ignores_request_user(self) -> None:
         """OpenAI-compatible execution identity should not trust the request-body user."""
         identity = build_tool_execution_identity(
@@ -1344,7 +1458,7 @@ class TestChatCompletions:
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.side_effect = _capture
+            mock_ai.side_effect = completing(_capture)
 
             response = authed_client.post(
                 "/v1/chat/completions",
@@ -1499,7 +1613,7 @@ class TestChatCompletions:
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.side_effect = _capture
+            mock_ai.side_effect = completing(_capture)
 
             app_client.post(
                 "/v1/chat/completions",
@@ -1531,7 +1645,7 @@ class TestChatCompletions:
             return "Response"
 
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.side_effect = _capture
+            mock_ai.side_effect = completing(_capture)
 
             authed_client.post(
                 "/v1/chat/completions",
@@ -1617,7 +1731,7 @@ class TestChatCompletions:
 
     def test_extra_fields_ignored(self, app_client: TestClient) -> None:
         """Extra/unknown fields don't cause 422."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Response"
 
             response = app_client.post(
@@ -1636,7 +1750,7 @@ class TestChatCompletions:
         assert response.status_code == 200
 
     def test_error_response_detection(self, app_client: TestClient) -> None:
-        """Error strings from ai_response() become HTTP 500 with sanitized message."""
+        """A turn that completes no attempt failed, so it answers HTTP 500 with a sanitized message."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
             mock_ai.return_value = "❌ Authentication failed (openai): Invalid API key"
 
@@ -1654,10 +1768,10 @@ class TestChatCompletions:
         # Error message is sanitized — raw backend details are not exposed
         assert error["message"] == "Agent execution failed"
 
-    def test_agent_prefix_error_detection(self, app_client: TestClient) -> None:
-        """Error strings with [agent] prefix are detected."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.return_value = "[general] ⚠️ Error: something went wrong"
+    def test_a_completed_answer_that_starts_like_an_error_is_an_answer(self, app_client: TestClient) -> None:
+        """A blocking completion reads failure from the turn's outcome, not from its text."""
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
+            mock_ai.return_value = "⚠️ Error: the log line you asked about means the disk is full."
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -1667,7 +1781,8 @@ class TestChatCompletions:
                 },
             )
 
-        assert response.status_code == 500
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"].startswith("⚠️ Error: the log line")
 
 
 @dataclass
@@ -2250,7 +2365,7 @@ class TestAuthentication:
         body = json.dumps({"model": "general", "messages": [{"role": "user", "content": "Hello"}]})
         # A text/plain POST is a simple request, which a browser sends cross-site without a preflight.
         simple = {"Content-Type": "text/plain"}
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Hello!"
             rebound = app_client.post(
                 "/v1/chat/completions",
@@ -2277,7 +2392,7 @@ class TestAuthentication:
     def test_unauthenticated_api_serves_local_callers(self, app_client: TestClient) -> None:
         """API clients, the local UI, and callers on an address keep reaching an unauthenticated `/v1`."""
         payload = {"model": "general", "messages": [{"role": "user", "content": "Hello"}]}
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Hello!"
             responses = [
                 app_client.post("/v1/chat/completions", json=payload, headers=headers)
@@ -2684,7 +2799,7 @@ def _completion_session_ids(client: TestClient, authorization_headers: list[str]
         session_ids.append(ctx.session_id)
         return "Response"
 
-    with patch("mindroom.api.openai_compat.ai_response", side_effect=capture):
+    with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(capture)):
         for authorization in authorization_headers:
             response = client.post(
                 "/v1/chat/completions",
@@ -2783,7 +2898,7 @@ class TestSessionIdDerivation:
             return sid
 
         with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.api.openai_compat.derive_session_id", side_effect=capture_session_id),
         ):
             mock_ai.return_value = "Response"
@@ -2935,7 +3050,7 @@ class TestAutoRouting:
 
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", side_effect=respond),
+            patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)),
         ):
             mock_route.return_value = ResponderSelection("code")
 
@@ -2994,7 +3109,7 @@ class TestAutoRouting:
 
         monkeypatch.setattr(RuntimePaths, "env_value", env_value)
         monkeypatch.setattr(JudgmentClient, "_post", post)
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as response_agent:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as response_agent:
             response = app_client.post(
                 "/v1/chat/completions",
                 json={
@@ -3012,7 +3127,7 @@ class TestAutoRouting:
         """When suggest_responder returns None, falls back to first agent."""
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
         ):
             mock_route.return_value = None
             mock_ai.return_value = "Fallback response"
@@ -3033,7 +3148,7 @@ class TestAutoRouting:
         """Auto-routing passes thread_history to suggest_responder for context."""
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
         ):
             mock_route.return_value = ResponderSelection("general")
             mock_ai.return_value = "Response"
@@ -3125,7 +3240,7 @@ class TestAutoRouting:
         """Session ID derivation uses the resolved agent name, not 'auto'."""
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
         ):
             mock_route.return_value = ResponderSelection("code")
             mock_ai.return_value = "Response"
@@ -3150,7 +3265,7 @@ class TestAutoRouting:
         """If routing returns no match, auto should still fall back gracefully."""
         with (
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
         ):
             mock_route.return_value = None
             mock_ai.return_value = "Fallback response"
@@ -3280,13 +3395,8 @@ def _scripted_team(
 
 
 def _resolved_members(members: Sequence[tuple[str, str, ScriptedModel]]) -> ResolvedExactTeamMembers:
-    """Return the member set ``materialize_exact_team_members`` resolves for the ``(id, name, model)`` members."""
-    return ResolvedExactTeamMembers(
-        requested_agent_names=[member_id for member_id, _name, _model in members],
-        builds=[],
-        display_names=[name for _member_id, name, _model in members],
-        failed_agent_names=[],
-    )
+    """Return the member set ``resolve_exact_team_members`` resolves for the ``(id, name, model)`` members."""
+    return resolved_members({member_id: name for member_id, name, _model in members})
 
 
 def _finished(content: str) -> RunFinished:
@@ -3422,7 +3532,7 @@ def test_agent_turn_names_the_mapped_keys_requester(test_config: Config, stream:
 
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(test_config, runtime_paths)),
-        patch("mindroom.api.openai_compat.ai_response", new=respond),
+        patch("mindroom.api.openai_compat.ai_response", new=completing(respond)),
         patch("mindroom.api.openai_compat.stream_agent_response", new=stream_response),
         TestClient(app, base_url="http://localhost") as client,
     ):
@@ -3531,7 +3641,7 @@ class TestTeamCompletion:
             assert matrix_text not in leader_prompt
         for member in built.spec.members:
             assert "the MindRoom agent exposed through the OpenAI-compatible API" in str(
-                member.spec.system_messages[0].content,
+                member.build().spec.system_messages[0].content,
             )
 
     @pytest.mark.asyncio
@@ -3822,7 +3932,7 @@ class TestTeamCompletion:
 
         config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
+            patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
@@ -3996,8 +4106,13 @@ class TestTeamCompletion:
         assert run.ctx.metadata is not None
         assert run.ctx.metadata[constants.AI_RUN_METADATA_KEY]["prepared_context"]["tokens"] == 456
 
-    def test_team_streaming_keeps_execution_identity_for_full_stream(self, team_app_client: TestClient) -> None:
-        """Team streaming must keep worker-routing identity active after preflight."""
+    @pytest.mark.parametrize("stream", [True, False])
+    def test_a_team_completion_keeps_execution_identity_for_its_whole_run(
+        self,
+        team_app_client: TestClient,
+        stream: bool,
+    ) -> None:
+        """A team completion keeps worker-routing identity active after preflight, streamed or not."""
         observed_session_ids: list[str | None] = []
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
@@ -4019,7 +4134,7 @@ class TestTeamCompletion:
                 json={
                     "model": "team/super_team",
                     "messages": [{"role": "user", "content": "Build it"}],
-                    "stream": True,
+                    "stream": stream,
                 },
             )
 
@@ -4179,13 +4294,19 @@ class TestTeamCompletion:
         assert response.status_code == 500
         assert response.json()["error"]["message"] == "Team execution failed"
 
-    def test_team_member_materialization_failure_returns_generic_500(
+    def test_a_member_that_fails_to_build_is_a_failed_delegation_the_leader_answers_around(
         self,
         team_app_client: TestClient,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Configured team build failures should not expose internal exception details."""
-        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        """A member that cannot be built fails only the delegation to it; the completion is the leader's answer."""
+        leader = ScriptedModel(
+            [
+                calls(tool_call("delegate_task_to_member", "call-general", member_id="general", task="Help")),
+                answer("General could not start."),
+            ],
+        )
+        install_model_providers(monkeypatch, {"default": leader})
         with (
             patch(
                 "mindroom.teams.members.resolve_agent_knowledge_access",
@@ -4201,9 +4322,10 @@ class TestTeamCompletion:
                 },
             )
 
-        assert response.status_code == 500
-        assert response.json()["error"]["type"] == "server_error"
-        assert response.json()["error"]["message"] == "Team execution failed"
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == "General could not start."
+        delegated = leader.requests[1].messages[-1]
+        assert (delegated.tool_call_id, delegated.content) == ("call-general", "boom")
 
     @pytest.mark.parametrize("stream", [False, True])
     def test_team_execution_failure_500(self, team_app_client: TestClient, stream: bool) -> None:
@@ -4792,7 +4914,7 @@ class TestTeamCompletion:
         )
 
         assert (built.spec.leader.id, built.spec.mode) == ("coord_team", expected)
-        assert [member.spec.id for member in built.spec.members] == ["general"]
+        assert [member.id for member in built.spec.members] == ["general"]
 
     def test_build_team_openai_compat_does_not_require_persisted_matrix_accounts(
         self,
@@ -4838,7 +4960,7 @@ class TestTeamCompletion:
         )
 
         assert built.spec.mode is TeamMode.COORDINATE
-        assert [member.spec.id for member in built.spec.members] == ["general", "code"]
+        assert [member.id for member in built.spec.members] == ["general", "code"]
         assert not constants.matrix_state_file(runtime_paths=runtime_paths).exists()
 
     def test_build_team_propagates_team_build_failures(self) -> None:
@@ -4869,7 +4991,7 @@ class TestTeamCompletion:
         )
         assert scope_context is not None
         with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", return_value=members),
+            patch("mindroom.api.openai_compat.resolve_exact_team_members", return_value=members),
             patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
             pytest.raises(RuntimeError, match="team build failed"),
         ):
@@ -4911,13 +5033,19 @@ class TestTeamCompletion:
         )
         mock_knowledge = MagicMock()
         built = _scripted_team()
+        resolved: list[ResolvedExactTeamMembers] = []
+
+        def build_team_spec(*, members: ResolvedExactTeamMembers, **_kwargs: object) -> BuiltTeam:
+            resolved.append(members)
+            return built
+
         with (
             patch("mindroom.teams.members.create_agent") as mock_create,
             patch(
                 "mindroom.teams.members.resolve_agent_knowledge_access",
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ),
-            patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
+            patch("mindroom.api.openai_compat.build_team_spec", side_effect=build_team_spec),
         ):
             mock_create.return_value = MagicMock(name="Research")
 
@@ -4941,6 +5069,10 @@ class TestTeamCompletion:
                 unavailable_bases={},
                 refresh_scheduler=None,
             )
+            # The member builds on its first delegation, with the knowledge the team build resolved for it.
+            mock_create.assert_not_called()
+            [members] = resolved
+            members.build("research", members.model_names["research"])
 
             assert mock_create.call_args.kwargs["knowledge"] is mock_knowledge
             assert "include_default_tools" not in mock_create.call_args.kwargs
@@ -5005,7 +5137,7 @@ class TestKnowledgeIntegration:
         mock_reader = MagicMock()
 
         with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch(
                 "mindroom.knowledge.utils._lookup_knowledge_for_base",
                 return_value=_knowledge_lookup(mock_reader),
@@ -5053,7 +5185,7 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -5072,7 +5204,7 @@ class TestKnowledgeIntegration:
 
     def test_knowledge_none_when_not_configured(self, knowledge_app_client: TestClient) -> None:
         """Knowledge is None when agent has no knowledge_bases."""
-        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai:
             mock_ai.return_value = "Response"
 
             knowledge_app_client.post(
@@ -5091,7 +5223,7 @@ class TestKnowledgeIntegration:
     ) -> None:
         """Chat completions should not await shared-manager initialization on the request path."""
         with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.manager.KnowledgeManager.reindex_all", new_callable=AsyncMock) as reindex_all,
         ):
             mock_ai.return_value = "Response"
@@ -5132,7 +5264,7 @@ class TestKnowledgeIntegration:
 
         config_lifecycle.app_state(knowledge_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
         ):
             mock_ai.return_value = "Response without knowledge"
@@ -5211,7 +5343,7 @@ class TestKnowledgeIntegration:
 
         with (
             patch("mindroom.api.openai_compat._load_config", return_value=(knowledge_config, runtime_paths)),
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             TestClient(app, base_url="http://localhost") as client,
         ):
@@ -5233,7 +5365,7 @@ class TestKnowledgeIntegration:
     def test_knowledge_resolution_failure_graceful_fallback(self, knowledge_app_client: TestClient) -> None:
         """When knowledge resolution fails, request proceeds with knowledge=None."""
         with (
-            patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch(
                 "mindroom.api.openai_compat.resolve_agent_knowledge_access_async",
                 new_callable=AsyncMock,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,7 +36,6 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_error_note
-from mindroom.tool_system.agno_toolkits import AgnoImage, ToolResult
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
@@ -44,7 +43,12 @@ from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnStore
 from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
-from tests.conftest import message_origin, patch_response_runner_module, unwrap_extracted_collaborator
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    message_origin,
+    patch_response_runner_module,
+    unwrap_extracted_collaborator,
+)
 from tests.journal_membership_helpers import admit_room_membership
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _plain_request, _target
 
@@ -503,6 +507,13 @@ async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) ->
         return await runner.generate_response(request)
 
 
+async def _owe(bot: AgentBot, reply_id: str, **debt: object) -> None:
+    await bot._reply_runtime.store.replies.update(
+        reply_id,
+        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, **debt)),
+    )
+
+
 async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_path: Path) -> None:
     """In a room the bot left, an owed note has no row to become; the reply stops owing it."""
     bot = await _streaming_bot(tmp_path)
@@ -510,10 +521,7 @@ async def test_a_note_the_outbox_cannot_take_is_dropped_not_retried_forever(tmp_
     answered = await _reply(bot)
     await admit_room_membership(bot.journal_principal(), _target().room_id, "leave", source=DepartureSource.LOCAL)
     owed = rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART)
-    await bot._reply_runtime.store.replies.update(
-        answered.reply_id,
-        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
-    )
+    await _owe(bot, answered.reply_id, owed_write=owed)
     sends = len(_sent_bodies(bot))
 
     await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
@@ -529,13 +537,7 @@ async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> N
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     answered = await _reply(bot)
-    await bot._reply_runtime.store.replies.update(
-        answered.reply_id,
-        lambda reply: rl.Transition(
-            outcome=rl.Outcome.APPLIED,
-            reply=replace(reply, redaction_pending=("$gone", "$kept")),
-        ),
-    )
+    await _owe(bot, answered.reply_id, redaction_pending=("$gone", "$kept"))
 
     async def redact(_room_id: str, event_id: str, *_args: object, **_kwargs: object) -> nio.RoomRedactError:
         if event_id == "$gone":
@@ -548,16 +550,87 @@ async def test_a_redaction_of_an_event_already_gone_is_done(tmp_path: Path) -> N
     assert (await _reply(bot)).redaction_pending == ("$kept",)
 
 
+@dataclass
+class _FirstCallHold:
+    """Hold the first Matrix call until released; later calls go straight through."""
+
+    holding: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def wait_if_first(self) -> None:
+        if not self.holding.is_set():
+            self.holding.set()
+            await self.release.wait()
+
+
+async def _settle_while_another_settlement_is_held(bot: AgentBot, reply_id: str, hold: _FirstCallHold) -> rl.Reply:
+    """Settle a reply while an earlier settlement of it is held in Matrix; return the reply as the later one left it."""
+    first = asyncio.create_task(bot._delivery_gateway.settle_reply_debt(reply_id))
+    await asyncio.wait_for(hold.holding.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    async def settle_and_read() -> rl.Reply:
+        await bot._delivery_gateway.settle_reply_debt(reply_id)
+        return await _reply(bot)
+
+    second = asyncio.create_task(settle_and_read())
+    try:
+        # A later settlement that does not wait for the held one has finished well within this time.
+        await asyncio.wait({second}, timeout=0.2)
+        assert not second.done(), "a settlement finished while an earlier one was still settling the same reply"
+    finally:
+        hold.release.set()
+    await asyncio.wait_for(first, timeout=SETTLE_TIMEOUT_SECONDS)
+    return await asyncio.wait_for(second, timeout=SETTLE_TIMEOUT_SECONDS)
+
+
+async def test_overlapping_settlements_redact_an_owed_event_once(tmp_path: Path) -> None:
+    """A settlement that starts while another is redacting the reply's event waits for it instead of redacting again."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    await _owe(bot, answered.reply_id, redaction_pending=("$owed",))
+    hold = _FirstCallHold()
+
+    async def redact(*_args: object, **_kwargs: object) -> nio.RoomRedactResponse:
+        await hold.wait_if_first()
+        return nio.RoomRedactResponse(event_id="$redaction", room_id=_target().room_id)
+
+    bot.client.room_redact = AsyncMock(side_effect=redact)
+    settled = await _settle_while_another_settlement_is_held(bot, answered.reply_id, hold)
+
+    assert settled.redaction_pending == ()
+    bot.client.room_redact.assert_awaited_once()
+
+
+async def test_a_settlement_overlapping_a_note_delivery_returns_once_the_note_is_delivered(tmp_path: Path) -> None:
+    """A settlement that starts while another sends the reply's owed note returns only after Matrix acknowledged it."""
+    bot = await _streaming_bot(tmp_path)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
+    answered = await _reply(bot)
+    await _owe(bot, answered.reply_id, owed_write=rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART))
+    sends = len(_sent_bodies(bot))
+    hold = _FirstCallHold()
+    send = bot.client.room_send.side_effect
+
+    async def held_send(*args: object, **kwargs: object) -> object:
+        await hold.wait_if_first()
+        return send(*args, **kwargs)
+
+    bot.client.room_send.side_effect = held_send
+    settled = await _settle_while_another_settlement_is_held(bot, answered.reply_id, hold)
+
+    assert settled.owed_write is None
+    assert settled.confirmed_seq == settled.reply_sequence
+    assert len(_sent_bodies(bot)) == sends + 1
+
+
 async def test_a_note_that_could_not_be_prepared_yet_stays_owed(tmp_path: Path) -> None:
     """Only the outbox's refusal drops an owed note; one the gateway could not prepare is retried later."""
     bot = await _streaming_bot(tmp_path)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="An answer."))
     answered = await _reply(bot)
     owed = rl.OwedWrite(answered.last_span_id, rl.NoteKind.RESTART)
-    await bot._reply_runtime.store.replies.update(
-        answered.reply_id,
-        lambda reply: rl.Transition(outcome=rl.Outcome.APPLIED, reply=replace(reply, owed_write=owed)),
-    )
+    await _owe(bot, answered.reply_id, owed_write=owed)
     gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
     with patch.object(type(gateway), "_deliver_rendered_reply_write", new=AsyncMock(return_value=None)) as deliver:
         await bot._delivery_gateway.settle_reply_debt(answered.reply_id)
@@ -1453,12 +1526,8 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
     async def draw(prompt: str) -> ToolValue:
         return ToolValue(content=f"Drew a {prompt}.", images=(Image(url=picture, mime_type="image/png"),))
 
-    async def render(prompt: str) -> ToolResult:
-        return ToolResult(content=f"Rendered a {prompt}.", images=[AgnoImage(url=picture)])
-
     async def answer(*_args: object, **_kwargs: object) -> str:
         await bridge("draw", draw, {"prompt": "cat"})
-        await bridge("render", render, {"prompt": "dog"})
         return "Drawn."
 
     assert await _answer(bot, _plain_request(_target()), AsyncMock(side_effect=answer)) == "$sent1"
@@ -1466,10 +1535,9 @@ async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answer
     reply = await _reply(bot)
     recorded = await bot._reply_runtime._span_tool_calls((reply.last_span_id,))
     account = render_stopped_attempt(partial_text="", completed_tools=recorded, interrupted_tools=())
-    assert account.splitlines()[-2:] == [
-        '- The `draw` tool finished with input preview "prompt=cat" and output preview "Drew a cat.".',
-        '- The `render` tool finished with input preview "prompt=dog" and output preview "Rendered a dog.".',
-    ]
+    assert account.splitlines()[-1] == (
+        '- The `draw` tool finished with input preview "prompt=cat" and output preview "Drew a cat.".'
+    )
 
 
 async def test_a_tool_result_stands_when_recording_its_finish_fails(

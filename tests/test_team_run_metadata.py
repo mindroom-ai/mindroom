@@ -18,7 +18,6 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.providers.registry import build_model_provider
 from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.members import ResolvedExactTeamMembers
 from mindroom.teams.presentation import TeamStreamPresentation
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
 from tests.team_turn_helpers import (
@@ -29,6 +28,7 @@ from tests.team_turn_helpers import (
     build_team_turn,
     registered_probe,
 )
+from tests.teams.squad import resolved_members, scripted, team_spec
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -232,14 +232,9 @@ def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices
     ]
     attempt = TeamAttempt(
         run_id="run-1",
-        members=ResolvedExactTeamMembers(
-            requested_agent_names=["general"],
-            builds=[],
-            display_names=["GeneralAgent"],
-            failed_agent_names=[],
-        ),
+        members=resolved_members({"general": "GeneralAgent"}),
+        team=team_spec("team", "Team", scripted("leader-model"), "You lead the team.", ()),
         presentation=TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False),
-        stream=False,
         team_name="team",
         runtime_model_name="leader",
         prepared_history=None,

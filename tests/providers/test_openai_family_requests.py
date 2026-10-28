@@ -567,9 +567,9 @@ def test_claude_server_tool_blocks_are_not_replayed_to_responses() -> None:
 
 # --- Replies an older release stored --------------------------------------------------------------------------
 
-# A tool turn after a hosted tool search as v2026.10.627 stored it (``Message.to_dict``), keyed by how its response
+# A tool turn after a hosted tool search as v2026.10.647 stored it (``Message.to_dict``), keyed by how its response
 # ended: on a stored route, on an unstored route without and with reasoning, and cut off by the output limit.
-_V2026_10_627_SEARCH_ITEMS = [
+_V2026_10_647_SEARCH_ITEMS = [
     {
         "id": "tsc_1",
         "arguments": {"queries": ["weather"]},
@@ -585,9 +585,9 @@ _V2026_10_627_SEARCH_ITEMS = [
         "type": "tool_search_output",
     },
 ]
-_V2026_10_627_PROVIDER_DATA: dict[str, dict[str, Any]] = {
+_V2026_10_647_PROVIDER_DATA: dict[str, dict[str, Any]] = {
     "stored": {
-        "tool_search_items": _V2026_10_627_SEARCH_ITEMS,
+        "tool_search_items": _V2026_10_647_SEARCH_ITEMS,
         "response_id": "resp_1",
         "mindroom_response_stored": True,
         "mindroom_conversation_sha256": "d31229fc7f47dc5edce3e26cc3c5f1863d6a9936eeac56eb8d04fcbf185d9152",
@@ -595,14 +595,14 @@ _V2026_10_627_PROVIDER_DATA: dict[str, dict[str, Any]] = {
         "mindroom_native_compaction": None,
     },
     "unstored-without-reasoning": {
-        "tool_search_items": _V2026_10_627_SEARCH_ITEMS,
+        "tool_search_items": _V2026_10_647_SEARCH_ITEMS,
         "response_id": "resp_1",
         "mindroom_response_stored": False,
         "mindroom_portable_replay": False,
         "mindroom_native_compaction": None,
     },
     "unstored-with-reasoning": {
-        "tool_search_items": _V2026_10_627_SEARCH_ITEMS,
+        "tool_search_items": _V2026_10_647_SEARCH_ITEMS,
         "response_id": "resp_1",
         "mindroom_response_stored": False,
         "mindroom_portable_replay": False,
@@ -614,7 +614,7 @@ _V2026_10_627_PROVIDER_DATA: dict[str, dict[str, Any]] = {
                 "type": "reasoning",
                 "encrypted_content": "opaque-reasoning",
             },
-            *_V2026_10_627_SEARCH_ITEMS,
+            *_V2026_10_647_SEARCH_ITEMS,
             {
                 "id": "msg_1",
                 "content": [{"annotations": [], "text": "Checking the forecast.", "type": "output_text"}],
@@ -633,7 +633,7 @@ _V2026_10_627_PROVIDER_DATA: dict[str, dict[str, Any]] = {
         ],
     },
     "cut-off": {
-        "tool_search_items": _V2026_10_627_SEARCH_ITEMS,
+        "tool_search_items": _V2026_10_647_SEARCH_ITEMS,
         "response_id": "resp_1",
         "mindroom_response_stored": False,
     },
@@ -641,11 +641,11 @@ _V2026_10_627_PROVIDER_DATA: dict[str, dict[str, Any]] = {
 
 
 @pytest.mark.parametrize("store", [True, False])
-@pytest.mark.parametrize("row", list(_V2026_10_627_PROVIDER_DATA))
-def test_a_reply_v2026_10_627_stored_replays_as_that_release_sent_it(row: str, *, store: bool) -> None:
-    """Each tool turn v2026.10.627 stored replays as that release sent it, its search items included.
+@pytest.mark.parametrize("row", list(_V2026_10_647_PROVIDER_DATA))
+def test_a_reply_v2026_10_647_stored_replays_as_that_release_sent_it(row: str, *, store: bool) -> None:
+    """Each tool turn v2026.10.647 stored replays as that release sent it, its search items included.
 
-    The expected inputs are the ones v2026.10.627 built for this history.
+    The expected inputs are the ones v2026.10.647 built for this history.
     """
     reply = Message.from_dict(
         {
@@ -659,7 +659,7 @@ def test_a_reply_v2026_10_627_stored_replays_as_that_release_sent_it(row: str, *
                     "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
                 },
             ],
-            "provider_data": json.loads(json.dumps(_V2026_10_627_PROVIDER_DATA[row])),
+            "provider_data": json.loads(json.dumps(_V2026_10_647_PROVIDER_DATA[row])),
         },
     )
     history = [
@@ -670,12 +670,12 @@ def test_a_reply_v2026_10_627_stored_replays_as_that_release_sent_it(row: str, *
         Message(role="user", content="And tomorrow?"),
     ]
     call = {"call_id": "call_1", "name": "get_weather", "arguments": '{"city": "Paris"}', "status": "completed"}
-    recorded = _V2026_10_627_PROVIDER_DATA[row].get("mindroom_response_output")
+    recorded = _V2026_10_647_PROVIDER_DATA[row].get("mindroom_response_output")
     turn = (
         [*recorded[:-1], {"type": "function_call", "id": "fc_1", **call}]
         if recorded is not None
         else [
-            *(_without_item_id(item) for item in _V2026_10_627_SEARCH_ITEMS),
+            *(_without_item_id(item) for item in _V2026_10_647_SEARCH_ITEMS),
             {"role": "assistant", "content": "Checking the forecast."},
             {"type": "function_call", **call},
         ]
@@ -1639,6 +1639,29 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
 
     body = {**kwargs.pop("extra_body", {}), **kwargs}
     assert {name: body.get(name) for name in body_fields} == authored
+
+
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path: Path) -> None:
+    """Every Chat dialect leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
+    adapter = build_provider(
+        ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+    )
+    assert isinstance(adapter, ChatAdapter)
+
+    kwargs = chat_request_kwargs(
+        model_id="m",
+        messages=[Message(role="user", content="Hi")],
+        tools=(),
+        tool_choice=None,
+        output_schema=None,
+        structured_output=adapter.capabilities.structured_output,
+        settings=adapter.settings,
+        wire=adapter.wire,
+    )
+
+    assert "tools" not in {**kwargs.get("extra_body", {}), **kwargs}
 
 
 # --- Codex ----------------------------------------------------------------------------------------------------
