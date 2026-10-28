@@ -1144,7 +1144,7 @@ async def _owned_agent_credentials(
     expected_user_id: str,
     auth: appservice.ManagedAccountAuth,
     runtime_paths: RuntimePaths,
-) -> tuple[MatrixCredentials, str, bool]:
+) -> tuple[MatrixCredentials, str]:
     """Resolve exact credentials without opening an ordinary MatrixStore."""
     if agent_user.device_id is not None:
         if not olm_store_exists(expected_user_id, agent_user.device_id, runtime_paths):
@@ -1161,7 +1161,7 @@ async def _owned_agent_credentials(
             runtime_paths,
         )
         if restored is not None:
-            return restored, "Matrix session restore", False
+            return restored, "Matrix session restore"
 
     if auth.mode == "appservice":
         assert auth.appservice_token is not None
@@ -1172,11 +1172,7 @@ async def _owned_agent_credentials(
             runtime_paths=runtime_paths,
             device_id=agent_user.device_id,
         )
-        return (
-            MatrixCredentials(*credentials),
-            "Matrix application-service login",
-            True,
-        )
+        return MatrixCredentials(*credentials), "Matrix application-service login"
     if agent_user.password is None:
         msg = f"Stored Matrix password for {agent_user.agent_name} is missing"
         raise matrix_startup_error(msg, permanent=True)
@@ -1189,8 +1185,21 @@ async def _owned_agent_credentials(
             device_id=agent_user.device_id,
         ),
         "Matrix password login",
-        False,
     )
+
+
+async def _sync_profile_display_name(client: nio.AsyncClient, agent_user: AgentMatrixUser) -> None:
+    """Set the Matrix profile name when it differs from the configured one, such as after a config change."""
+    profile = await client.get_displayname(agent_user.user_id)
+    if isinstance(profile, nio.ProfileGetDisplayNameResponse) and profile.displayname == agent_user.display_name:
+        return
+    display_response = await client.set_displayname(agent_user.display_name)
+    if isinstance(display_response, nio.ErrorResponse):
+        logger.warning(
+            "matrix_user_display_name_sync_failed",
+            user_id=agent_user.user_id,
+            error=str(display_response),
+        )
 
 
 async def _close_failed_owned_agent_login(opened: OwnedMatrixSession) -> None:
@@ -1217,7 +1226,7 @@ async def login_agent_owned_session(
     """Authenticate and open one agent's exclusive durable Matrix session."""
     auth = appservice.resolve_managed_account_auth(runtime_paths)
     expected_user_id = _validated_expected_agent_user_id(agent_user)
-    credentials, source, set_appservice_display_name = await _owned_agent_credentials(
+    credentials, source = await _owned_agent_credentials(
         homeserver,
         agent_user,
         expected_user_id,
@@ -1244,16 +1253,7 @@ async def login_agent_owned_session(
         ),
     )
     try:
-        if set_appservice_display_name:
-            display_response = await opened.client.set_displayname(
-                agent_user.display_name,
-            )
-            if isinstance(display_response, nio.ErrorResponse):
-                logger.warning(
-                    "matrix_user_display_name_sync_failed",
-                    user_id=expected_user_id,
-                    error=str(display_response),
-                )
+        await _sync_profile_display_name(opened.client, agent_user)
         await ensure_agent_cross_signing(opened.client, agent_user)
     except BaseException:
         await _close_failed_owned_agent_login(opened)
