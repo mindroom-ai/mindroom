@@ -5803,7 +5803,9 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
         await _settle_dispatcher(harness, dispatcher)
     finally:
         await dispatcher.stop()
-    assert [request.prompt for request in harness.runner.requests] == (
+    # Each top-level message is its own conversation, so the two answers may start in either order once dispatched
+    # in receipt order.
+    assert sorted(request.prompt for request in harness.runner.requests) == (
         ["first owed", "second owed"] if recover_as_member else []
     )
     assert await harness.turn_store.is_handled(_ROOM_ID, "$first")
