@@ -25750,6 +25750,74 @@
         "external_execution": false,
         "approval_type": null,
         "stop_after_tool_call": false
+      },
+      {
+        "name": "slack_edit",
+        "description": "Replace the text of one Slack message.\nA personal connection edits as the connected person, and Slack lets them edit only their own messages; a\nproject agent edits the MindRoom app's messages, in its own channels only. The edit is sent once and never\nretried; check slack_read before editing again after an error.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "target",
+            "text"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "slack_delete",
+        "description": "Delete one Slack message.\nA personal connection deletes as the connected person, so only messages Slack lets them delete; a project\nagent deletes the MindRoom app's messages, in its own channels only. The delete is sent once and never retried;\ncheck slack_read before deleting again after an error.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "target"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false
       }
     ]
   },

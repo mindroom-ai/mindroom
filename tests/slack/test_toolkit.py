@@ -67,11 +67,14 @@ class FakeSlack:
     answers: dict[str, Answer] = field(default_factory=dict)
     requests: list[httpx.Request] = field(default_factory=list)
 
+    @staticmethod
+    def _key(request: httpx.Request) -> str:
+        return request.url.path.removeprefix("/api/") if request.url.host == "slack.com" else str(request.url)
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
         request.read()
         self.requests.append(request)
-        key = request.url.path.removeprefix("/api/") if request.url.host == "slack.com" else str(request.url)
-        answer = self.answers.get(key, {"ok": False, "error": "unknown_method"})
+        answer = self.answers.get(self._key(request), {"ok": False, "error": "unknown_method"})
         return httpx.Response(200, json=answer) if isinstance(answer, dict) else answer(request)
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeSlack:
@@ -83,7 +86,8 @@ class FakeSlack:
         return self
 
     def methods(self) -> list[str]:
-        return [request.url.path.removeprefix("/api/") for request in self.requests]
+        """Return each request's Slack method, or its full URL for a request off the Web API."""
+        return [self._key(request) for request in self.requests]
 
     def calls(self, method: str) -> list[httpx.Request]:
         return [request for request in self.requests if request.url.path == f"/api/{method}"]
@@ -586,7 +590,8 @@ def _gateway_context(tmp_path: Path) -> AgentToolContext:
 async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
     context = _gateway_context(tmp_path)
 
-    result = await gateway.search_tools(context, toolkit="slack")
+    # The gateway answers at most 10 results per search.
+    result = await gateway.search_tools(context, toolkit="slack", limit=10)
     schema = await gateway.get_tool(context, toolkit="slack", function="slack_read")
 
     assert "error" not in result
@@ -596,6 +601,8 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
         "slack_download",
         "slack_post",
         "slack_react",
+        "slack_edit",
+        "slack_delete",
     ]
     assert "error" not in schema
     assert set(schema["inputSchema"]["properties"]) >= {"target", "limit", "before", "cursor"}
@@ -621,11 +628,11 @@ def test_slack_tools_require_a_credentials_manager(paths: RuntimePaths) -> None:
 
 
 def _write_names(tools: SlackTools) -> set[str]:
-    return set(tools.get_async_functions()) & {"slack_post", "slack_react"}
+    return set(tools.get_async_functions()) & slack_toolkit._WRITE_FUNCTIONS
 
 
 def test_write_false_hides_write_functions(paths: RuntimePaths) -> None:
-    assert _write_names(_tools(paths)) == {"slack_post", "slack_react"}
+    assert _write_names(_tools(paths)) == {"slack_post", "slack_react", "slack_edit", "slack_delete"}
     assert _write_names(_tools(paths, write=False)) == set()
     assert set(_tools(paths, write=False).get_async_functions()) == {"slack_search", "slack_read", "slack_download"}
 
@@ -739,10 +746,14 @@ async def test_project_post_outside_allowlist_refused(paths: RuntimePaths, monke
     fake = FakeSlack({"conversations.info": _member(UNLISTED)}).install(monkeypatch)
     tools = _tools(paths, channels=[CHANNEL])
 
-    post = json.loads(await tools.slack_post(UNLISTED, "hello"))
-    react = json.loads(await tools.slack_react(f"{UNLISTED}:{ROOT_TS}", "eyes"))
+    results = [
+        await tools.slack_post(UNLISTED, "hello"),
+        await tools.slack_react(f"{UNLISTED}:{ROOT_TS}", "eyes"),
+        await tools.slack_edit(f"{UNLISTED}:{ROOT_TS}", "fixed"),
+        await tools.slack_delete(f"{UNLISTED}:{ROOT_TS}"),
+    ]
 
-    assert post["message"] == react["message"] == "Not one of this agent's Slack channels"
+    assert {json.loads(result)["message"] for result in results} == {"Not one of this agent's Slack channels"}
     assert fake.requests == []
 
 
@@ -783,14 +794,103 @@ async def test_react_adds_the_named_reaction_to_the_message(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target", [CHANNEL, DANA["id"]])
-async def test_react_requires_message_target(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+async def test_message_functions_require_a_message_target(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
     _connect_alice(paths)
     fake = FakeSlack().install(monkeypatch)
+    tools = _tools(paths)
 
-    result = json.loads(await _tools(paths).slack_react(target, "eyes"))
+    results = [
+        await tools.slack_react(target, "eyes"),
+        await tools.slack_edit(target, "fixed"),
+        await tools.slack_delete(target),
+    ]
 
-    assert result["message"] == "Use <conversation>:<ts> or a message link to react to a message"
+    assert [json.loads(result)["message"] for result in results] == [
+        "Use <conversation>:<ts> or a message link to react to a message",
+        "Use <conversation>:<ts> or a message link to edit a message",
+        "Use <conversation>:<ts> or a message link to delete a message",
+    ]
     assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_edit_replaces_the_linked_message_text_defused(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit names the linked reply itself, not its thread, and its new text cannot notify a whole channel."""
+    _connect_alice(paths)
+    fake = FakeSlack({"chat.update": {"ok": True, "channel": CHANNEL, "ts": REPLY_TS}}).install(monkeypatch)
+    permalink = f"{WORKSPACE_URL}archives/{CHANNEL}/p1714000100000200?thread_ts={ROOT_TS}&cid={CHANNEL}"
+
+    result = json.loads(await _tools(paths).slack_edit(permalink, "<!here> <!subteam^S0123ABCD> beta ships Friday"))
+
+    assert result == {"status": "ok", "tool": "slack", "channel_id": CHANNEL, "ts": REPLY_TS}
+    assert fake.methods() == ["chat.update"]
+    (sent,) = (_form(request) for request in fake.requests)
+    assert sent == {
+        "channel": CHANNEL,
+        "ts": REPLY_TS,
+        "text": "<\u2060!here> <\u2060!subteam^S0123ABCD> beta ships Friday",
+    }
+    assert _bearer(fake.requests[0]) == USER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_the_named_message(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack({"chat.delete": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS}}).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_delete(f"{CHANNEL}:{ROOT_TS}"))
+
+    assert result == {"status": "ok", "tool": "slack", "channel_id": CHANNEL, "ts": ROOT_TS}
+    assert fake.methods() == ["chat.delete"]
+    assert _form(fake.requests[0]) == {"channel": CHANNEL, "ts": ROOT_TS}
+    assert _bearer(fake.requests[0]) == USER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_project_edit_and_delete_use_the_bot_token_in_a_member_channel(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeSlack(
+        {"conversations.info": _member(), "chat.update": {"ok": True}, "chat.delete": {"ok": True}},
+    ).install(monkeypatch)
+    tools = _tools(paths, channels=[CHANNEL])
+
+    edited = json.loads(await tools.slack_edit(f"{CHANNEL}:{ROOT_TS}", "on it"))
+    deleted = json.loads(await tools.slack_delete(f"{CHANNEL}:{ROOT_TS}"))
+
+    assert (edited["status"], deleted["status"]) == ("ok", "ok")
+    assert fake.methods() == ["conversations.info", "chat.update", "conversations.info", "chat.delete"]
+    assert {_bearer(request) for request in fake.requests} == {BOT_TOKEN}
+
+
+@pytest.mark.asyncio
+async def test_editing_someone_elses_message_returns_slacks_refusal_once(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(
+        {
+            "chat.update": {"ok": False, "error": "cant_update_message"},
+            "chat.delete": {"ok": False, "error": "cant_delete_message"},
+        },
+    ).install(monkeypatch)
+    tools = _tools(paths)
+
+    edited = json.loads(await tools.slack_edit(f"{CHANNEL}:{ROOT_TS}", "fixed"))
+    deleted = json.loads(await tools.slack_delete(f"{CHANNEL}:{ROOT_TS}"))
+
+    assert edited["message"] == "Slack refused the request: cant_update_message"
+    assert deleted["message"] == "Slack refused the request: cant_delete_message"
+    assert fake.methods() == ["chat.update", "chat.delete"]
 
 
 @pytest.mark.asyncio
@@ -826,7 +926,12 @@ async def test_write_target_must_be_a_slack_target(
     fake = FakeSlack().install(monkeypatch)
     tools = _tools(paths)
 
-    for result in (await tools.slack_post(target, "hello"), await tools.slack_react(target, "eyes")):
+    for result in (
+        await tools.slack_post(target, "hello"),
+        await tools.slack_react(target, "eyes"),
+        await tools.slack_edit(target, "fixed"),
+        await tools.slack_delete(target),
+    ):
         assert (
             json.loads(result)["message"]
             == "Use a Slack conversation ID, <conversation>:<ts>, a message link, or a user ID"
@@ -834,10 +939,19 @@ async def test_write_target_must_be_a_slack_target(
     assert fake.requests == []
 
 
-# One call per write function; a write function without an entry fails `test_every_write_function_has_a_watch_guard_case`.
-_WRITE_CALLS: dict[str, Callable[[SlackTools], Awaitable[str]]] = {
-    "slack_post": lambda tools: tools.slack_post(CHANNEL, "hello"),
-    "slack_react": lambda tools: tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"),
+# One call per write function and the Slack methods it calls; a write function without an entry fails
+# `test_every_write_function_has_a_watch_guard_case`.
+_WRITE_CALLS: dict[str, tuple[Callable[[SlackTools], Awaitable[str]], tuple[str, ...]]] = {
+    "slack_post": (lambda tools: tools.slack_post(CHANNEL, "hello"), ("chat.postMessage",)),
+    "slack_react": (lambda tools: tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"), ("reactions.add",)),
+    "slack_edit": (lambda tools: tools.slack_edit(f"{CHANNEL}:{ROOT_TS}", "fixed"), ("chat.update",)),
+    "slack_delete": (lambda tools: tools.slack_delete(f"{CHANNEL}:{ROOT_TS}"), ("chat.delete",)),
+}
+_WRITE_ANSWERS: dict[str, Answer] = {
+    "chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS},
+    "reactions.add": {"ok": True},
+    "chat.update": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS},
+    "chat.delete": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS},
 }
 
 
@@ -853,22 +967,20 @@ async def test_writes_refused_during_watch_turn(
     hook_source: str,
 ) -> None:
     _connect_alice(paths)
-    fake = FakeSlack(
-        {"chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS}, "reactions.add": {"ok": True}},
-    ).install(monkeypatch)
+    fake = FakeSlack(dict(_WRITE_ANSWERS)).install(monkeypatch)
     tools = _tools(paths)
     writes = [_WRITE_CALLS[name] for name in sorted(slack_toolkit._WRITE_FUNCTIONS)]
 
     with tool_runtime_context(_turn_context(paths, hook_source)):
-        refusals = [json.loads(await write(tools))["message"] for write in writes]
+        refusals = [json.loads(await write(tools))["message"] for write, _ in writes]
 
     assert refusals == ["Ask me in a new message to post to Slack"] * len(writes)
     assert fake.requests == []
 
     for context in (None, _turn_context(paths, None), _turn_context(paths, "plugin:message_received")):
         with tool_runtime_context(context):
-            assert [json.loads(await write(tools))["status"] for write in writes] == ["ok"] * len(writes)
-    assert fake.methods() == ["chat.postMessage", "reactions.add"] * 3
+            assert [json.loads(await write(tools))["status"] for write, _ in writes] == ["ok"] * len(writes)
+    assert fake.methods() == [method for _, methods in writes for method in methods] * 3
 
 
 @pytest.mark.asyncio
@@ -896,22 +1008,19 @@ async def test_unanswered_write_warns_it_may_have_been_sent_and_a_read_does_not(
     def timed_out(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout(TIMEOUT, request=request)
 
-    fake = FakeSlack(
-        {"chat.postMessage": timed_out, "reactions.add": timed_out, "conversations.history": timed_out},
-    ).install(monkeypatch)
+    writes = [_WRITE_CALLS[name] for name in sorted(_WRITE_CALLS)]
+    first_methods = [methods[0] for _, methods in writes]
+    fake = FakeSlack(dict.fromkeys([*first_methods, "conversations.history"], timed_out)).install(monkeypatch)
     tools = _tools(paths)
 
-    results = [
-        json.loads(await write(tools))["message"] for write in (_WRITE_CALLS[name] for name in sorted(_WRITE_CALLS))
-    ]
+    results = [json.loads(await write(tools))["message"] for write, _ in writes]
     read = json.loads(await tools.slack_read(CHANNEL))["message"]
 
-    assert (
-        results
-        == ["Slack did not answer; the message may have been sent, so check with slack_read before retrying"] * 2
-    )
+    assert results == [
+        "Slack did not answer; the message may have been sent, so check with slack_read before retrying",
+    ] * len(writes)
     assert read == "Slack could not be reached; try again"
-    assert fake.methods() == ["chat.postMessage", "reactions.add", "conversations.history"]
+    assert fake.methods() == [*first_methods, "conversations.history"]
 
 
 def _save_app_token(paths: RuntimePaths, **app: str) -> None:

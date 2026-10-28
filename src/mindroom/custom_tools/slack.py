@@ -69,7 +69,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _TOOL_NAME = "slack"
-_WRITE_FUNCTIONS = frozenset({"slack_post", "slack_react"})
+_WRITE_FUNCTIONS = frozenset({"slack_post", "slack_react", "slack_edit", "slack_delete"})
 _SEARCH_KINDS = ("messages", "conversations", "people")
 _MAX_LIMIT = 100
 # Slack's search pages stop at page 100.
@@ -95,7 +95,6 @@ _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connect
 # Slack may have received the write before the connection failed, so a blind retry could post twice.
 _WRITE_UNANSWERED = "Slack did not answer; the message may have been sent, so check with slack_read before retrying"
 _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
-_NOT_A_MESSAGE = "Use <conversation>:<ts> or a message link to react to a message"
 # A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
 _WATCH_SOURCE_PREFIX = "slack-watch/"
 _WATCH_TURN_WRITE_REFUSAL = "Ask me in a new message to post to Slack"
@@ -179,6 +178,15 @@ def _parse_target(target: str) -> SlackTarget:
         return parse_slack_target(target)
     except ValueError as exc:
         raise _SlackRefusalError(str(exc)) from None
+
+
+def _message_target(target: str, action: str) -> tuple[str, str]:
+    """Return the conversation and ts of the one message `target` names, refusing a conversation or a person."""
+    parsed = _parse_target(target)
+    if parsed.channel_id is None or parsed.ts is None:
+        msg = f"Use <conversation>:<ts> or a message link to {action} a message"
+        raise _SlackRefusalError(msg)
+    return parsed.channel_id, parsed.ts
 
 
 def _conversation_target(target: str) -> tuple[str, SlackTarget]:
@@ -348,6 +356,8 @@ class SlackTools(Toolkit):
             "slack_download": self.slack_download,
             "slack_post": self.slack_post,
             "slack_react": self.slack_react,
+            "slack_edit": self.slack_edit,
+            "slack_delete": self.slack_delete,
         }
         # MCP builds have no room, and a project toolkit has no person to watch for.
         if self.project_channels is None and current_room_id is not None:
@@ -693,15 +703,54 @@ class SlackTools(Toolkit):
         """
 
         async def operation(session: _Session) -> Mapping[str, object]:
-            parsed = _parse_target(target)
-            if parsed.channel_id is None or parsed.ts is None:
-                raise _SlackRefusalError(_NOT_A_MESSAGE)
-            await self._require_project_channel(session, parsed.channel_id)
+            channel_id, ts = _message_target(target, "react to")
+            await self._require_project_channel(session, channel_id)
             name = emoji.strip(":")
-            await session.call("reactions.add", channel=parsed.channel_id, timestamp=parsed.ts, name=name)
-            return {"channel_id": parsed.channel_id, "ts": parsed.ts, "emoji": name}
+            await session.call("reactions.add", channel=channel_id, timestamp=ts, name=name)
+            return {"channel_id": channel_id, "ts": ts, "emoji": name}
 
         return await self._run("slack_react", operation)
+
+    async def slack_edit(self, target: str, text: str) -> str:
+        """Replace the text of one Slack message.
+
+        A personal connection edits as the connected person, and Slack lets them edit only their own messages; a
+        project agent edits the MindRoom app's messages, in its own channels only. The edit is sent once and never
+        retried; check slack_read before editing again after an error.
+
+        Args:
+            target: The message, as `<conversation>:<ts>` or a Slack message link.
+            text: The new text, in Slack's formatting.
+
+        """
+
+        async def operation(session: _Session) -> Mapping[str, object]:
+            channel_id, ts = _message_target(target, "edit")
+            await self._require_project_channel(session, channel_id)
+            await session.call("chat.update", channel=channel_id, ts=ts, text=neutralize_broadcasts(text))
+            return {"channel_id": channel_id, "ts": ts}
+
+        return await self._run("slack_edit", operation)
+
+    async def slack_delete(self, target: str) -> str:
+        """Delete one Slack message.
+
+        A personal connection deletes as the connected person, so only messages Slack lets them delete; a project
+        agent deletes the MindRoom app's messages, in its own channels only. The delete is sent once and never retried;
+        check slack_read before deleting again after an error.
+
+        Args:
+            target: The message, as `<conversation>:<ts>` or a Slack message link.
+
+        """
+
+        async def operation(session: _Session) -> Mapping[str, object]:
+            channel_id, ts = _message_target(target, "delete")
+            await self._require_project_channel(session, channel_id)
+            await session.call("chat.delete", channel=channel_id, ts=ts)
+            return {"channel_id": channel_id, "ts": ts}
+
+        return await self._run("slack_delete", operation)
 
     async def slack_watch(
         self,
