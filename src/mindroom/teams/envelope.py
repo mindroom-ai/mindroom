@@ -375,8 +375,8 @@ class _TeamTurn:
     """The constants of one team turn, shared by its attempts.
 
     ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
-    agent turn runs on the config it was given; ``orchestrator`` supplies the runtime paths and the knowledge refresh
-    scheduler.
+    agent turn runs on the config it was given; ``spec.orchestrator`` supplies the runtime paths and the knowledge
+    refresh scheduler.
     """
 
     ctx: ResponseTurnContext
@@ -496,7 +496,6 @@ class _TeamTurn:
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=self.ctx.pipeline_timing,
         )
-        run.unseen_event_ids = prepared.unseen_event_ids
         run.run_metadata = prepared.run_metadata
         presentation = TeamStreamPresentation.new(
             members.requested_agent_names,
@@ -741,18 +740,13 @@ class _TeamTurn:
             team_name=self.configured_team_name,
         )
 
-    def initial_continuation(
-        self,
-        message: str,
-        *,
-        current_timestamp_ms: float | None,
-        current_prompt_is_structured: bool,
-    ) -> TurnContinuationRunState:
+    def initial_continuation(self) -> TurnContinuationRunState:
+        """Return the turn's first continuation state, which answers the team's message."""
         return TurnContinuationRunState.initial(
-            prompt=message,
+            prompt=self.ctx.prompt,
             model_prompt=None,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
+            current_timestamp_ms=self.ctx.current_timestamp_ms,
+            current_prompt_is_structured=self.ctx.current_prompt_is_structured,
             current_event_id=self.ctx.reply_to_event_id,
             run_id=self.ctx.run_id,
             continuation_model_prompt_tail="",
@@ -771,7 +765,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -
         msg = "team response turns require ResponseTurnContext.session_id"
         raise ValueError(msg)
     config = orchestrator.config
-    requested_agent_names = requested_team_agent_names(list(spec.agent_names))
+    requested_agent_names = requested_team_agent_names(spec.agent_names)
     config.assert_team_agents_supported(
         requested_agent_names,
         allow_direct_private_agents=allow_direct_private_team_agents(
@@ -860,11 +854,7 @@ async def team_response_stream(
         turn.ctx,
         adapter,
         sinks,
-        continuation=turn.initial_continuation(
-            ctx.prompt,
-            current_timestamp_ms=ctx.current_timestamp_ms,
-            current_prompt_is_structured=ctx.current_prompt_is_structured,
-        ),
+        continuation=turn.initial_continuation(),
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.

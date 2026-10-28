@@ -32,8 +32,6 @@ from mindroom.orchestration.runtime import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
     CancelSource,
-    cancel_failure_reason,
-    cancel_source_from_failure_reason,
     current_task_is_process_shutdown,
     log_cancelled_response,
     request_task_cancel,
@@ -91,8 +89,6 @@ __all__ = [
     "TerminalSend",
     "UnfinishedStreamedReply",
     "build_restart_interrupted_body",
-    "cancel_failure_reason",
-    "cancel_source_from_failure_reason",
     "clean_partial_reply_text",
     "current_task_is_process_shutdown",
     "format_stream_error_note",
@@ -796,14 +792,7 @@ class StreamingResponse:
             and canonical_final_body_candidate is not None
             and self._last_committed_visible_body_state != "visible_body"
         ):
-            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
-            return StreamTransportOutcome(
-                last_physical_stream_event_id=self.event_id,
-                rendered_body=committed_rendered_body,
-                visible_body_state=committed_visible_body_state,
-                canonical_final_body_candidate=canonical_final_body_candidate,
-                interactive_metadata=self._last_committed_interactive_metadata,
-            )
+            return self._committed_outcome(canonical_final_body_candidate)
         if not self.accumulated_text.strip() and not has_placeholder:
             # Nothing to send: no text arrived and no placeholder waits for an ending.
             return StreamTransportOutcome(
@@ -839,26 +828,13 @@ class StreamingResponse:
                 reason=str(exc),
                 exc_info=True,
             )
-            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
-            return StreamTransportOutcome(
-                last_physical_stream_event_id=self.event_id,
-                rendered_body=committed_rendered_body,
-                visible_body_state=committed_visible_body_state,
-                canonical_final_body_candidate=canonical_final_body_candidate,
+            return self._committed_outcome(
+                canonical_final_body_candidate,
                 failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
-                interactive_metadata=self._last_committed_interactive_metadata,
             )
         if not send_succeeded:
             logger.warning("Failed to persist terminal stream status", event_id=self.event_id, room_id=self.room_id)
-            committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
-            return StreamTransportOutcome(
-                last_physical_stream_event_id=self.event_id,
-                rendered_body=committed_rendered_body,
-                visible_body_state=committed_visible_body_state,
-                canonical_final_body_candidate=canonical_final_body_candidate,
-                failure_reason="terminal_update_failed",
-                interactive_metadata=self._last_committed_interactive_metadata,
-            )
+            return self._committed_outcome(canonical_final_body_candidate, failure_reason="terminal_update_failed")
         # What the room shows is the payload that landed, which the final text transform may have reshaped.
         shown = final_delivery.committed_state
         return StreamTransportOutcome(
@@ -875,7 +851,6 @@ class StreamingResponse:
         is_final: bool = False,
         *,
         allow_empty_progress: bool = False,
-        retry_on_failure: bool = False,
         boundary_refresh: bool = False,
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
@@ -895,7 +870,6 @@ class StreamingResponse:
             boundary_refresh=boundary_refresh,
             force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,
-            retry_on_failure=retry_on_failure and is_final,
         )
 
     async def _send_prepared_delivery(
@@ -1095,18 +1069,28 @@ class StreamingResponse:
             public_trace = tuple(committed_state.tool_trace) if self.show_tool_calls else ()
             self.visible_progress_callback(committed_state.rendered_body, public_trace)
 
-    def _committed_terminal_snapshot(
+    def _committed_outcome(
         self,
-    ) -> tuple[str | None, Literal["none", "placeholder_only", "visible_body"]]:
-        """Return the last visible body that definitely reached Matrix."""
+        canonical_final_body_candidate: str | None,
+        *,
+        failure_reason: str | None = None,
+    ) -> StreamTransportOutcome:
+        """Report what definitely reached Matrix, for a terminal update that was skipped or did not land."""
+        rendered_body: str | None = None
+        visible_body_state: Literal["none", "placeholder_only", "visible_body"] = "none"
         if self._last_committed_visible_body_state != "none":
-            return (
-                self._last_committed_rendered_body,
-                self._last_committed_visible_body_state,
-            )
-        if self.event_id is not None and self.placeholder_progress_sent:
-            return _PROGRESS_PLACEHOLDER, "placeholder_only"
-        return None, "none"
+            rendered_body = self._last_committed_rendered_body
+            visible_body_state = self._last_committed_visible_body_state
+        elif self.event_id is not None and self.placeholder_progress_sent:
+            rendered_body, visible_body_state = _PROGRESS_PLACEHOLDER, "placeholder_only"
+        return StreamTransportOutcome(
+            last_physical_stream_event_id=self.event_id,
+            rendered_body=rendered_body,
+            visible_body_state=visible_body_state,
+            canonical_final_body_candidate=canonical_final_body_candidate,
+            failure_reason=failure_reason,
+            interactive_metadata=self._last_committed_interactive_metadata,
+        )
 
     def restore_last_delivered_state(self) -> None:
         """Discard buffered state that never reached Matrix after a delivery failure."""

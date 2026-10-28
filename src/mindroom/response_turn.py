@@ -44,11 +44,11 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.request_context import bind_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, ToolExecution
 from mindroom.logging_config import get_logger
-from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation, StreamInputChunk
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
@@ -446,12 +446,12 @@ class _LiveAttempt(Protocol):
 class TurnRunState:
     """Driver-owned mutable state shared with the adapter attempt bodies.
 
-    Attempt bodies must set ``run_metadata`` and ``unseen_event_ids`` once
-    prepare finishes; interruption recording falls back to rebuilt metadata
-    while they are still unset. They set ``attempt`` once their attempt starts;
-    the driver drops it when the attempt is spent, so an interruption before the
-    next attempt starts records none of the spent attempt's partial output, whose
-    finished calls ``prior_completed_tools`` already carries.
+    Attempt bodies must set ``run_metadata`` once prepare finishes; interruption
+    recording falls back to rebuilt metadata while it is unset. They set
+    ``attempt`` once their attempt starts; the driver drops it when the attempt
+    is spent, so an interruption before the next attempt starts records none of
+    the spent attempt's partial output, whose finished calls
+    ``prior_completed_tools`` already carries.
     """
 
     # The turn's record; its run's hooks note the calls a mid-turn fold summarized into it.
@@ -459,7 +459,6 @@ class TurnRunState:
     # None until the driver loads the turn's scope, which it does before the turn's first attempt.
     scope_context: ScopeSessionContext | None = None
     run_metadata: dict[str, Any] | None = None
-    unseen_event_ids: list[str] = field(default_factory=list)
     # The calls the turn's spent attempts finished, before a continuation started another.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
     empty_response_retried: bool = False
@@ -548,27 +547,8 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
         super().__init__(f"Run {paused.run_id} is waiting for tool approval")
         self.paused = paused
 
-    def capture_collected_presentation(
-        self,
-        *,
-        response_text: str,
-        tool_trace: Sequence[ToolTraceEntry],
-        state: dict[str, object] | None = None,
-    ) -> None:
-        """Attach an ordered in-memory presentation from a collector; ``state`` is a team document's."""
-        self.capture_presentation(
-            StreamingPresentation(
-                response_text=response_text,
-                tool_trace=tuple(deepcopy(tool_trace)),
-                state=state,
-            ),
-        )
 
-
-type _CollectedChunk = str | TextDelta | StructuredStreamChunk | ToolStarted | ToolCompleted | RunFinished
-
-
-def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: _CollectedChunk) -> None:
+def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: StreamInputChunk) -> None:
     """Fold one stream chunk into a collected presentation; a team's document arrives whole in each structured chunk."""
     if isinstance(chunk, str):
         presentation.show_text(chunk)
@@ -586,7 +566,7 @@ def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: _Co
 
 
 async def collect_streamed_response_content(
-    response_stream: AsyncIterator[_CollectedChunk],
+    response_stream: AsyncIterator[StreamInputChunk],
     *,
     presentation: CollectedStreamPresentation,
     on_update: Callable[[], Awaitable[None]] | None = None,
@@ -603,10 +583,13 @@ async def collect_streamed_response_content(
                 if on_update is not None:
                     await on_update()
     except ResponsePausedForApproval as error:
-        error.capture_collected_presentation(
-            response_text=presentation.final_text().rstrip(),
-            tool_trace=presentation.tool_trace,
-            state=presentation.document_state,
+        # The collected presentation, a team's document state included, is what the approval card shows.
+        error.capture_presentation(
+            StreamingPresentation(
+                response_text=presentation.final_text().rstrip(),
+                tool_trace=tuple(deepcopy(presentation.tool_trace)),
+                state=presentation.document_state,
+            ),
         )
         raise
 
@@ -821,9 +804,10 @@ def _interrupted_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -> di
     """Keep the best Matrix metadata available when an attempt is interrupted, rebuilt when prepare had not finished."""
     if run.run_metadata is not None:
         return run.run_metadata
+    # Prepare had not finished, so the turn consumed no unseen events yet.
     return build_matrix_run_metadata(
         ctx.reply_to_event_id,
-        run.unseen_event_ids,
+        [],
         room_id=ctx.room_id,
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,

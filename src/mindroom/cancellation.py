@@ -56,14 +56,10 @@ def request_task_cancel(
 
     ``process_shutdown`` tags the task as handed to a successor runtime until it finishes.
     """
-    cancel_msg = cancel_message_for_source(cancel_source)
     if process_shutdown and task not in _PROCESS_SHUTDOWN_TASKS:
         _PROCESS_SHUTDOWN_TASKS.add(task)
         task.add_done_callback(_PROCESS_SHUTDOWN_TASKS.discard)
-    if cancel_msg is None:
-        task.cancel()
-    else:
-        task.cancel(msg=cancel_msg)
+    task.cancel(msg=cancel_message_for_source(cancel_source))
 
 
 def current_task_is_process_shutdown() -> bool:

@@ -170,26 +170,18 @@ def _model_prompt_tail_after_raw_prompt(*, raw_prompt: str, model_prompt: str | 
     return model_prompt_tail
 
 
-def _initial_agent_continuation(
-    *,
-    prompt: str,
-    model_prompt: str | None,
-    current_timestamp_ms: float | None,
-    current_prompt_is_structured: bool,
-    current_event_id: str | None,
-    run_id: str | None,
-) -> TurnContinuationRunState:
+def _initial_agent_continuation(ctx: ResponseTurnContext) -> TurnContinuationRunState:
     """Build the initial continuation state for one agent response turn."""
     return TurnContinuationRunState.initial(
-        prompt=prompt,
-        model_prompt=model_prompt,
-        current_timestamp_ms=current_timestamp_ms,
-        current_prompt_is_structured=current_prompt_is_structured,
-        current_event_id=current_event_id,
-        run_id=run_id,
+        prompt=ctx.prompt,
+        model_prompt=ctx.model_prompt,
+        current_timestamp_ms=ctx.current_timestamp_ms,
+        current_prompt_is_structured=ctx.current_prompt_is_structured,
+        current_event_id=ctx.reply_to_event_id,
+        run_id=ctx.run_id,
         continuation_model_prompt_tail=_model_prompt_tail_after_raw_prompt(
-            raw_prompt=prompt,
-            model_prompt=model_prompt,
+            raw_prompt=ctx.prompt,
+            model_prompt=ctx.model_prompt,
         ),
     )
 
@@ -460,7 +452,6 @@ def _begin_attempt(
 ) -> tuple[RunStorage, _AgentAttempt]:
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
-    run.unseen_event_ids = prepared_run.unseen_event_ids
     run.run_metadata = run_context.metadata
     storage = bind_turn_session(run)
     attempt = run.attempt = _AgentAttempt(
@@ -675,22 +666,20 @@ def _memory_conversation(
 
 async def _prepare_turn_memory(
     ctx: ResponseTurnContext,
-    prompt: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
     conversation: ConversationRef | None,
 ) -> MemoryPromptParts:
     """Recall memories for a configured agent turn; an authored persona recalls none."""
     if ctx.persona is not None:
         return MemoryPromptParts()
     return await build_memory_prompt_parts(
-        prompt,
+        ctx.prompt,
         ctx.entity_label,
         runtime_paths.storage_root,
         config,
         runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=ctx.execution_identity,
         conversation=conversation,
     )
 
@@ -701,7 +690,6 @@ async def _system_messages_after_compaction(
     ctx: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None,
     conversation: ConversationRef | None,
 ) -> tuple[Message, ...]:
@@ -718,7 +706,7 @@ async def _system_messages_after_compaction(
         runtime_paths.storage_root,
         config,
         runtime_paths,
-        execution_identity,
+        ctx.execution_identity,
         conversation=compacted,
     )
     return _turn_system_messages(build, ctx, fresh)
@@ -824,14 +812,7 @@ async def _prepare_agent_and_prompt(
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await _prepare_turn_memory(
-            ctx,
-            prompt,
-            config,
-            runtime_paths,
-            execution_identity,
-            memory_conversation,
-        )
+        prompt_parts = await _prepare_turn_memory(ctx, config, runtime_paths, memory_conversation)
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
         runtime_model, build = await build_agent_off_loop(_resolve_model_and_build_agent, agent_name=agent_name)
@@ -886,7 +867,6 @@ async def _prepare_agent_and_prompt(
         ctx,
         config,
         runtime_paths,
-        execution_identity,
         scope_context,
         memory_conversation,
     )
@@ -1174,11 +1154,11 @@ async def _stream_agent_attempt_chunks(
     attempt: _AgentAttempt,
     storage: RunStorage,
     state: _StreamingAttemptState,
-    show_tool_calls: bool,
     on_attempt_start: Callable[[str, str], None] | None,
-    pipeline_timing: DispatchPipelineTiming | None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Start and consume one streaming agent attempt."""
+    show_tool_calls = run_context.turn.show_tool_calls
+    pipeline_timing = run_context.turn.pipeline_timing
     try:
         if on_attempt_start is not None:
             on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
@@ -1227,7 +1207,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     session_id = _turn_session_id(ctx)
     media_inputs = ctx.media or MediaInputs()
     show_tool_calls = ctx.show_tool_calls
-    pipeline_timing = ctx.pipeline_timing
     run_metadata_collector = sinks.run_metadata_collector
     try:
         _assert_agent_target(agent_name, config)
@@ -1278,9 +1257,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             attempt=attempt,
             storage=storage,
             state=state,
-            show_tool_calls=show_tool_calls,
             on_attempt_start=sinks.on_attempt_start,
-            pipeline_timing=pipeline_timing,
         )
         async with closing_async_stream(attempt_stream):
             async for stream_chunk in attempt_stream:
@@ -1393,14 +1370,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         adapter,
         sinks,
         resume=resume,
-        continuation=_initial_agent_continuation(
-            prompt=ctx.prompt,
-            model_prompt=ctx.model_prompt,
-            current_timestamp_ms=ctx.current_timestamp_ms,
-            current_prompt_is_structured=ctx.current_prompt_is_structured,
-            current_event_id=ctx.reply_to_event_id,
-            run_id=ctx.run_id,
-        ),
+        continuation=_initial_agent_continuation(ctx),
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.

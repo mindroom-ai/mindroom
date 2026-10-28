@@ -18,7 +18,7 @@ import nio
 
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
-from mindroom.cancellation import classify_cancel_source
+from mindroom.cancellation import cancel_failure_reason, classify_cancel_source
 from mindroom.constants import ACTING_REQUESTER_KEY, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
@@ -127,7 +127,6 @@ from mindroom.streaming import (
     ProgressPermission,
     ProgressState,
     StreamingResponse,
-    cancel_failure_reason,
     current_task_is_process_shutdown,
     interactive_response_for_visible_body,
     send_streaming_response,
