@@ -551,7 +551,6 @@ visibility = [
     "mindroom.matrix.relation_lookup",
     "mindroom.matrix.transport_progress",
     "mindroom.event_journal.matrix_delivery",
-    "mindroom.orchestrator",
     "mindroom.pending_event_worker",
     "mindroom.reaction_dispatch",
     "mindroom.reply_scope",
