@@ -1,4 +1,8 @@
-"""The conversation databases Agno 3.0.9 wrote convert to storage v2 and read and write with nothing lost or changed."""
+"""The conversation databases Agno 3.0.9 wrote convert to storage v2 and read and write with nothing lost or changed.
+
+A converted run is compared with the run its Agno row decodes to, as typed records, so these tests pin what the rows
+hold and not how MindRoom encodes a run it writes.
+"""
 
 from __future__ import annotations
 
@@ -6,19 +10,22 @@ import copy
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom.history.storage import new_scope_session
+from mindroom.llm.runs import TeamRunRecord
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, run_from_row
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import persist_runs
-from tests.llm.agno_dict_helpers import expected_run_dict
+from tests.llm.agno_dict_helpers import stored_run_record
 from tests.session_storage.goldens import GoldenStore, agno_loaded_session, golden_sessions, golden_stores, stored_rows
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.history.types import ScopeSummary
@@ -45,17 +52,20 @@ _WITHOUT_METADATA = [
 ]
 
 
-def _as_agno_reread(run: dict[str, Any]) -> dict[str, Any]:
-    """Return what Agno's reader writes back for a run dict: no empty tool list and no audio formats."""
-    reread = {key: value for key, value in run.items() if not (key == "tools" and value == [])}
-    reread["messages"] = [
-        {**message, "audio": [{k: v for k, v in audio.items() if k != "format"} for audio in message["audio"]]}
-        if "audio" in message
-        else message
-        for message in run["messages"]
-    ]
-    if "member_responses" in run:
-        reread["member_responses"] = [_as_agno_reread(member) for member in run["member_responses"]]
+def _as_agno_reread[RunT: AnyRunRecord](run: RunT) -> RunT:
+    """Return a run as Agno's reader loaded it: an empty tool list as none, and no audio formats."""
+    reread = replace(
+        run,
+        tools=run.tools or None,
+        messages=[
+            replace(message, audio=[replace(audio, format=None) for audio in message.audio])
+            if message.audio
+            else message
+            for message in run.messages
+        ],
+    )
+    if isinstance(reread, TeamRunRecord):
+        reread.member_responses = [_as_agno_reread(member) for member in reread.member_responses]
     return reread
 
 
@@ -88,10 +98,10 @@ def _folded_message_ids(db_file: Path) -> dict[str, set[str]]:
     return folded
 
 
-def _replay_view(run_data: dict[str, Any], folded: set[str]) -> dict[str, Any]:
-    """Return what reading the run Agno stored as ``run_data`` gives: its dict without the messages its folds took."""
-    expected = expected_run_dict(run_data)
-    return {**expected, "messages": [message for message in expected["messages"] if message["id"] not in folded]}
+def _replay_view(run_data: dict[str, Any], kept: Callable[[str], bool]) -> AnyRunRecord:
+    """Return the run Agno stored as ``run_data`` with only the messages whose ids ``kept`` accepts."""
+    run = stored_run_record(run_data)
+    return replace(run, messages=[message for message in run.messages if kept(message.id)])
 
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
@@ -115,12 +125,12 @@ def test_golden_sessions_load_as_agno_loaded_them(store: GoldenStore, session_id
     )
     assert _summary_dict(session.summary) == agno["summary"]
     assert [run.run_id for run in session.runs] == [run["run_id"] for run in agno["runs"]]
-    assert [_as_agno_reread(run.to_dict()) for run in session.runs] == [expected_run_dict(run) for run in agno["runs"]]
+    assert [_as_agno_reread(run) for run in session.runs] == [stored_run_record(run) for run in agno["runs"]]
 
 
 @pytest.mark.parametrize(("store", "session_id"), _SESSIONS, ids=_SESSION_IDS)
-def test_golden_runs_load_with_every_stored_key(store: GoldenStore, session_id: str, tmp_path: Path) -> None:
-    """A loaded run writes back exactly its Agno row, keys in stored order, minus only messages a fold holds."""
+def test_golden_runs_load_every_field_their_rows_hold(store: GoldenStore, session_id: str, tmp_path: Path) -> None:
+    """A loaded run is the run its Agno row decodes to, minus only the messages a fold holds."""
     rows = {
         row["run_id"]: row["run_data"]
         for row in stored_rows(store.restore(tmp_path / "agno"), store.names.runs, session_id)
@@ -132,13 +142,7 @@ def test_golden_runs_load_with_every_stored_key(store: GoldenStore, session_id: 
     }
 
     for run in session.runs:
-        expected = expected_run_dict(rows[run.run_id])
-        expected["messages"] = [
-            message for message in expected["messages"] if message["id"] in loaded_message_ids[run.run_id]
-        ]
-        written = run.to_dict()
-        assert written == expected, run.run_id
-        assert list(written) == list(expected), run.run_id
+        assert run == _replay_view(rows[run.run_id], loaded_message_ids[run.run_id].__contains__), run.run_id
 
 
 @pytest.mark.parametrize("store", golden_stores(), ids=lambda store: store.label)
@@ -151,12 +155,13 @@ def test_golden_run_logs_list_and_get_as_stored(store: GoldenStore, tmp_path: Pa
     for session_id in store.sessions:
         rows = stored_rows(agno, store.names.runs, session_id)
         assert rows
-        expected = [_replay_view(row["run_data"], folded.get(row["run_id"], set())) for row in rows]
-        assert [run.to_dict() for run in conversation.list_runs(session_id)] == expected
+        expected = [
+            _replay_view(row["run_data"], lambda message_id, row=row: message_id not in folded.get(row["run_id"], ()))
+            for row in rows
+        ]
+        assert conversation.list_runs(session_id) == expected
         for row, stored in zip(rows, expected, strict=True):
-            run = conversation.get_run(row["run_id"])
-            assert run is not None
-            assert run.to_dict() == stored
+            assert conversation.get_run(row["run_id"]) == stored
     assert conversation.get_run("no-such-run") is None
 
 
@@ -263,9 +268,7 @@ def test_replaying_golden_runs_with_usage_reproduces_rows_ledger_and_totals(
         }
         for row in rows
     ]
-    assert [run.to_dict() for run in fresh.list_runs(session_id)] == [
-        expected_run_dict(row["run_data"]) for row in rows
-    ]
+    assert fresh.list_runs(session_id) == _replayed(rows)
     assert sorted(
         (row["run_id"], _without_update_time(row["usage_data"]))
         for row in stored_rows(fresh.path, store.names.usage, session_id)
@@ -341,9 +344,8 @@ def test_a_resumed_team_run_keeps_its_empty_member_and_requirement_lists(tmp_pat
 
     team_run = conversation.get_run("team-approved")
 
-    assert team_run is not None
-    stored = team_run.to_dict()
-    assert (stored["member_responses"], stored["requirements"]) == ([], [])
+    assert isinstance(team_run, TeamRunRecord)
+    assert (team_run.member_responses, team_run.requirements) == ([], [])
 
 
 def _layout(db_file: Path, tables: tuple[str, ...]) -> dict[str, Any]:

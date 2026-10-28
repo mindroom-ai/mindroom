@@ -119,6 +119,19 @@ def test_the_scope_key_names_the_runs_agent_or_team(run: RunRecord | TeamRunReco
     assert run_columns(run.to_dict(), run_kind(run)).scope_key == scope_key
 
 
+@pytest.mark.parametrize("status", ["PENDING", "REGENERATED"])
+def test_a_row_stored_with_an_agno_only_status_decodes_as_a_run_that_did_not_finish(status: str) -> None:
+    """A run row whose status no MindRoom release writes still decodes, as an error run, which history skips."""
+    run = RunRecord(run_id="r", session_id="s", agent_id="code", messages=[Message(role="user", content="hi")])
+    data = run.to_dict()
+    columns = replace(run_columns(data, "agent"), status=status)
+
+    decoded = run_record("r", "s", None, columns, data["messages"], [])
+
+    assert decoded.status is RunStatus.error
+    assert decoded.messages == run.messages
+
+
 def test_the_rows_ids_and_status_win_over_the_record_json() -> None:
     """A record JSON that holds ids or a status, which ``run_columns`` never writes, cannot override the row's."""
     run = RunRecord(
