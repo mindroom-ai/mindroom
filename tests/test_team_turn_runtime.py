@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall, MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
@@ -258,7 +259,9 @@ async def test_a_collected_team_reply_is_the_streamed_document(
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Member answer.")],
     )
 
-    text = await team.respond(show_tool_calls=show_tool_calls)
+    tool_trace: list[ToolTraceEntry] = []
+
+    text = await team.respond(show_tool_calls=show_tool_calls, tool_trace=tool_trace)
 
     assert ProbeToolkit.calls == ["a"]
     canonical = f"{HEADER}**Writer**: Member answer.\n\n\n**Team Consensus**:\n\nConsensus answer."
@@ -267,6 +270,7 @@ async def test_a_collected_team_reply_is_the_streamed_document(
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\nConsensus answer."
     )
     assert text == (shown if show_tool_calls else canonical)
+    assert [entry.tool_name for entry in tool_trace] == ["touch", "delegate_task_to_member"]
     assert team.recorder.assistant_text == canonical
 
 
@@ -2517,6 +2521,39 @@ async def test_a_stopped_team_turn_records_the_text_its_members_streamed(
         writer=[calls(tool_call("touch", "call-touch", label="draft", wait=True), content="Drafting.")],
     )
     task = asyncio.create_task(team.respond(show_tool_calls=False))
+    await asyncio.wait_for(ProbeToolkit.waiting.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record, members = team.stored_runs()
+    assert [run.status for run in (record, *members)] == [RunStatus.completed, RunStatus.error, RunStatus.cancelled]
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
+    assert team.recorder.outcome == "interrupted"
+    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_stopped_team_turn_records_its_member_runs_in_configured_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A Stop records the document its run's events built, each member in its configured slot, on either path.
+
+    The writer, stopped while its call ran, shows what it wrote before; the checker failed before any text and shows
+    its error.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-check", "checker", "Check"), delegate("call-write", "writer", "Write")],
+        checker=[[Await(_checker_overloaded)]],
+        writer=[calls(tool_call("touch", "call-touch", label="draft", wait=True), content="Drafting.")],
+    )
+    task = asyncio.create_task(team.reply(stream=stream, show_tool_calls=False))
     await asyncio.wait_for(ProbeToolkit.waiting.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

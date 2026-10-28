@@ -678,6 +678,24 @@ def test_ai_run_metadata_splits_uncached_input_from_streamed_counters() -> None:
     assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 266
 
 
+def test_ai_run_metadata_counts_a_configured_vertex_claude_models_cache_writes_as_new_input() -> None:
+    """A model configured as Claude on Vertex AI counts its cache tokens outside its input, whatever its ID says."""
+    metadata = build_ai_run_metadata_content(
+        prices={},
+        config=_metadata_config("vertexai_claude", "custom-sonnet"),
+        model_name="default",
+        run_id="run-1",
+        session_id="session-1",
+        status=RunStatus.completed,
+        model="custom-sonnet",
+        model_provider="VertexAI",
+        tool_count=0,
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=8, cache_read_tokens=100, cache_write_tokens=20)),
+    )
+
+    assert metadata[AI_RUN_METADATA_KEY]["usage"]["uncached_input_tokens"] == 28
+
+
 def test_append_knowledge_availability_notice_rendering() -> None:
     """Knowledge availability notices should render as transient message enrichment."""
     rendered_context = render_enrichment_block(

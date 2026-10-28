@@ -797,6 +797,32 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
     ]
 
 
+@pytest.mark.parametrize(("allow_no_report_response", "ending"), [(True, ["notice:"]), (False, [])])
+def test_a_quiet_turn_without_an_answer_ends_with_an_empty_final_text(
+    allow_no_report_response: bool,
+    ending: list[str],
+) -> None:
+    """A quiet turn whose shown output is no answer ends with an empty final text, which a team's chunks give way to."""
+    log = _AdapterLog()
+
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield "tool document"
+        yield AttemptResolved(CompletedAttempt(completed_tools=(_trace("touch"),)))
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(allow_no_report_response=allow_no_report_response),
+                _streaming_adapter(log, _attempt),
+                TurnSinks(),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == ["tool document", *ending]
+
+
 def test_completion_skips_collector_without_metadata_content() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()
@@ -929,6 +955,36 @@ def test_external_cancel_before_prepare_builds_fallback_metadata(
     assert run_metadata["room_id"] == "!room"
     assert run_metadata["correlation_id"] == "corr-1"
     assert run_metadata["reply_to_event_id"] == "$reply"
+
+
+def test_a_cancel_after_the_turn_completed_keeps_its_completed_record(
+    persisted: list[tuple[str, InterruptedReplaySnapshot]],
+) -> None:
+    """A stop that lands while a completed turn finishes its attempt leaves the turn's completed record as it is."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
+
+    async def _cancel_while_finalizing(_scope: ScopeSessionContext | None) -> None:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            _collect(
+                stream_response_turn(
+                    _ctx(),
+                    replace(_streaming_adapter(log, _attempt), finalize_attempt=_cancel_while_finalizing),
+                    TurnSinks(turn_recorder=recorder),
+                    continuation=_continuation(),
+                ),
+            ),
+        )
+
+    assert recorder.outcome == "completed"
+    assert recorder.interrupted_calls == []
+    assert persisted == []
 
 
 def test_external_cancel_skips_persist_after_handled_attempt_persisted(

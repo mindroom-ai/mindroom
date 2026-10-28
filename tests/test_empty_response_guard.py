@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -15,7 +15,7 @@ from mindroom.ai_runtime import (
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -231,6 +231,26 @@ async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
     assert len(model.requests) == 2
     # The retry's empty run is discarded too; the notice is delivery-only.
     assert stored_runs(config, runtime_paths_for(config), "session-1") == []
+
+
+@pytest.mark.asyncio
+async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_streamed_one_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking reply whose retry is empty too publishes its run as failed, as the streamed reply does."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer(""), answer(""), answer("")])})
+    blocking: dict[str, Any] = {}
+    streamed: dict[str, Any] = {}
+
+    result = await _respond(config, sinks=TurnSinks(run_metadata_collector=blocking))
+    chunks = await _stream(config, sinks=TurnSinks(run_metadata_collector=streamed))
+
+    assert result == EMPTY_RESPONSE_NOTICE
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
+    assert blocking[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert streamed[AI_RUN_METADATA_KEY]["status"] == "error"
 
 
 @pytest.mark.asyncio

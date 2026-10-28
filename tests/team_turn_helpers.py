@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -182,9 +183,18 @@ def scripted_team_stream(*chunks: str, completes: bool = False) -> MagicMock:
     return MagicMock(side_effect=stream)
 
 
-async def collect_team_reply(spec: TeamTurnSpec, ctx: ResponseTurnContext, *, sinks: TurnSinks) -> str:
-    """Collect one team turn's stream into the text it delivers whole, as the response runner collects it."""
-    body, _tool_trace = await collect_streamed_response_content(
+async def collect_team_reply(
+    spec: TeamTurnSpec,
+    ctx: ResponseTurnContext,
+    *,
+    sinks: TurnSinks,
+    tool_trace: list[ToolTraceEntry] | None = None,
+) -> str:
+    """Collect one team turn's stream into the text it delivers whole, as the response runner collects it.
+
+    ``tool_trace`` receives the collected tool trace, as the runner's does.
+    """
+    body, collected_trace = await collect_streamed_response_content(
         team_response_stream(spec, ctx, sinks=sinks),
         presentation=CollectedStreamPresentation(
             show_tool_calls=ctx.show_tool_calls,
@@ -192,6 +202,8 @@ async def collect_team_reply(spec: TeamTurnSpec, ctx: ResponseTurnContext, *, si
             replaces_text=ReplacementStreamingResponse.replaces_text,
         ),
     )
+    if tool_trace is not None:
+        tool_trace.extend(collected_trace)
     return body
 
 
@@ -315,12 +327,16 @@ class TeamTurn:
         *,
         message: str = "Hello",
         ctx: ResponseTurnContext | None = None,
+        tool_trace: list[ToolTraceEntry] | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> str:
-        """Run one team reply collected into its text, as a reply delivered without streaming is."""
+        """Run one team reply collected into its text, as a reply delivered without streaming is.
+
+        ``tool_trace`` receives the reply's collected tool trace.
+        """
         spec, turn_ctx, sinks = self.turn_inputs(message, ctx, kwargs)
         with tool_runtime_context(self.runtime):
-            return await collect_team_reply(spec, turn_ctx, sinks=sinks)
+            return await collect_team_reply(spec, turn_ctx, sinks=sinks, tool_trace=tool_trace)
 
     async def reply(self, *, stream: bool, **kwargs: Any) -> str:  # noqa: ANN401
         """Run one reply on either path and return the text it ended with: the last streamed chunk, or the reply."""
