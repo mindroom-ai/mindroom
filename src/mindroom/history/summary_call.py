@@ -83,13 +83,12 @@ def is_summary_timeout(error: BaseException) -> bool:
 
 
 def _is_size_error(error: Exception) -> bool:
-    """Return whether a rate limit says the input alone was too large, or a final request timed out.
+    """Return whether a rate limit says the input alone was too large.
 
     A request above the account's tokens-per-minute limit fails as a rate limit worded "Request too large"; waiting
     never lets it through, but a smaller input does.
     """
-    oversized = isinstance(error, RateLimited) and is_context_window_error(str(error), code=error.provider_code)
-    return oversized or (is_summary_timeout(error) and not _is_transient(error))
+    return isinstance(error, RateLimited) and is_context_window_error(str(error), code=error.provider_code)
 
 
 @dataclass(frozen=True)
