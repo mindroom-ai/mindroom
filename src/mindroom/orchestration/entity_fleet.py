@@ -116,8 +116,6 @@ class EntityFleet:
     def __init__(self, hooks: EntityFleetHooks) -> None:
         self._hooks = hooks
         self._slots: dict[str, _EntitySlot] = {}
-        # Removed bots whose stop still owns a reply; process shutdown finishes them.
-        self._deferred_removals: list[_Bot] = []
         self.bots: Mapping[str, _Bot] = _BotsView(self._slots)
 
     @property
@@ -311,18 +309,7 @@ class EntityFleet:
         )
         left = _succeeded(prepared, leave_results, failures)
         stop_results = await _phase(cancellations, *(slot.bot.stop(shutdown_intent=intent) for slot in left.values()))
-        stopped: dict[str, _EntitySlot] = {}
-        for (name, slot), result in zip(left.items(), stop_results, strict=True):
-            if isinstance(result, ResponseShutdownTimeoutError):
-                # A reply outlived its bounded finalization: process shutdown finishes
-                # this stop, so the removal, and every later reload, goes on without it.
-                logger.warning("removed_entity_stop_deferred_until_shutdown", entity=name)
-                del self._slots[name]
-                self._deferred_removals.append(slot.bot)
-            elif isinstance(result, BaseException):
-                failures.append(result)
-            else:
-                stopped[name] = slot
+        stopped = _succeeded(left, stop_results, failures)
         for name in stopped:
             del self._slots[name]
         if stopped:
@@ -370,14 +357,13 @@ class EntityFleet:
         )
         if cancellation is not None:
             cancellations.append(cancellation)
-        owners = [*bots, *self._deferred_removals]
-        deferred_bots = [bot for bot in owners if bot.deferred_stop_required is True]
-        pending_owner_count = sum(bot.pending_response_owner_count for bot in owners)
+        deferred_bots = [bot for bot in bots if bot.deferred_stop_required is True]
+        pending_owner_count = sum(bot.pending_response_owner_count for bot in bots)
         if pending_owner_count > 0:
             logger.warning(
                 "orchestrator_response_shutdown_owners_pending",
                 live_response_owner_count=pending_owner_count,
-                pending_response_phase_counts=_response_phase_counts(owners),
+                pending_response_phase_counts=_response_phase_counts(bots),
             )
         deferred_results: list[object] = []
         if deferred_bots:
@@ -409,13 +395,13 @@ class EntityFleet:
             if isinstance(result, BaseException)
             and not (id(bot) in finished_deferred and isinstance(result, ResponseShutdownTimeoutError))
         ]
-        pending_owner_count = sum(bot.pending_response_owner_count for bot in owners)
-        callback_cleanup_pending = any(bot.deferred_stop_required is True for bot in owners)
+        pending_owner_count = sum(bot.pending_response_owner_count for bot in bots)
+        callback_cleanup_pending = any(bot.deferred_stop_required is True for bot in bots)
         if pending_owner_count > 0 or callback_cleanup_pending:
             logger.warning(
                 "orchestrator_shared_journal_close_deferred",
                 live_response_owner_count=pending_owner_count,
-                pending_response_phase_counts=_response_phase_counts(owners),
+                pending_response_phase_counts=_response_phase_counts(bots),
             )
         return _FleetShutdown(
             failures=[

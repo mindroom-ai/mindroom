@@ -2510,16 +2510,15 @@ async def test_fleet_restart_stop_cleans_up_before_reporting_source_quiesce_fail
     [
         (ResponseShutdownTimeoutError("reply outlived the drain"), False, True),
         (RuntimeError("journal store close failed"), False, False),
-        (ResponseShutdownTimeoutError("reply outlived the drain"), True, True),
-        (RuntimeError("journal store close failed"), True, False),
+        (ResponseShutdownTimeoutError("reply outlived the drain"), True, False),
     ],
 )
-async def test_fleet_tolerates_only_reply_drain_timeouts(
+async def test_fleet_tolerates_only_restart_drain_timeouts(
     failure: Exception,
     removed: bool,
     released: bool,
 ) -> None:
-    """Only a reply that outlived its drain releases the slot; any other stop failure keeps the bot and fails."""
+    """Only a restarting bot's reply drain timeout releases its slot; a removed bot stays until shutdown finishes it."""
     bot = _fleet_bot("agent1")
     bot.stop = AsyncMock(side_effect=failure)
     fleet = _fleet_with_bots({"agent1": bot})

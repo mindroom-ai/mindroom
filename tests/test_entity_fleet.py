@@ -359,41 +359,19 @@ async def test_cancelling_a_start_stuck_in_login_ends_it_without_another_attempt
 
 
 @pytest.mark.asyncio
-async def test_removal_hands_a_stop_that_still_owns_a_reply_to_process_shutdown(fake_sync: list[str]) -> None:
-    """A removed bot whose reply outlived its finalization never fails the reload; process shutdown finishes it."""
+async def test_removal_ends_replies_only_for_entities_whose_bot_stopped(fake_sync: list[str]) -> None:
+    """A removal whose stop failed keeps its slot, and its replies stay open for the bot that still owns them."""
     del fake_sync
     harness = _Harness()
-    harness.add(
-        "stuck",
-        stop_error=ResponseShutdownTimeoutError("reply still running"),
-        deferred_stop_required=True,
-    )
+    harness.add("stuck", stop_error=ResponseShutdownTimeoutError("reply still running"))
     harness.add("done")
     await harness.fleet.start({"stuck", "done"})
 
-    assert await harness.fleet.remove({"stuck", "done"}) == set()
+    with pytest.raises(ResponseShutdownTimeoutError):
+        await harness.fleet.remove({"stuck", "done"})
 
-    # Only the stopped bot's replies end; the stuck bot still owns its reply.
     assert "end_replies:done" in harness.order
-    assert set(harness.fleet.bots) == set()
-    shutdown = await harness.fleet.stop_all()
-    assert "finish_deferred:stuck" in harness.order
-    assert shutdown.failures == []
-    assert shutdown.owns_resources is False
-
-
-@pytest.mark.asyncio
-async def test_removal_keeps_the_slot_of_a_bot_whose_stop_failed(fake_sync: list[str]) -> None:
-    """Any other stop failure keeps the bot in the fleet and fails the reload before publication."""
-    del fake_sync
-    harness = _Harness()
-    harness.add("broken", stop_error=RuntimeError("stop failed"))
-    await harness.fleet.start({"broken"})
-
-    with pytest.raises(RuntimeError, match="stop failed"):
-        await harness.fleet.remove({"broken"})
-
-    assert set(harness.fleet.bots) == {"broken"}
+    assert set(harness.fleet.bots) == {"stuck"}
 
 
 @pytest.mark.asyncio
