@@ -338,10 +338,12 @@ def test_redact_sensitive_data_redacts_secret_before_truncated_bound() -> None:
 
 
 def test_redact_sensitive_data_tolerates_malformed_ipv6_url() -> None:
-    """A URL-like token with an unbalanced IPv6 bracket must not crash redaction (ISSUE-230), and goes whole."""
+    """A URL-like token with an unbalanced IPv6 bracket must not crash redaction (ISSUE-230)."""
     redacted = redact_sensitive_data({"message": 'see <a href="http://[">x</a> for details'})
 
-    assert redacted == {"message": 'see <a href="***">x</a> for details'}
+    message = redacted["message"]
+    assert isinstance(message, str)
+    assert "http://[" in message
 
 
 def test_redact_sensitive_text_fails_closed_when_internal_redaction_raises(
@@ -1549,6 +1551,7 @@ def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
         ("http://[::1]:9000/bucket/cat.png?X-Amz-Signature=abc", "http://[::1]:9000/bucket/cat.png"),
         ("https://media.example/a;session=abc/cat.png;v=1", "https://media.example/a"),
         ("https://user:hunter2\uff20example.com/repo.git", "***"),
+        ("https://exa\uff1aple.com/repo.git", "***"),
         ("relative/path?token=abc", "relative/path?token=abc"),
     ],
     ids=[
@@ -1564,6 +1567,7 @@ def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
         "ipv6",
         "path-parameters",
         "unparseable",
+        "unparseable-without-userinfo",
         "no-scheme",
     ],
 )
@@ -1573,6 +1577,37 @@ def test_a_redacted_url_keeps_its_scheme_host_port_and_path(url: str, redacted: 
     A value without a scheme or host is kept.
     """
     assert redact_url_credentials(url) == redacted
+
+
+# Text the parser rejects as a URL that holds no userinfo: a sentence running on from a host without a path, and an at
+# sign after the host.
+_REJECTED_WITHOUT_USERINFO = {
+    "chinese-comma": "请看https://github.com，里面有详细说明。你觉得怎么样？",  # noqa: RUF001
+    "chinese-colon": "我在https://example.com上找到了答案：用这个方法就行。",  # noqa: RUF001
+    "japanese-colon": "公式サイトhttps://example.jpを参照してください。質問：",  # noqa: RUF001
+    "at-sign-in-path": "我看https://example.com：见/docs@v2说明",  # noqa: RUF001
+    "at-sign-in-query": "我看https://example.com：见?ref=a@b说明",  # noqa: RUF001
+    "at-sign-in-fragment": "我看https://example.com：见#a@b说明",  # noqa: RUF001
+}
+
+
+@pytest.mark.parametrize("text", list(_REJECTED_WITHOUT_USERINFO.values()), ids=list(_REJECTED_WITHOUT_USERINFO))
+def test_text_the_parser_rejects_as_a_url_stays_unless_it_could_hide_userinfo(text: str) -> None:
+    """A URL in running text reaches the next ASCII space, so the sentence after a bare host stays as it was."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "redacted"),
+    [
+        ("fatal: https://user:hunter2\uff20example.com/repo.git failed", "fatal: *** failed"),
+        ("connect postgresql://user:pw@[::1/db now", "connect *** now"),
+    ],
+    ids=["fullwidth-at", "unbalanced-ipv6-userinfo"],
+)
+def test_a_url_the_parser_rejects_goes_whole_when_it_could_hide_userinfo(text: str, redacted: str) -> None:
+    """An at sign before the host, once NFKC-normalised, may end a password, so the whole URL goes."""
+    assert redact_sensitive_text(text) == redacted
 
 
 def test_the_log_redactor_hides_a_url_the_parser_rejects_whole() -> None:

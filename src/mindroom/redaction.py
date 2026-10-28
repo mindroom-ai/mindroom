@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
@@ -509,14 +510,26 @@ _UNPARSEABLE_URL = "***"
 def _parsed_url(value: str) -> ParseResult | None:
     """Return ``value`` parsed as a URL, or None when ``urlparse`` rejects it.
 
-    Every redactor replaces a rejected URL wholesale (``_UNPARSEABLE_URL``) rather than returning it unchanged:
-    unparseable is not the same as credential-free, because what defeats the parse can be the userinfo separator
-    itself, such as a fullwidth at sign (U+FF20), which NFKC-normalises to ``@``.
+    Unparseable is not the same as credential-free, because what defeats the parse can be the userinfo separator
+    itself, such as a fullwidth at sign (U+FF20), which NFKC-normalises to ``@``. So ``redact_url_credentials``, which
+    receives one URL, replaces any rejected URL wholesale (``_UNPARSEABLE_URL``), and the text redactor does so for a
+    rejected URL that could hide userinfo (``_may_hide_userinfo``).
     """
     try:
         return urlparse(value)
     except ValueError:
         return None
+
+
+def _may_hide_userinfo(url: str) -> bool:
+    """Return whether the authority of a URL the parser rejected holds an at sign once NFKC-normalised.
+
+    A URL in running text reaches the next ASCII space, so after a host without a path it runs on into the sentence,
+    whose fullwidth punctuation, such as a fullwidth comma or colon, makes the parser reject it; such a URL holds no
+    userinfo unless an at sign comes before the first ASCII ``/``, ``?``, or ``#``.
+    """
+    authority = re.split(r"[/?#]", url.partition("://")[2], maxsplit=1)[0]
+    return "@" in unicodedata.normalize("NFKC", authority)
 
 
 def _masked_userinfo(netloc: str) -> str:
@@ -526,7 +539,7 @@ def _masked_userinfo(netloc: str) -> str:
 def _redact_url(value: str) -> str:
     parsed = _parsed_url(value)
     if parsed is None:
-        return _UNPARSEABLE_URL
+        return _UNPARSEABLE_URL if _may_hide_userinfo(value) else value
     if not parsed.scheme:
         return value
 
