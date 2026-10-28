@@ -41,10 +41,12 @@ _T = TypeVar("_T")
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
-# Chroma publishes each store's shared system before starting it, so a build that overlaps the first build of the same
-# store can reach the unstarted system, and both builds fail. Builds of one store take turns; Chroma keys that shared
-# state by store path, so different stores still build in parallel.
-_STORE_BUILD_LOCKS: dict[str, threading.Lock] = {}
+# The calls into one Chroma store take turns, from building a memory on. Chroma publishes each store's shared system
+# before starting it, so a build that overlaps the first build of the same store can reach the unstarted system, and
+# both builds fail. A query that overlaps a new collection's first write can fail with "Error creating hnsw segment
+# reader: Nothing found on disk", as a first memory search beside the first save into a store did. Chroma keys that
+# shared state by store path, so different stores still work in parallel.
+_STORE_LOCKS: dict[str, threading.Lock] = {}
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,27 @@ class _Mem0Embedder:
             raise
         except Exception as exc:
             raise _recorded(self.classify(exc)) from exc
+
+
+def _hold_store_lock(vector_store: Any, lock: threading.Lock) -> None:  # noqa: ANN401 - Mem0's Chroma vector store
+    """Make each call Mem0 sends its vector store, from a worker thread, hold the store's lock.
+
+    The entity store Mem0 builds on first use keeps unlocked calls; Mem0 catches their failures.
+    """
+
+    def locked(call: Callable[..., _T]) -> Callable[..., _T]:
+        def locked_call(*args: object, **kwargs: object) -> _T:
+            with lock:
+                return call(*args, **kwargs)
+
+        return locked_call
+
+    vector_store.search = locked(vector_store.search)
+    vector_store.insert = locked(vector_store.insert)
+    vector_store.update = locked(vector_store.update)
+    vector_store.delete = locked(vector_store.delete)
+    vector_store.get = locked(vector_store.get)
+    vector_store.list = locked(vector_store.list)
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -294,6 +317,7 @@ async def create_memory_instance(
     """
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
     store_path = config_dict["vector_store"]["config"]["path"]
+    store_lock = _STORE_LOCKS.setdefault(store_path, threading.Lock())
 
     def build_memory() -> AsyncMemory:
         # Mem0 and its Chroma store install on first use, and Mem0's huggingface embedder, which both local providers
@@ -303,7 +327,7 @@ async def create_memory_instance(
         ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
         if config_dict["embedder"]["provider"] == "huggingface":
             ensure_sentence_transformers_dependencies(runtime_paths)
-        with _STORE_BUILD_LOCKS.setdefault(store_path, threading.Lock()), optional_dependency_environment():
+        with store_lock, optional_dependency_environment():
             from mem0 import AsyncMemory  # noqa: PLC0415
 
             try:
@@ -343,6 +367,7 @@ async def create_memory_instance(
     # MindRoom's strict embedder raises typed errors itself.
     classify = _ollama_embedder_error if embedder_provider == "ollama" else openai_embedder_error
     cast("Any", memory).embedding_model = _Mem0Embedder(mem0_embedder, classify)
+    _hold_store_lock(memory.vector_store, store_lock)
 
     logger.info("created_memory_instance", path=store_path)
     return memory
