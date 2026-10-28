@@ -332,6 +332,20 @@ class TestAliases:
         # The original keeps its own physical turn, and its own later write is refused.
         assert await read(store, turn_rows.load_turn, original.turn_key) is not None
         assert await pending(store, turn(["$o"])) == Refused(("$o",))
+        # Waiting in a batch beside a fresh source, the original refuses the batch so each source retries alone.
+        assert await pending(store, turn(["$o", "$fresh"])) == Refused(("$o",))
+        assert isinstance(await pending(store, turn(["$fresh"])), Accepted)
+
+    async def test_a_relay_handed_to_its_final_delivery_also_refuses_a_batch_naming_its_original(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A bound relay is about to answer its original, so a batch naming the original is refused too."""
+        await accepted(store, turn(["$o"]))
+        relay = await accepted(store, turn(["$r"], aliases=["$o"]))
+        await write(store, turn_rows.bind_final_delivery, delivery_id="$r", room_id=ROOM, turn_key=relay.turn_key)
+
+        assert await pending(store, turn(["$o", "$fresh"])) == Refused(("$o",))
 
     async def test_without_a_completed_owner_the_physical_owner_then_the_newest_alias_owner_answer(
         self,
@@ -411,6 +425,7 @@ class TestRedactionGuard:
         store = journal_database()
         relay = turn(["$r"], aliases=["$o"], metadata={"$r": SourceEventMetadata(ALICE, discovery_event_id="$o")})
         stored = await accepted(store, relay)
+        await write(store, turn_rows.record_prepared_voice, room_id=ROOM, source_event_id="$r", prepared=VOICE)
 
         await redact(store, "$o")
         await accepted(store, relay)
@@ -421,7 +436,9 @@ class TestRedactionGuard:
         assert found is not None
         assert found.source_event_prompts is None
         assert await read(reopened, turn_rows.deleted_sources, stored.turn_key) == {"$r"}
-        assert await column(reopened, "SELECT prompt FROM turn_sources WHERE event_id = '$r'") == [(None,)]
+        assert await column(reopened, "SELECT prompt, prepared_voice_json FROM turn_sources WHERE event_id = '$r'") == [
+            (None, None),
+        ]
 
     async def test_a_physical_source_is_never_read_as_another_sources_alias(self, store: EventJournalStore) -> None:
         """A physical source is never read as another sources alias."""
