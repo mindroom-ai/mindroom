@@ -234,9 +234,7 @@ def test_shared_replay_file_is_split_into_scope_files(tmp_path: Path) -> None:
         "threads": {},
     }
     assert _claim(store, now=1_000) == (DeliveryThreadKeyClaim.BOUND, "$root")
-    assert store.claim_event_id("other-trigger", "event-1", now=1_000, ttl_seconds=300) is (
-        DeliveryEventClaim.DELIVERED
-    )
+    assert store.claim_event_id("other-trigger", "event-1", now=1_000, ttl_seconds=300) is DeliveryEventClaim.DELIVERED
 
 
 def test_release_after_send_failure_keeps_nonce_single_use_but_allows_event_retry(tmp_path: Path) -> None:
@@ -324,17 +322,17 @@ def test_full_replay_scope_refuses_new_claims_but_still_detects_replays(tmp_path
     store = external_trigger_replay_store(tmp_path)
 
     assert not store.claim_nonce("campground", "nonce-0", now=1_000, ttl_seconds=300)
-    assert store.claim_event_id("campground", "event-0", now=1_000, ttl_seconds=300) is (DeliveryEventClaim.DELIVERED)
+    assert store.claim_event_id("campground", "event-0", now=1_000, ttl_seconds=300) is DeliveryEventClaim.DELIVERED
     with pytest.raises(DeliveryReplayScopeFullError):
         store.claim_nonce("campground", "nonce-new", now=1_000, ttl_seconds=300)
     with pytest.raises(DeliveryReplayScopeFullError):
         store.claim_event_id("campground", "event-new", now=1_000, ttl_seconds=300)
 
     assert store.claim_nonce("other-trigger", "nonce-new", now=1_000, ttl_seconds=300)
-    assert store.claim_event_id("other-trigger", "event-new", now=1_000, ttl_seconds=300) is (DeliveryEventClaim.FRESH)
+    assert store.claim_event_id("other-trigger", "event-new", now=1_000, ttl_seconds=300) is DeliveryEventClaim.FRESH
     # Expired claims no longer count against the scope.
     assert store.claim_nonce("campground", "nonce-new", now=2_001, ttl_seconds=300)
-    assert store.claim_event_id("campground", "event-new", now=2_001, ttl_seconds=300) is (DeliveryEventClaim.FRESH)
+    assert store.claim_event_id("campground", "event-new", now=2_001, ttl_seconds=300) is DeliveryEventClaim.FRESH
 
 
 @pytest.mark.parametrize("store_payload", [["not", "a", "dict"], {"nonces": {}}])

@@ -1821,9 +1821,14 @@ depends_on = [
 path = "mindroom.delivery_replay"
 depends_on = [
     "mindroom.durable_write",
-    "mindroom.external_triggers.legacy_replay_store",
     "mindroom.file_locks",
+    "mindroom.legacy_delivery_replay",
 ]
+
+[[modules]]
+path = "mindroom.legacy_delivery_replay"
+depends_on = []
+visibility = ["mindroom.delivery_replay"]
 
 [[modules]]
 path = "mindroom.external_triggers.executor"

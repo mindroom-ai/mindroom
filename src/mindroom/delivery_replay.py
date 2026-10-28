@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, TypeGuard, cast
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+from mindroom.legacy_delivery_replay import split_shared_replay_store
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -74,6 +75,7 @@ class DeliveryReplayStore:
     """JSON-backed replay store keeping each replay scope in its own file under its own lock."""
 
     root: Path
+    # The pre-split shared replay file whose scopes the first call moves into `root`; None means nothing to split.
     legacy_shared_file: Path | None = None
 
     def claim_nonce(self, replay_scope: str, nonce: str, *, now: int, ttl_seconds: int) -> bool:
@@ -266,9 +268,6 @@ class DeliveryReplayStore:
         legacy_path = self.legacy_shared_file
         if legacy_path is None or not legacy_path.exists():
             return
-        # Deferred because importing any external_triggers module runs its package, which imports this module.
-        from mindroom.external_triggers.legacy_replay_store import split_shared_replay_store  # noqa: PLC0415
-
         legacy_lock_path = legacy_path.with_name(f"{legacy_path.name}.lock")
         with advisory_file_lock(legacy_lock_path):
             try:
