@@ -2409,6 +2409,48 @@ async def test_a_team_paused_on_its_child_s_approval_resumes_through_the_delegat
 
 
 @pytest.mark.asyncio
+async def test_a_child_that_pauses_again_after_its_approval_shows_the_leader_s_earlier_text_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team paused on its member's child shows what the leader wrote before the pause once when the child asks again.
+
+    The delegation driver hands back the stored team run unresumed, whose content is that text, which the restored
+    document already shows.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            calls(
+                tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Research it"),
+                content="Asking the writer.",
+                metrics=usage(40, 4),
+            ),
+            answer("Consensus.", usage(50, 5)),
+        ],
+        writer=[_delegate_to_helper("Dig"), answer("Writer: dug.")],
+        helper=[
+            calls(tool_call("touch", "call-helper", label="deep"), metrics=usage(5, 1)),
+            calls(tool_call("touch", "call-helper-again", label="deeper"), metrics=usage(5, 1)),
+            answer("Dug deeper."),
+        ],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    first = raised.value.paused
+    assert first.response_text.count("Asking the writer.") == 1
+    _, _, state = _delegation_state(team)
+
+    again = await team.resume(first, approved=True, approvals=_saved_approval_calls(state))
+
+    assert isinstance(again, PausedAttempt)
+    assert ProbeToolkit.calls == ["deep"]
+    assert again.response_text.count("Asking the writer.") == 1
+
+
+@pytest.mark.asyncio
 async def test_a_member_s_delegation_card_adds_no_marker_and_the_approved_reply_shows_the_call_finished(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -46,9 +46,10 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
 
     A run's deltas show its content as it is written, so a run that streamed text has shown what it hands over,
     unless it failed: a failed run hands over why it failed, which no delta shows. What a resumed run wrote before its
-    pause the document the resume continues already shows.
+    pause the document the resume continues already shows. A paused run shows nothing more: the document it pauses
+    in holds its text, even a stored run the delegation driver hands back unresumed, which carries nothing.
     """
-    if streamed and run.status is not RunStatus.error:
+    if run.status is RunStatus.paused or (streamed and run.status is not RunStatus.error):
         return None
     return run.new_handover_content
 
