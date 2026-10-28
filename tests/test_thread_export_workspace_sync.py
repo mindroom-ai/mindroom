@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import background_tasks
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
@@ -243,17 +244,52 @@ async def test_started_runner_exports_on_activity_and_stops_cleanly(tmp_path: Pa
         return _stats_for_targets(**kwargs)
 
     with patch(EXPORT_PATH, new=AsyncMock(side_effect=_export)) as export:
-        runner.start()
-        runner.start()
+        await runner.sync(config)
         runner.mark_room_activity("!lobby:localhost")
         await asyncio.wait_for(exported.wait(), timeout=5)
-        task = runner._task
-        assert task is not None
         await asyncio.wait_for(runner.stop(), timeout=5)
 
     export.assert_awaited_once()
-    assert task.cancelled()
-    assert runner._task is None
+    assert not runner._loop.running
+
+
+async def test_only_a_sync_of_the_running_runner_queues_a_full_pass(tmp_path: Path) -> None:
+    """The startup sync leaves its pass to the bots' start; a reload's sync reconciles every workspace at once."""
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+
+    with patch.object(runner, "_run_pass_once", new=AsyncMock()):
+        await runner.sync(config)
+        assert not runner._full_pass_pending
+        await runner.sync(config)
+        assert runner._full_pass_pending
+        await runner.stop()
+
+
+async def test_loop_that_crashes_runs_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crash outside a pass restarts the loop instead of ending exports until the process restarts."""
+    monkeypatch.setattr(background_tasks, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+    crashed = asyncio.Event()
+    ran_again = asyncio.Event()
+
+    async def run_pass_once() -> None:
+        if not crashed.is_set():
+            crashed.set()
+            msg = "pass bookkeeping failed"
+            raise RuntimeError(msg)
+        ran_again.set()
+
+    with patch.object(runner, "_run_pass_once", new=run_pass_once):
+        await runner.sync(config)
+        try:
+            runner.queue_full_pass()
+            await asyncio.wait_for(crashed.wait(), timeout=5)
+            runner.queue_full_pass()
+            await asyncio.wait_for(ran_again.wait(), timeout=5)
+        finally:
+            await runner.stop()
 
 
 async def test_pass_failure_keeps_the_work_for_the_next_trigger(tmp_path: Path) -> None:
@@ -721,7 +757,7 @@ async def test_manual_export_borrows_live_owner_and_reserves_reload_admission(tm
         assert reader.reader.hydrator.self_sender == bot.user_id
         return tuple(ThreadExportAccumulator(target=target, rooms_exported=1) for target in kwargs["targets"])
 
-    runner.start()
+    await runner.sync(config)
     try:
         with patch("mindroom.thread_export.service.export_threads_for_targets_for_client", side_effect=export_source):
             stats = await runner.export_once()
@@ -747,7 +783,7 @@ async def test_manual_export_preserves_previous_files_when_owner_is_unavailable(
     output = tmp_path / "manual-exports"
     prior = _write_owned_export(output)
     runner = _runner(config, {})
-    runner.start()
+    await runner.sync(config)
     try:
         stats = await runner.export_once(output_dir=output)
         assert stats.failures == 2
@@ -774,7 +810,7 @@ async def test_stopping_runner_waits_for_manual_export_cleanup(tmp_path: Path) -
             cleaning_up.set()
             await allow_cleanup.wait()
 
-    runner.start()
+    await runner.sync(config)
     with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
         export = asyncio.create_task(runner.export_once())
         await started.wait()
@@ -796,6 +832,27 @@ async def test_stopping_runner_waits_for_manual_export_cleanup(tmp_path: Path) -
             await asyncio.gather(export, stop, cleanup_started, return_exceptions=True)
 
 
+async def test_manual_export_starting_while_the_runner_stops_is_drained(tmp_path: Path) -> None:
+    """An administrative export that begins once stopping has begun is drained with the rest, never left running."""
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+
+    async def blocked_export(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    await runner.sync(config)
+    with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
+        stop = asyncio.create_task(runner.stop())
+        export = asyncio.create_task(runner.export_once())
+        try:
+            await asyncio.wait_for(stop, timeout=5)
+            assert export.done()
+        finally:
+            export.cancel()
+            await asyncio.gather(export, return_exceptions=True)
+    assert runner._deps.response_admission_gate.in_flight_response_count == 0
+
+
 async def test_forced_replacement_waits_for_manual_export_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -804,7 +861,8 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS", 0)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0)
     orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
-    orchestrator.config = _config(tmp_path, {})
+    config = _config(tmp_path, {})
+    orchestrator.config = config
     runner = orchestrator._thread_export_runner
     started = asyncio.Event()
     cleaning_up = asyncio.Event()
@@ -824,7 +882,7 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
         assert orchestrator._response_admission_gate.in_flight_response_count == 0
         replaced.set()
 
-    runner.start()
+    await runner.sync(config)
     with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
         export = asyncio.create_task(runner.export_once())
         await started.wait()
@@ -856,10 +914,11 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
 ) -> None:
     """Borrowed clients survive automatic cleanup; interrupted work resumes after publication."""
     orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
-    orchestrator.config = _config(
+    config = _config(
         tmp_path,
         {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())},
     )
+    orchestrator.config = config
     write_thread_export_matrix_state(tmp_path)
     original = _FakeBot("@mindroom_code:localhost")
     current = _FakeBot("@mindroom_code:localhost")
@@ -890,7 +949,7 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
     async def publish() -> None:
         assert cleaned.is_set(), "replacement closed a client still borrowed by an automatic export"
         orchestrator.agent_bots["code"] = cast("AgentBot", current)
-        runner.start()  # Runtime worker synchronization also calls start during publication.
+        await runner.sync(config)  # Runtime support synchronization also syncs the runner during publication.
         if outcome != "success":
             runner.mark_room_activity("!lobby:localhost")
         publishing.set()
@@ -900,7 +959,7 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
             raise RuntimeError(msg)
 
     with patch(EXPORT_PATH, side_effect=export_sources):
-        runner.start()
+        await runner.sync(config)
         runner.mark_room_activity("!lobby:localhost")
         await asyncio.wait_for(started.wait(), timeout=5)
         replacement = asyncio.create_task(
