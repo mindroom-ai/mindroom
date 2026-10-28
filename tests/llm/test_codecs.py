@@ -1,10 +1,10 @@
-"""Dict codecs of ``mindroom.llm`` reproduce the shapes Agno 3.0.9 wrote.
+"""Dict codecs of ``mindroom.llm`` read the dicts Agno 3.0.9 wrote, keeping every value the owned records model.
 
-Every expected dict here is one Agno 3.0.9 wrote: ``tests/fixtures/agno_parity/codecs.json`` holds the values real
-Agno objects produced, and the stored-run fixtures under ``tests/fixtures/agno_parity/runs`` hold the values MindRoom
-stored through Agno, so the owned readers and writers are proven against Agno's own ``to_dict``; the stored data they
-must keep decoding was written that way.
-Keys the owned records deliberately drop are listed once per type and removed before comparing.
+These are legacy inputs and never change: ``tests/fixtures/agno_parity/codecs.json`` holds what real Agno objects
+produced, and the stored-run fixtures under ``tests/fixtures/agno_parity/runs`` hold what MindRoom stored through Agno.
+Each one read and written back is the dict it was, minus the keys the owned records deliberately drop, which
+``tests.llm.agno_dict_helpers`` lists once per type. The schema MindRoom itself writes is
+``tests/llm/test_stored_dicts.py``'s.
 """
 # ruff: noqa: D103
 
@@ -23,7 +23,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import (
     RunRecord,
     RunRequirement,
-    RunStatus,
     TeamRunRecord,
     ToolExecution,
 )
@@ -90,20 +89,6 @@ def test_media_from_dict_decodes_content_bytes_as_agno_did() -> None:
     assert binary_file.content == PDF_BYTES
 
 
-def test_a_text_file_that_is_not_utf8_reads_back_as_its_bytes() -> None:
-    """A ``text/*`` file whose bytes are not UTF-8 is stored as base64 that says so, and reads back as those bytes."""
-    latin1 = File(id="f", content="café".encode("latin-1"), mime_type="text/plain")
-
-    stored = latin1.to_dict()
-
-    assert File.from_dict(stored).content == "café".encode("latin-1")
-    assert stored == {"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q==", "content_encoding": "base64"}
-    # UTF-8 text keeps its text form, which reads back as the same bytes.
-    utf8 = File(id="f", content="café".encode(), mime_type="text/plain")
-    assert utf8.to_dict() == {"id": "f", "mime_type": "text/plain", "content": "café"}
-    assert File.from_dict(utf8.to_dict()).content == "café".encode()
-
-
 def test_a_text_file_stored_before_its_encoding_was_recorded_reads_as_before() -> None:
     """An unmarked ``text/*`` row reads as UTF-8 text, so an earlier non-UTF-8 file still reads as its base64 text."""
     earlier = File.from_dict({"id": "f", "mime_type": "text/plain", "content": "Y2Fm6Q=="})
@@ -132,24 +117,10 @@ def test_message_metrics_round_trip_agno_dict() -> None:
     assert MessageMetrics.from_dict(expected).to_dict() == expected
 
 
-def test_message_metrics_to_dict_omits_zero_and_none_as_agno() -> None:
-    owned = MessageMetrics(tokens=TokenCounts(input_tokens=1), cost=0.0, duration=0.0, provider_metrics={})
-
-    assert owned.to_dict() == {"input_tokens": 1, "cost": 0.0, "duration": 0.0}
-    assert MessageMetrics().to_dict() == {}
-
-
 def test_message_metrics_from_dict_ignores_timer_and_unknown_keys() -> None:
     assert MessageMetrics.from_dict({"input_tokens": 3, "timer": {"start": 1}, "mystery": 1}) == MessageMetrics(
         tokens=TokenCounts(input_tokens=3),
     )
-
-
-def test_message_metrics_addition_matches_agno() -> None:
-    owned = MessageMetrics.from_dict(agno("message_metrics")) + MessageMetrics.from_dict(agno("message_metrics_addend"))
-
-    assert owned.to_dict() == agno("message_metrics_sum")
-    assert (MessageMetrics(tokens=TokenCounts(input_tokens=1)) + MessageMetrics()).to_dict() == {"input_tokens": 1}
 
 
 def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
@@ -157,44 +128,6 @@ def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
 
     assert RunMetrics.from_dict(agno("run_metrics")).to_dict() == expected
     assert RunMetrics().to_dict() == {}
-
-
-def test_run_metrics_add_matches_agno_accumulate_model_metrics() -> None:
-    reports = [
-        (
-            "claude-opus-5-5",
-            "Anthropic",
-            {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "cost": 0.1, "provider_metrics": {"n": 1}},
-        ),
-        (
-            "claude-opus-5-5",
-            "Anthropic",
-            {
-                "input_tokens": 5,
-                "output_tokens": 1,
-                "total_tokens": 6,
-                "cache_read_tokens": 4,
-                "provider_metrics": {"n": 2, "tier": "a"},
-            },
-        ),
-        ("gpt-6-luna", "OpenAI Chat", {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}),
-    ]
-    usages = [MessageMetrics.from_dict(report) for _, _, report in reports]
-    owned = RunMetrics()
-    for (model_id, provider, _), usage in zip(reports, usages, strict=True):
-        owned.add(usage, model_id=model_id, provider=provider)
-
-    assert owned.to_dict() == agno("run_metrics_accumulated")
-    assert [entry.id for entry in owned.details["model"]] == ["claude-opus-5-5", "gpt-6-luna"]  # type: ignore[index]
-    # Agno aliased the request's provider_metrics into the details entry and rewrote it on the next request.
-    assert usages[0].provider_metrics == {"n": 1}
-
-
-def test_run_metrics_addition_matches_agno() -> None:
-    owned = RunMetrics.from_dict(agno("run_metrics")) + RunMetrics.from_dict(agno("run_metrics_addend"))
-
-    assert owned.to_dict() == without(agno("run_metrics_sum"), DROPPED_METRICS_KEYS)
-    assert (RunMetrics(tokens=TokenCounts(input_tokens=1)) + RunMetrics()).to_dict() == {"input_tokens": 1}
 
 
 def test_model_metrics_round_trip_agno_dict() -> None:
@@ -213,50 +146,13 @@ def test_message_round_trips_agno_dict(message_id: str) -> None:
     assert Message.from_dict(expected).to_dict() == expected
 
 
-def test_message_dict_keys_match_agno_for_every_field() -> None:
-    owned = Message(
-        role="assistant",
-        content="x",
-        id="same",
-        created_at=5,
-        name="n",
-        tool_call_id="c",
-        tool_calls=[{"id": "c"}],
-        tool_name="t",
-        tool_args={"a": 1},
-        tool_call_error=True,
-        stop_after_tool_call=True,
-        compressed_content="cc",
-        reasoning_content="r",
-        redacted_reasoning_content="rr",
-        provider_data={"k": "v"},
-        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=1)),
-        from_history=True,
-        images=[Image(id="i", url="https://example.invalid/i")],
-        audio=[Audio(id="a", url="https://example.invalid/a")],
-        videos=[Video(id="v", url="https://example.invalid/v")],
-        files=[File(id="f", url="https://example.invalid/f")],
-    )
-
-    assert owned.to_dict() == agno("message_every_field")
-
-
 def test_message_from_dict_ignores_agno_only_keys() -> None:
     stored = agno("message_with_agno_only_fields")
     stored["citations"] = {"urls": [{"url": "https://example.invalid"}]}
     stored["references"] = {"query": "q", "references": []}
     stored["unexpected_future_key"] = {"nested": True}
 
-    message = Message.from_dict(stored)
-
-    assert message.to_dict() == {
-        "id": "m",
-        "content": "hi",
-        "from_history": False,
-        "stop_after_tool_call": False,
-        "role": "assistant",
-        "created_at": 1,
-    }
+    assert Message.from_dict(stored) == Message(role="assistant", content="hi", id="m", created_at=1)
 
 
 def test_message_from_dict_keeps_media_scalars_agno_reader_dropped() -> None:
@@ -270,16 +166,6 @@ def test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads() 
     message = Message.from_dict(agno("message_model_dump_with_non_persisted_flags"))
 
     assert message.add_to_agent_memory is False
-
-
-def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:
-    """A paused run's turn context stores ``add_to_agent_memory: false``; every other message stores no such key."""
-    context = Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False)
-    prompt = Message(role="user", content="Hi")
-
-    assert context.to_dict()["add_to_agent_memory"] is False
-    assert "add_to_agent_memory" not in prompt.to_dict()
-    assert [Message.from_dict(message.to_dict()) for message in (context, prompt)] == [context, prompt]
 
 
 # --- tool executions and requirements --------------------------------------------------------------------------
@@ -338,82 +224,10 @@ def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
     assert written == expected
 
 
-def test_tool_execution_default_dict_matches_agno_minus_dropped_keys() -> None:
-    owned = ToolExecution(tool_call_id="c", tool_name="t", tool_args={})
-
-    assert owned.to_dict() == without(agno("tool_execution_default"), DROPPED_TOOL_EXECUTION_KEYS)
-
-
-def test_new_tool_executions_and_requirements_store_no_timing() -> None:
-    stored = RunRequirement(ToolExecution(tool_call_id="c", tool_name="t", tool_args={})).to_dict()
-
-    assert "created_at" not in stored
-    assert {"metrics", "created_at"}.isdisjoint(stored["tool_execution"])
-
-
 def test_run_requirement_round_trips_agno_dict() -> None:
     expected = expected_requirement_dict(agno("run_requirement"))
 
     assert RunRequirement.from_dict(expected).to_dict() == expected
-
-
-@pytest.mark.parametrize("decision", ["confirm", "reject_with_note"])
-def test_run_requirement_confirmation_updates_match_agno(decision: str) -> None:
-    owned = RunRequirement.from_dict(agno("run_requirement"))
-    if decision == "confirm":
-        owned.confirm()
-    else:
-        owned.reject("Not approved by requester")
-
-    assert owned.to_dict() == expected_requirement_dict(agno("run_requirement_decided")[decision])
-    assert owned.is_resolved() is True
-    assert owned.needs_confirmation is False
-
-
-@pytest.mark.parametrize("reason", [None, ""])
-def test_run_requirement_denied_without_a_reason_tells_the_model_it_was_not_approved(reason: str | None) -> None:
-    """Agno stored no note here and its tool rejection made up its own text; the owned record always has the note."""
-    owned = RunRequirement.from_dict(agno("run_requirement"))
-
-    owned.reject(reason)
-
-    assert owned.confirmation_note == "Not approved by requester"
-    assert owned.tool_execution.confirmation_note == "Not approved by requester"
-    assert owned.to_dict() == expected_requirement_dict(agno("run_requirement_decided")["reject_with_note"])
-
-
-@pytest.mark.parametrize(
-    ("reason", "note"),
-    [("Alice declined it.", "Alice declined it."), (None, "Not approved by requester")],
-)
-def test_a_denied_requirement_gives_the_note_the_model_is_told(reason: str | None, note: str) -> None:
-    """A reader of a recorded denial gets its note as a string, whether or not the requester gave a reason."""
-    owned = RunRequirement.from_dict(agno("run_requirement"))
-    owned.reject(reason)
-
-    assert owned.denial_note == note
-
-
-@pytest.mark.parametrize("decision", ["pending", "confirmed"])
-def test_a_requirement_that_was_not_denied_has_no_denial_note(decision: str) -> None:
-    """Reading a denial's note from a call nobody denied is a mistake, not an empty note."""
-    owned = RunRequirement.from_dict(agno("run_requirement"))
-    if decision == "confirmed":
-        owned.confirm()
-
-    with pytest.raises(ValueError, match="not a recorded denial"):
-        _ = owned.denial_note
-
-
-def test_run_requirement_external_result_matches_agno() -> None:
-    owned = RunRequirement.from_dict(agno("run_requirement_external"))
-    assert owned.needs_external_execution is True
-
-    owned.set_external_execution_result("subagent said hi")
-
-    assert owned.to_dict() == expected_requirement_dict(agno("run_requirement_external_resolved"))
-    assert owned.tool_execution.result == "subagent said hi"
-    assert owned.is_resolved() is True
 
 
 def test_run_requirement_from_dict_ignores_user_input_schemas() -> None:
@@ -440,36 +254,17 @@ def test_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     assert {"input", "session_state", "content_type"} <= set(agno_dict)
 
 
-def test_run_record_minimal_dict_matches_agno_minus_dropped_keys() -> None:
-    owned = RunRecord(
-        run_id="r",
-        agent_id="a",
-        session_id="s",
-        status=RunStatus.completed,
-        metrics=RunMetrics(),
-        created_at=1,
-    )
-
-    assert owned.to_dict() == expected_run_dict(agno("minimal_agent_run"))
-    assert owned.to_dict()["metrics"] == {}
-    assert "tools" not in owned.to_dict()
-    assert "requirements" not in owned.to_dict()
-
-
-def test_run_record_writes_tools_requirements_and_metrics_exactly_when_set() -> None:
+def test_a_run_agno_stored_with_empty_tools_and_requirements_and_no_metrics_reads_as_stored() -> None:
     # Agno's loop left ``tools = []`` on runs without tool calls and ``requirements = []`` after resolving a
     # pause; MindRoom's interrupted-turn records never set ``metrics``. Each key must survive as stored.
     agno_dict = agno("agent_run_with_empty_tools_and_requirements")
     assert (agno_dict["tools"], agno_dict["requirements"]) == ([], [])
     assert "metrics" not in agno_dict
 
-    owned = RunRecord(run_id="r", agent_id="a", tools=[], requirements=[], created_at=1)
+    record = RunRecord.from_dict(agno_dict)
 
-    assert owned.to_dict() == expected_run_dict(agno_dict)
-    assert RunRecord.from_dict(agno_dict).to_dict() == expected_run_dict(agno_dict)
-    assert RunRecord.from_dict(agno_dict).metrics is None
-    absent = RunRecord(run_id="r", agent_id="a", created_at=1).to_dict()
-    assert {"tools", "requirements", "metrics"}.isdisjoint(absent)
+    assert (record.tools, record.requirements, record.metrics) == ([], [], None)
+    assert record.to_dict() == expected_run_dict(agno_dict)
 
 
 def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
@@ -484,16 +279,6 @@ def test_team_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
     assert "team_name" not in record.to_dict()
     assert isinstance(record.member_responses[0], RunRecord)
     assert record.member_responses[0].parent_run_id == "team-run-1"
-    # Agno wrote an empty ``member_responses`` list on a team run without members.
-    assert TeamRunRecord(run_id="t", team_id="x", created_at=1).to_dict()["member_responses"] == []
-
-
-def test_run_status_values_and_names_match_agno() -> None:
-    assert [[status.name, status.value] for status in RunStatus] == AGNO["run_statuses"]
-    for status in RunStatus:
-        # ``.name`` is persisted as ``mindroom_original_status``, so the member names must match too.
-        assert status.name == status.value.lower()
-        assert status == str(status)
 
 
 @pytest.mark.parametrize("status", ["PENDING", "REGENERATED"])
@@ -639,23 +424,6 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
         assert json.dumps(_METRIC_CODECS[fixture](value).to_dict()) == json.dumps(value)
 
 
-def test_stored_metrics_keep_a_counter_the_stored_order_omits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The stored order only orders the counters, so a counter it does not name is still stored after the rest."""
-    monkeypatch.setattr(
-        llm_usage,
-        "_STORED_COUNTER_ORDER",
-        tuple(name for name in llm_usage._STORED_COUNTER_ORDER if name != "input_tokens"),
-    )
-    run = RunMetrics()
-    run.add(MessageMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=2)), model_id="m", provider="P")
-
-    stored = run.to_dict()
-
-    assert list(stored) == ["output_tokens", "input_tokens", "details"]
-    assert list(stored["details"]["model"][0]) == ["output_tokens", "input_tokens", "id", "provider"]
-    assert RunMetrics.from_dict(stored).to_dict() == stored
-
-
 # --- session totals --------------------------------------------------------------------------------------------
 
 
@@ -692,50 +460,3 @@ def test_session_metrics_count_token_counters_as_agno_accumulated_them() -> None
 
         assert owned.to_dict() == _counted_totals(agno_totals)
     assert SessionMetrics.from_dict(totals[-1]).to_dict() == without(totals[-1], DROPPED_METRICS_KEYS)
-
-
-def test_session_metrics_count_token_counters_only() -> None:
-    """A run's cost, timing, and provider metrics never reach the session totals, in total or per model."""
-    counters = TokenCounts(input_tokens=2, total_tokens=2)
-    run = RunMetrics(
-        tokens=counters,
-        cost=1.5,
-        duration=3.0,
-        details={"model": [ModelMetrics(tokens=counters, cost=1.5, id="m", provider="P", provider_metrics={"x": 1})]},
-    )
-    totals = SessionMetrics()
-
-    totals.count_run(run, replacing=None)
-
-    assert totals.to_dict() == {
-        "input_tokens": 2,
-        "total_tokens": 2,
-        "details": {"model": [{"input_tokens": 2, "total_tokens": 2, "id": "m", "provider": "P"}]},
-    }
-
-
-def test_session_metrics_count_a_saved_again_run_once() -> None:
-    """A run saved when it paused and again when it finished adds only its final usage."""
-    paused = RunMetrics.from_dict(agno("run_metrics"))
-    finished = RunMetrics.from_dict(agno("run_metrics"))
-    finished.add(
-        MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10)),
-        model_id="m",
-        provider="P",
-    )
-    once = SessionMetrics()
-    once.count_run(finished, replacing=None)
-
-    twice = SessionMetrics()
-    twice.count_run(paused, replacing=None)
-    twice.count_run(finished, replacing=paused)
-
-    assert twice.tokens.input_tokens == finished.tokens.input_tokens
-    assert twice.to_dict() == once.to_dict()
-
-
-def test_session_metrics_from_dict_ignores_unreadable_details() -> None:
-    assert SessionMetrics.from_dict({"input_tokens": 3, "details": "garbage", "timer": 1}).to_dict() == {
-        "input_tokens": 3,
-    }
-    assert SessionMetrics.from_dict({"details": {"model": "garbage"}}).to_dict() == {}

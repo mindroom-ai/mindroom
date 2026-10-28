@@ -1,8 +1,8 @@
 # Agno parity goldens
 
-These fixtures pin what MindRoom sends and stores, so a change to persisted data or model-visible bytes shows as a golden diff.
+These fixtures pin what MindRoom sends to providers and models and what it publishes, so a change to model-visible bytes shows as a golden diff, and they hold the data Agno wrote, which MindRoom must keep reading.
 They were first captured while Agno 3.0.9 ran MindRoom, so the owned runtime could prove it changed neither (`docs/dev/2026-10-20-replace-agno-design.md`).
-The goldens of what owned code produces now regenerate from it, in the encodings this file describes, while the data Agno wrote stays as captured.
+The goldens of what owned code produces now regenerate from it, in the encodings this file describes, while the data Agno wrote stays as captured, as legacy inputs.
 The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime.
 The scripts still run from the history trees that hold Agno's provider layer (`tests/agno_parity/capture_providers.py` at `b1d5c30b1`, `tests/agno_parity/capture_prompts.py` at `58bbd84fb`), and a rerun reproduces the goldens those commits stored, which is how the send order of request bodies and prompt requests was recorded.
 
@@ -12,7 +12,7 @@ The scripts still run from the history trees that hold Agno's provider layer (`t
 It covers the provider, prompt, tool, and event goldens and the knowledge embedder and search goldens, each through the support functions its parity tests compare with, so an unchanged golden regenerates byte for byte.
 A deliberate change to model-visible bytes, a provider request, a tool, or the `io.mindroom.ai_run` metadata reruns it and commits the rewritten goldens with the change, so a reviewer reads the change as a golden diff.
 Nothing reaches a provider: replies come from each golden's canned response or a scripted model, provider credentials are hidden from the environment, and every network connection and name lookup is refused.
-The storage, run, history, and codec goldens and the rows of `knowledge/rows.json` hold data Agno wrote, so they are read-only inputs and never change.
+The legacy inputs below are not goldens of owned code, so the command leaves them alone.
 
 The command keeps the authored parts of each golden as written and rewrites only what it derives from them.
 The authored parts are each provider golden's `input` and `response_raw`, the cases of `tools/arguments.json` (their `function` and `raw_arguments`), the cases of `knowledge/embedders.json` (their `embedder` and each call's `agno_method`, `purpose`, and `texts`), the `input` of `knowledge/rows.json` (the config, whose agents the searches run as, and the source files), the searches of `knowledge/search.json` (each one's `agent`, `query`, `embedding_fails` where its query embedding fails, and whether it answers with documents or with text), the requests of `events/openai_compat.json`, and which runs `events/ai_run.json` holds.
@@ -20,6 +20,13 @@ The prompt goldens have no authored part: their scenarios are code in `tests/agn
 To rebase a branch whose goldens conflict, merge the authored parts of each conflicting golden by hand, in the current encoding, take either side for everything else, then rerun the command at the rebased head and review its diff.
 Taking one side whole would silently drop the other side's authored edits, because the command regenerates from whatever authored parts it finds.
 A conflict in a read-only golden is resolved on its own, as data, since no command rewrites it.
+
+## Legacy inputs
+
+`storage/`, `runs/`, `history/`, `codecs.json`, and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
+Tests read them as inputs: the storage conversion, the legacy codec tests, and the resumes of runs paused before the upgrade start from them.
+Two families still compare owned results with them: history selection (`history/`), which MindRoom keeps as Agno selected, and the knowledge rows, which an owned refresh must keep writing.
+A test of what MindRoom stores builds the typed records it expects itself (`tests/run_record_helpers.py`), and MindRoom's own stored schema is pinned in `tests/llm/test_stored_dicts.py`, so a deliberate change to stored data edits those tests and leaves these files alone.
 
 ## Provider wire goldens (`providers/`)
 
@@ -324,5 +331,5 @@ Each cosine distance is summed in float32 in an order the CPU's vector width dec
 ## Codec goldens (`codecs.json`)
 
 `codecs.json` maps a case name to what Agno 3.0.9 objects produced for it: the `to_dict()` of messages, media, metrics, tool executions, requirements, and agent and team runs built field by field, the results of Agno's metric addition and accumulation, requirement decisions, and lenient reads, and the names and values of Agno's `RunStatus`.
-`tests/llm/test_codecs.py` builds or reads each case with the owned types and compares the result with the case.
+`tests/llm/test_codecs.py` reads each case it uses with the owned types and checks that it writes back as the case, minus the keys the owned records drop (`tests/llm/agno_dict_helpers.py`).
 Dicts keep Agno's key order and its base64 media content, and a case built without an id or a timestamp keeps the random id and capture-time timestamp Agno filled in.
