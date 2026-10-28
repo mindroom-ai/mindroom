@@ -416,8 +416,11 @@ async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
     source_watcher = config_lifecycle.app_state(api_app).knowledge_source_watcher
     if source_watcher is None:
         return
-    snapshot = _app_context(api_app)
-    await source_watcher.sync(config=snapshot.runtime_config, runtime_paths=snapshot.runtime_paths)
+    config = _app_context(api_app).runtime_config
+    if config is None:
+        await source_watcher.stop()
+    else:
+        await source_watcher.sync(config)
 
 
 def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
@@ -571,7 +574,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     if standalone:
         api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
         knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
-        standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler)
+        standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler, runtime_paths)
         app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
     app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
     await _sync_standalone_knowledge_watchers(_app)
@@ -597,7 +600,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0915
     with suppress(asyncio.CancelledError):
         await worker_cleanup_task
     if standalone_knowledge_source_watcher is not None:
-        await standalone_knowledge_source_watcher.shutdown()
+        await standalone_knowledge_source_watcher.stop()
     if api_owned_knowledge_refresh_scheduler is not None:
         await api_owned_knowledge_refresh_scheduler.shutdown()
     close_usage_export_runner(_app)
