@@ -169,21 +169,27 @@ class ConfigReloadLifecycle:
         )
 
     def request_reload(self) -> None:
-        """Queue a debounced config reload; a request made during startup runs once startup publishes."""
+        """Queue a debounced config reload; startup applies a request made before the runtime runs once it publishes."""
         self._requested_at = asyncio.get_running_loop().time()
-        if not self.is_running():
-            logger.info("Configuration change recorded until the runtime runs")
-            return
         if self._reload_task is not None and not self._reload_task.done():
             logger.info("Configuration reload already queued; extending debounce window")
             return
-        self.status = ConfigReloadStatus(status="pending")
-        logger.info("Queued configuration reload")
+        if not self.is_running():
+            logger.info("Configuration change recorded until the runtime runs")
+            if not self._starting():
+                return
+        else:
+            self.status = ConfigReloadStatus(status="pending")
+            logger.info("Queued configuration reload")
         self._reload_task = create_logged_task(
             self._run_reload_loop(),
             name="config_reload",
             failure_message="Queued config reload failed",
         )
+
+    def _starting(self) -> bool:
+        """Return whether the runtime has not run yet, as opposed to having stopped."""
+        return not self.is_running() and self._fully_applied_config is None
 
     def startup_published(self, config: Config) -> None:
         """Acknowledge startup's config, and reload at once if its files changed since startup loaded them."""
@@ -525,14 +531,24 @@ class ConfigReloadLifecycle:
         loop = asyncio.get_running_loop()
 
         try:
-            while self.is_running() and self._requested_at is not None:
+            while self._requested_at is not None:
                 requested_at = self._requested_at
                 await self._wait_for_reload_debounce(requested_at, loop)
                 if self._requested_at != requested_at:
                     # A newer config change superseded the current one.
                     continue
-
-                await self._apply_queued_config_reload()
+                if self.is_running():
+                    await self._apply_queued_config_reload()
+                    continue
+                if not self._starting():
+                    return
+                # Startup applies the kept request once it publishes, but the
+                # dashboard loads the edit now, so a dashboard save made while
+                # MindRoom starts cannot write over it.
+                async with self.config_update_lock:
+                    await asyncio.to_thread(self.load_config)
+                if self._requested_at == requested_at:
+                    return
         finally:
             if self._reload_task is current_task:
                 self._reload_task = None

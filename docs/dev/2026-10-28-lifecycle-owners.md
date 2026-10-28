@@ -14,10 +14,10 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   An entity whose frozen FINAL recovery is still unresolved does not leave its rooms, so the recovery retry can still deliver there.
 - Three authorization predicates stay separate because they gate different things: any reply-authorization input (publication waits for replies), a continuing agent's responder access (background scripts are re-authorized; a broader trigger would end scripts whose bot is merely restarting, because an unavailable bot cannot confirm authority), and room-membership grant inputs (grants are revoked until the router refreshes, which blocks replies, so it must not fire on extra inputs).
 - One entity fleet holds each entity's bot, sync task, start retry, and disabled flag in one slot, with one stop sequence per reason.
-  A restart tolerates only a reply that outlived the drain, because the replacement replays it; removal and process shutdown keep a bot that still owns cleanup registered until its deferred stop finishes.
+  A restart tolerates only a reply that outlived the drain, because the replacement replays it; a removal hands a bot whose reply outlived its finalization to process shutdown, so one stuck reply cannot fail every later reload, and process shutdown waits for each such bot's deferred stop before it closes shared stores.
 - A bot start is one attempt and the fleet owns every retry, because a retry inside the fleet's own retry loop multiplied attempts and delayed the degraded report.
 - An edit made while MindRoom starts is applied once startup publishes its config: a reload request made before the runtime runs is kept, and startup reloads once if the config files changed since it loaded them.
-- Under `mindroom run` the runtime loads each edit once and publishes that load to the embedded dashboard before it waits for any response drain.
+- Under `mindroom run` the runtime loads each edit once and publishes that load to the embedded dashboard before it waits for any response drain, and also while MindRoom starts, before it can apply anything.
   A dashboard save rewrites the whole file from the config the dashboard holds, so a dashboard that lagged behind the file for a drain would erase the edit.
 
 ## Rejected alternatives
@@ -31,5 +31,5 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 ## Accepted limitations
 
 - A removed entity that leaves no room, because its frozen FINAL recovery is still unresolved or it never started, is removed from its rooms by the next router start's orphan cleanup.
-- A second file edit made while an MCP catalog restart drains responses reaches the dashboard only after that drain, at most 600 seconds; a dashboard save in that window overwrites it.
-  It needs two file edits and a dashboard save inside one forced drain, and bounding it would need a second loader outside the reload loop.
+- A file edit made while another reload restarts bots, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step, which takes seconds or, for the drain, at most 600 seconds; a dashboard save in that window overwrites it.
+  Closing it would need a loader beside the reload loop, a second owner of each load.

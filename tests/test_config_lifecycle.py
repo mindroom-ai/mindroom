@@ -110,21 +110,53 @@ def test_replacement_drain_state_tracks_wait_warning_and_force() -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_change_during_startup_reloads_once_startup_publishes(tmp_path: Path) -> None:
-    """An edit made while MindRoom starts is applied as soon as startup has published its config."""
+async def test_config_change_during_startup_reaches_the_dashboard_and_applies_once_startup_publishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An edit made while MindRoom starts is loaded for the dashboard at once and applied once startup publishes."""
+    monkeypatch.setattr(lifecycle_module, "_CONFIG_RELOAD_DEBOUNCE_SECONDS", 0)
     running = False
     config = load_config(test_runtime_paths(tmp_path))
-    lifecycle = _make_lifecycle(tmp_path, current_config=config)
+    loads: list[Config] = []
+
+    def load_edit() -> PublishedConfigLoad:
+        loads.append(config)
+        return published_config_load(config)
+
+    lifecycle = _make_lifecycle(tmp_path, current_config=config, load_config=load_edit)
     lifecycle.is_running = lambda: running
 
     lifecycle.request_reload()
-    assert lifecycle._reload_task is None
+    startup_load = lifecycle._reload_task
+    assert startup_load is not None
+    await asyncio.wait_for(startup_load, timeout=5)
+    assert len(loads) == 1
+    lifecycle.apply_update_plan.assert_not_awaited()
 
     running = True
     lifecycle.startup_published(config)
+    reload_task = lifecycle._reload_task
+    assert reload_task is not None
+    await asyncio.wait_for(reload_task, timeout=5)
+    assert len(loads) == 2
 
-    assert lifecycle._reload_task is not None
+
+@pytest.mark.asyncio
+async def test_config_change_after_the_runtime_stopped_loads_nothing(tmp_path: Path) -> None:
+    """A file edit during shutdown is neither loaded nor applied."""
+    running = True
+    config = load_config(test_runtime_paths(tmp_path))
+    lifecycle = _make_lifecycle(tmp_path, current_config=config, load_config=MagicMock())
+    lifecycle.is_running = lambda: running
+    lifecycle.startup_published(config)
     await lifecycle.cancel()
+    running = False
+
+    lifecycle.request_reload()
+
+    assert lifecycle._reload_task is None
+    lifecycle.load_config.assert_not_called()
 
 
 @pytest.mark.asyncio
