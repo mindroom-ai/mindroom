@@ -778,7 +778,6 @@ class ApprovalManager:
                 scheduled_scope is not None
                 and (
                     status != "approved"
-                    or card.owner_kind != "scheduled"
                     or not card.any_arguments_offered
                     or scheduled_scope not in SCHEDULED_SCOPE_OPTIONS
                 )
@@ -1232,8 +1231,7 @@ class ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
-        if card.expires_at_ns is not None and card.expires_at_ns <= _now_ns():
-            return "expired", _DEFAULT_TIMEOUT_REASON, False
+        """Deny an approval no reviewer could see in full; the journal applies the deadline when it decides."""
         if status == "approved" and not card.approvable:
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False

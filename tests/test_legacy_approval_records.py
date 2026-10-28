@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -496,6 +496,21 @@ async def test_a_scheduled_approval_still_arms_and_claims(recorded_journal: Call
             ),
         )
         assert again == "used"
+        armed = await router.approvals.scheduled_call(task_id="task-armed")
+        assert armed is not None
+        armed_claim = await store.backend.write(
+            lambda transaction: scheduled_approvals.claim(
+                transaction,
+                _ROUTER,
+                call=armed,
+                arguments_json=armed.arguments_json,
+                receipt=replace(receipt, delivery_id="scheduled-receipt:task-armed", tool_call_id="task-armed"),
+                now_ns=armed.execute_at_ns,
+            ),
+        )
+        assert isinstance(armed_claim, ScheduledCallClaim)
+        # Armed before the upgrade, it is spent under the scope it was armed for.
+        assert armed_claim.provenance["scope"] == "exact_arguments"
         withdrawn = await router.approvals.scheduled_call(task_id="task-withdrawn")
         assert withdrawn is not None
         assert (
@@ -557,6 +572,7 @@ async def test_expired_calls_stay_expired(recorded_journal: Callable[[str], _Jou
 @pytest.mark.asyncio
 async def test_a_departed_responders_card_keeps_its_decided_call_until_it_retires(
     recorded_journal: Callable[[str], _Journal],
+    tmp_path: Path,
 ) -> None:
     """A card whose paused reply departure deleted gets its decided call back, which goes when the card retires."""
     journal = recorded_journal("15_responder_departed_card_debt.sql")
@@ -581,6 +597,26 @@ async def test_a_departed_responders_card_keeps_its_decided_call_until_it_retire
         retired = await router.approvals.approval_card(room_id=_ROOM, card_event_id="$waiting-0-0")
         assert isinstance(retired, ApprovalCardView)
         assert retired.terminal
+        manager = _manager(tmp_path, store, [])
+        try:
+            consumed: list[bool] = []
+
+            async def consume() -> None:
+                consumed.append(True)
+
+            result = await handle_card_response_for_test(
+                manager,
+                room_id=_ROOM,
+                sender_id=_ALICE,
+                card_event_id="$waiting-0-0",
+                status="approved",
+                authorize_responder=lambda _entity_name: True,
+                before_consume=consume,
+            )
+            assert result.consumed is True
+            assert consumed == [True]
+        finally:
+            await manager.shutdown()
     finally:
         await store.close()
 

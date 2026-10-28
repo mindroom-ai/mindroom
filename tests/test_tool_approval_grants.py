@@ -1284,6 +1284,7 @@ async def _card(
     thread: str | None = "$thread",
     operation: str | None = "binding:shell",
     command: object = None,
+    expires_at_ns: int = 9_000_000_000_000_000_000,
 ) -> str:
     responder = journal.principal("agent@" + agent)
     await responder.admit(
@@ -1313,7 +1314,7 @@ async def _card(
                 tool_call_id="call-" + name,
                 tool_name="shell",
                 invoking_agent=agent,
-                expires_at_ns=9_000_000_000_000_000_000,
+                expires_at_ns=expires_at_ns,
             ),
         ),
         state="waiting",
@@ -1332,7 +1333,7 @@ async def _card(
         room_id="!room:test",
         requester_id=requester,
         approver_user_id=requester,
-        expires_at_ns=9_000_000_000_000_000_000,
+        expires_at_ns=expires_at_ns,
         agent_name=agent,
         thread_id=thread,
         grant_operation=ApprovalOperation(operation, "shell") if operation is not None else None,
@@ -1860,4 +1861,188 @@ async def test_ended_job_denies_its_open_timed_card(
         assert not later.done()
     finally:
         await _stop([ended] if later is None else [ended, later])
+        await manager.shutdown()
+
+
+async def _call_row(journal: EventJournalStore, name: str) -> tuple[object, ...]:
+    row = await journal.backend.read(
+        lambda transaction: transaction.fetchone(
+            "SELECT decision, resolved_by FROM approval_calls WHERE owner_id = ?",
+            (name,),
+        ),
+    )
+    assert row is not None
+    return row["decision"], row["resolved_by"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fence",
+    [
+        "UPDATE approval_continuations SET state = 'ready' WHERE approval_id = 'fenced'",
+        "UPDATE approval_continuations SET generation = 1 WHERE approval_id = 'fenced'",
+    ],
+    ids=["no-longer-waiting", "another-generation"],
+)
+async def test_a_call_is_decided_only_while_its_paused_reply_waits_at_its_generation(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    fence: str,
+) -> None:
+    """A decision cannot land on a paused reply that moved past the state or generation its card was posted for."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "fenced")
+        await journal.backend.write(lambda transaction: transaction.execute(fence))
+        recorded = await resolve_card_event(
+            journal.principal("router@shared").approvals,
+            room_id="!room:test",
+            card_event_id=card,
+            requested_status="approved",
+            reason=None,
+            metadata=ApprovalDecisionMetadata(resolved_by="@human:test"),
+        )
+        assert recorded.recorded is False
+        assert await _call_row(journal, "fenced") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_deadline_overrode_names_no_decider(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late approval records the expiry, not the person whose approval came too late."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "late")
+        monkeypatch.setattr("time.time_ns", lambda: 9_000_000_000_000_000_000)
+        await resolve_card_event(
+            journal.principal("router@shared").approvals,
+            room_id="!room:test",
+            card_event_id=card,
+            requested_status="approved",
+            reason=None,
+            metadata=ApprovalDecisionMetadata(resolved_by="@human:test"),
+        )
+        assert await _call_row(journal, "late") == ("expired", None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_only_a_receipt_takes_another_event_as_its_alias(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A transport-verified copy of a request card is not a second actionable card."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        await _card(journal, manager, "aliased")
+        approvals = journal.principal("router@shared").approvals
+        await approvals.remember_terminal_approval_alias(
+            room_id="!room:test",
+            card_event_id="$copy-of-card",
+            delivery_id="card-aliased",
+        )
+        assert await approvals.approval_card(room_id="!room:test", card_event_id="$copy-of-card") is None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_a_card_whose_membership_is_fenced_is_not_consumed(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """While the router's membership of the room is fenced for departure, its cards decide nothing."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "fenced-room")
+        await journal.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE room_membership SET departure_fenced = 1 WHERE principal_id = ? AND room_id = ?",
+                ("router@shared", "!room:test"),
+            ),
+        )
+        view = await journal.principal("router@shared").approvals.approval_card(
+            room_id="!room:test",
+            card_event_id=card,
+        )
+        assert isinstance(view, ApprovalCardView)
+        assert view.current is False
+        assert (await _approve(manager, card, seconds=None)).consumed is False
+        assert await _call_row(journal, "fenced-room") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_active_grant_does_not_approve_a_call_already_past_its_deadline(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A call reserved after its deadline gets its own card, which the deadline then expires."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        assert (await _approve(manager, await _card(journal, manager, "granted"))).consumed
+        late = await _card(journal, manager, "past-deadline", expires_at_ns=1)
+        card = await pending_card(
+            journal.principal("router@shared").approvals,
+            room_id="!room:test",
+            card_event_id=late,
+        )
+        assert card is not None
+        assert card.kind == "request"
+        assert card.offers_timed_approval
+        assert await _call_row(journal, "past-deadline") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_only_the_requester_can_open_a_timed_grant_on_a_card(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The journal refuses a grant from anyone but the requester the card's consent names."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "consent")
+        decisions = await journal.principal("router@shared").approvals.create_approval_grant(
+            room_id="!room:test",
+            card_event_id=card,
+            sender_id="@intruder:test",
+            seconds=600,
+            metadata=ApprovalDecisionMetadata(resolved_by="@intruder:test"),
+        )
+        assert decisions == ()
+        assert await _call_row(journal, "consent") == (None, None)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Failure settlement expires only the cards of the paused reply that failed."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        await _card(journal, manager, "failed")
+        await _card(journal, manager, "still-waiting")
+        assert await manager.expire_continuation_cards("failed")
+        assert (await _call_row(journal, "failed"))[0] == "expired"
+        assert await _call_row(journal, "still-waiting") == (None, None)
+    finally:
         await manager.shutdown()

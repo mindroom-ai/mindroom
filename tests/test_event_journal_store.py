@@ -8245,6 +8245,13 @@ class TestApprovalContinuations:
 
         assert await alice.approvals.approval_continuation("approval-1") is None
         assert await alice.approvals.approval_continuation_for_source("$source-1") is None
+        # No card shows its calls, so they went with it.
+        assert (
+            await alice._backend.read(
+                lambda transaction: transaction.fetchall("SELECT owner_id FROM approval_calls"),
+            )
+            == ()
+        )
         # Both sources are ordinary pending work again, even for the runtime that claimed them.
         replayable = await alice.pending(runtime_generation="runtime-a")
         assert [event.event_id for event in replayable] == ["$source-1", "$source-2"]
@@ -8674,6 +8681,27 @@ class TestApprovalContinuations:
             "removed",
             "removed",
         ]
+
+    async def test_room_departure_discards_a_paused_reply_with_the_calls_no_card_shows(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A paused reply the responder's departure deletes takes the calls no live card shows with it."""
+        await self.admit_sources(alice)
+        await paused_for_approval(
+            alice,
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+
+        await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.REPORTED)
+
+        assert await alice.approvals.approval_continuation("approval-1") is None
+        assert (
+            await alice._backend.read(
+                lambda transaction: transaction.fetchall("SELECT owner_id FROM approval_calls"),
+            )
+            == ()
+        )
 
     async def test_room_departure_discards_continuation_and_cards_with_its_sources(
         self,
