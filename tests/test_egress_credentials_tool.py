@@ -841,3 +841,5 @@ def test_a_service_with_its_own_account_is_marked_and_the_note_names_the_header(
     assert _entry(payload, "mine")["separate_account"] is True
     assert "separate_account" not in _entry(payload, "github")
     assert "`X-Agent-Keys-Service: <name>`" in str(payload["note"])
+    # A key wins elsewhere, but such a service takes none, so the agent never sends the user to add one for it.
+    assert "a `separate_account: true` service takes no API key, only its own account" in str(payload["note"])
