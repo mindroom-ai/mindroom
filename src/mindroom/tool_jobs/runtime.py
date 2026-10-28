@@ -333,8 +333,6 @@ class ToolJobRuntime:
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
-        # Jobs that ended while their approval cards could not be denied yet; the coordinator retries them every pass.
-        self.unsettled_approvals: set[str] = set()
 
     @staticmethod
     def _canonical_owner(owner: ToolExecutionIdentity) -> ToolExecutionIdentity:
@@ -427,7 +425,8 @@ class ToolJobRuntime:
             if accepted:
                 await self._store.accept(job.job_id, job_json)
             else:
-                await self._store.save(job.job_id, job_json, payload_json)
+                # The save of an ended job denies its pending approval cards in the same commit.
+                await self._store.save(job.job_id, job_json, payload_json, ended=job.status in TERMINAL_STATUSES)
             entry.job, entry.saved, entry.unsaved_payload = job, True, None
             if job.status in TERMINAL_STATUSES:
                 # A durable terminal outcome ends execution; drop what only running work needed.

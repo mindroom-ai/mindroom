@@ -20,7 +20,13 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.event_journal import ApprovalCall, BackgroundApprovalDecision
+from mindroom.event_journal import (
+    JOB_ENDED_REASON,
+    ApprovalCall,
+    BackgroundApprovalDecision,
+    EventJournalStore,
+    tool_job_run_id,
+)
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from mindroom.tool_jobs.approvals import ask_job_approvals, end_tool_call_approval
@@ -38,10 +44,13 @@ from tests.tool_approval_helpers import gated_functions
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     job_actor,
+    job_card_decision,
     job_owner,
     job_tool,
+    reserve_job_card,
     resume_job_turn,
     run_job_turn,
+    saved_job_card_decision,
     saved_jobs,
     tool_job_runtime,
     toolkit_job_tools,
@@ -181,16 +190,21 @@ class _GatedTools(Toolkit):
 
 @dataclass
 class _Cards:
-    """Stand in for the approval store: record each card a job posts and answer it when the test decides."""
+    """Stand in for the approval store: record each card a job posts and answer it when the test decides.
+
+    Each card's call is reserved in the job journal, as the router reserves it, so the save of the job's end denies it.
+    """
 
     decision: asyncio.Future[BackgroundApprovalDecision]
+    journal: EventJournalStore
     posted: asyncio.Event = field(default_factory=asyncio.Event)
     requested: list[tuple[str, str, dict[str, object]]] = field(default_factory=list)
     # The authored toolkit each card names as its call's origin.
     toolkits: list[str] = field(default_factory=list)
     # The entity and operation each card binds its timed approvals to.
     grants: list[tuple[str | None, ApprovalOperation | None]] = field(default_factory=list)
-    settled: list[str] = field(default_factory=list)
+    # Each posted card's run and call.
+    calls: list[tuple[str, str]] = field(default_factory=list)
     cards: object = field(default_factory=object)
     transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
@@ -206,16 +220,17 @@ class _Cards:
         **_kwargs: object,
     ) -> BackgroundApprovalDecision:
         assert owner_kind == "job"
+        await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
+        self.calls.append((origin.run_id, origin.call_id))
         self.requested.append((origin.run_id, tool_name, arguments))
         self.toolkits.append(origin.toolkit_name)
         self.grants.append((entity_name, grant_operation))
         self.posted.set()
         return await asyncio.shield(self.decision)
 
-    async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
-        assert reason
-        self.settled.append(run_id)
-        return 0
+    async def decisions(self) -> list[BackgroundApprovalDecision | None]:
+        """Return the journal's decision of each posted card's call, None for a card that stays answerable."""
+        return [await job_card_decision(self.journal, run_id, call_id) for run_id, call_id in self.calls]
 
 
 @dataclass
@@ -243,12 +258,12 @@ class _GatedRun:
 
         async def interrupt(job: BackgroundJob) -> BackgroundOutcome | None:
             # The coordinator's cleanup of a stopped tool call's job.
-            return await end_tool_call_approval(self.runtime, job)
+            return end_tool_call_approval(job)
 
         self.runtime = await tool_job_runtime(self.tmp_path, cancel=interrupt)
         pin_background_tool_jobs(self.config, self.paths)
         register_background_runtime(self.paths, self.runtime)
-        self.cards = _Cards(asyncio.get_running_loop().create_future())
+        self.cards = _Cards(asyncio.get_running_loop().create_future(), self.runtime.journal)
         self.monkeypatch.setattr(approval_manager, "get_approval_store", lambda: self.cards)
         return self
 
@@ -351,8 +366,7 @@ async def test_cancelled_job_denies_the_card_it_waits_on(tmp_path: Path, monkeyp
                 await asyncio.wait_for(run.cards.posted.wait(), JOB_TEST_TIMEOUT)
                 await run.runtime.cancel(job_id, owner=run.owner, depth=0)
                 await wait_for_status(run.runtime, job_id, "cancelled")
-        [(card_run_id, _, _)] = run.cards.requested
-        assert card_run_id in run.cards.settled
+            assert await run.cards.decisions() == [BackgroundApprovalDecision("denied", JOB_ENDED_REASON)]
         assert run.effects == []
 
 
@@ -400,8 +414,11 @@ async def test_shutdown_while_a_call_waits_for_approval_says_it_did_not_run(
     job = (await saved_jobs(tmp_path))[job_id]
     assert job.status == "interrupted"
     assert job.result == "The runtime stopped while this call waited for its approval, so it did not run."
-    [(card_run_id, _, _)] = run.cards.requested
-    assert card_run_id in run.cards.settled
+    [(card_run_id, card_call_id)] = run.cards.calls
+    assert await saved_job_card_decision(tmp_path, card_run_id, card_call_id) == BackgroundApprovalDecision(
+        "denied",
+        JOB_ENDED_REASON,
+    )
     assert run.effects == []
 
 
@@ -447,15 +464,21 @@ async def test_a_restart_denies_the_card_a_crashed_call_waited_on(
         status="awaiting_approval",
     )
     await write_saved_job(tmp_path, job.job_id, json.dumps(asdict(job)))
-    cards = _Cards(asyncio.get_running_loop().create_future())
-    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    # No approval runtime exists yet to deny the card.
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: None)
 
     async def interrupt(saved: BackgroundJob) -> BackgroundOutcome | None:
-        return await end_tool_call_approval(runtime, saved)
+        return end_tool_call_approval(saved)
 
     runtime = await tool_job_runtime(tmp_path, cancel=interrupt)
+    run_id = tool_job_run_id(job.job_id)
     try:
+        await reserve_job_card(runtime.journal, run_id, "write-1", tool_name="write_report")
         await runtime.recover()
+        assert await job_card_decision(runtime.journal, run_id, "write-1") == BackgroundApprovalDecision(
+            "denied",
+            JOB_ENDED_REASON,
+        )
     finally:
         await runtime.shutdown()
     recovered = (await saved_jobs(tmp_path))[job.job_id]
@@ -463,7 +486,6 @@ async def test_a_restart_denies_the_card_a_crashed_call_waited_on(
         "interrupted",
         "The runtime stopped while this call waited for its approval, so it did not run.",
     )
-    assert cards.settled == [f"tool-job:{job.job_id}"]
 
 
 @pytest.mark.asyncio
@@ -599,7 +621,8 @@ async def test_job_cards_offer_timed_approval_only_for_calls_the_policy_gated(
 ) -> None:
     """As on a paused reply, a background child's call that asked for confirmation itself is approved only once."""
     config = Config(tool_approval=ToolApprovalConfig(default="require_approval"))
-    cards = _Cards(asyncio.get_running_loop().create_future())
+    runtime = await tool_job_runtime(tmp_path)
+    cards = _Cards(asyncio.get_running_loop().create_future(), runtime.journal)
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
     monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     tools = [
@@ -622,7 +645,6 @@ async def test_job_cards_offer_timed_approval_only_for_calls_the_policy_gated(
         )
         for tool in tools
     ]
-    runtime = await tool_job_runtime(tmp_path)
     owner = job_owner()
     decided: list[tuple[bool, str | None]] = []
 

@@ -1,9 +1,9 @@
 """Approval cards that a background job posts and owns while it waits for their decisions.
 
 A background subagent's gated calls ask here, and so does a gated tool call that runs as a job. The job stays
-`awaiting_approval` while its cards are open; an exit before every decision arrives denies the cards it posted.
-Timed approvals work as they do for a paused reply: the cards offer them, and an active one approves a call
-without a card.
+`awaiting_approval` while its cards are open; an exit before every decision arrives stops the card requests still
+open, and the save of the job's end denies the cards it posted. Timed approvals work as they do for a paused reply:
+the cards offer them, and an active one approves a call without a card.
 """
 
 from __future__ import annotations
@@ -20,9 +20,8 @@ from mindroom.approval.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.event_journal import JOB_ENDED_REASON, ApprovalDecision
+from mindroom.event_journal import ApprovalDecision, tool_job_run_id
 from mindroom.llm.runs import ToolExecution
-from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 
@@ -36,13 +35,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-logger = get_logger(__name__)
 _INTERRUPTED_APPROVAL_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
-
-
-def _approval_run_id(job_id: str) -> str:
-    """Name a job's approval cards in the exact-call approval domain that background work shares."""
-    return f"tool-job:{job_id}"
 
 
 async def ask_job_approvals(
@@ -58,7 +51,7 @@ async def ask_job_approvals(
     """Ask the requester about each planned call through cards the job owns, and wait for every decision.
 
     Returns each call's decision and denial reason, in order. Any exit before then, a cancellation or a failure,
-    stops the card requests still open and denies the cards already posted.
+    stops the card requests still open; the job's end denies the cards already posted.
     """
     gated = any(call.decision is None for call in calls)
     if gated:
@@ -70,8 +63,8 @@ async def ask_job_approvals(
     try:
         decided = await asyncio.gather(*decisions)
     except BaseException:
-        # Cancellation or a failed card ends this wait; no card of it may stay answerable.
-        await run_coroutine_until_complete(_end_wait(runtime, job_id, decisions))
+        # Cancellation or a failed card ends this wait, and the job's end denies its cards: none may post after it.
+        await run_coroutine_until_complete(_end_wait(decisions))
         raise
     if gated:
         await runtime.set_awaiting_approval(job_id, awaiting=False)
@@ -141,7 +134,7 @@ async def _decide(
     assert call.toolkit_name is not None
     decision = await manager.request_background_approval(
         origin=BackgroundScriptToolOrigin(
-            run_id=_approval_run_id(job_id),
+            run_id=tool_job_run_id(job_id),
             call_id=call.tool_call_id,
             requester_id=owner.requester_id,
             toolkit_name=call.toolkit_name,
@@ -163,40 +156,19 @@ async def _decide(
     return decision.status == "approved", decision.reason
 
 
-async def _end_wait(
-    runtime: ToolJobRuntime,
-    job_id: str,
-    decisions: Sequence[asyncio.Future[tuple[bool, str | None]]],
-) -> None:
-    """Stop every card request of an ended wait, so none posts later, then deny the cards already posted."""
+async def _end_wait(decisions: Sequence[asyncio.Future[tuple[bool, str | None]]]) -> None:
+    """Stop every card request of an ended wait, so none posts after the job's end denies its cards."""
     for decision in decisions:
         decision.cancel()
     await asyncio.gather(*decisions, return_exceptions=True)
-    await settle_job_approvals(runtime, job_id)
 
 
-async def end_tool_call_approval(runtime: ToolJobRuntime, job: BackgroundJob) -> BackgroundOutcome | None:
-    """Deny the card a stopped tool call's job waits on; a shutdown or restart during that wait leaves the call unrun."""
-    await settle_job_approvals(runtime, job.job_id)
+def end_tool_call_approval(job: BackgroundJob) -> BackgroundOutcome | None:
+    """Leave a stopped tool call unrun when a shutdown or restart stopped the job while it waited for its approval."""
     if job.status == "awaiting_approval" and job_stopped_by_shutdown():
         # The approval is the job's first phase, so unlike other interrupted work its call has no effects to check.
         return BackgroundOutcome("interrupted", _INTERRUPTED_APPROVAL_REASON)
     return None
-
-
-async def settle_job_approvals(runtime: ToolJobRuntime, job_id: str) -> None:
-    """Deny every card a job still waits on, or leave the job to the coordinator's retries while that cannot happen."""
-    manager = approval_manager.get_approval_store()
-    if manager is not None and manager.cards is not None:
-        try:
-            await manager.settle_pending_background_approvals(_approval_run_id(job_id), reason=JOB_ENDED_REASON)
-        except Exception:
-            # A settlement failure must not replace how the job ended.
-            logger.exception("Denying a background job's approval cards failed; retrying", job_id=job_id)
-        else:
-            runtime.unsettled_approvals.discard(job_id)
-            return
-    runtime.unsettled_approvals.add(job_id)
 
 
 async def prune_job_approvals(jobs: Iterable[BackgroundJob]) -> None:
@@ -205,4 +177,4 @@ async def prune_job_approvals(jobs: Iterable[BackgroundJob]) -> None:
     if manager is None:
         return
     for job in jobs:
-        await manager.prune_background_approvals(_approval_run_id(job.job_id))
+        await manager.prune_background_approvals(tool_job_run_id(job.job_id))
