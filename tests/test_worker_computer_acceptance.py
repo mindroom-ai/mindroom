@@ -14,12 +14,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
-from agno.tools.function import ToolResult
 
 from mindroom.api import computers
 from mindroom.config.main import Config
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workers.backend import WorkerBackendError
 from tests.test_docker_worker_backend import _backend
 from tests.test_shell_async import _make_runtime_paths
@@ -94,7 +94,7 @@ async def test_native_call_accepts_native_function_argument(tmp_path: Path, monk
     fixture = object.__new__(module.Fixture)
     fixture.args = SimpleNamespace(output=tmp_path)
     fixture.execute = AsyncMock(
-        return_value={"ok": True, "result": encode_media_result(ToolResult(content="### Result\n1"))},
+        return_value={"ok": True, "result": encode_media_result(ToolValue(content="### Result\n1"))},
     )
     result = await fixture.native("browser_evaluate", function="()=>1")
     fixture.execute.assert_awaited_once_with("browser_mcp", "browser_evaluate", {"function": "()=>1"})

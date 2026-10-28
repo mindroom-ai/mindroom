@@ -21,7 +21,6 @@ from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
-from agno.tools.function import ToolResult
 from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 from structlog.testing import capture_logs
@@ -46,6 +45,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
 from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
@@ -586,7 +586,7 @@ async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(
         console = json.loads(await tool.browser(action="console"))
         assert {"level": "error", "text": "Uncaught ReferenceError: drawChart is not defined"} in console["entries"]
         screenshot = await tool.browser(action="screenshot")
-        assert isinstance(screenshot, ToolResult)
+        assert isinstance(screenshot, ToolValue)
     finally:
         await tool.aclose()
 
@@ -883,7 +883,7 @@ async def test_desktop_target_returns_decrypted_browser_screenshot(
         result = await tool.browser(action="screenshot", target="desktop")
 
     assert not isinstance(result, str)
-    assert result.images is not None
+    assert result.images
     assert result.images[0].content == PNG_BYTES
     receipt = json.loads(result.content)
     assert receipt["view_status"] == "ready"
