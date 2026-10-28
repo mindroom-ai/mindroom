@@ -17,11 +17,13 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Agent session rows, runs, and summaries naming the id Agno derived from the agent's display name.
 # Legacy format: In agent `<name>`'s conversation database, a `session_type = 'agent'` row whose `agent_id` is not
 # `<name>`, a top-level run whose `agent_id` is not `<name>`, and a summary row under the scope the row's old owner
-# names. MindRoom built each Agno agent without an id, so Agno stored `generate_id_from_name(display_name)` (`Code
-# Agent` became `code-agent`); a row keeps the owner its last save wrote, a run the id it was saved under, and storage
-# v2 copied both as it found them and stored a row's Agno summary under the scope of its owner. A row or run without an
-# owner, which no release wrote, is selected too.
-# Last legacy release: v2026.2.54; replacement: v2026.2.55 passed the agent's name as its id.
+# names. Until v2026.2.55 MindRoom built each Agno agent without an id, so Agno stored
+# `generate_id_from_name(display_name)` (`Code Agent` became `code-agent`) on every session it created. A row keeps the
+# owner it was created with, because Agno loaded a stored session with its stored owner and saved that back, and storage
+# v2 copied the row as it found it; a run keeps the id it was saved under; and storage v2 stored a row's Agno summary
+# under the scope of its owner. A row or run without an owner, which no release wrote, is selected too.
+# Last legacy release: v2026.10.634, which still saves such rows with their creation owner; replacement: the next
+# release, whose layout version 3 makes them name the agent.
 # Handling: The agent's store open and the startup sweep set their agent to `<name>` once: in the conversion of an
 # Agno-layout database, or when a storage v2 database moves to layout version 3. The session's owner is then its
 # history scope: its summary rows move with it, keeping their order and provenance, a later compaction's summary

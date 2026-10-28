@@ -132,7 +132,7 @@ async def test_the_startup_sweep_adopts_agent_rows_and_leaves_team_and_system_ro
 
 
 def test_a_compaction_after_the_adoption_replays_its_summary(tmp_path: Path) -> None:
-    """A conversation last saved under the display-name id keeps its summary and compacted run after a compaction."""
+    """A conversation started under the display-name id keeps its summary and compacted run after a compaction."""
     _agno_database(tmp_path / "code", _session("session", _DISPLAY_NAME_ID))
     store: ConversationStore = create_agent_state_storage("code", tmp_path / "code")
     session = store.load_session("session", "agent")

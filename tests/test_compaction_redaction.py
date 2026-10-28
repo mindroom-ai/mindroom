@@ -380,13 +380,13 @@ def test_a_late_save_after_a_legacy_clear_cannot_replay_the_cleared_run(
 
 
 @pytest.mark.asyncio
-async def test_redaction_cleans_the_agent_runs_of_a_conversation_last_saved_under_its_display_name_id(
+async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_its_display_name_id(
     tmp_path: Path,
 ) -> None:
     """Cleanup takes the scope from the session, which the agent's store open makes name the agent.
 
-    Releases before v2026.2.55 let Agno derive an agent's id from its display name, and a row keeps the owner its last
-    save wrote, so a conversation last saved then named ``code-agent`` while the runs it gets now belong to ``code``.
+    Releases before v2026.2.55 let Agno derive an agent's id from its display name, and a row keeps the owner it was
+    created with, so a conversation started then named ``code-agent`` while the runs it gets now belong to ``code``.
     """
     old_run = replace(_run("old"), agent_id="code-agent")
     old_session = ConversationSession(session_id="session", kind="agent", owner_id="code-agent", runs=[old_run])
