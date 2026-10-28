@@ -10539,14 +10539,14 @@ async def test_one_runtime_holds_a_journal_at_a_time(journal_database: Callable[
     second = journal_database()
     assert await first.hold_exclusively("journal-identity")
     assert await first.hold_exclusively("journal-identity")
-    assert await first.still_held()
+    assert await first.still_usable()
     assert not await second.hold_exclusively("journal-identity")
-    assert not await second.still_held()
+    assert not await second.still_usable()
 
     await first.close()
 
     assert await second.hold_exclusively("journal-identity")
-    assert await second.still_held()
+    assert await second.still_usable()
 
 
 async def test_a_postgres_journal_hold_lets_the_server_drop_a_vanished_holder(postgres_journal_url: str) -> None:
@@ -10570,10 +10570,45 @@ async def test_a_postgres_journal_hold_lets_the_server_drop_a_vanished_holder(po
         await store.close()
 
 
-@pytest.mark.parametrize("lost", ["writer", "readers"])
-async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_held(
+async def test_every_postgres_journal_connection_detects_a_silent_drop(postgres_journal_url: str) -> None:
+    """Each connection keeps client keepalives, so one cut off without a reset fails within a minute and stops the runtime."""
+    from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
+
+    store = EventJournalStore.open_postgres(postgres_journal_schema_url(postgres_journal_url))
+    try:
+        assert await store.hold_exclusively("keepalive-identity")
+        backend = store.backend
+        assert isinstance(backend, PostgresBackend)
+        assert backend._hold is not None
+        for connection in (backend._hold, backend._writer, backend._recovery_reader, *backend._pool):
+            parameters = connection.info.get_parameters()
+            assert {key: parameters.get(key) for key in ("keepalives_idle", "tcp_user_timeout")} == {
+                "keepalives_idle": "30",
+                "tcp_user_timeout": "60000",
+            }
+    finally:
+        await store.close()
+
+
+def _lose_the_writer(backend: PostgresBackend, principal: PrincipalStore) -> tuple[list[object], Awaitable[object]]:
+    return [backend._writer], admit(principal, "$after")
+
+
+def _lose_the_readers(backend: PostgresBackend, principal: PrincipalStore) -> tuple[list[object], Awaitable[object]]:
+    return list(backend._pool), principal.is_pending("$before")
+
+
+def _lose_the_recovery_reader(
+    backend: PostgresBackend,
+    _principal: PrincipalStore,
+) -> tuple[list[object], Awaitable[object]]:
+    return [backend._recovery_reader], backend.recovery_read(lambda transaction: transaction.fetchone("SELECT 1"))
+
+
+@pytest.mark.parametrize("lose", [_lose_the_writer, _lose_the_readers, _lose_the_recovery_reader])
+async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_usable(
     postgres_journal_url: str,
-    lost: str,
+    lose: Callable[[PostgresBackend, PrincipalStore], tuple[list[object], Awaitable[object]]],
 ) -> None:
     """Journal connections never reconnect, so losing one stops the runtime as losing the lock's session does."""
     import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
@@ -10588,17 +10623,17 @@ async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_held(
         assert await admit(principal, "$before") is AdmissionResult.ADMITTED
         backend = store.backend
         assert isinstance(backend, PostgresBackend)
-        terminated = [backend._writer] if lost == "writer" else backend._pool
+        terminated, use = lose(backend, principal)
         with psycopg.connect(database_url, autocommit=True) as admin:
             for connection in terminated:
+                assert isinstance(connection, psycopg.Connection)
                 admin.execute("SELECT pg_terminate_backend(%s)", (connection.info.backend_pid,))
 
-        use = admit(principal, "$after") if lost == "writer" else principal.is_pending("$before")
         with pytest.raises(psycopg.OperationalError):
             await use
 
         assert backend._hold is not None
         assert backend._hold.execute("SELECT 1").fetchone() == (1,)
-        assert not await store.still_held()
+        assert not await store.still_usable()
     finally:
         await store.close()

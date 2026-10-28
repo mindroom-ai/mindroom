@@ -327,7 +327,7 @@ class SqliteBackend:
             )
         return self._hold is not None
 
-    async def still_held(self) -> bool:
+    async def still_usable(self) -> bool:
         """Return whether this runtime holds the database; an open descriptor holds it until close."""
         return self._hold is not None
 

@@ -65,7 +65,7 @@ class Backend(Protocol):
         """Claim the journal named ``identity`` for this runtime until close; ``False`` when another runtime holds it."""
         ...
 
-    async def still_held(self) -> bool:
+    async def still_usable(self) -> bool:
         """Return whether the claim ``hold_exclusively`` took still holds and the journal can still be used."""
         ...
 
