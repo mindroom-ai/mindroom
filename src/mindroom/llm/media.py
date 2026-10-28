@@ -340,6 +340,12 @@ class File:
 MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
+def _named_type(name: str) -> str | None:
+    """Return the type a file name names; a compressed name, such as ``report.csv.gz``, names none."""
+    named, encoding = mimetypes.guess_type(name)
+    return named if encoding is None else None
+
+
 def named_by_resource[T: Image | Audio | Video | File](
     media: T,
     resource_name: str,
@@ -356,11 +362,11 @@ def named_by_resource[T: Image | Audio | Video | File](
     """
     if isinstance(media, File):
         filename = media.filename or media.name or resource_name or None
-        candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(resource_name)[0])
+        candidates = (declared_mime, _named_type(filename or ""), _named_type(resource_name))
         mime_type = media.mime_type or next((value for value in candidates if value in DOCUMENT_MIME_TYPES), None)
         return replace(media, filename=filename, mime_type=mime_type)
     mime_type, media_format = media.mime_type, media.format
-    named_type = mimetypes.guess_type(resource_name)[0]
+    named_type = _named_type(resource_name)
     if mime_type is None and media_format is None:
         family = MEDIA_MIME_FAMILIES[type(media)]
         candidates = (declared_mime, named_type if isinstance(media, Image) else None)
