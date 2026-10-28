@@ -78,7 +78,7 @@ class GeminiProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
+        Media uploads happen first, so their SDK and transport errors are normalized too.
         """
         started = time.monotonic()
         reply = GeminiReply()

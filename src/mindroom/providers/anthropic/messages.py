@@ -1,9 +1,9 @@
 """The Claude adapter over the Anthropic Messages API, on the direct API, Vertex AI, and Bedrock Mantle.
 
-One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
-fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
-resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. The only state an adapter keeps is the ambient Google credentials a Vertex route
+One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request builds
+its SDK client and wire body off the event loop (Bedrock credential resolution and attachment encoding block),
+streams the reply through the SDK's message stream, and parses the finished message once; the pipeline already
+downloaded its URL media. The only state an adapter keeps is the ambient Google credentials a Vertex route
 discovers once.
 """
 
