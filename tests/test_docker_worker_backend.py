@@ -330,8 +330,7 @@ class _ConcurrentTagUpdate:
             return self.stale_launch_config
         return launch_config
 
-    def wait_for_ready(self, container: _FakeContainer, *, replacing: bool = False) -> str:
-        del replacing
+    def wait_for_ready(self, container: _FakeContainer) -> str:
         if container.attrs["Image"] == "sha256:image-v1":
             raise _WorkerImageIncompatibleError(_STALE_IMAGE_MISMATCH)
         if self.thread_context.worker_key == self.recovering_key:
@@ -796,19 +795,19 @@ def _launch(
 
 
 def _docker_backend(**kwargs: Any) -> DockerWorkerBackend:  # noqa: ANN401
-    """Build a backend whose applied launch is its host config file, as `_applied_launch` reads it."""
+    """Build a backend whose applied launch is read from its config file, which these tests make the primary's."""
     backend = DockerWorkerBackend(current_launch=lambda: _applied_launch(backend), **kwargs)
     return backend
 
 
-# The tool validation snapshot each test backend's applied launch carries; a backend's applied config is its file.
+# The tool validation snapshot each test backend's applied launch carries; the config is the backend's config file.
 _APPLIED_TOOL_SNAPSHOTS: weakref.WeakKeyDictionary[DockerWorkerBackend, dict[str, dict[str, object]] | None] = (
     weakref.WeakKeyDictionary()
 )
 
 
 def _applied_launch(backend: DockerWorkerBackend) -> WorkerLaunchConfig:
-    """Return the launch the backend's primary applies now: its host config file, with the snapshot last set."""
+    """Return the launch the backend's primary applies now: its config file, with the snapshot last set."""
     if backend in _APPLIED_TOOL_SNAPSHOTS and _APPLIED_TOOL_SNAPSHOTS[backend] is None:
         msg = "Dedicated workers need the applied config, and none is available yet."
         raise WorkerBackendError(msg)
@@ -826,7 +825,7 @@ def _spec(
 ) -> WorkerSpec:
     """Return one worker request, applying ``tool_validation_snapshot`` to the backend's launch when given.
 
-    Like every caller but a script run, the request pins no launch: the backend reads the applied one.
+    The request carries no launch: the backend reads the applied one.
     """
     if tool_validation_snapshot is not None:
         _APPLIED_TOOL_SNAPSHOTS[backend] = tool_validation_snapshot
@@ -1240,24 +1239,27 @@ def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtim
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Host-config overrides should also re-anchor relative assets and sibling .env values."""
+    """The host config path re-anchors the applied config's relative assets and sibling .env; its content is unused."""
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     runtime_config_path = runtime_dir / "config.yaml"
     runtime_config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: test-model\nagents: {}\nrouter:\n  model: default\n",
+        "plugins:\n  - ./plugin.py\nmodels:\n  default:\n    provider: openai\n    id: test-model\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
+    (runtime_dir / "plugin.py").write_text("PLUGIN = 1\n", encoding="utf-8")
     (runtime_dir / ".env").write_text("BROWSER_EXECUTABLE_PATH=/runtime/browser\n", encoding="utf-8")
 
+    # The same config directory as the Docker host sees it; a plugin only this file lists is never projected.
     host_config_dir = tmp_path / "host-config"
     host_config_dir.mkdir()
     host_config_path = host_config_dir / "docker-host-config.yaml"
     host_config_path.write_text(
-        "plugins:\n  - ./plugin.py\nmodels:\n  default:\n    provider: openai\n    id: test-model\nagents: {}\nrouter:\n  model: default\n",
+        "plugins:\n  - ./host-only.py\nmodels:\n  default:\n    provider: openai\n    id: test-model\nagents: {}\nrouter:\n  model: default\n",
         encoding="utf-8",
     )
     (host_config_dir / "plugin.py").write_text("PLUGIN = 1\n", encoding="utf-8")
+    (host_config_dir / "host-only.py").write_text("PLUGIN = 2\n", encoding="utf-8")
     (host_config_dir / ".env").write_text("BROWSER_EXECUTABLE_PATH=/hostcfg/browser\n", encoding="utf-8")
 
     runtime_paths = resolve_runtime_paths(
@@ -1295,16 +1297,17 @@ def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtim
     )
     projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "projection-test"),
-        launch=_launch(backend._runtime_paths),
+        launch=_launch(runtime_paths),
         materialize=False,
     )
 
     assert backend._runtime_paths.config_path == host_config_path.resolve()
     assert backend._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") == "/hostcfg/browser"
     assert ".mindroom-worker-assets/plugins/00-plugin.py" in projection.projected_yaml
-    assert [asset.relative_path.as_posix() for asset in projection.assets] == [
-        ".mindroom-worker-assets/plugins/00-plugin.py",
+    assert [(asset.relative_path.as_posix(), asset.host_path) for asset in projection.assets] == [
+        (".mindroom-worker-assets/plugins/00-plugin.py", (host_config_dir / "plugin.py").resolve()),
     ]
+    assert "host-only" not in projection.projected_yaml
 
 
 def test_docker_backend_config_signature_supports_nested_relative_host_config_paths(tmp_path: Path) -> None:
@@ -3733,11 +3736,10 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
     fake_client.images.pull_image_id = "sha256:image-v2"
     readiness_calls = 0
 
-    def _wait_for_ready(container: _FakeContainer, *, replacing: bool = False) -> str:
+    def _wait_for_ready(container: _FakeContainer) -> str:
         nonlocal readiness_calls
         readiness_calls += 1
         if container.attrs["Image"] == "sha256:image-v1":
-            assert not replacing
             raise _WorkerImageIncompatibleError(_STALE_IMAGE_MISMATCH)
         if readiness_calls == 2:
             message = "replacement failed"

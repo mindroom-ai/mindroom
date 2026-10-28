@@ -405,7 +405,7 @@ class ScriptRunManager:
                     max_concurrent_runs=effective_limits.max_concurrent_runs,
                     worker_spec=worker_spec,
                 )
-            run, worker_spec = self._bind_admitted_worker_profile(
+            run, worker_spec = await self._bind_admitted_worker_profile(
                 context,
                 run=run,
                 worker_spec=_require_worker_spec(worker_spec),
@@ -422,7 +422,7 @@ class ScriptRunManager:
         finally:
             await self._release_launch_admission()
 
-    def _bind_admitted_worker_profile(
+    async def _bind_admitted_worker_profile(
         self,
         context: ToolRuntimeContext,
         *,
@@ -435,9 +435,10 @@ class ScriptRunManager:
         Read once admitted, the launch names the authority the worker launches with: a reload that changes it waits
         for admitted launches and fences new ones until it is published, and any other reload leaves it unchanged.
         """
+        # Deriving the launch can build the tool validation snapshot, so it stays off the event loop.
+        launch = await asyncio.to_thread(_script_worker_launch, context.runtime_paths)
         backend = _require_script_launch_backend(self._worker_backend_for(None), context.runtime_paths)
         profile, requests, limits = _resolve_script_resource_profile(backend, requested_profile)
-        launch = _script_worker_launch(context.runtime_paths)
         return (
             replace(
                 run,

@@ -613,11 +613,13 @@ class KubernetesWorkerBackend:
         mismatch = ready_worker_protocol_mismatch(
             self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
             worker=f"Kubernetes worker image '{self.config.image}'",
-            replacing=is_replacement,
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
             newer_worker_hint=_RESTART_RUNTIME_HINT,
         )
+        if mismatch is not None and is_replacement:
+            # A worker is replaced once; a replacement that still mismatches fails the request.
+            raise WorkerBackendError(mismatch.error)
         return mismatch is not None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:

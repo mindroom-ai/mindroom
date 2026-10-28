@@ -19,6 +19,7 @@ from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001 - pyd
 # 5: a shell call's PATH directories go first on the command's PATH.
 # 6: requests and responses are these typed models, which refuse unknown fields, and each request names its
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
+# A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
 WORKER_PROTOCOL_VERSION = 6
 
 FailureKind = Literal["tool", "worker"]

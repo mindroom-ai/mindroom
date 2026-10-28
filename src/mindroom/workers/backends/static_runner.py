@@ -151,7 +151,6 @@ class StaticSandboxRunnerBackend:
         mismatch = ready_worker_protocol_mismatch(
             response,
             worker=f"Sandbox runner at '{runner_root}'",
-            replacing=False,
             older_worker_hint=_OLDER_RUNNER_HINT,
         )
         if mismatch is not None:

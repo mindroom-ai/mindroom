@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
@@ -42,14 +41,12 @@ def ready_worker_protocol_mismatch(
     response: httpx.Response,
     *,
     worker: str,
-    replacing: bool,
     older_worker_hint: str | None = None,
     newer_worker_hint: str | None = None,
 ) -> WorkerProtocolMismatch | None:
-    """Return why a ready worker must be replaced, or None when it speaks this runtime's protocol.
+    """Return why a ready worker speaks another protocol, or None when it speaks this runtime's.
 
     ``worker`` names the worker in the error, such as ``Docker worker image 'mindroom:dev'``.
-    A backend replaces a mismatched worker once: a worker started as that replacement raises its mismatch instead.
     ``older_worker_hint`` is appended only when the worker reports an older or no protocol,
     and ``newer_worker_hint`` only when it reports a newer one.
     """
@@ -85,6 +82,4 @@ def ready_worker_protocol_mismatch(
         advice = f"{mismatch} Use a worker image built for this MindRoom release."
         hint = older_worker_hint
     error = advice if hint is None else f"{advice} {hint}"
-    if replacing:
-        raise WorkerBackendError(error)
     return WorkerProtocolMismatch(error=error, worker_is_newer=newer_worker)

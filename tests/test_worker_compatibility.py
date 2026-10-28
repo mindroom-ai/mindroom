@@ -5,14 +5,13 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
 
 
 def _first_check(response: httpx.Response, **kwargs: str) -> WorkerProtocolMismatch | None:
     """Check a ready worker that replaces no other worker."""
-    return ready_worker_protocol_mismatch(response, replacing=False, **kwargs)
+    return ready_worker_protocol_mismatch(response, **kwargs)
 
 
 def test_worker_health_accepts_matching_protocol() -> None:
@@ -27,7 +26,6 @@ def test_worker_health_accepts_matching_protocol() -> None:
     )
 
     assert _first_check(response, worker="Docker worker image 'mindroom:2026.8.1'") is None
-    assert ready_worker_protocol_mismatch(response, worker="Docker worker image 'mindroom'", replacing=True) is None
 
 
 @pytest.mark.parametrize(
@@ -116,18 +114,3 @@ def test_worker_health_rejects_malformed_payload(response: httpx.Response) -> No
     assert mismatch is not None
     assert "got missing" in mismatch.error
     assert "worker MindRoom version unknown" in mismatch.error
-
-
-@pytest.mark.parametrize("reported_protocol", [3, WORKER_PROTOCOL_VERSION + 1], ids=["older", "newer"])
-def test_a_replacement_worker_that_still_mismatches_fails_instead_of_being_replaced_again(
-    reported_protocol: int,
-) -> None:
-    """A backend replaces a mismatched worker once; the replacement's mismatch is the error it reports."""
-    response = httpx.Response(200, json={"status": "ok", "mindroom_version": "x", "worker_protocol": reported_protocol})
-    first = _first_check(response, worker="Docker worker image 'mindroom:latest'")
-    assert first is not None
-
-    with pytest.raises(WorkerBackendError) as exc_info:
-        ready_worker_protocol_mismatch(response, worker="Docker worker image 'mindroom:latest'", replacing=True)
-
-    assert str(exc_info.value) == first.error

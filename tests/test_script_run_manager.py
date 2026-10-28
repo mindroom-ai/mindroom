@@ -414,7 +414,7 @@ async def test_a_launch_admitted_after_a_reload_binds_the_reloaded_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launch that waited for admission while a reload applied launches, and records recovery, with the new config."""
+    """A launch admitted after a reload applied records recovery with the new config, derived off the event loop."""
     manager, backend, _client = _manager(tmp_path, backend="kubernetes", isolated_script_gateway=True)
     backend.backend_name = "kubernetes"
     context = _context(tmp_path, backend="kubernetes", isolated_script_gateway=True)
@@ -428,14 +428,20 @@ async def test_a_launch_admitted_after_a_reload_binds_the_reloaded_authority(
         applied["config"] = reloaded
         await admit(self)
 
+    derived_on: list[int] = []
+
+    def derive_launch(_paths: object) -> object:
+        # Deriving a launch can build the tool validation snapshot, which must not hold up the event loop.
+        derived_on.append(threading.get_ident())
+        return build_worker_launch_config(applied["config"], tool_validation_snapshot={})
+
     monkeypatch.setattr(manager_module.ScriptRunManager, "_admit_launch", admit_after_a_reload)
-    monkeypatch.setattr(
-        manager_module,
-        "current_worker_launch_config",
-        lambda _paths: build_worker_launch_config(applied["config"], tool_validation_snapshot={}),
-    )
+    monkeypatch.setattr(manager_module, "current_worker_launch_config", derive_launch)
 
     run = await manager.run(context, source="print('ok')\n")
+
+    assert derived_on
+    assert threading.get_ident() not in derived_on
 
     assert run.recovery_signature == script_recovery_signature(
         backend=backend,

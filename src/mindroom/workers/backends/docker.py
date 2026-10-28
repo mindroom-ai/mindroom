@@ -676,7 +676,8 @@ class DockerWorkerBackend:
                         launch_config=launch_config,
                         mismatch=stale_error.mismatch,
                     )
-                    endpoint = self._wait_for_ready(container, replacing=True)
+                    # A worker is replaced once; a replacement that still mismatches fails the request.
+                    endpoint = self._wait_for_ready(container)
             except Exception as exc:
                 failure_reason = str(exc)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
@@ -1238,7 +1239,7 @@ class DockerWorkerBackend:
             msg = f"Failed to refresh Docker worker state: {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _wait_for_ready(self, container: _DockerContainer, *, replacing: bool = False) -> str:
+    def _wait_for_ready(self, container: _DockerContainer) -> str:
         host_port = self._container_host_port(container)
         if host_port is None:
             msg = "Docker worker is missing a published port."
@@ -1263,7 +1264,6 @@ class DockerWorkerBackend:
                     mismatch = ready_worker_protocol_mismatch(
                         response,
                         worker=f"Docker worker image '{self.config.image}'",
-                        replacing=replacing,
                     )
                     if mismatch is not None:
                         raise _WorkerImageIncompatibleError(mismatch)

@@ -21589,6 +21589,7 @@ Smaller changes that need operator action:
 - **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 - **Dedicated workers**: the upgrade replaces every Docker and Kubernetes worker once on its next use, which ends background shell commands running in it.
   Kubernetes background scripts still running during the upgrade are interrupted when MindRoom starts again instead of resuming; start them again.
+- **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 
 ### Compaction History
 
