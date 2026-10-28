@@ -14,10 +14,7 @@ from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import watch_session_row
-from mindroom.tool_system.runtime_context import (
-    resolve_tool_runtime_hook_bindings,
-    runtime_context_from_dispatch_context,
-)
+from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context, scope_hook_context_kwargs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -53,7 +50,6 @@ async def session_started_on_creation(
     reply: ReplySession | None,
     *,
     correlation_id: str,
-    logger: structlog.stdlib.BoundLogger,
 ) -> AsyncIterator[None]:
     """Run one reply, then emit ``session:started`` once if a write the reply made created its session's row.
 
@@ -70,25 +66,14 @@ async def session_started_on_creation(
         yield
     if not watch.created:
         return
-    bindings = resolve_tool_runtime_hook_bindings(context)
     hook_context = SessionHookContext(
-        event_name=EVENT_SESSION_STARTED,
-        plugin_name="",
-        settings={},
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        logger=logger.bind(event_name=EVENT_SESSION_STARTED, session_id=context.session_id),
-        correlation_id=correlation_id,
-        message_sender=bindings.message_sender,
-        matrix_admin=bindings.matrix_admin,
-        room_state_querier=bindings.room_state_querier,
-        room_state_putter=bindings.room_state_putter,
-        agent_name=reply.scope.scope_id if reply.scope.kind == "team" else context.agent_name,
-        scope=reply.scope,
-        session_id=context.session_id,
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-        _hook_registry_state=context.hook_registry_state,
+        **scope_hook_context_kwargs(
+            context,
+            event_name=EVENT_SESSION_STARTED,
+            correlation_id=correlation_id,
+            scope=reply.scope,
+            session_id=context.session_id,
+        ),
     )
     await emit(context.hook_registry, EVENT_SESSION_STARTED, hook_context)
 

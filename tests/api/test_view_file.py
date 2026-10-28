@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agno.tools.function import ToolResult
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -21,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import FileAccess
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ViewFileRequest
 
 TOKEN = "view-file-test-token"  # noqa: S105
@@ -169,11 +169,11 @@ async def test_view_file_endpoint_keeps_event_loop_responsive_during_decode(
     client, workspace = view_file_client
     release = threading.Event()
 
-    def blocking_view(_path: str, *, workspace: Path, file_access: FileAccess) -> ToolResult:
+    def blocking_view(_path: str, *, workspace: Path, file_access: FileAccess) -> ToolValue:
         assert workspace.name == "workspace"
         assert file_access == "workspace"
         release.wait(timeout=1)
-        return ToolResult(content="decoded")
+        return ToolValue(content="decoded")
 
     monkeypatch.setattr(sandbox_runner, "view_agent_image", blocking_view)
     request = type("Request", (), {"app": client.app})()
@@ -241,6 +241,6 @@ async def test_view_file_endpoint_prefers_prepared_worker_workspace(
 
     assert response.ok is True
     result = decode_media_result(response.result)
-    assert isinstance(result, ToolResult)
-    assert result.images is not None
+    assert isinstance(result, ToolValue)
+    assert result.images
     assert result.images[0].content == data

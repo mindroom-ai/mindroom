@@ -581,7 +581,6 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.stop",
     "mindroom.streaming",
-    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.events",
     "mindroom.tool_system.tool_function",
@@ -1709,8 +1708,10 @@ depends_on = [
     "mindroom.desktop.input",
     "mindroom.desktop.media",
     "mindroom.desktop.protocol",
+    "mindroom.llm",
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -2225,11 +2226,11 @@ depends_on = []
 path = "mindroom.api.computer_browser_binding"
 depends_on = [
     "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.tool_function",
     "mindroom.custom_tools.browser_mcp",
     "mindroom.tools.browser_mcp",
     "mindroom.worker_computer.mcp_catalog",
     "mindroom.worker_computer.protocol",
-    "mindroom.tool_system.agno_toolkits",
 ]
 visibility = ["mindroom.api.sandbox_runner"]
 
@@ -2452,6 +2453,7 @@ path = "mindroom.custom_tools.attachments"
 depends_on = [
     "mindroom.constants",
     "mindroom.file_access",
+    "mindroom.llm",
     "mindroom.media_delivery",
     "mindroom.tool_system.media_attachments",
     "mindroom.matrix.client_delivery",
@@ -2460,6 +2462,7 @@ depends_on = [
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]
@@ -5457,7 +5460,6 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.workspaces",
     "mindroom.tool_system.agno_toolkits",
-    "mindroom.tool_system.tool_function",
 ]
 
 [[modules]]
@@ -5650,11 +5652,11 @@ depends_on = [
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_environment",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.egress_broker",
-    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[modules]]
@@ -5741,16 +5743,15 @@ path = "mindroom.tool_system.media_attachments"
 depends_on = [
     "mindroom.providers.registry",
     "mindroom.tool_system.runtime_context",
-    "mindroom.tool_system.agno_toolkits",
 ]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"
-depends_on = ["mindroom.tool_system.agno_toolkits"]
+depends_on = ["mindroom.llm", "mindroom.tool_system.tool_function"]
 
 [[modules]]
 path = "mindroom.media_delivery"
-depends_on = ["mindroom.file_access", "mindroom.llm", "mindroom.path_confinement", "mindroom.tool_system.agno_toolkits"]
+depends_on = ["mindroom.file_access", "mindroom.llm", "mindroom.path_confinement", "mindroom.tool_system.tool_function"]
 visibility = [
     "mindroom.api.sandbox_runner",
     "mindroom.custom_tools.attachments",
@@ -7150,6 +7151,7 @@ expose = [
     "resolve_current_session_id",
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
+    "scope_hook_context_kwargs",
     "tool_runtime_context",
     "tool_runtime_model_context",
     "worker_progress_pump_scope",
@@ -8730,7 +8732,6 @@ depends_on = [
     "mindroom.llm",
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.types",
-    "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.call_record",
     "mindroom.failure_text",

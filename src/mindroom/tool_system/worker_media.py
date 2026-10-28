@@ -5,6 +5,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -12,13 +13,13 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from httpx._utils import get_environment_proxies
 
-from mindroom.llm.media import canonical_mime_type
+from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource
 from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
-from mindroom.tool_system.agno_toolkits import AgnoAudio, AgnoFile, AgnoImage, AgnoVideo, ToolResult
+from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
-type _Media = AgnoImage | AgnoAudio | AgnoVideo | AgnoFile
+type _Media = Image | Audio | Video | File
 
 _AUDIO_FORMAT_BY_MIME_TYPE = {
     "audio/mpeg": "mp3",
@@ -103,20 +104,18 @@ def _resource_name(media: _Media) -> str:
 def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]:
     """Retain provider-relevant resource identity before dropping its location."""
     name = _resource_name(media)
-    if isinstance(media, AgnoFile):
-        filename = media.filename or media.name or name or None
-        candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
-        mime = media.mime_type or next((value for value in candidates if value in AgnoFile.valid_mime_types()), None)
-        return {"filename": filename, "mime_type": mime}
+    if isinstance(media, File):
+        named = named_by_resource(media, name, declared_mime)
+        return {"filename": named.filename, "mime_type": named.mime_type}
     updates: dict[str, Any] = {}
     if media.mime_type is None and media.format is None:
         family = media_transport.MEDIA_MIME_FAMILIES[type(media)]
-        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, AgnoImage) else None
+        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, Image) else None
         candidates = (declared_mime, inferred_mime)
         updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
-    if isinstance(media, (AgnoAudio, AgnoVideo)) and media.format is None and name:
+    if isinstance(media, (Audio, Video)) and media.format is None and name:
         updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
-    if isinstance(media, AgnoAudio) and media.format is None:
+    if isinstance(media, Audio) and media.format is None:
         suffix_mime = mimetypes.guess_type(name)[0] or ""
         if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
             mime = media.mime_type or updates.get("mime_type")
@@ -126,8 +125,8 @@ def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]
 
 
 def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
-    if limit <= 0 or media.media_reference is not None or (isinstance(media, AgnoFile) and media.external is not None):
-        msg = "Unsupported worker media resource or exhausted byte limit."
+    if limit <= 0:
+        msg = "Worker media exhausted the byte limit."
         raise ValueError(msg)
     declared_mime = None
     try:
@@ -143,38 +142,34 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
     except (OSError, httpx.HTTPError, ServerFetchUrlError):
         msg = "Unable to read worker media resource."
         raise ValueError(msg) from None
-    if isinstance(media, AgnoFile) and isinstance(content, str):
+    if isinstance(content, str):
         content = content.encode("utf-8")
-    if not isinstance(content, bytes) or not content or len(content) > limit:
+    if not content or len(content) > limit:
         msg = "Worker media must contain bytes within the byte limit."
         raise ValueError(msg)
     updates = {"content": content, "url": None, "filepath": None, **_inline_metadata(media, declared_mime)}
-    return media.model_copy(update=updates), len(content)
+    return replace(media, **updates), len(content)
 
 
 def serialize_worker_tool_result(result: object) -> object:
     """Resolve bounded media in the worker; ordinary results keep their JSON form."""
-    if not isinstance(result, ToolResult):
+    value = read_tool_value(result)
+    if value is None:
         result = to_json_compatible(result)
         if media_transport.is_media_result_envelope(result):
             return media_transport.encode_media_result(result)
         return result
-    sources = {
-        "images": result.images or [],
-        "audios": result.audios or [],
-        "videos": result.videos or [],
-        "files": result.files or [],
-    }
-    if sum(map(len, sources.values())) > media_transport.MAX_MEDIA_COUNT:
+    if sum(1 for _ in value.media()) > media_transport.MAX_MEDIA_COUNT:
         msg = "Worker media exceeds the item limit."
         raise ValueError(msg)
     total = 0
-    prepared: dict[str, Any] = {}
-    for field, items in sources.items():
-        prepared[field] = []
+    prepared: dict[str, list[Any]] = {"images": [], "audios": [], "videos": [], "files": []}
+    for field, items in zip(prepared, (value.images, value.audios, value.videos, value.files), strict=True):
         for media in items:
             limit = min(media_transport.MAX_MEDIA_BYTES, media_transport.MAX_TOTAL_MEDIA_BYTES - total)
             item, size = _materialize_media(media, limit)
             total += size
             prepared[field].append(item)
-    return media_transport.encode_media_result(result.model_copy(update=prepared))
+    return media_transport.encode_media_result(
+        replace(value, **{field: tuple(items) for field, items in prepared.items()}),
+    )

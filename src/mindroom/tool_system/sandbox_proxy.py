@@ -24,6 +24,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
+from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -31,6 +32,7 @@ from mindroom.tool_system.runtime_context import (
     get_worker_progress_pump,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
     SANDBOX_PROXY_VIEW_FILE_PATH,
@@ -71,7 +73,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit, ToolResult
+    from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
@@ -539,7 +541,7 @@ def view_file_from_worker(
     worker_tools_override: list[str] | None = None,
     workspace_root: Path | None,
     path: str,
-) -> ToolResult | None:
+) -> ToolValue | None:
     """View one file in the selected worker, returning None when no worker endpoint exists."""
     if not attachment_save_uses_worker(
         runtime_paths=runtime_paths,
@@ -577,10 +579,6 @@ def view_file_from_worker(
             failure="Sandbox file view failed.",
             client_factory=httpx.Client,
         )
-        # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
-        from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
-        from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
-
         try:
             result = decode_media_result(response.result)
         except ValueError as exc:
@@ -591,7 +589,7 @@ def view_file_from_worker(
                 failure_kind=None,
             )
             raise
-        if not isinstance(result, ToolResult):
+        if not isinstance(result, ToolValue):
             msg = "Sandbox view-file returned a non-media result."
             record_proxy_response_failure_for_worker(
                 worker_handle=worker_handle,
@@ -868,15 +866,12 @@ def _call_proxy_sync(
             ),
             cancellation=cancellation,
         )
-        # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
+        # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
-        from mindroom.tool_system.media_transport import (  # noqa: PLC0415
-            decode_media_result,
-            is_media_result_envelope,
-        )
 
         if tool_name == "browser_mcp" or is_media_result_envelope(result):
-            return finalize_tool_media(decode_media_result(result))
+            decoded = decode_media_result(result)
+            return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
         return result
 
 

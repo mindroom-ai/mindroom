@@ -56,7 +56,7 @@ from mindroom.token_budget import (
 from mindroom.tool_system.runtime_context import (
     current_requester_id,
     get_tool_runtime_context,
-    resolve_tool_runtime_hook_bindings,
+    scope_hook_context_kwargs,
 )
 
 if TYPE_CHECKING:
@@ -302,31 +302,19 @@ async def _emit_compaction_hook(
     if runtime_context is None or not runtime_context.hook_registry.has_hooks(event_name):
         return
 
-    bindings = resolve_tool_runtime_hook_bindings(runtime_context)
-    correlation_id = runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}"
     context = CompactionHookContext(
-        event_name=event_name,
-        plugin_name="",
-        settings={},
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-        logger=logger.bind(event_name=event_name, session_id=session_id),
-        correlation_id=correlation_id,
-        message_sender=bindings.message_sender,
-        matrix_admin=bindings.matrix_admin,
-        room_state_querier=bindings.room_state_querier,
-        room_state_putter=bindings.room_state_putter,
-        agent_name=scope.scope_id if scope.kind == "team" else runtime_context.agent_name,
-        scope=scope,
-        room_id=runtime_context.room_id,
-        thread_id=runtime_context.resolved_thread_id,
+        **scope_hook_context_kwargs(
+            runtime_context,
+            event_name=event_name,
+            correlation_id=runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}",
+            scope=scope,
+            session_id=session_id,
+        ),
         messages=list(messages),
         transcript=tuple(transcript),
-        session_id=session_id,
         token_count_before=token_count_before,
         token_count_after=token_count_after,
         compaction_summary=compaction_summary,
-        _hook_registry_state=runtime_context.hook_registry_state,
     )
     await emit(runtime_context.hook_registry, event_name, context)
 

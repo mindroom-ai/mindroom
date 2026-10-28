@@ -980,9 +980,11 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
 
     observed: list[tuple[str, list[str], int, int | None, str | None]] = []
     active_states: list[bool] = []
+    correlation_ids: list[str] = []
 
     @hook(EVENT_COMPACTION_BEFORE, priority=10)
     async def before_first(ctx: CompactionHookContext) -> None:
+        correlation_ids.append(ctx.correlation_id)
         active_states.append(ctx.is_active())
         registry_state.registry = HookRegistry.empty()
         active_states.append(ctx.is_active())
@@ -1007,6 +1009,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
 
     @hook(EVENT_COMPACTION_AFTER)
     async def after(ctx: CompactionHookContext) -> None:
+        correlation_ids.append(ctx.correlation_id)
         observed.append(
             (
                 ctx.event_name,
@@ -1072,6 +1075,8 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
     assert observed[0][3] == completed_outcome(lifecycle).before_tokens
     assert observed[2][3] == completed_outcome(lifecycle).before_tokens
     assert active_states == [True, False]
+    # The hooks of one compaction share the turn's correlation ID.
+    assert correlation_ids == ["corr-compaction", "corr-compaction"]
 
 
 @pytest.mark.asyncio
@@ -1465,9 +1470,11 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
     seed_session(storage, session)
 
     observed: list[str] = []
+    correlation_ids: list[str] = []
 
     @hook(EVENT_COMPACTION_BEFORE, agents=["test_agent"], rooms=["!room:localhost"])
     async def matching(ctx: CompactionHookContext) -> None:
+        correlation_ids.append(ctx.correlation_id)
         observed.append(f"{ctx.scope.key}:{ctx.agent_name}:{ctx.room_id}:{ctx.thread_id}")
 
     @hook(EVENT_COMPACTION_BEFORE, agents=["other_agent"], rooms=["!room:localhost"])
@@ -1479,11 +1486,14 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
         observed.append(f"wrong-room:{ctx.room_id}")
 
     registry = HookRegistry.from_plugins([_plugin("compaction-hooks", [matching, wrong_agent, wrong_room])])
-    runtime_context = _hook_runtime_context(
-        config=config,
-        runtime_paths=runtime_paths,
-        registry=registry,
-        session_id="session-1",
+    runtime_context = replace(
+        _hook_runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            registry=registry,
+            session_id="session-1",
+        ),
+        correlation_id=None,
     )
 
     install_model_providers(monkeypatch, {"default": summary_model()})
@@ -1507,6 +1517,9 @@ async def test_prepare_history_for_run_applies_compaction_hook_agent_and_room_sc
 
     assert prepared.compaction_reply_outcome == "success"
     assert observed == ["agent:test_agent:test_agent:!room:localhost:$thread"]
+    # A turn without a correlation ID gets one naming the event and the session.
+    [correlation_id] = correlation_ids
+    assert correlation_id.startswith("compaction:before:session-1:")
 
 
 @pytest.mark.asyncio

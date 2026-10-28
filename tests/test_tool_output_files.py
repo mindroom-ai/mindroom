@@ -548,7 +548,7 @@ def test_media_toolresult_is_rejected_without_writing(tmp_path: Path) -> None:
 
     assert _receipt(result.result) == {
         "status": "error",
-        "error": "ToolResult media artifacts cannot be redirected to workspace files.",
+        "error": "Tool media results cannot be redirected to workspace files.",
     }
     assert not (tmp_path / "media.txt").exists()
 

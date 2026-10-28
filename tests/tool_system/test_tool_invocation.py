@@ -258,6 +258,31 @@ async def test_result_media_comes_back_owned() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_vendor_tool_result_reaches_middleware_and_runners_as_its_tool_value() -> None:
+    """A vendor tool's ``ToolResult`` is read once, at the entrypoint, so the middleware and runners see a ``ToolValue``."""
+    seen: list[object] = []
+
+    def tool() -> ToolResult:
+        return ToolResult(content="made", images=[AgnoImage(url="https://example.invalid/out.png", id="out")])
+
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        seen.append(await call_next(call.arguments))
+        return seen[-1]
+
+    [function] = _functions(tool).values()
+
+    returned = (await run_tool_call(function, {}, _context(), middleware=[observe])).value
+
+    expected = ToolValue(content="made", images=(Image(id="out", url="https://example.invalid/out.png"),))
+    assert returned == expected
+    assert seen == [expected]
+    assert client_tool_result(returned) == {
+        "content": "made",
+        "attachments": [{"kind": "image", "mime_type": None, "url": "https://example.invalid/out.png"}],
+    }
+
+
+@pytest.mark.asyncio
 async def test_without_media_the_media_parameters_receive_none() -> None:
     """A declared media parameter receives None, as Agno passed it for a run without media."""
     received: list[object] = ["unset"]
@@ -353,6 +378,27 @@ async def test_generators_are_drained_into_text_and_media() -> None:
     assert sync_outcome.images == (Image(id="a", url="https://example.invalid/a.png"),)
     assert async_outcome == ToolOutcome(content="012!")
     assert closed == ["sync", "async"]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_of_tool_values_joins_their_text_and_media() -> None:
+    """A generator may yield MindRoom's ``ToolValue`` items beside Agno's and text; their media all reach the outcome."""
+    picture = Image(id="picture", url="https://example.invalid/p.png")
+    clip = Audio(id="clip", content=b"RIFF", mime_type="audio/wav")
+
+    def stream() -> Iterator[object]:
+        yield ToolValue(content="a", images=(picture,))
+        yield "b"
+        yield ToolResult(content="c", images=[AgnoImage(url="https://example.invalid/q.png", id="q")])
+        yield ToolValue(content="d", audios=(clip,))
+
+    [function] = _functions(stream).values()
+
+    outcome = await _run(function, "{}")
+
+    assert outcome.content == "abcd"
+    assert outcome.images == (picture, Image(id="q", url="https://example.invalid/q.png"))
+    assert outcome.audios == (clip,)
 
 
 @pytest.mark.asyncio
@@ -598,7 +644,7 @@ async def test_a_call_the_policy_refuses_is_declined_or_denied_with_the_refusals
 async def test_a_call_that_ran_is_read_from_what_its_tool_answered(answer: object, status: str) -> None:
     """A tool's own failed outcome is ``failed`` with no error, and an OAuth prompt in any form needs a connection.
 
-    The value is the tool's answer unchanged either way.
+    The value is the tool's answer, with a vendor ``ToolResult`` read as its ``ToolValue``.
     """
 
     def tool() -> object:
@@ -608,7 +654,8 @@ async def test_a_call_that_ran_is_read_from_what_its_tool_answered(answer: objec
 
     result = await run_tool_call(function, {}, _context(), middleware=())
 
-    assert result == CallResult(status, answer)
+    expected = ToolValue(content=answer.content) if isinstance(answer, ToolResult) else answer
+    assert result == CallResult(status, expected)
     assert result.error is None
     if status == "failed":
         assert result.failure_text == "The account is locked."
@@ -659,7 +706,6 @@ def test_clients_get_a_tool_values_text_with_references_to_its_media() -> None:
         files=(File(content=b"a,b", mime_type="text/csv"),),
     )
 
-    assert client_tool_result(ToolResult(content="hello")) == "hello"
     assert client_tool_result(ToolValue(content="hello")) == "hello"
     assert client_tool_result(drawn) == {
         "content": "drawn",
