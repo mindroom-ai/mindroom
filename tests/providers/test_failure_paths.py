@@ -1009,6 +1009,10 @@ _RESPONSES_CASES = [
     ),
 ]
 
+_GEMINI_CREDITS_DEPLETED = (
+    "Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project "
+    "and billing."
+)
 _GEMINI_CASES = [
     _Case(
         "http_429",
@@ -1016,6 +1020,30 @@ _GEMINI_CASES = [
         RateLimited,
         RATE_LIMITED,
         _PIPELINE,
+    ),
+    # Gemini sends used-up prepaid credit and a reached monthly spending cap as a 429 like a rate limit, with no code
+    # of its own, and Google's troubleshooting guide names a 402 for used-up credit; no retry passes until the credits
+    # or the cap change, so the reply shows Google's text.
+    *(
+        _Case(
+            f"http_{status}_{failure}",
+            _gemini_status(status, message, reason),
+            ProviderError,
+            f"{ERROR}{message}",
+            1,
+            code=QUOTA_EXHAUSTED,
+        )
+        for status, reason, failure, message in (
+            (429, "RESOURCE_EXHAUSTED", "prepayment_credits_depleted", _GEMINI_CREDITS_DEPLETED),
+            (402, "PAYMENT_REQUIRED", "prepayment_credits_depleted", _GEMINI_CREDITS_DEPLETED),
+            (429, "RESOURCE_EXHAUSTED", "project_spending_cap", "Your project has exceeded its monthly spending cap."),
+            (
+                429,
+                "RESOURCE_EXHAUSTED",
+                "billing_account_spending_cap",
+                "Your billing account has exceeded its monthly spending cap.",
+            ),
+        )
     ),
     _Case(
         "http_500",
