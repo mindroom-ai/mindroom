@@ -65,6 +65,7 @@ Matrix sync callback
 | `config/skill_learning.py` | Opt-in agent settings for skill reviews: interval, review model, notices, and archival |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `event_journal/upgrades.py` | The ordered schema upgrades both backends run inside their schema transaction, against one schema inspector |
 | `event_journal/write_queue.py` | The one writer task each backend's writes queue for, from any event loop; the writes queued at once commit in one transaction |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
 | `reply_lifecycle.py` | Pure rules for durable reply records: every event that changes a reply, its spans, rows, and effects (see [Reply Messages](reply-messages.md)) |
@@ -72,7 +73,14 @@ Matrix sync callback
 | `reply_scope.py` | `ReplyRuntime` and `SpanHandle`: reply claims, span exits, write-ahead, owed writes, and runtime ownership |
 | `edit_regenerator.py` | Decides which message edits regenerate a reply and hands each to a regeneration off the room's event lane |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
+| `event_journal/approval_store.py` | `ApprovalStore`: one principal's approval calls, cards, grants, scheduled calls, and paused-run continuations |
+| `event_journal/approval_calls.py` | One row per gated call, whatever owns it, and `resolve_call`, the only writer of a call's decision and its card's terminal edit |
+| `event_journal/approval_cards.py` | Approval cards and receipts: reservation, the events that show them, terminal edits, retirement, departure cleanup, and the typed `ApprovalCardView` clicks and recovery read |
+| `event_journal/approval_grants.py` | Timed grants: the consent a card offers, the grant it originates, its batch, and revocation edits |
+| `event_journal/approval_signals.py` | `ApprovalSignals`: what committed approval writes tell the process, each principal's paused replies that bots' holds follow and each decided call that wakes its waiter and sends its card's terminal edit |
+| `event_journal/legacy_approval_records.py` | One-time conversion of an earlier release's per-kind approval tables to one row per call and card |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
+| `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
@@ -87,7 +95,7 @@ Matrix sync callback
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
-| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `response_lifecycle.py` | Shared response lifecycle helpers, queued-notice state, and the approval holds it follows from `ApprovalSignals` |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
@@ -103,8 +111,10 @@ Matrix sync callback
 | `approval/receipt.py` | The trusted approval receipt: the text naming each decided call of one tool-approval continuation, and the request hook that adds it to a reader's messages before its first request |
 | `approval/receipt_readers.py` | Which runs read the bound approval receipt: the binding an approval continuation sets around itself, free of model-loop imports so work the loop starts can leave it |
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
-| `approval/response.py` | Response-side native approval continuation persistence, card publication, and terminal settlement |
-| `approval/manager.py` | Matrix-backed tool approval runtime state |
+| `approval/response.py` | Which calls of a paused run need a person: the approval plan of a paused generation and the publication of its cards |
+| `approval/continuation_rules.py` | Pure rules for what a paused reply does next: `next_step` over its continuation's state, lease or claim holder, failure kind, claim outcome, and final answer, for each trigger (dispatch, a resume's end, an unavailable owner, a minimal-mode exit) |
+| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, and running the steps `continuation_rules` decides, including failure settlement |
+| `approval/manager.py` | Matrix-backed tool approval runtime state: card publication, clicks, deadlines, and recovery over typed card reads |
 | `approval/auto_approve_windows.py` | Durable per-conversation `!auto_approve` windows that approve one requester's gated calls without cards |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |
 | `oauth/credential_lifecycle.py` | Single transaction owner for scoped OAuth load, refresh, callback publication, invalidation, and reset state |
@@ -161,7 +171,7 @@ Matrix sync callback
 | `tool_system/filters.py` | Shared include/exclude function policy |
 | `custom_tools/job.py` | Reserved job discovery and control tool |
 | `orchestration/server_state.py` | Each entity's runtime origin and worker computer, published per room as state so MindRoom Chat finds its server |
-| `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, card denial, follow-ups, and retention |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, store, and surface into an `AgentBuild` |
@@ -191,7 +201,7 @@ Matrix sync callback
 | `commands/mode_commands.py` | Authorized agent mode selection with canonical session scope and deployment preflight |
 | `api/agent_cli.py` | Authenticated transport for response-owned CLI operations and live call receipts |
 | `agent_cli/cli_approval_recovery.py` | Exact saved CLI approval execution through rebuilt canonical bindings and ordinary interrupted-response recovery |
-| `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and terminal cleanup |
+| `agent_cli/cli_approval_waits.py` | Response-owned CLI approval waits, exact journal claims, and the end of each scope, which it reports to the approval runner |
 | `tool_system/agent_tool_calls.py` | The live turn's catalog of qualified tools and their serialized execution through the build's tool policy |
 | `tool_system/tool_access.py` | Shared qualified tool identities, discovery, schemas, and local argument validation |
 | `memory/` | Mem0 memory: agent and team-scoped |

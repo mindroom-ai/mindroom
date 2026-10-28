@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 import nio
 
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.tool_approval import ToolApprovalTransportError
+from mindroom.approval.tool_approval import DEFAULT_ROUTER_MANAGED_ROOM_REASON, ToolApprovalTransportError
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DEFAULT_ROUTER_MANAGED_ROOM_REASON, DeliveryStage
+from mindroom.event_journal import DeliveryStage
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -183,7 +183,7 @@ class ApprovalMatrixTransport:
                 delivery_event_type=claimed.event_type,
             )
 
-        delivery_id = await store.enqueue_unavailable_approval_notice(
+        delivery_id = await store.approvals.enqueue_unavailable_approval_notice(
             approval_id=continuation.approval_id,
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,

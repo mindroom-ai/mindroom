@@ -11,12 +11,9 @@ from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.receipt import build_approval_receipt
-from mindroom.event_journal.approval_continuations import (
-    ApprovalAdvance,
-    ApprovalCall,
-    ApprovalContinuation,
-    ApprovalDecision,
-)
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.event_journal.approval_calls import ApprovalCall, ApprovalDecision
+from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources
@@ -26,9 +23,11 @@ from tests.conftest import message_origin, unwrap_extracted_collaborator
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
 
+    from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
     from mindroom.llm.provider import ModelRequest
+    from mindroom.message_target import MessageTarget
 
 # The decided calls of a receipt that a test binds only to see which requests carry it, and its text.
 RECEIPT_CALLS = (
@@ -147,12 +146,12 @@ async def claim_continuation(
 
     Any other instance that owned the principal's replies owns them again afterwards, as after a takeover.
     """
-    continuation = await principal.approval_continuation(approval_id)
+    continuation = await principal.approvals.approval_continuation(approval_id)
     if continuation is None:
         return None
     owner = await principal.replies.active_generation()
     await principal.replies.write_generation(runtime_generation)
-    claimed, _applied = await principal.claim_approval_resume(
+    claimed, _applied = await principal.approvals.claim_approval_resume(
         approval_id,
         claim=await continuation_claim(principal, continuation, generation=runtime_generation),
     )
@@ -169,9 +168,9 @@ async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) ->
     continuation runs as the span's attempt for as long as the context is open.
     """
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     async with runner.deps.replies.span_scope() as slot:
-        claimed = await runner._claim_owned_approval(continuation, slot=slot)
+        claimed = await runner._approvals._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None
         assert slot.handle is not None
         yield claimed
@@ -191,7 +190,7 @@ async def advance_continuation(
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause, pausing the resume that ran it."""
-    current = await principal.approval_continuation(approval_id)
+    current = await principal.approvals.approval_continuation(approval_id)
     assert current is not None
     assert current.span_id is not None
     paused = await principal.replies.span(current.span_id)
@@ -199,7 +198,7 @@ async def advance_continuation(
     reply = await principal.replies.load(paused.reply_id)
     assert reply is not None
     assert reply.current_span_id is not None
-    enqueued = await principal.pause_for_approval(
+    enqueued = await principal.approvals.pause_for_approval(
         ApprovalAdvance(
             approval_id=approval_id,
             claimant_generation=claimant_generation,
@@ -226,7 +225,7 @@ async def advance_continuation(
     )
     if enqueued is None or not enqueued.transition.applied:
         return None
-    return await principal.approval_continuation(approval_id)
+    return await principal.approvals.approval_continuation(approval_id)
 
 
 async def freeze_resume_final(
@@ -260,3 +259,30 @@ async def freeze_resume_final(
         ),
     )
     assert enqueued is not None
+
+
+async def admit_approval_source(store: PrincipalStore) -> None:
+    """Admit the message ``$source`` in ``$thread`` that the tests' paused replies answer."""
+    await store.admit(
+        InboundEvent(
+            event_id="$source",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$source", "content": {"body": "run it"}},
+        ),
+    )
+
+
+async def dispatch_approval(
+    approvals: ApprovalContinuationRunner,
+    owned: ApprovalContinuation,
+    *,
+    target: MessageTarget,
+) -> str | None:
+    """Run the owning bot's source worker on a paused reply's source, as a woken source's dispatch does."""
+    request = approvals._approval_response_request(owned, target=target)
+    return await approvals.run_owned_approvals(owned, request=request, target=target)

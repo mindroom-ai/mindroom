@@ -10,6 +10,10 @@ Every commit waits for the disk, and under load the writes queued behind one
 commit outnumber what a commit apiece can keep up with. The task therefore
 hands the backend every write queued at once, which it commits in one
 transaction with each write atomic on its own.
+
+The task also publishes what each committed write signalled, in batch order and
+before any caller resumes, so listeners learn of commits in the order they
+happened, including the commits of callers cancelled while they waited.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from .offloading import ThreadOffload, settled
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .backend import Operation
+    from .backend import Operation, PublishSignals
 
 
 CLOSED_MESSAGE = "The event-journal store is closed"
@@ -37,11 +41,12 @@ _GROUP_COMMIT_LIMIT = 64
 
 @dataclass(frozen=True, slots=True)
 class WriteOutcome:
-    """How one write ended: its result, its error, or its cancellation."""
+    """How one write ended: its result, its error, or its cancellation, and what a committed write signalled."""
 
     result: Any = None
     error: BaseException | None = None
     cancelled: bool = False
+    signals: tuple[object, ...] = ()
 
 
 type _ApplyBatch = Callable[[list[Operation[Any]]], list[WriteOutcome]]
@@ -61,6 +66,8 @@ class WriteQueue:
     apply: _ApplyBatch
     offload: ThreadOffload
     task_name: str
+    # Called on the writer's loop with a committed batch's signals, before any of its callers resumes.
+    publish: PublishSignals
     closed: bool = field(default=False, init=False)
     # Absent until the first write, because the queue belongs to the loop that
     # drains it and the backend opens before there is one. Typed as such rather
@@ -134,8 +141,14 @@ class WriteQueue:
             with contextlib.suppress(Exception):
                 await settled(work)
         finally:
-            for queued, outcome in zip(batch, _outcomes(work, len(batch)), strict=True):
-                _deliver(queued.future, outcome)
+            outcomes = _outcomes(work, len(batch))
+            signals = tuple(signal for outcome in outcomes for signal in outcome.signals)
+            try:
+                if signals:
+                    self.publish(signals)
+            finally:
+                for queued, outcome in zip(batch, outcomes, strict=True):
+                    _deliver(queued.future, outcome)
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit.
@@ -245,7 +258,7 @@ def _outcomes(work: asyncio.Future[list[WriteOutcome]], count: int) -> list[Writ
     """Snapshot each write's outcome from the worker running its batch.
 
     A batch that did not commit fails every write in it, whatever each
-    operation returned.
+    operation returned or signalled.
     """
     if work.cancelled():
         return [WriteOutcome(cancelled=True)] * count
