@@ -469,6 +469,7 @@ Matrix sync callback
 | `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, parsing of conversation, message, permalink, and user targets, and message permalinks |
 | `slack/app.py` | The Slack app's workspace-wide credentials from the shared credential store, and the bot identity `auth.test` reports for them, cached per bot token |
 | `slack/events.py` | Pure Slack event handling: the signing-secret check, which Events API messages may wake anyone, the thread keys, which project agent answers an event, and which personal watches an event may be for |
+| `slack/files.py` | Slack file transfers: a download from Slack's file host, refused past 50 MB and written into the workspace's `slack-downloads/` without following links, and the external upload flow, which never sends the token to Slack's presigned upload link |
 | `slack/identity.py` | Maps a Slack author to a MindRoom account: the Slack display name and, for full workspace members whose profile email is in `slack.email_domain`, the Matrix user ID from `slack.matrix_user_id_template`; cached for ten minutes per team and user; also names a channel with `conversations.info`, cached the same way |
 | `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
 | `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule; Slack message markup as plain text |
@@ -477,7 +478,7 @@ Matrix sync callback
 | `slack/reply_mirror.py` | Posts the final reply of an agent's Slack project turn into its Slack thread as the app, in the background after the Matrix reply; only a managed account's hook dispatch whose Slack thread delivery bound to this room and Matrix thread, in a channel and room the agent currently answers |
 | `slack/watch_delivery.py` | Delivers a Slack event to the personal watches it is for, once Slack confirms the owner can see it and while the watch room may receive it |
 | `slack/watches.py` | Personal Slack watches: the durable store of who receives which Slack mentions and direct messages in which room, and the check that a room holds only the owner and MindRoom's accounts and hides earlier messages from people who join later |
-| `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, read, and workspace downloads, rendered by `slack/render.py`; in a personal toolkit built for a Matrix room, `slack_watch` starts, stops, and reports a watch |
+| `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, recent conversations, read, post, edit, delete, react, workspace downloads and uploads through `slack/files.py`, rendered by `slack/render.py`; in a personal toolkit built for a Matrix room, `slack_watch` starts, stops, and reports a watch |
 
 ## Persistent State
 

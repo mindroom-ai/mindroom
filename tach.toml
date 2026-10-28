@@ -9763,6 +9763,10 @@ path = "mindroom.slack.events"
 depends_on = []
 
 [[modules]]
+path = "mindroom.slack.files"
+depends_on = ["mindroom.atomic_file", "mindroom.path_confinement", "mindroom.slack.api"]
+
+[[modules]]
 path = "mindroom.slack.identity"
 depends_on = ["mindroom.matrix.identity", "mindroom.slack.api", "mindroom.slack.render"]
 
@@ -9819,12 +9823,11 @@ depends_on = ["mindroom.oauth.credential_lifecycle"]
 [[modules]]
 path = "mindroom.custom_tools.slack"
 depends_on = [
-    "mindroom.atomic_file",
     "mindroom.config.main",
     "mindroom.oauth.credential_lifecycle",
-    "mindroom.path_confinement",
     "mindroom.slack.api",
     "mindroom.slack.app",
+    "mindroom.slack.files",
     "mindroom.slack.oauth",
     "mindroom.slack.render",
     "mindroom.slack.watches",

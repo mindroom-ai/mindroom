@@ -26,6 +26,7 @@ from mindroom.custom_tools.slack import SlackTools
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
+from mindroom.slack import files as slack_files
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
@@ -404,7 +405,7 @@ async def test_download_stops_once_the_stream_passes_the_cap(
     FakeSlack(
         {"files.info": file_info, download_url: lambda _request: httpx.Response(200, content=b"x" * 9)},
     ).install(monkeypatch)
-    monkeypatch.setattr(slack_toolkit, "_MAX_FILE_BYTES", 8)
+    monkeypatch.setattr(slack_files, "MAX_FILE_BYTES", 8)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -1354,7 +1355,7 @@ async def test_upload_refuses_a_file_over_the_cap_before_any_request(
 ) -> None:
     _connect_alice(paths)
     fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
-    monkeypatch.setattr(slack_toolkit, "_MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(slack_toolkit, "MAX_FILE_BYTES", 4)
     tools = _tools(paths, tool_output_workspace_root=notes_workspace)
 
     result = json.loads(await tools.slack_upload("notes.txt", CHANNEL))
