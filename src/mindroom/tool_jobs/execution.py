@@ -58,7 +58,6 @@ from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
-from mindroom.tool_system.toolkit_connections import connects_per_run
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
@@ -128,7 +127,8 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
         isinstance(toolkit, JobTools)
         or function.external_execution
         or function.stop_after_call
-        or connects_per_run(toolkit)
+        # A connection opened for one run must finish its calls inside that run.
+        or toolkit.requires_connect
     )
 
 
@@ -150,7 +150,8 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
     if (
         isinstance(tool.toolkit, JobTools)
         or _is_background_job_excluded(tool, context)
-        or connects_per_run(tool.toolkit)
+        # A connection opened for one run must finish its calls inside that run.
+        or tool.toolkit.requires_connect
     ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.

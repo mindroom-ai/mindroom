@@ -758,46 +758,10 @@ Build clients only from the credentials the helpers return, without copies such 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
 See [Atlassian Cloud](tools/atlassian.md#add-more-connections) for the plugin example, fields, and callback setup.
 
-## MCP via plugins (advanced)
+## MCP servers
 
-Configure MCP servers directly in `config.yaml` as described in [MCP](mcp.md).
-Use a plugin only when you need a custom wrapper around Agno `MCPTools`:
-
-```python
-from agno.tools.mcp import MCPTools
-from mindroom.plugin_api import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolStatus,
-    register_tool_with_metadata,
-)
-
-
-class FilesystemMCPTools(MCPTools):
-    def __init__(self, **kwargs):
-        super().__init__(
-            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
-            **kwargs,
-        )
-
-
-@register_tool_with_metadata(
-    name="mcp_filesystem",
-    # The filesystem server reads local paths that file_access cannot confine.
-    file_access=ToolFileAccess.UNCONFINED,
-    display_name="MCP Filesystem",
-    description="Tools from an MCP filesystem server",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-)
-def mcp_filesystem_tools():
-    return FilesystemMCPTools
-```
-
-Add the plugin and assign `mcp_filesystem` to agents as in the [minimal example](#minimal-example).
-MindRoom connects and disconnects the MCP session around each agent run.
+Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](mcp.md).
+MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## Plugin skills
 
