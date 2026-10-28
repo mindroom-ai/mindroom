@@ -22,6 +22,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
+    MISSING_API_KEY,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -92,7 +93,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
         True,
     )
     assert settings.max_tokens == 8192
-    assert settings.timeout == 3600.0
+    assert settings.timeout is None
     assert parse_claude_settings("anthropic", {"timeout": 120.0}).timeout == 120.0
 
 
@@ -385,16 +386,16 @@ async def test_sdk_status_errors_map_to_the_shared_provider_errors(
     retryable: bool,
 ) -> None:
     """Each SDK failure becomes the shared error class whose retryable flag the loop decides from."""
-    wire = Wire(httpx.Response(status, json={"type": "error", "error": body}))
+    wire = Wire(httpx.Response(status, json={"type": "error", "error": body}, headers={"retry-after": "3"}))
     provider = route_provider("anthropic", tmp_path, wire)
-    request = ModelRequest(messages=_user(), overrides=RequestOverrides(caller_retries=True))
     with pytest.raises(expected) as raised:
-        await claude_turn(provider, request)
+        await claude_turn(provider, ModelRequest(messages=_user()))
     assert raised.value.retryable is retryable
     assert raised.value.status_code == status
     assert raised.value.provider == "Anthropic"
+    assert raised.value.retry_after_seconds == 3.0
     assert body["message"] in str(raised.value)
-    assert len(wire.requests) == 1, "a caller that retries itself must stop the SDK's own retries"
+    assert len(wire.requests) == 1, "the SDK client never retries; the pipeline alone does"
 
 
 def _stream_failing_with(error_type: str) -> httpx.Response:
@@ -448,6 +449,20 @@ async def test_a_mid_stream_error_event_is_classified_by_its_error_type(
 
 
 @pytest.mark.asyncio
+async def test_a_direct_route_without_any_credential_fails_as_a_missing_key(tmp_path: Path) -> None:
+    """With no key or token anywhere the SDK looks, the request fails unsent and the reply says how to connect one."""
+    wire = Wire(sse_reply([{"type": "text", "text": "unreachable"}]))
+
+    with isolated_provider_environment():
+        provider = provider_for({"provider": "anthropic", "id": "claude-sonnet-5-5"}, tmp_path, wire.client)
+        with pytest.raises(AuthenticationFailed) as raised:
+            await claude_turn(provider, ModelRequest(messages=_user()))
+
+    assert (raised.value.code, raised.value.provider, wire.requests) == (MISSING_API_KEY, "Anthropic", [])
+    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
+
+
+@pytest.mark.asyncio
 async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: Path) -> None:
     """A connection that never reaches the provider is retryable."""
 
@@ -457,7 +472,7 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 
     provider = route_provider("anthropic", tmp_path, Wire(fail))
     with pytest.raises(ProviderUnavailable) as raised:
-        await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(caller_retries=True)))
+        await claude_turn(provider, ModelRequest(messages=_user()))
     assert raised.value.retryable is True
     assert raised.value.status_code is None
 
@@ -1637,15 +1652,15 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
 
 
 @pytest.mark.asyncio
-async def test_requests_get_an_hour_unless_the_model_authors_no_timeout(tmp_path: Path) -> None:
-    """Requests get the one-hour default until #3119 drops it; an authored null keeps the SDK's own limits."""
+async def test_requests_keep_the_sdk_timeout_unless_the_model_authors_one(tmp_path: Path) -> None:
+    """Every request streams, so the SDK's own limits apply until the model authors a timeout."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     request = ModelRequest(messages=_user())
     await claude_turn(route_provider("anthropic", tmp_path, wire), request)
-    await claude_turn(route_provider("anthropic", tmp_path, wire, extra_kwargs={"timeout": None}), request)
+    await claude_turn(route_provider("anthropic", tmp_path, wire, extra_kwargs={"timeout": 120.0}), request)
     assert [sent.extensions["timeout"] for sent in wire.requests] == [
-        httpx.Timeout(3600.0).as_dict(),
         anthropic.DEFAULT_TIMEOUT.as_dict(),
+        httpx.Timeout(120.0).as_dict(),
     ]
 
 

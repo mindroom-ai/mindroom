@@ -1,8 +1,8 @@
 """Build the OpenAI-family adapter for one configured model.
 
-A model's key is its configured key (the provider registry folds in a key the dashboard saved for the model),
-then the provider's shared key, then the provider's own key variable. A route without a usable key fails at its
-first request.
+A model's key is its configured key (the provider registry folds in a key the dashboard saved for the model), else
+the provider's shared key, which Azure and Z.ai may also take straight from their key variables. A route without a
+usable key, a starter placeholder included, fails at its first request with the missing-key error.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderE
 from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity, StructuredOutput
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
+    AZURE_OPENAI_API_VERSION_DEFAULT,
     CEREBRAS_HOST_DEFAULT,
     DEEPSEEK_BASE_URL_DEFAULT,
     GROQ_HOST_DEFAULT,
@@ -27,7 +28,7 @@ from mindroom.model_defaults import (
     openai_rejects_sampling_controls,
 )
 from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
-from mindroom.providers.errors import CliLoginError, provider_failure
+from mindroom.providers.errors import CliLoginError, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
@@ -40,7 +41,6 @@ from mindroom.providers.openai.codex_auth import (
     borrow_codex_key,
     normalize_codex_model_id,
 )
-from mindroom.providers.openai.errors import missing_api_key_error
 from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token, normalize_kimi_model_id
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesWire
@@ -227,7 +227,6 @@ def _client_options(
         "organization": settings.organization if organization else None,
         "base_url": base_url,
         "timeout": settings.timeout,
-        "max_retries": settings.max_retries,
         "default_headers": settings.default_headers,
         "default_query": settings.default_query,
     }
@@ -241,12 +240,12 @@ def _sdk_client_kwargs(
     """Return SDK client keywords: the configured values that are set, with ``client_params`` merged over them.
 
     ``client_params.base_url`` is already in the configured endpoint (Groq and Cerebras append their API path
-    to it), and the shared HTTP client always wins.
+    to it). The shared HTTP client and no SDK retries always win, since the request pipeline alone retries a failed
+    request.
     """
     authored = {key: value for key, value in (settings.client_params or {}).items() if key != "base_url"}
-    return (
-        {key: value for key, value in configured.items() if value is not None} | authored | {"http_client": http_client}
-    )
+    configured_values = {key: value for key, value in configured.items() if value is not None}
+    return configured_values | authored | {"http_client": http_client, "max_retries": 0}
 
 
 def _cli_login_error(error: CliLoginError, *, provider: str) -> ProviderError:
@@ -303,21 +302,17 @@ def _keyed_client_factory(
     provider_name: str,
     runtime: ProviderRuntime,
 ) -> Callable[[], AsyncOpenAI]:
-    """Return the factory of a client keyed by ``api_key``, else by the route's key variable, else failing.
+    """Return the factory of a client keyed by ``api_key``, else failing with the missing-key error.
 
     A route with no key variable gets the ``not-provided`` placeholder key instead of failing.
     """
     api_key_env = _CHAT_ROUTES[route_key].api_key_env
-    process_env = runtime.runtime_paths.process_env
 
     def client() -> AsyncOpenAI:
-        key = api_key or (process_env.get(api_key_env) if api_key_env else None)
-        if not key:
-            if api_key_env is not None:
-                raise missing_api_key_error(api_key_env, provider=provider_name)
-            # The SDK client requires a key, so keyless OpenAI-compatible endpoints get a placeholder.
-            key = "not-provided"
-        return _openai_client(key, options, settings, runtime.http_client)
+        if not api_key and api_key_env is not None:
+            raise missing_api_key_error(api_key_env, provider=provider_name)
+        # The SDK client requires a key, so keyless OpenAI-compatible endpoints get a placeholder.
+        return _openai_client(api_key or "not-provided", options, settings, runtime.http_client)
 
     return client
 
@@ -334,7 +329,6 @@ def _chat_client_factory(
     """Return the SDK client factory of one Chat route; ``alternative_auth`` says it authenticates without a key."""
     route = _CHAT_ROUTES[route_key]
     http_client = runtime.http_client
-    process_env = runtime.runtime_paths.process_env
     options = _client_options(settings, base_url=base_url, organization=route.dialect == "openai")
     if route_key == "kimi":
 
@@ -353,9 +347,7 @@ def _chat_client_factory(
         def azure_client() -> AsyncOpenAI:
             from openai import AsyncAzureOpenAI  # noqa: PLC0415 - keep the SDK out of module import time
 
-            # The SDK refuses a key beside an Entra ID token, so a model signing in with one never reads the variable.
-            key = api_key or (None if alternative_auth else process_env.get(api_key_env))
-            if not (key or alternative_auth):
+            if not (api_key or alternative_auth):
                 msg = (
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
@@ -365,10 +357,10 @@ def _chat_client_factory(
                 **options,
                 # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
                 "base_url": base_url or None,
-                "api_key": key,
-                "api_version": settings.api_version or "2024-10-21",
-                "azure_endpoint": settings.azure_endpoint or process_env.get(AZURE_OPENAI_ENV_BY_KEY["endpoint"]),
-                "azure_deployment": settings.azure_deployment or process_env.get(AZURE_OPENAI_ENV_BY_KEY["deployment"]),
+                "api_key": api_key,
+                "api_version": settings.api_version or AZURE_OPENAI_API_VERSION_DEFAULT,
+                "azure_endpoint": settings.azure_endpoint,
+                "azure_deployment": settings.azure_deployment,
                 "azure_ad_token": settings.azure_ad_token,
                 "azure_ad_token_provider": settings.azure_ad_token_provider,
             }
@@ -383,6 +375,12 @@ def _chat_client_factory(
         provider_name=route.provider_name,
         runtime=runtime,
     )
+
+
+def _with_cli_home(extra_kwargs: dict[str, Any], setting: str, variable: str, runtime: ProviderRuntime) -> None:
+    """Fill a CLI login's home directory from the runtime env, the ``.env`` beside the config included, unless set."""
+    if setting not in extra_kwargs and (home := runtime.runtime_paths.env_value(variable)):
+        extra_kwargs[setting] = home
 
 
 def _with_agent_cache_key(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) -> None:
@@ -415,6 +413,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     model_id = model_config.id
     if route_key == "kimi":
         model_id = normalize_kimi_model_id(model_id)
+        _with_cli_home(extra_kwargs, "kimi_home", "KIMI_CODE_HOME", runtime)
         _with_agent_cache_key(extra_kwargs, runtime)
     if route_key == "azure":
         _populate_azure_env(extra_kwargs, runtime)
@@ -498,6 +497,7 @@ def _build_responses(
     model_id = model_config.id
     if route_key == "codex":
         model_id = normalize_codex_model_id(model_id)
+        _with_cli_home(extra_kwargs, "codex_home", "CODEX_HOME", runtime)
         _with_agent_cache_key(extra_kwargs, runtime)
         if runtime.execution_identity is not None:
             extra_kwargs["session_id"] = derive_session_routing_key(

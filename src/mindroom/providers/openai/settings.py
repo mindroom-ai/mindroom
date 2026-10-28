@@ -28,7 +28,6 @@ _CLIENT_FIELDS = frozenset(
         "organization",
         "base_url",
         "timeout",
-        "max_retries",
         "default_headers",
         "default_query",
         "client_params",
@@ -68,7 +67,6 @@ class ChatSettings:
     organization: str | None = None
     base_url: str | None = None
     timeout: float | None = None
-    max_retries: int | None = None
     default_headers: dict[str, str] | None = field(default=None, metadata=SECRET)
     default_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     client_params: dict[str, Any] | None = field(default=None, metadata=SECRET)
@@ -180,7 +178,6 @@ class ResponsesSettings:
     organization: str | None = None
     base_url: str | None = None
     timeout: float | None = None
-    max_retries: int | None = None
     default_headers: dict[str, str] | None = field(default=None, metadata=SECRET)
     default_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     client_params: dict[str, Any] | None = field(default=None, metadata=SECRET)

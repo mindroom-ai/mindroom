@@ -37,6 +37,7 @@ from mindroom.history.types import (
     HistoryScope,
     HistoryScopeState,
 )
+from mindroom.llm.errors import RateLimited
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import RequestOverrides
@@ -712,6 +713,23 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "second result" in summary_input
 
 
+@pytest.mark.parametrize(
+    ("error", "shrink"),
+    [
+        (RateLimited("Request too large for gpt-6-astra on tokens per min", provider="fake", status_code=429), True),
+        (RateLimited("slow down", provider="fake", status_code=429, provider_code="context_length_exceeded"), True),
+        (RateLimited("slow down", provider="fake", status_code=429, provider_code="rate_limit_exceeded"), False),
+    ],
+)
+def test_a_rate_limit_shrinks_the_summary_input_only_when_the_input_alone_is_too_large(
+    error: RateLimited,
+    *,
+    shrink: bool,
+) -> None:
+    """Waiting never lets a request above the per-minute token limit through, so its wording or code shrinks it."""
+    assert SummaryRetryPolicy().should_shrink(error) is shrink
+
+
 def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     """Renaming an engine deadline message cannot change retry or lifecycle decisions."""
     error = _CompactionSummaryTimeoutError("deadline expired")
@@ -719,13 +737,15 @@ def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     assert is_summary_timeout(error)
 
 
-def test_a_compaction_failure_is_a_timeout_by_its_type_or_a_providers_own_words() -> None:
-    """A transport timeout counts by its code, a provider's own timeout by its text, and no other error by wording."""
+def test_a_compaction_failure_is_a_timeout_by_its_type_alone() -> None:
+    """A transport timeout counts by MindRoom's marker, and no error by its wording or the code a provider sent."""
     timed_out = provider_failure(httpx.PoolTimeout(""), provider="fake")
     assert timed_out is not None
     assert is_summary_timeout(timed_out)
-    provider_side = classify_provider_error("upstream request timed out", provider="fake", status_code=504)
-    assert is_summary_timeout(provider_side)
+    assert not is_summary_timeout(
+        classify_provider_error("upstream request timed out", provider="fake", status_code=504),
+    )
+    assert not is_summary_timeout(classify_provider_error("busy", provider="fake", status_code=500, code="timeout"))
     refused = provider_failure(httpx.ConnectError("connection refused"), provider="fake")
     assert refused is not None
     assert not is_summary_timeout(refused)
