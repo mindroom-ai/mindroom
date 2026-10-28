@@ -40,6 +40,7 @@ from mindroom.personal_agents import (
     provision_created_agent,
     update_generated_agent,
 )
+from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -334,6 +335,20 @@ def test_a_created_agent_chooses_from_its_creators_granted_tools(tmp_path: Path)
     )
     assert [entry.name for entry in config._get_agent_authored_tool_configs("mind_alice_research")] == ["shell"]
     assert config.tool_ceiling("mind_alice_research") == ("calculator", "shell")
+
+
+def test_a_tool_that_brings_others_keeps_the_creators_settings_for_them(tmp_path: Path) -> None:
+    """matrix_message brings attachments, so choosing it alone still gives the creator's restricted attachments."""
+    data = deepcopy(BASE)
+    restricted = {"include_tools": ["list_attachments"]}
+    data["agents"]["creator"]["tools"] = ["matrix_message", {"attachments": restricted}]
+    edits = GeneratedAgentEdits(display_name="Research", tools=["matrix_message"])
+    config = _load(tmp_path, data, created=[_created(edits=edits)])
+    for name in ("creator", "creator_research"):
+        surface = visible_tool_surface(agent_name=name, config=config)
+        assert {entry.name: entry.tool_config_overrides for entry in surface.runtime_tool_configs}["attachments"] == (
+            restricted
+        )
 
 
 def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:

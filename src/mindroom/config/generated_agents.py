@@ -51,7 +51,9 @@ def _generated_agent_data(
             offered = {entry.name: entry for entry in base._get_agent_authored_tool_configs(base_agent)}
             chosen = list(dict.fromkeys(edits.tools))
             dropped = [name for name in chosen if name not in offered]
+            kept = [name for name in chosen if name in offered]
             # Each entry is copied whole and defaults stay off, so no tool comes back with other settings.
+            # Tools that a chosen preset or tool brings along take the base's entry too, or they would run unrestricted.
             # A flag is written only when set, because presets and control-plane tools may not carry one at all.
             data["tools"] = [
                 {
@@ -59,7 +61,7 @@ def _generated_agent_data(
                     "overrides": deepcopy(offered[name].tool_config_overrides),
                     **{flag: True for flag in ("defer", "initial") if getattr(offered[name], flag)},
                 }
-                for name in chosen
+                for name in base.expand_tool_names(kept)
                 if name in offered
             ]
             data["include_default_tools"] = False
