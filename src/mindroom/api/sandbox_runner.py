@@ -976,15 +976,7 @@ def _workspace_env_hook_workspace_for_request(
         return prepared_base_dir
 
     if request.routing_agent_name is not None:
-        execution_identity = _request_execution_identity(request)
-        agent_runtime = resolve_agent_runtime(
-            request.routing_agent_name,
-            config,
-            _runtime_paths_for_runner_agent_paths(runtime_paths),
-            execution_identity=execution_identity,
-            create=True,
-        )
-        return agent_runtime.workspace.root
+        return _runner_agent_workspace(request, request.routing_agent_name, runtime_paths=runtime_paths, config=config)
 
     if prepared_base_dir is not None:
         return prepared_base_dir
@@ -994,6 +986,23 @@ def _workspace_env_hook_workspace_for_request(
         if candidate.is_absolute():
             return candidate
     return None
+
+
+def _runner_agent_workspace(
+    request: SandboxRunnerExecuteRequest,
+    agent_name: str,
+    *,
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> Path:
+    """Return the agent workspace this runner resolves in its own storage for one agent-routed request."""
+    return resolve_agent_runtime(
+        agent_name,
+        config,
+        _runtime_paths_for_runner_agent_paths(runtime_paths),
+        execution_identity=_request_execution_identity(request),
+        create=True,
+    ).workspace.root
 
 
 def _prepared_request_base_dir(prepared: sandbox_worker_prep.PreparedWorkerRequest | None) -> Path | None:
@@ -1131,7 +1140,13 @@ def _prepare_execute_request(
     if prepared is None and request.routing_agent_name is not None and "base_dir" in tool_init_overrides:
         # A static runner works in the agent workspace it resolves in its own storage, which a Compose runner does not
         # share with the primary, so the primary's path for it would not exist here.
-        tool_init_overrides = {**tool_init_overrides, "base_dir": str(request_workspace)}
+        agent_workspace = _runner_agent_workspace(
+            request,
+            request.routing_agent_name,
+            runtime_paths=runtime_paths,
+            config=config,
+        )
+        tool_init_overrides = {**tool_init_overrides, "base_dir": str(agent_workspace)}
     try:
         env_result = sandbox_env_assembly.build_request_execution_env(
             request_workspace=request_workspace,

@@ -2498,7 +2498,15 @@ def test_prepare_execute_request_preserves_dedicated_worker_runtime_contract(
     assert "MINDROOM_STORAGE_PATH" not in subprocess_context.subprocess_env
 
 
-def test_a_static_runner_works_in_its_own_agent_workspace_not_the_primary_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("tool_name", "function_name"),
+    [("shell", "run_shell_command"), ("file", "read_file"), ("coding", "read_file")],
+)
+def test_a_static_runner_works_in_its_own_agent_workspace_not_the_primary_path(
+    tmp_path: Path,
+    tool_name: str,
+    function_name: str,
+) -> None:
     """An agent call without a worker key runs in the workspace the runner resolves, not the primary's path for it.
 
     A Docker Compose runner does not share the primary's data volume, so the primary's workspace path does not exist
@@ -2514,8 +2522,8 @@ def test_a_static_runner_works_in_its_own_agent_workspace_not_the_primary_path(t
 
     prepared = sandbox_runner_module._prepare_execute_request(
         sandbox_runner_module.SandboxRunnerExecuteRequest(
-            tool_name="shell",
-            function_name="run_shell_command",
+            tool_name=tool_name,
+            function_name=function_name,
             routing_agent_name="general",
             tool_init_overrides={"base_dir": str(primary_workspace)},
         ),
