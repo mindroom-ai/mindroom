@@ -739,24 +739,174 @@ async def test_recent_refuses_a_window_it_cannot_read(
     assert fake.requests == []
 
 
+def _paged_conversations(pages: dict[str | None, tuple[list[dict[str, Any]], str | None]]) -> Answer:
+    """Answer `users.conversations` with the page each cursor names, and its next cursor."""
+
+    def listing(request: httpx.Request) -> httpx.Response:
+        channels, following = pages[_form(request).get("cursor")]
+        metadata = {"next_cursor": following or ""}
+        return httpx.Response(200, json={"ok": True, "channels": channels, "response_metadata": metadata})
+
+    return listing
+
+
+def _history_reads(fake: FakeSlack) -> list[str]:
+    return [_form(request)["channel"] for request in fake.calls("conversations.history")]
+
+
 @pytest.mark.asyncio
-async def test_recent_is_incomplete_when_slack_rate_limits_a_read_and_never_waits(
+async def test_recent_continues_after_a_rate_limit_with_the_conversations_it_did_not_read(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A 429 stops the reads not yet sent, never waits, and next_cursor resumes at the first unread conversation."""
     _connect_alice(paths)
-    sent = _latest({DM_DANA["id"]: {"ts": _ago(60), "text": "hi"}})
+    channels = [{"id": f"C000000{letter}A", "name": letter} for letter in "abcd"]
+    limited = {"c": True}
+    sent = _latest({channel["id"]: {"ts": _ago(60), "text": channel["name"]} for channel in channels})
 
     def history(request: httpx.Request) -> httpx.Response:
-        if _form(request)["channel"] == GROUP_DM["id"]:
+        if _form(request)["channel"] == "C000000cA" and limited.pop("c", False):
             return httpx.Response(429, headers={"Retry-After": "30"})
         return sent(request)
 
     monkeypatch.setattr(slack_toolkit, "_MAX_READS_IN_FLIGHT", 1)
     fake = FakeSlack(
         {
-            "users.conversations": {"ok": True, "channels": [DM_DANA, GROUP_DM, DM_OLD]},
+            # The rate limit falls on the second page, so resuming needs that page's cursor.
+            "users.conversations": _paged_conversations(
+                {None: (channels[:2], "page-2"), "page-2": (channels[2:], None)},
+            ),
             "conversations.history": history,
+            "auth.test": AUTH_TEST,
+        },
+    ).install(monkeypatch)
+    tools = _tools(paths)
+
+    first = json.loads(await tools.slack_recent("channels"))
+
+    assert sorted(conversation["name"] for conversation in first["conversations"]) == ["a", "b"]
+    assert (first["complete"], first["skipped"], first["retry_after"]) == (False, 2, 30)
+    assert _history_reads(fake) == ["C000000aA", "C000000bA", "C000000cA"]
+
+    fake.requests.clear()
+    second = json.loads(await tools.slack_recent("channels", cursor=first["next_cursor"]))
+
+    assert sorted(conversation["name"] for conversation in second["conversations"]) == ["c", "d"]
+    assert second["complete"] is True
+    assert "next_cursor" not in second
+    assert [_form(request).get("cursor") for request in fake.calls("users.conversations")] == ["page-2"]
+    assert _history_reads(fake) == ["C000000cA", "C000000dA"]
+
+
+@pytest.mark.asyncio
+async def test_recent_stops_its_reads_when_slack_cannot_be_reached(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    channels = [{"id": f"C000000{letter}A", "name": letter} for letter in "abc"]
+    sent = _latest({channel["id"]: {"ts": _ago(60), "text": channel["name"]} for channel in channels})
+
+    def history(request: httpx.Request) -> httpx.Response:
+        if _form(request)["channel"] == "C000000bA":
+            raise httpx.ConnectError(TIMEOUT, request=request)
+        return sent(request)
+
+    monkeypatch.setattr(slack_toolkit, "_MAX_READS_IN_FLIGHT", 1)
+    fake = FakeSlack(
+        {
+            "users.conversations": {"ok": True, "channels": channels},
+            "conversations.history": history,
+            "auth.test": AUTH_TEST,
+        },
+    ).install(monkeypatch)
+    tools = _tools(paths)
+
+    result = json.loads(await tools.slack_recent("channels"))
+
+    assert [conversation["name"] for conversation in result["conversations"]] == ["a"]
+    assert (result["complete"], result["skipped"], result["retry_after"]) == (False, 2, None)
+    assert _history_reads(fake) == ["C000000aA", "C000000bA"]
+
+    fake.answers["conversations.history"] = sent
+    fake.requests.clear()
+    resumed = json.loads(await tools.slack_recent("channels", cursor=result["next_cursor"]))
+
+    assert sorted(conversation["name"] for conversation in resumed["conversations"]) == ["b", "c"]
+    assert _history_reads(fake) == ["C000000bA", "C000000cA"]
+
+
+@pytest.mark.asyncio
+async def test_recent_skips_a_conversation_slack_refuses_and_reads_the_rest(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    channels = [{"id": f"C000000{letter}A", "name": letter} for letter in "abc"]
+    sent = _latest({channel["id"]: {"ts": _ago(60), "text": channel["name"]} for channel in channels})
+
+    def history(request: httpx.Request) -> httpx.Response:
+        if _form(request)["channel"] == "C000000bA":
+            return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+        return sent(request)
+
+    monkeypatch.setattr(slack_toolkit, "_MAX_READS_IN_FLIGHT", 1)
+    fake = FakeSlack(
+        {
+            "users.conversations": {"ok": True, "channels": channels},
+            "conversations.history": history,
+            "auth.test": AUTH_TEST,
+        },
+    ).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_recent("channels"))
+
+    assert sorted(conversation["name"] for conversation in result["conversations"]) == ["a", "c"]
+    # Reading it again would meet the same refusal, so there is nothing to continue with.
+    assert (result["complete"], result["skipped"], result["next_cursor"]) == (False, 1, None)
+    assert _history_reads(fake) == ["C000000aA", "C000000bA", "C000000cA"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("refusal", "expected"),
+    [
+        (
+            {"ok": False, "error": "missing_scope", "needed": "mpim:history"},
+            {"message": "Slack needs the mpim:history permission; reconnect Slack to grant it"},
+        ),
+        ({"ok": False, "error": "token_revoked"}, {"oauth_connection_required": True}),
+    ],
+)
+async def test_recent_reports_a_missing_permission_or_a_revoked_connection(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: dict[str, Any],
+    expected: dict[str, Any],
+) -> None:
+    _connect_alice(paths)
+    FakeSlack(
+        {"users.conversations": {"ok": True, "channels": [DM_DANA, GROUP_DM]}, "conversations.history": refusal},
+    ).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_recent())
+
+    assert result["status"] == "error"
+    assert {key: result.get(key) for key in expected} == expected
+
+
+@pytest.mark.asyncio
+async def test_recent_never_reads_a_direct_message_with_a_deleted_person(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    deleted = {"id": "D0999ZZZZ", "is_im": True, "user": "U0GONE000", "is_user_deleted": True}
+    fake = FakeSlack(
+        {
+            "users.conversations": {"ok": True, "channels": [deleted, DM_DANA]},
+            "conversations.history": _latest({DM_DANA["id"]: {"ts": _ago(60), "text": "hi"}}),
             "users.info": {"ok": True, "user": DANA},
             "auth.test": AUTH_TEST,
         },
@@ -765,36 +915,59 @@ async def test_recent_is_incomplete_when_slack_rate_limits_a_read_and_never_wait
     result = json.loads(await _tools(paths).slack_recent())
 
     assert [conversation["channel_id"] for conversation in result["conversations"]] == [DM_DANA["id"]]
-    assert (result["complete"], result["skipped"], result["retry_after"]) == (False, 2, 30)
-    # After the 429, the reads not yet sent are skipped instead of sent into the rate limit.
-    assert [_form(request)["channel"] for request in fake.calls("conversations.history")] == [
-        DM_DANA["id"],
-        GROUP_DM["id"],
-    ]
+    assert result["complete"] is True
+    assert _history_reads(fake) == [DM_DANA["id"]]
 
 
 @pytest.mark.asyncio
-async def test_recent_is_incomplete_when_the_listing_reaches_its_page_cap(
-    paths: RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_recent_continues_past_its_page_cap(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
     _connect_alice(paths)
+    channels = [{"id": f"C0000000{index}", "name": f"c{index}"} for index in range(7)]
+    pages = {
+        None if index == 0 else f"page-{index}": ([channel], f"page-{index + 1}" if index < 6 else None)
+        for index, channel in enumerate(channels)
+    }
     fake = FakeSlack(
         {
-            "users.conversations": {"ok": True, "channels": [], "response_metadata": {"next_cursor": "more"}},
+            "users.conversations": _paged_conversations(pages),
+            "conversations.history": _latest({channel["id"]: {"ts": _ago(60), "text": "hi"} for channel in channels}),
             "auth.test": AUTH_TEST,
         },
     ).install(monkeypatch)
+    tools = _tools(paths)
 
-    result = json.loads(await _tools(paths).slack_recent())
+    first = json.loads(await tools.slack_recent("channels", limit=100))
 
     assert len(fake.calls("users.conversations")) == 5
-    assert (result["conversations"], result["complete"], result["skipped"], result["retry_after"]) == (
-        [],
+    assert (len(first["conversations"]), first["complete"], first["skipped"], first["retry_after"]) == (
+        5,
         False,
         0,
         None,
     )
+
+    fake.requests.clear()
+    second = json.loads(await tools.slack_recent("channels", limit=100, cursor=first["next_cursor"]))
+
+    assert [_form(request).get("cursor") for request in fake.calls("users.conversations")] == ["page-5", "page-6"]
+    assert sorted(conversation["name"] for conversation in second["conversations"]) == ["c5", "c6"]
+    assert second["complete"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", ["", "page-2", "x:page-2", "-1:", "12345:"])
+async def test_recent_refuses_a_cursor_it_did_not_give(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    cursor: str,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack().install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_recent(cursor=cursor))
+
+    assert result["message"] == "cursor must be the next_cursor of the previous slack_recent call"
+    assert fake.requests == []
 
 
 @pytest.mark.asyncio

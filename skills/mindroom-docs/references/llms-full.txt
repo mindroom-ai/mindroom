@@ -12894,7 +12894,7 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 | Function | Does | Personal | Project |
 | --- | --- | --- | --- |
 | `slack_search` | Finds messages, conversations, or people and returns the IDs the other functions take | `messages` (Slack search syntax, such as `launch in:#general from:@dana after:2026-10-01`), `conversations`, and `people` | `conversations` only, among the agent's channels |
-| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link | `dms` (direct and group direct messages, named after the other person) or `channels`, active within `active_within` such as `30d`, `12h`, or `90m` | `channels` only: the agent's channels the app has joined |
+| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link, in batches when Slack limits it | `dms` (direct and group direct messages, named after the other person, leaving out deactivated people) or `channels`, active within `active_within` such as `30d`, `12h`, or `90m` | `channels` only: the agent's channels the app has joined |
 | `slack_read` | Reads a conversation's latest messages, or one thread | any conversation the person can see | the agent's channels |
 | `slack_download` | Saves a file of up to 50 MB in the agent workspace's `slack-downloads/` folder | any file the person can see | files shared in the agent's channels |
 | `slack_upload` | Shares a workspace file of up to 50 MB in a conversation or thread, with an optional `title` and `comment` | as the person; a user ID opens a direct message | as the app, in the agent's channels |
@@ -13170,7 +13170,8 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 - Slack sends at most 30,000 events per hour per workspace, and events beyond that are not delivered, so in a very busy workspace some watch deliveries and mentions can be missed until the next hour.
 - If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
 - Messages sent directly to the app in Slack are not answered.
-- `slack_recent` checks at most 1,000 conversations, one Slack request each, so for a person in many conversations Slack's rate limit can stop it early; it then reports `complete: false` with how many it skipped and when to retry.
+- `slack_recent` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
+  The call then answers with the conversations it read, `complete: false`, and a `next_cursor`; the agent waits `retry_after` seconds, calls again with that cursor to read the next conversations, and merges the batches.
 
 ## Troubleshooting
 
