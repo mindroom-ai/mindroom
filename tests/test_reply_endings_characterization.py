@@ -846,6 +846,24 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
     assert not await turn.pending()
 
 
+async def test_a_run_whose_reply_a_hook_suppressed_still_counts_as_succeeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run completed though delivery suppressed its reply, so memory and skill review still take it."""
+    turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": [answer("Hidden answer.")]})
+    turn.hooks.suppress = True
+    effects = AsyncMock(return_value=None)
+    monkeypatch.setattr("mindroom.response_lifecycle.apply_post_response_effects", effects)
+
+    await turn.runner.generate_response(_plain_request(_target()))
+
+    effects.assert_awaited_once()
+    final, outcome, _deps = effects.await_args.args
+    assert final.suppressed
+    assert outcome.run_succeeded is True
+
+
 async def test_a_before_response_hook_that_suppresses_a_whole_reply_removes_its_placeholder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
