@@ -137,6 +137,37 @@ class PersonalAgentTemplateConfig(BaseModel):
         return self
 
 
+class GeneratedAgentEdits(BaseModel):
+    """What an owner may change on a generated agent; None keeps the base's value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    role: str | None = None
+    instructions: list[str] | None = None
+    # Names from the base agent's effective tool list; each is copied with its settings.
+    tools: list[str] | None = None
+
+
+class CreatedAgentEntry(BaseModel):
+    """An agent that `creator` made for `owner`: the creator's config with identity fields replaced, plus edits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_name: str
+    creator: str
+    owner: str
+    co_owners: list[str] = Field(default_factory=list)
+    edits: GeneratedAgentEdits
+    # Recorded before the account is registered, so no load sees it without one; a failed creation removes it.
+    pending: bool = False
+
+    @property
+    def owners(self) -> list[str]:
+        """Return the people who may change this agent: its owner first, then its co-owners."""
+        return [self.owner, *self.co_owners]
+
+
 class PersonalAgentRosterEntry(BaseModel):
     """One generated agent: the template, its owner, and the names fixed at onboarding."""
 
@@ -153,6 +184,12 @@ class PersonalAgentRosterEntry(BaseModel):
     source_user_id: str | None = None
     # Recorded before the account is registered, so an interrupted registration resumes under these names.
     pending: bool = False
+    edits: GeneratedAgentEdits | None = None
+
+    @property
+    def owners(self) -> list[str]:
+        """Return the person who may change this agent."""
+        return [self.user_id]
 
 
 @dataclass(frozen=True)
@@ -173,10 +210,13 @@ class _PersonalAgentExpansion:
     probe_data: object | None
 
 
-class _PersonalAgentRosterFile(BaseModel):
+class PersonalAgentRoster(BaseModel):
+    """The roster file: personal agents plus the agents other agents created."""
+
     model_config = ConfigDict(extra="forbid")
 
     entries: list[PersonalAgentRosterEntry] = Field(default_factory=list)
+    created: list[CreatedAgentEntry] = Field(default_factory=list)
 
 
 def _localpart(user_id: str) -> str:
@@ -336,15 +376,20 @@ def personal_agent_roster_lock_path(runtime_paths: RuntimePaths) -> Path:
     return tracking_dir(runtime_paths) / "personal_agents.lock"
 
 
-def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgentRosterEntry]:
-    """Read every roster entry, or an empty list before the first onboarding."""
+def read_personal_agent_roster_file(runtime_paths: RuntimePaths) -> PersonalAgentRoster:
+    """Read the whole roster file, or an empty roster before the first onboarding."""
     path = personal_agent_roster_path(runtime_paths)
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return []
+        return PersonalAgentRoster()
     try:
-        return _PersonalAgentRosterFile.model_validate(json.loads(text)).entries
+        return PersonalAgentRoster.model_validate(json.loads(text))
     except ValueError as exc:  # JSON and pydantic errors are both ValueErrors.
         msg = f"Personal agent roster {path} is invalid: {exc}"
         raise ValueError(msg) from exc
+
+
+def read_personal_agent_roster(runtime_paths: RuntimePaths) -> list[PersonalAgentRosterEntry]:
+    """Read every roster entry, or an empty list before the first onboarding."""
+    return read_personal_agent_roster_file(runtime_paths).entries

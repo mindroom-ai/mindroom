@@ -111,6 +111,9 @@ def _special_tool_names(
     if allow_self_config:
         tool_names.append("self_config")
 
+    if config.generated_agent(agent_name) is not None or agent_config.created_agents_per_owner > 0:
+        tool_names.append("agent_manager")
+
     if agent_config.skill_learning.enabled:
         # Like Hermes, an agent that learns skills can also save them in chat, and its skill review can only call
         # tools the agent's own request offered.
