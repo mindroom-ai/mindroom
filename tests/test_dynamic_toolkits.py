@@ -1,4 +1,4 @@
-"""Tests for deferred tool configuration and visible tool surfaces."""
+"""Tests for deferred tool configuration and the toolkits an agent's turns may build."""
 
 from __future__ import annotations
 
@@ -12,10 +12,7 @@ from agno.tools.function import Function
 from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
-from mindroom.agents import (
-    _context_hidden_toolkits,
-    create_agent,
-)
+from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -33,12 +30,9 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
-from mindroom.tool_system.dynamic_toolkits import (
-    DeferredToolkit,
-    defer_toolkit,
-    visible_tool_surface,
-)
+from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
@@ -139,7 +133,7 @@ def _private_identity(requester_id: str) -> ToolExecutionIdentity:
     )
 
 
-def test_openai_compatible_context_hides_desktop() -> None:
+def test_openai_compatible_context_hides_desktop(tmp_path: Path) -> None:
     """Non-Matrix callers cannot access the Matrix-bound Desktop tool."""
     identity = ToolExecutionIdentity(
         channel="openai_compat",
@@ -150,8 +144,17 @@ def test_openai_compatible_context_hides_desktop() -> None:
         resolved_thread_id=None,
         session_id="api-session",
     )
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = ["calculator", "desktop"]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
 
-    assert "desktop" in _context_hidden_toolkits(identity)
+    room_tools, matrix_room_tools = turn_room_flags(identity)
+    candidates = resolve_agent_tools(config, "code").candidates(
+        room_tools=room_tools,
+        matrix_room_tools=matrix_room_tools,
+    )
+
+    assert [entry.name for entry in candidates] == ["calculator"]
 
 
 def _install_update_awareness_status(monkeypatch: pytest.MonkeyPatch) -> str:
@@ -170,15 +173,10 @@ def _runtime_tool_configs(
     agent_name: str,
     config: Config,
     deferred_tools: list[str],
-    enable_dynamic_tools_manager: bool,
+    portable_search: bool,
 ) -> list[EffectiveToolConfig]:
     return list(
-        visible_tool_surface(
-            agent_name=agent_name,
-            config=config,
-            deferred_tools=deferred_tools,
-            enable_dynamic_tools_manager=enable_dynamic_tools_manager,
-        ).runtime_tool_configs,
+        resolve_agent_tools(config, agent_name).candidates(deferred=deferred_tools, portable_search=portable_search),
     )
 
 
@@ -336,9 +334,9 @@ def test_initial_deferred_tools_attach_under_a_restricted_selection_with_implied
     raw["agents"]["code"]["tools"] = [{"matrix_message": {"defer": True, "initial": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    surface = visible_tool_surface(agent_name="code", config=config, deferred_tools=[])
+    candidates = resolve_agent_tools(config, "code").candidates(deferred=[])
 
-    assert [entry.name for entry in surface.runtime_tool_configs] == ["matrix_message", "attachments", "matrix_room"]
+    assert [entry.name for entry in candidates] == ["matrix_message", "attachments", "matrix_room"]
 
 
 def test_unrestricted_selection_attaches_every_deferred_tool(tmp_path: Path) -> None:
@@ -347,11 +345,12 @@ def test_unrestricted_selection_attaches_every_deferred_tool(tmp_path: Path) -> 
     raw["agents"]["code"]["tools"] = ["sleep", {"shell": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    plain = visible_tool_surface(agent_name="code", config=config)
-    searchable = visible_tool_surface(agent_name="code", config=config, enable_dynamic_tools_manager=True)
+    agent_tools = resolve_agent_tools(config, "code")
+    plain = agent_tools.candidates()
+    searchable = agent_tools.candidates(portable_search=True)
 
-    assert [entry.name for entry in plain.runtime_tool_configs] == ["sleep", "shell"]
-    assert [entry.name for entry in searchable.runtime_tool_configs] == ["sleep", "shell", "dynamic_tools"]
+    assert [entry.name for entry in plain] == ["sleep", "shell"]
+    assert [entry.name for entry in searchable] == ["sleep", "shell", "dynamic_tools"]
 
 
 def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_path: Path) -> None:
@@ -365,7 +364,7 @@ def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_pa
         agent_name="code",
         config=config,
         deferred_tools=[],
-        enable_dynamic_tools_manager=False,
+        portable_search=False,
     )
     overrides_by_name = {entry.name: entry.tool_config_overrides for entry in runtime_configs}
 
@@ -386,13 +385,13 @@ def test_attached_deferred_concrete_tool_preserves_override_over_preset_child(tm
         agent_name="code",
         config=config,
         deferred_tools=[],
-        enable_dynamic_tools_manager=False,
+        portable_search=False,
     )
     attached_configs = _runtime_tool_configs(
         agent_name="code",
         config=config,
         deferred_tools=["shell"],
-        enable_dynamic_tools_manager=False,
+        portable_search=False,
     )
     unattached_names = [entry.name for entry in unattached_configs]
     attached_overrides_by_name = {entry.name: entry.tool_config_overrides for entry in attached_configs}
@@ -417,7 +416,7 @@ def test_attached_parent_keeps_implied_child_when_child_is_separately_deferred(t
             agent_name="code",
             config=config,
             deferred_tools=[],
-            enable_dynamic_tools_manager=False,
+            portable_search=False,
         )
     ]
     attached_names = [
@@ -426,7 +425,7 @@ def test_attached_parent_keeps_implied_child_when_child_is_separately_deferred(t
             agent_name="code",
             config=config,
             deferred_tools=["matrix_message"],
-            enable_dynamic_tools_manager=False,
+            portable_search=False,
         )
     ]
 
@@ -456,7 +455,7 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
             agent_name="code",
             config=config,
             deferred_tools=[],
-            enable_dynamic_tools_manager=False,
+            portable_search=False,
         )
     ]
     attached_names = [
@@ -465,7 +464,7 @@ def test_deferred_concrete_tool_gates_implied_children_over_preset_in_any_order(
             agent_name="code",
             config=config,
             deferred_tools=["matrix_message"],
-            enable_dynamic_tools_manager=False,
+            portable_search=False,
         )
     ]
 
@@ -489,7 +488,7 @@ def test_runtime_selection_hides_unattached_deferred_tools(tmp_path: Path) -> No
             agent_name="code",
             config=config,
             deferred_tools=[],
-            enable_dynamic_tools_manager=True,
+            portable_search=True,
         )
     ]
     attached_names = [
@@ -498,7 +497,7 @@ def test_runtime_selection_hides_unattached_deferred_tools(tmp_path: Path) -> No
             agent_name="code",
             config=config,
             deferred_tools=["shell"],
-            enable_dynamic_tools_manager=True,
+            portable_search=True,
         )
     ]
 
@@ -795,9 +794,9 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
     config = _validated_config(tmp_path, raw)
     config.agents["code"].worker_scope = "user"
 
-    surface = visible_tool_surface(agent_name="code", config=config)
+    candidates = resolve_agent_tools(config, "code").candidates()
 
-    assert "homeassistant" not in {entry.name for entry in surface.runtime_tool_configs}
+    assert "homeassistant" not in {entry.name for entry in candidates}
 
 
 @pytest.mark.parametrize("defer", [False, True])

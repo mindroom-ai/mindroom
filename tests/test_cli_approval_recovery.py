@@ -160,6 +160,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
         execution_identity=identity,
+        delegation_depth=0,
     )
     assert required == ("dynamic_tools",)
     runtime.config.agents["helper"].tools = ["shell"]
@@ -170,6 +171,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
             execution_identity=identity,
+            delegation_depth=0,
         )
 
 

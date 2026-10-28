@@ -122,7 +122,7 @@ async def test_background_shell_leaves_a_process_running_after_the_call_returns(
     toolkit = get_tool_by_name(
         "shell",
         _make_runtime_paths(tmp_path),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
     )

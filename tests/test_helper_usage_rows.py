@@ -362,6 +362,7 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     _scripted(monkeypatch, "A summary of the conversation.")
     inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=paths,
         entity_name="test_agent",
         history_settings=config.resolve_entity("test_agent").history_settings,
         static_prompt_tokens=0,

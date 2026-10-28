@@ -105,23 +105,6 @@ class ResolvedEntityView:
         return self._config._get_agent_authored_tool_configs(self._agent_name())
 
     @property
-    def authored_deferred_tool_configs(self) -> list[EffectiveToolConfig]:
-        """One entry per authored deferred tool in effective order."""
-        return self._config._agent_authored_deferred_tool_configs(self._agent_name())
-
-    def authored_deferred_tool_config(self, authored_tool_name: str) -> EffectiveToolConfig | None:
-        """Return one authored deferred tool config by authored name."""
-        return self._config._agent_authored_deferred_tool_config(self._agent_name(), authored_tool_name)
-
-    def tool_runtime_overrides(self, tool_name: str) -> dict[str, object] | None:
-        """Return runtime kwargs derived from this agent's authored overrides for one tool."""
-        return self._config._agent_tool_runtime_overrides(self._agent_name(), tool_name)
-
-    def deferred_tool_scope_incompatible_tools(self, authored_tool_name: str) -> list[str]:
-        """Return expanded deferred tools invalid for this agent's effective execution scope."""
-        return self._config._deferred_tool_scope_incompatible_tools(self._agent_name(), authored_tool_name)
-
-    @property
     def knowledge_base_ids(self) -> list[str]:
         """Shared and private knowledge base IDs assigned to this agent."""
         return self._config._agent_knowledge_base_ids(self._agent_name())

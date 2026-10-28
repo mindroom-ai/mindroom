@@ -28,6 +28,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -35,6 +36,7 @@ from mindroom.tool_system.runtime_context import (
     register_tool_runtime_media_attachment,
     tool_runtime_context,
 )
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.access_schema_support import with_current_room_member_access
@@ -505,7 +507,7 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "worker_tools_override",
+    "worker_tools",
     [
         ["coding"],
         ["python"],
@@ -514,14 +516,14 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
 )
 async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_workspace_consumers(
     tmp_path: Path,
-    worker_tools_override: list[str],
+    worker_tools: list[str],
 ) -> None:
-    """Attachment saves should land on the worker when workspace tools can consume the workspace."""
+    """Attachment saves should land on the worker when the agent's workspace tools run there."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runtime_env = {
         "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": ",".join(worker_tools_override),
+        "MINDROOM_SANDBOX_PROXY_TOOLS": ",".join(worker_tools),
         "MINDROOM_WORKER_BACKEND": "kubernetes",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
     }
@@ -530,10 +532,17 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
         storage_path=tmp_path,
         process_env=runtime_env,
     )
+    placement = tool_placement(runtime_paths)
+    config = Config(
+        agents={"openclaw": AgentConfig(display_name="OpenClaw", tools=worker_tools, worker_tools=worker_tools)},
+    )
+    agent_tools = resolve_agent_tools(config, "openclaw")
+    workspace_in_worker = agent_tools.workspace_in_worker(agent_tools.tool_names, placement)
+    assert workspace_in_worker is True
     tool = AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=worker_tools_override,
+        workspace_in_worker=workspace_in_worker,
         tool_output_workspace_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
@@ -591,7 +600,7 @@ async def test_attachments_tool_get_attachment_worker_save_ignores_primary_works
     tool = AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=["file"],
+        workspace_in_worker=True,
         tool_output_workspace_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
@@ -640,7 +649,7 @@ async def test_attachments_tool_get_attachment_worker_save_does_not_block_event_
     tool = AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=["file"],
+        workspace_in_worker=True,
         tool_output_workspace_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
@@ -703,7 +712,7 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     tool = AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=["file"],
+        workspace_in_worker=True,
         tool_output_workspace_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
@@ -737,7 +746,7 @@ def _worker_attachment_tool(
     tmp_path: Path,
     *,
     runtime_env: dict[str, str],
-    worker_tools_override: list[str],
+    workspace_in_worker: bool,
 ) -> AttachmentTools:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -749,7 +758,7 @@ def _worker_attachment_tool(
     return AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=worker_tools_override,
+        workspace_in_worker=workspace_in_worker,
         tool_output_workspace_root=workspace,
     )
 
@@ -772,7 +781,7 @@ async def test_get_attachment_worker_save_accepts_attachments_over_16_mib_unless
 ) -> None:
     """A received file above 16 MiB reaches the worker unless an operator lowers the inline cap."""
     runtime_env = {**_WORKER_RUNTIME_ENV, **inline_limit_env}
-    tool = _worker_attachment_tool(tmp_path, runtime_env=runtime_env, worker_tools_override=["file"])
+    tool = _worker_attachment_tool(tmp_path, runtime_env=runtime_env, workspace_in_worker=True)
     size_bytes = 16 * 1024 * 1024 + 1
     sample_file = tmp_path / "archive.zip"
     sample_file.write_bytes(b"PK")
@@ -811,7 +820,7 @@ async def test_attachment_metadata_shows_local_path_only_where_agent_tools_can_o
     tool = _worker_attachment_tool(
         tmp_path,
         runtime_env=_WORKER_RUNTIME_ENV,
-        worker_tools_override=["file"] if uses_worker else [],
+        workspace_in_worker=uses_worker,
     )
     (tmp_path / "workspace" / "notes.txt").write_text("notes", encoding="utf-8")
     sample_file = tmp_path / "archive.zip"

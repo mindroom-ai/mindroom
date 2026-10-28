@@ -59,6 +59,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
+from mindroom.tool_system.agent_tools import AgentTools, resolve_agent_tools, turn_room_flags
 from mindroom.tool_system.agno_toolkits import (
     adapt_function,
     adapt_toolkit,
@@ -84,14 +85,12 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.dynamic_toolkits import (
     DeferredToolkit,
     ToolDeferral,
-    VisibleToolSurface,
     defer_toolkit,
-    visible_tool_surface,
 )
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
@@ -701,34 +700,32 @@ def _build_agent_model_provider(
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
+def build_agent_toolkit(  # noqa: C901, PLR0911
     tool_name: str,
     *,
-    agent_name: str,
+    agent_tools: AgentTools,
+    placement: ToolPlacement,
     config: Config,
     runtime_paths: constants.RuntimePaths,
-    worker_tools: list[str],
-    runtime_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None,
+    workspace_in_worker: bool = False,
     delegation_depth: int = 0,
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     persona: SubagentPersona | None = None,
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
 ) -> Toolkit | None:
-    """Build one configured toolkit for an agent.
+    """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
 
     ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
     the copies it authors within the persona's tools, skills, and knowledge bases.
-
-    Callers own runtime override resolution before invoking this builder.
-    Returns ``None`` when the configured tool should be skipped, such as an
-    explicit ``delegate`` entry without valid delegation targets.
+    ``workspace_in_worker`` says whether the build's workspace-path toolkits run in a worker, where attachments save.
 
     ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
-    them; without it ``dynamic_tools`` is skipped.
+    them; without it ``dynamic_tools`` is skipped and None is returned.
     """
+    agent_name = agent_tools.agent_name
     agent_config = config.get_agent(agent_name)
     if agent_runtime is None:
         agent_runtime = resolve_agent_runtime(
@@ -754,9 +751,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         return constructed(wrap_toolkit_for_output_files(toolkit, policy))
 
     if tool_name == "memory":
-        if config.resolve_entity(agent_name).memory_backend == "none":
-            return None
-
         from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
 
         # MemoryTools resolves the canonical per-agent storage roots internally via the
@@ -772,9 +766,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         )
 
     if tool_name == "knowledge_graph":
-        if not config.agent_uses_knowledge_graph(agent_name):
-            return None
-
         from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
 
         return wrap_direct(KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity))
@@ -782,22 +773,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
         from mindroom.custom_tools import delegate  # noqa: PLC0415
-        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
-        if not agent_config.delegate_to:
-            logger.warning(
-                "Skipping delegate tool because delegate_to is empty",
-                agent=agent_name,
-            )
-            return None
-        if delegation_depth >= MAX_DELEGATION_DEPTH:
-            logger.warning(
-                "Skipping delegate tool because delegation depth limit was reached",
-                agent=agent_name,
-                delegation_depth=delegation_depth,
-                max_delegation_depth=MAX_DELEGATION_DEPTH,
-            )
-            return None
         return wrap_direct(
             delegate.DelegateTools(
                 agent_name=agent_name,
@@ -878,13 +854,13 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         runtime_config=config,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=_tool_base_dir_override(tool_name, workspace_path=agent_runtime.tool_base_dir),
-        runtime_overrides=runtime_overrides,
+        runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
         shared_storage_root_path=shared_storage_path,
-        worker_tools_override=worker_tools,
         allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
         tool_output_workspace_root=agent_runtime.tool_base_dir,
         agent_state_root=agent_runtime.state_root,
         tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        workspace_in_worker=workspace_in_worker,
         worker_target=build_agent_toolkit_worker_target(
             worker_scope,
             agent_name,
@@ -893,28 +869,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             runtime_paths=runtime_paths,
         ),
     )
-
-
-def resolve_runtime_worker_tools(
-    agent_name: str,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    runtime_tool_names: list[str],
-    *,
-    tool_registry_preloaded: bool = False,
-) -> list[str]:
-    """Return worker-routed tools for one concrete runtime tool selection."""
-    configured = config.get_agent_worker_tools(agent_name)
-    if configured is not None:
-        return configured
-
-    if not tool_registry_preloaded:
-        ensure_tool_registry_loaded(runtime_paths, config)
-    return [
-        tool_name
-        for tool_name in runtime_tool_names
-        if sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths)
-    ]
 
 
 def _render_tool_execution_environment(
@@ -1018,31 +972,6 @@ def _unconfined_tool_names(tool_names: tuple[str, ...], *, requires_primary_runt
     )
 
 
-def _registry_tool_routes_through_worker(
-    tool_name: str,
-    *,
-    runtime_paths: constants.RuntimePaths,
-    worker_tools: list[str],
-) -> bool:
-    """Return whether one successfully built registry toolkit uses worker routing."""
-    metadata = TOOL_METADATA.get(tool_name)
-    return (
-        metadata is not None
-        and metadata.factory is not None
-        and sandbox_proxy_enabled_for_tool(
-            tool_name,
-            runtime_paths=runtime_paths,
-            worker_tools_override=worker_tools,
-        )
-    )
-
-
-def _context_hidden_toolkits(execution_identity: ToolExecutionIdentity | None) -> frozenset[str]:
-    if execution_identity is None or execution_identity.room_id is not None:
-        return frozenset()
-    return frozenset(tool_name for tool_name, metadata in TOOL_METADATA.items() if metadata.requires_room_context)
-
-
 def _build_dynamic_tooling_instruction_block(
     config: Config,
     deferred_toolkits: Sequence[DeferredToolkit],
@@ -1069,8 +998,10 @@ def _load_agent_plugins(config: Config, runtime_paths: constants.RuntimePaths) -
 
 
 @timed("system_prompt_assembly.agent_create.tool_registry_sync")
-def _sync_agent_tool_registry(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+def _resolve_agent_tools(config: Config, runtime_paths: constants.RuntimePaths, agent_name: str) -> AgentTools:
+    """Sync the registry with the config's MCP servers, then resolve the toolkits the agent may use."""
     ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
+    return resolve_agent_tools(config, agent_name)
 
 
 @timed("system_prompt_assembly.agent_create.hook_bridge")
@@ -1160,32 +1091,6 @@ def apply_tool_approval_capability(
     return replace(adapted, functions=tuple(function for function in functions if function is not None))
 
 
-@timed("system_prompt_assembly.agent_create.dynamic_tool_selection")
-def _resolve_agent_dynamic_tool_selection(
-    *,
-    agent_name: str,
-    config: Config,
-    delegation_depth: int,
-    minimal_mode: bool,
-    eager_deferred_tools: bool,
-    portable_deferred_tools: bool,
-    include_matrix_room_runtime_tools: bool,
-    required_tool_names: tuple[str, ...],
-) -> VisibleToolSurface:
-    # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
-    # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
-    # deferred, portable tool search keeps them off the wire, and personas with their own tool list, plus voice calls
-    # on models without native tool search, send them as ordinary tools.
-    return visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        deferred_tools=required_tool_names if minimal_mode and not eager_deferred_tools else None,
-        delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=portable_deferred_tools,
-        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-    )
-
-
 def _render_agent_identity_context(
     agent_name: str,
     display_name: str,
@@ -1251,7 +1156,7 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
 
 
 def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
-    agent_name: str,
+    agent_tools: AgentTools,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
@@ -1279,11 +1184,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     The configured toolkits come first and the knowledge search and skills generated beside them after, so a
     generated function never displaces a configured one; the names across all of them are resolved once, here.
     """
+    agent_name = agent_tools.agent_name
     approvals_as_jobs = (
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
     persona_tools = persona.tools if persona is not None else None
-    _sync_agent_tool_registry(config, runtime_paths)
     # A team member is built under its team turn's identity; its tool hooks and job controls act as the member.
     agent_identity = replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
     hook_middleware = _build_agent_tool_middleware(
@@ -1294,53 +1199,37 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         config=config,
         runtime_paths=runtime_paths,
     )
-    include_matrix_room_runtime_tools = (
-        execution_identity is not None
-        and execution_identity.channel == "matrix"
-        and execution_identity.room_id is not None
+    room_tools, matrix_room_tools = turn_room_flags(execution_identity)
+    # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
+    # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
+    # deferred, portable tool search keeps them off the wire, and personas with their own tool list, plus voice calls
+    # on models without native tool search, send them as ordinary tools.
+    selected = agent_tools.candidates(
+        depth=delegation_depth,
+        room_tools=room_tools,
+        matrix_room_tools=matrix_room_tools,
+        deferred=required_tool_names if minimal_mode and not eager_deferred_tools else None,
+        portable_search=portable_deferred_tools,
     )
-    dynamic_tool_selection = _resolve_agent_dynamic_tool_selection(
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        minimal_mode=minimal_mode,
-        eager_deferred_tools=eager_deferred_tools,
-        portable_deferred_tools=portable_deferred_tools,
-        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-        required_tool_names=required_tool_names,
-    )
-    excluded_tool_names = disabled_tool_names | _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = (
         {}
         if disable_runtime_capabilities
-        else {
-            entry.name: entry
-            for entry in dynamic_tool_selection.runtime_tool_configs
-            if entry.name not in excluded_tool_names
-        }
+        else {entry.name: entry for entry in selected if entry.name not in disabled_tool_names}
     )
     deferred_configs = {}
     if minimal_mode:
-        complete = visible_tool_surface(
-            agent_name=agent_name,
-            config=config,
-            delegation_depth=delegation_depth,
-            include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
+        complete = agent_tools.candidates(
+            depth=delegation_depth,
+            room_tools=room_tools,
+            matrix_room_tools=matrix_room_tools,
         )
         deferred_configs = {
             entry.name: entry
-            for entry in complete.runtime_tool_configs
-            if entry.name not in resolved_tool_configs and entry.name not in excluded_tool_names
+            for entry in complete
+            if entry.name not in resolved_tool_configs and entry.name not in disabled_tool_names
         }
-    with _agent_create_timing("resolve_worker_tools"):
-        worker_tools = resolve_runtime_worker_tools(
-            agent_name,
-            config,
-            runtime_paths,
-            [*resolved_tool_configs, *deferred_configs],
-            tool_registry_preloaded=True,
-        )
-    entity_view = config.resolve_entity(agent_name)
+    placement = tool_placement(runtime_paths)
+    workspace_in_worker = agent_tools.workspace_in_worker([*resolved_tool_configs, *deferred_configs], placement)
     entries: list[_ToolkitEntry] = []
     assembly: _AgentToolAssembly | None = None
 
@@ -1354,25 +1243,21 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     worker_routed_tool_names: list[str] = []
     persona_built: dict[str, frozenset[str]] = {}
 
-    def routes_through_worker(tool_name: str) -> bool:
-        return _registry_tool_routes_through_worker(tool_name, runtime_paths=runtime_paths, worker_tools=worker_tools)
-
     def build_entry(tool_entry: EffectiveToolConfig) -> _ToolkitEntry | None:
         """Build and adapt one configured toolkit; what the agent records of it waits until both succeeded."""
         tool_name = tool_entry.name
         authored_name = tool_entry.authored_name or tool_name
-        runtime_overrides = entity_view.tool_runtime_overrides(tool_name)
         with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
             toolkit = build_agent_toolkit(
                 tool_name,
-                agent_name=agent_name,
+                agent_tools=agent_tools,
+                placement=placement,
                 config=config,
                 runtime_paths=runtime_paths,
-                worker_tools=worker_tools,
-                runtime_overrides=runtime_overrides,
                 agent_runtime=agent_runtime,
                 tool_config_overrides=tool_entry.tool_config_overrides,
                 execution_identity=execution_identity,
+                workspace_in_worker=workspace_in_worker,
                 delegation_depth=delegation_depth,
                 refresh_scheduler=refresh_scheduler,
                 persona=persona,
@@ -1443,7 +1328,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 replace(function, middleware=(*function.middleware, announcement)) for function in adapted.functions
             )
             adapted = replace(adapted, functions=functions)
-        if not routes_through_worker(tool_name):
+        if not agent_tools.runs_in_worker(tool_name, placement):
             # A worker builds and connects its own copy of a toolkit routed through it.
             adapted = replace(adapted, connect=run_connection(toolkit))
         return _ToolkitEntry(adapted=adapted, toolkit=toolkit, deferral=deferral)
@@ -1497,7 +1382,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             continue
         if entry is not None:
             entries.append(entry)
-            target_names = worker_routed_tool_names if routes_through_worker(tool_name) else local_tool_names
+            target_names = (
+                worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
+            )
             target_names.append(tool_name)
     controls = JobTools.build(
         {function.name for entry in entries for function in entry.adapted.functions},
@@ -1914,13 +1801,15 @@ def create_agent(
     )
     portable_deferred_tools = agent_mode == "standard" and not eager_deferred_tools and not native_deferred_tools
 
+    # Loaded before the toolkits are resolved and placed, which read plugin tool metadata, and before the skills,
+    # which include the skills of the plugins this config loads.
+    plugins = _load_agent_plugins(config, runtime_paths)
+    agent_tools = _resolve_agent_tools(config, runtime_paths, agent_name)
     tool_function_filter, disabled_tool_names = persona_tool_policy(
         persona_tools,
         lambda: caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth),
         tool_function_filter,
     )
-    # Loaded before the skills, which include the skills of the plugins this config loads.
-    plugins = _load_agent_plugins(config, runtime_paths)
     workspace = agent_runtime.workspace
     output_file_policy = _agent_tool_output_file_policy(
         agent_runtime,
@@ -1961,7 +1850,7 @@ def create_agent(
     # Minimal mode presents skill contents as context documents instead of through skill functions.
     offered_skills = skills if agent_mode == "minimal" else prompt_skills
     tool_assembly = _assemble_agent_toolkits(
-        agent_name,
+        agent_tools,
         config,
         runtime_paths,
         agent_runtime,
@@ -2085,7 +1974,7 @@ def create_agent(
         # The roster names each toolkit by the registered tool the agent CLI reaches it under.
         # A persona's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
-            visible_tool_surface(agent_name=agent_name, config=config).toolkit_names(config)
+            agent_tools.toolkit_names(agent_tools.candidates())
             if persona is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )
@@ -2143,7 +2032,6 @@ __all__ = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
-    "resolve_runtime_worker_tools",
     "show_tool_calls_for_agent",
     "team_background_jobs",
 ]

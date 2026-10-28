@@ -22,6 +22,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
 from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
 from mindroom.tool_system.plugins import get_configured_plugin_roots, load_plugins, reload_plugins
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
@@ -2369,7 +2370,7 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
     with _preserved_plugin_loader_state():
         config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
-        assert config.resolve_entity("assistant").authored_deferred_tool_configs == []
+        assert not any(entry.defer for entry in resolve_agent_tools(config, "assistant").facts.authored)
         assert config.resolve_entity("assistant").available_tools == ["scheduler"]
         assert any(
             call.args == ("Plugin tool unavailable because plugin failed to load",)

@@ -16,9 +16,9 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolAuthoredOverrideValidator
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillMarkdownError,
@@ -267,13 +267,8 @@ def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: i
     if agent_name not in config.agents:
         # A reload can remove the caller mid-response; its copies then have no tools to inherit.
         return []
-    surface = visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        include_matrix_room_runtime_tools=True,
-    )
-    return surface.toolkit_names(config)
+    agent_tools = resolve_agent_tools(config, agent_name)
+    return agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True))
 
 
 def caller_skill_names(

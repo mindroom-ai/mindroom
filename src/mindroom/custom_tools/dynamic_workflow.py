@@ -58,6 +58,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.runtime_context import (
@@ -65,6 +66,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
@@ -793,29 +795,23 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
         return {}
     ensure_tool_registry_loaded(context.runtime_paths, context.config)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
 
     execution_identity = build_execution_identity_from_runtime_context(context)
-    worker_tools = resolve_runtime_worker_tools(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        list(tool_names),
-        tool_registry_preloaded=True,
-    )
-    entity_view = context.config.resolve_entity(context.agent_name)
-    authored_overrides = {entry.name: entry.tool_config_overrides for entry in entity_view.tool_configs}
+    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    placement = tool_placement(context.runtime_paths)
+    authored_overrides = {entry.name: entry.tool_config_overrides for entry in agent_tools.candidates()}
     toolkits: dict[str, Toolkit] = {}
     for tool_name in tool_names:
         toolkit = build_agent_toolkit(
             tool_name,
-            agent_name=context.agent_name,
+            agent_tools=agent_tools,
+            placement=placement,
             config=context.config,
             runtime_paths=context.runtime_paths,
-            worker_tools=worker_tools,
-            runtime_overrides=entity_view.tool_runtime_overrides(tool_name),
             tool_config_overrides=authored_overrides.get(tool_name),
             execution_identity=execution_identity,
+            workspace_in_worker=agent_tools.workspace_in_worker(tool_names, placement),
         )
         if toolkit is None:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not available in this runtime."
@@ -876,7 +872,7 @@ def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
         )
         if scoped:
             values.update(scoped)
-    for entry in context.config.resolve_entity(context.agent_name).tool_configs:
+    for entry in resolve_agent_tools(context.config, context.agent_name).facts.authored:
         if entry.name == "dynamic_workflow":
             values.update(entry.tool_config_overrides)
     raw_allowed = values.get("allowed_tools")

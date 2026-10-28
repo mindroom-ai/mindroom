@@ -65,11 +65,7 @@ def _env(
 def _placement(runtime_paths: RuntimePaths, tool_name: str, worker_tools: tuple[str, ...] | None) -> str:
     """Return 1 for the worker, 0 for the primary, and E when the settings are rejected."""
     try:
-        routed = sandbox_proxy.sandbox_proxy_enabled_for_tool(
-            tool_name,
-            runtime_paths=runtime_paths,
-            worker_tools_override=None if worker_tools is None else list(worker_tools),
-        )
+        routed = sandbox_proxy.tool_placement(runtime_paths).runs_in_worker(tool_name, worker_tools)
     except (ValueError, WorkerBackendError):
         return "E"
     return "1" if routed else "0"

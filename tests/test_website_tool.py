@@ -635,7 +635,7 @@ def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
     """A configured toolkit reads URLs; no authored option swaps read_url for a knowledge-base insert."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
 
-    tool = get_tool_by_name("website", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    tool = get_tool_by_name("website", runtime_paths, runs_in_worker=False, worker_target=None)
 
     assert list(tool.functions) == ["read_url"]
     with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):

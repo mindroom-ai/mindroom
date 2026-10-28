@@ -43,8 +43,10 @@ from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
@@ -2457,11 +2459,10 @@ async def test_agent_browser_profiles_live_in_each_agent_state_root(
         )
         toolkit = build_agent_toolkit(
             "browser",
-            agent_name=agent_name,
+            agent_tools=resolve_agent_tools(config, agent_name),
+            placement=tool_placement(runtime_paths),
             config=config,
             runtime_paths=runtime_paths,
-            worker_tools=[],
-            runtime_overrides=None,
             agent_runtime=agent_runtime,
             execution_identity=identity,
         )
@@ -2514,11 +2515,10 @@ def test_agent_browser_artifacts_are_uploadable_only_by_their_agent(tmp_path: Pa
         )
         toolkit = build_agent_toolkit(
             "browser",
-            agent_name=agent_name,
+            agent_tools=resolve_agent_tools(config, agent_name),
+            placement=tool_placement(runtime_paths),
             config=config,
             runtime_paths=runtime_paths,
-            worker_tools=[],
-            runtime_overrides=None,
             agent_runtime=agent_runtime,
             execution_identity=identity,
         )

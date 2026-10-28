@@ -16,8 +16,8 @@ from mindroom.mcp.function_surface import (
     analyze_mcp_function_collisions,
 )
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
@@ -124,13 +124,11 @@ def scoped_oauth_state_has_configured_agent(
 
 def _configured_tool_configs(context: MCPFunctionSurfaceContext, agent_name: str) -> tuple[EffectiveToolConfig, ...]:
     """Return one agent's eager tool configs; agent builds hide MCP functions that collide with deferred ones."""
-    return visible_tool_surface(
-        agent_name=agent_name,
-        config=context.config,
-        deferred_tools=(),
-        enable_dynamic_tools_manager=True,
-        include_matrix_room_runtime_tools=True,
-    ).runtime_tool_configs
+    return resolve_agent_tools(context.config, agent_name).candidates(
+        deferred=(),
+        matrix_room_tools=True,
+        portable_search=True,
+    )
 
 
 def _mcp_server_id_from_tool_config_name(

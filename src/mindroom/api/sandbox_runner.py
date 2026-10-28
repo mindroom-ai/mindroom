@@ -906,7 +906,7 @@ def _resolve_entrypoint(
         toolkit = get_tool_by_name(
             tool_name,
             runtime_paths=runtime_paths,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             credential_overrides=credential_overrides,
             credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
             runtime_config=config,

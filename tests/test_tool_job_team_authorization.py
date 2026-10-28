@@ -74,7 +74,7 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 def _calculator_member(config: Config, paths: RuntimePaths) -> JobActor:
     """The worker as a team runs it, granted by its own snapshot, whose one call adds 2 and 3."""
-    toolkit = get_tool_by_name("calculator", paths, worker_target=None, disable_sandbox_proxy=True)
+    toolkit = get_tool_by_name("calculator", paths, worker_target=None, runs_in_worker=False)
     tools = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))
     return job_actor(*tools.values(), name="worker")
 

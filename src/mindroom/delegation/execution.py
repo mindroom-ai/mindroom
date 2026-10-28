@@ -342,6 +342,7 @@ async def _execute_child(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
+        delegation_depth=child.depth,
     )
     await settle_child_response(
         child,

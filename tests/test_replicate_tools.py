@@ -131,7 +131,7 @@ def _tool(tmp_path: Path, stored_key: str | None = None, *, model: str = _MODEL)
             credentials_manager=credentials,
             tool_config_overrides={"model": model},
             worker_target=None,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
         ),
     )
 

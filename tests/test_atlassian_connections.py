@@ -190,7 +190,7 @@ def test_connection_toolkit_exposes_only_its_prefixed_functions(tmp_path: Path) 
             "partner_atlassian",
             paths,
             worker_target=worker_target(),
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             tool_config_overrides={"include_tools": ["partner_confluence_search"]},
         )
 
@@ -255,7 +255,7 @@ def _build(name: str, paths: RuntimePaths, requester_id: str | None = None) -> A
         name,
         paths,
         worker_target=worker_target(requester_id) if requester_id else worker_target(),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
     )
     assert isinstance(tool, AtlassianToolkit)
     return tool

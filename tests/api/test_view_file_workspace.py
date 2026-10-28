@@ -225,6 +225,7 @@ async def test_view_file_transports_workspace_between_storage_mounts(
     tools = AttachmentTools(
         runtime_paths=context.runtime_paths,
         worker_target=target,
+        workspace_in_worker=True,
         tool_output_workspace_root=primary_workspace,
     )
     (workspace / "linked.png").symlink_to("sample.png")

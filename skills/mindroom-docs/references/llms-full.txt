@@ -16435,7 +16435,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 | `FILE_ACCESS` | `file_access` | The constructing agent's effective `file_access` setting |
 | `WORKER_TARGET` | `worker_target` | Resolved worker routing context (scope, execution identity, worker key) |
 | `TOOL_OUTPUT_WORKSPACE_ROOT` | `tool_output_workspace_root` | Workspace root used for managed tool-output saves |
-| `WORKER_TOOLS_OVERRIDE` | `worker_tools_override` | Effective worker-routed tool override |
+| `WORKSPACE_IN_WORKER` | `workspace_in_worker` | Whether the constructing agent's workspace-path tools run in a worker, which is where its attachments are saved |
 | `CURRENT_ROOM_ID` | `current_room_id` | Active Matrix room ID when available |
 | `AGENT_STATE_ROOT` | `agent_state_root` | The constructing agent's state root in the primary runtime, requester-scoped for private agents; `None` inside workers |
 
@@ -16517,6 +16517,7 @@ worker_target = context.resolve_worker_target()
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
+A sub-toolkit built with that target runs where the agent's own toolkit of that name would run: an explicit `worker_tools` list decides, and without one the sandbox settings and the tool's default target do.
 
 ## OAuth providers
 

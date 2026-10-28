@@ -78,10 +78,11 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.teams.members import materialize_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.construction import get_toolkit_construction
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -434,10 +435,6 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
 
     agent_config = config.agents["openclaw"]
     assert agent_config.tool_names == ["shell", "browser"]
-    assert agent_config.get_tool_overrides("shell") == {
-        "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
-        "shell_path_prepend": ["/run/wrappers/bin"],
-    }
     assert config.authored_model_dump()["agents"]["openclaw"]["tools"] == [
         {
             "shell": {
@@ -447,7 +444,8 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
         },
         "browser",
     ]
-    assert config.resolve_entity("openclaw").tool_runtime_overrides("shell") == {
+    candidates = {entry.name: entry for entry in resolve_agent_tools(config, "openclaw").candidates()}
+    assert candidates["shell"].tool_config_overrides == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
@@ -1089,7 +1087,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
@@ -1104,7 +1103,8 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             tool_init_overrides,
             runtime_overrides,
             shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
@@ -1147,7 +1147,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
@@ -1162,7 +1163,8 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_init_overrides,
             runtime_overrides,
             shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
@@ -1238,6 +1240,8 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Worker override list should receive expanded tool names including openclaw_compat."""
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
@@ -1246,10 +1250,14 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
 
     _create_agent_for_test("summary", config=config)
 
-    expected_worker_tools = config.expand_tool_names(["openclaw_compat"])
-    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
-    assert worker_overrides
-    assert all(override == expected_worker_tools for override in worker_overrides)
+    expected_worker_tools = tuple(config.expand_tool_names(["openclaw_compat"]))
+    assert resolve_agent_tools(config, "summary").facts.worker_tools == expected_worker_tools
+    placement = tool_placement(runtime_paths_for(config))
+    placements = {call.args[0]: call.kwargs["runs_in_worker"] for call in mock_get_tool_by_name.call_args_list}
+    assert placements
+    assert placements == {
+        tool_name: placement.runs_in_worker(tool_name, expected_worker_tools) for tool_name in placements
+    }
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1293,11 +1301,10 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
 
     toolkit = build_agent_toolkit(
         "memory",
-        agent_name="general",
+        agent_tools=resolve_agent_tools(config, "general"),
+        placement=tool_placement(runtime_paths),
         config=config,
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
@@ -1324,11 +1331,10 @@ def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name
 
     toolkit = build_agent_toolkit(
         tool_name,
-        agent_name="general",
+        agent_tools=resolve_agent_tools(config, "general"),
+        placement=tool_placement(runtime_paths),
         config=config,
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
@@ -1344,27 +1350,12 @@ def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path)
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.memory.backend = "mem0"
+    config.agents["general"].tools = ["memory"]
+    assert "memory" in [entry.name for entry in resolve_agent_tools(config, "general").candidates()]
+
     config.agents["general"].memory_backend = "none"
-    agent_runtime = resolve_agent_runtime(
-        "general",
-        config,
-        runtime_paths,
-        execution_identity=None,
-        create=True,
-    )
 
-    toolkit = build_agent_toolkit(
-        "memory",
-        agent_name="general",
-        config=config,
-        runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
-        agent_runtime=agent_runtime,
-        execution_identity=None,
-    )
-
-    assert toolkit is None
+    assert "memory" not in [entry.name for entry in resolve_agent_tools(config, "general").candidates()]
 
 
 def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
@@ -2429,7 +2420,7 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
 def test_create_agent_passes_authored_shell_runtime_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Authored per-agent shell overrides should be converted into runtime kwargs."""
+    """Authored per-agent shell list settings should reach the constructor as validated settings."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = _test_config()
@@ -2445,10 +2436,10 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
 
     _create_agent_for_test("general", config=config)
 
-    runtime_overrides_by_tool = {
-        call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
+    settings_by_tool = {
+        call.args[0]: call.kwargs.get("tool_config_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert runtime_overrides_by_tool["shell"] == {
+    assert settings_by_tool["shell"] == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
@@ -2626,9 +2617,7 @@ def test_openclaw_compat_implies_matrix_message_tool() -> None:
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    runtime_toolkits = [
-        entry.name for entry in visible_tool_surface(agent_name="summary", config=config).runtime_tool_configs
-    ]
+    runtime_toolkits = [entry.name for entry in resolve_agent_tools(config, "summary").candidates()]
     assert "openclaw_compat" in runtime_toolkits
     assert "matrix_message" in runtime_toolkits
 
@@ -2825,7 +2814,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
         shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
@@ -2839,7 +2829,8 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             tool_init_overrides,
             runtime_overrides,
             shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,

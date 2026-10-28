@@ -51,6 +51,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
@@ -913,7 +914,7 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
 
 def matrix_message_available_during_call(config: Config, agent_name: str) -> bool:
     """Return whether the call agent can send Matrix messages; tools that may need approval are unavailable in calls."""
-    return "matrix_message" in config.resolve_entity(agent_name).available_tools and not tool_may_require_approval(
+    return room_turn_offers(config, agent_name, "matrix_message") and not tool_may_require_approval(
         config,
         "matrix_message",
     )

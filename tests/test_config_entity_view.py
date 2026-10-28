@@ -18,6 +18,7 @@ from mindroom.config.models import (
 )
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 
 
 def _representative_config() -> Config:
@@ -167,17 +168,18 @@ def test_tool_resolution() -> None:
     assert shell_entry.initial is True
     assert shell_entry.tool_config_overrides == {"shell_path_prepend": ["/run/wrappers/bin"]}
 
-    assert [entry.name for entry in view.authored_deferred_tool_configs] == ["shell"]
-    assert view.authored_deferred_tool_config("shell") is not None
-    assert view.authored_deferred_tool_config("calculator") is None
-    assert view.tool_runtime_overrides("shell") == {"shell_path_prepend": "/run/wrappers/bin"}
-    assert view.tool_runtime_overrides("calculator") is None
-    assert view.deferred_tool_scope_incompatible_tools("shell") == []
+    facts = resolve_agent_tools(config, "overriding_agent").facts
+    assert [entry.name for entry in facts.authored if entry.defer] == ["shell"]
+    # The agent's toolkits receive its authored agent-only list joined into the tool's string setting.
+    candidates = {entry.name: entry for entry in resolve_agent_tools(config, "overriding_agent").candidates()}
+    assert candidates["shell"].tool_config_overrides == {"shell_path_prepend": "/run/wrappers/bin"}
+    assert candidates["calculator"].tool_config_overrides == {}
+    assert "shell" not in facts.scope_incompatible
 
     inheriting = config.resolve_entity("inheriting_agent")
     assert inheriting.available_tools == []
     assert inheriting.tool_configs == []
-    assert inheriting.authored_deferred_tool_configs == []
+    assert not any(entry.defer for entry in resolve_agent_tools(config, "inheriting_agent").facts.authored)
 
 
 def test_scope_resolution() -> None:

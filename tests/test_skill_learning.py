@@ -62,8 +62,8 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
 from mindroom.tool_jobs.execution import project_definitions
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -1783,7 +1783,7 @@ def test_learning_agents_offer_skill_manage(tmp_path: Path) -> None:
     config, _paths = _learner(tmp_path)
 
     def offered() -> set[str]:
-        return {entry.name for entry in visible_tool_surface(agent_name="mind", config=config).runtime_tool_configs}
+        return {entry.name for entry in resolve_agent_tools(config, "mind").candidates()}
 
     assert "skill_manage" in offered()
     config.agents["mind"].skill_learning.enabled = False

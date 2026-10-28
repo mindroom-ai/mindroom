@@ -1481,21 +1481,6 @@ class Config(BaseModel):
         model_config = self.models.get(model_name)
         return model_config.context_window if model_config and model_config.context_window else None
 
-    def _deferred_tool_scope_incompatible_tools(
-        self,
-        agent_name: str,
-        authored_tool_name: str,
-    ) -> list[str]:
-        """Return expanded deferred tools invalid for one agent's effective execution scope."""
-        authored_config = self._agent_authored_deferred_tool_config(agent_name, authored_tool_name)
-        if authored_config is None:
-            return []
-        execution_scope = self._agent_execution_scope(agent_name)
-        return unsupported_shared_only_integration_names(
-            self.expand_tool_names([authored_tool_name]),
-            execution_scope,
-        )
-
     def _agent_scope_incompatible_deferred_tools(self, agent_name: str) -> dict[str, list[str]]:
         """Return deferred authored tools whose expanded contents are invalid for one agent scope."""
         execution_scope = self._agent_execution_scope(agent_name)
@@ -1509,13 +1494,6 @@ class Config(BaseModel):
                 )
             )
         }
-
-    def get_agent_worker_tools(self, agent_name: str) -> list[str] | None:
-        """Return one agent's configured worker-routed tools, or None for the built-in routing policy."""
-        configured = self.get_agent(agent_name).worker_tools
-        if configured is None:
-            configured = self.defaults.worker_tools
-        return None if configured is None else self.expand_tool_names(list(configured))
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:
         """Return shared credential service names allowed inside isolated workers."""
@@ -1888,28 +1866,6 @@ class Config(BaseModel):
             for entry in self._get_agent_authored_tool_configs(agent_name)
             if entry.defer and self._tool_name_is_available(entry.name)
         ]
-
-    def _agent_authored_deferred_tool_config(
-        self,
-        agent_name: str,
-        authored_tool_name: str,
-    ) -> EffectiveToolConfig | None:
-        """Return one authored deferred tool config by authored name."""
-        for entry in self._agent_authored_deferred_tool_configs(agent_name):
-            if entry.name == authored_tool_name:
-                return entry
-        return None
-
-    def _agent_tool_runtime_overrides(self, agent_name: str, tool_name: str) -> dict[str, object] | None:
-        """Return runtime kwargs derived from one agent's authored tool overrides."""
-        from mindroom.tool_system.catalog import authored_tool_overrides_to_runtime  # noqa: PLC0415
-
-        agent_config = self.get_agent(agent_name)
-        overrides = agent_config.get_tool_overrides(tool_name)
-        if not overrides:
-            return None
-
-        return authored_tool_overrides_to_runtime(tool_name, overrides)
 
     def _agent_hard_dependency_tool_names(self, agent_name: str) -> set[str]:
         """Return tool names that are hard startup dependencies for one agent."""

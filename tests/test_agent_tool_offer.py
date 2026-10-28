@@ -173,8 +173,8 @@ def _docker_runtime_paths(tmp_path: Path) -> RuntimePaths:
         pytest.param({"tools": ["attachments"]}, False, id="no-workspace-tool"),
         pytest.param({"tools": ["attachments", "shell"]}, True, id="worker-shell"),
         pytest.param({"tools": ["attachments", "shell"], "worker_tools": []}, False, id="everything-in-primary"),
-        # Today an explicit list counts workspace tools the agent does not have.
-        pytest.param({"tools": ["attachments"], "worker_tools": ["file"]}, True, id="explicit-list-names-absent-tool"),
+        # Only the agent's own workspace tools count, even when its worker_tools names others.
+        pytest.param({"tools": ["attachments"], "worker_tools": ["file"]}, False, id="explicit-list-names-absent-tool"),
         pytest.param(
             {"tools": ["attachments", "shell"], "_persona": ("attachments",)},
             False,
@@ -211,4 +211,4 @@ def test_attachments_save_where_the_agents_workspace_tools_run(
         else SubagentPersona(source_kind="inline", source_name="", system_prompt="Attach.", tools=persona_tools),
     )
     attachments = source_toolkit(offered_function(build, "view_file"))
-    assert attachments._tools_use_worker(None) is uses_worker  # type: ignore[attr-defined, arg-type]
+    assert attachments._workspace_in_worker is uses_worker  # type: ignore[attr-defined]

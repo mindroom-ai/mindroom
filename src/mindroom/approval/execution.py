@@ -467,6 +467,7 @@ class AgentApprovalExecution:
             config=config,
             runtime_paths=self.runtime_paths,
             execution_identity=execution_identity,
+            delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
         build = await asyncio.to_thread(
             create_agent,

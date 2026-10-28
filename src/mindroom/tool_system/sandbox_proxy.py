@@ -13,6 +13,7 @@ import math
 import secrets
 from contextlib import suppress
 from dataclasses import asdict, dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
@@ -23,6 +24,7 @@ from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTE
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
@@ -63,7 +65,7 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -501,23 +503,6 @@ def _tool_defaults_to_worker(tool_name: str) -> bool:
     return metadata is not None and metadata.default_execution_target.value == "worker"
 
 
-def attachment_save_uses_worker(
-    *,
-    runtime_paths: RuntimePaths,
-    worker_tools_override: list[str] | None = None,
-) -> bool:
-    """Return whether attachment saves should land where workspace consumers run."""
-    return any(
-        sandbox_proxy_enabled_for_tool(
-            tool_name,
-            runtime_paths=runtime_paths,
-            worker_tools_override=worker_tools_override,
-        )
-        for tool_name, metadata in TOOL_METADATA.items()
-        if metadata.consumes_workspace_paths
-    )
-
-
 def _post_worker_file_request(
     proxy_config: _SandboxProxyConfig,
     runtime_paths: RuntimePaths,
@@ -558,7 +543,7 @@ def save_attachment_to_worker(
     mime_type: str | None,
     filename: str | None,
 ) -> WorkerAttachmentSaveReceipt:
-    """Write attachment bytes to the selected worker, for agents whose ``attachment_save_uses_worker`` holds."""
+    """Write attachment bytes to the selected worker, for an agent whose workspace tools run in a worker."""
     byte_limit = inline_attachment_byte_limit(runtime_paths)
     byte_count = len(payload_bytes)
     if byte_count > byte_limit:
@@ -626,7 +611,7 @@ def view_file_from_worker(
     workspace_root: Path | None = None,
     path: str,
 ) -> ToolValue:
-    """View one file in the selected worker, for agents whose ``attachment_save_uses_worker`` holds."""
+    """View one file in the selected worker, for an agent whose workspace tools run in a worker."""
     proxy_config = sandbox_proxy_config(runtime_paths)
     manager_context = _primary_worker_manager_context(runtime_paths)
     with _lease_worker_manager(runtime_paths, proxy_config, manager_context) as worker_manager:
@@ -735,11 +720,11 @@ def _sandbox_proxy_requested_for_tool(
     *,
     tool_name: str,
     proxy_config: _SandboxProxyConfig,
-    worker_tools_override: list[str] | None,
+    worker_tools: Collection[str] | None,
 ) -> bool:
     """Return whether config requests worker/proxy routing for one tool."""
-    if worker_tools_override is not None:
-        requested = tool_name in worker_tools_override
+    if worker_tools is not None:
+        requested = tool_name in worker_tools
     elif proxy_config.execution_mode in _UNSAFE_LOCAL_EXECUTION_MODES:
         requested = False
     elif proxy_config.execution_mode in _SANDBOX_ALL_EXECUTION_MODES:
@@ -757,61 +742,71 @@ def _sandbox_proxy_requested_for_tool(
     return requested
 
 
-def sandbox_proxy_enabled_for_tool(
-    tool_name: str,
-    *,
-    runtime_paths: RuntimePaths,
-    worker_tools_override: list[str] | None = None,
-) -> bool:
-    """Return whether the given tool should execute through the sandbox proxy.
+@dataclass(frozen=True)
+class ToolPlacement:
+    """The sandbox settings of one runtime, which decide where each tool runs: in the primary or in a worker.
 
-    When *worker_tools_override* is not ``None``, it takes precedence over the
-    env-var based ``_EXECUTION_MODE`` / ``_PROXY_TOOLS`` logic. An empty list
-    means "route nothing through the proxy for this agent".
+    Settings are parsed once; the worker backend is checked only when a tool's placement depends on it.
     """
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    metadata = TOOL_METADATA.get(tool_name)
-    if proxy_config.runner_mode or (
-        metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
-    ):
-        return False
 
-    if not _sandbox_proxy_requested_for_tool(
-        tool_name=tool_name,
-        proxy_config=proxy_config,
-        worker_tools_override=worker_tools_override,
-    ):
-        return False
+    runtime_paths: RuntimePaths
+    proxy_config: _SandboxProxyConfig
 
-    if (
-        worker_tools_override is None
-        and proxy_config.execution_mode is None
-        and proxy_config.proxy_tools is not None
-        and not proxy_config.proxy_tools
-        and proxy_config.proxy_url is None
-        and primary_worker_backend_name(runtime_paths) == "static_runner"
-    ):
-        return False
+    @cached_property
+    def _backend_routes(self) -> bool:
+        # Dedicated-worker backends must fail closed when routing is intended but the
+        # provider config is incomplete; otherwise tools silently execute locally.
+        return primary_worker_backend_available(
+            self.runtime_paths,
+            proxy_url=self.proxy_config.proxy_url,
+            proxy_token=self.proxy_config.proxy_token,
+        ) or primary_worker_backend_is_dedicated(self.runtime_paths)
 
-    if primary_worker_backend_available(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-    ):
-        return True
+    def runs_in_worker(self, tool_name: str, worker_tools: Collection[str] | None) -> bool:
+        """Return whether calls of ``tool_name`` run in a worker for an agent with these ``worker_tools``.
 
-    # Dedicated-worker backends must fail closed when routing is intended but the
-    # provider config is incomplete; otherwise tools silently execute locally.
-    if primary_worker_backend_is_dedicated(runtime_paths):
-        return True
+        ``worker_tools`` is the agent's resolved list, which takes precedence over the env-var based
+        execution mode and proxy tools; None follows them, and an empty list routes nothing.
+        """
+        proxy_config = self.proxy_config
+        metadata = TOOL_METADATA.get(tool_name)
+        if proxy_config.runner_mode or (
+            metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
+        ):
+            return False
+        if not _sandbox_proxy_requested_for_tool(
+            tool_name=tool_name,
+            proxy_config=proxy_config,
+            worker_tools=worker_tools,
+        ):
+            return False
+        if (
+            worker_tools is None
+            and proxy_config.execution_mode is None
+            and proxy_config.proxy_tools is not None
+            and not proxy_config.proxy_tools
+            and proxy_config.proxy_url is None
+            and primary_worker_backend_name(self.runtime_paths) == "static_runner"
+        ):
+            return False
+        if self._backend_routes:
+            return True
+        # Execution tools also fail closed on the default static backend. To allow
+        # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
+        # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
+        return not (
+            _tool_defaults_to_worker(tool_name)
+            and self.runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
+        )
 
-    # Execution tools also fail closed on the default static backend. To allow
-    # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
-    # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
-    return not (
-        _tool_defaults_to_worker(tool_name)
-        and runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
-    )
+
+def tool_placement(runtime_paths: RuntimePaths) -> ToolPlacement:
+    """Return the tool placement of one runtime.
+
+    The built-in tool registry is loaded first, so a tool's placement never depends on what imported it before.
+    """
+    ensure_tool_registry_loaded(runtime_paths)
+    return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths))
 
 
 def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -> bool:
@@ -1116,7 +1111,7 @@ def _wrap_async_proxy(
     return wrapped
 
 
-def maybe_wrap_toolkit_for_sandbox_proxy(
+def wrap_toolkit_for_sandbox_proxy(
     tool_name: str,
     toolkit: Toolkit,
     *,
@@ -1126,21 +1121,13 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
     extra_env_passthrough: str | None = None,
-    worker_tools_override: list[str] | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
-    Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
+    Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this) that runs in a worker.
     """
-    if not sandbox_proxy_enabled_for_tool(
-        tool_name,
-        runtime_paths=runtime_paths,
-        worker_tools_override=worker_tools_override,
-    ):
-        return toolkit
-
     execution_env = _execution_env_payload(
         tool_name,
         runtime_paths=runtime_paths,

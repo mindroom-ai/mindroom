@@ -149,7 +149,7 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.events import body_without_tool_markers, strip_visible_tool_markers
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -469,11 +469,7 @@ def _reply_authorization_entity_names(
 
 def _agent_has_matrix_messaging_tool(config: Config, agent_name: str) -> bool:
     """Return whether one agent can issue Matrix message actions."""
-    try:
-        surface = visible_tool_surface(agent_name=agent_name, config=config)
-    except ValueError:
-        return False
-    return "matrix_message" in {entry.name for entry in surface.runtime_tool_configs}
+    return room_turn_offers(config, agent_name, "matrix_message")
 
 
 def _cached_room_display_name(runtime: BotRuntimeView, room_id: str) -> str | None:

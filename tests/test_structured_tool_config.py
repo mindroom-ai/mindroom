@@ -40,7 +40,7 @@ def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object
         tool_name,
         paths,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         credential_overrides={"api_key": "synthetic-search-key"} if tool_name != "searxng" else None,
         tool_config_overrides=entry.tool_config_overrides,

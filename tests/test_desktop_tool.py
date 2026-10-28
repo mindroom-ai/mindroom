@@ -131,7 +131,7 @@ async def test_unconfigured_normal_desktop_tool_advertises_chat_pairing(tmp_path
     tool = get_tool_by_name(
         "desktop",
         test_runtime_paths(tmp_path),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=_desktop_target(),
     )
 
@@ -1163,7 +1163,7 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
     toolkit = get_tool_by_name(
         "desktop",
         test_runtime_paths(tmp_path),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=workspace,
         worker_target=_desktop_target(),
     )

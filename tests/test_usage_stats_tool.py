@@ -215,14 +215,14 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         "usage_stats",
         runtime_paths,
         credential_overrides={"admin_scope": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
     admin_toolkit = get_tool_by_name(
         "usage_stats",
         runtime_paths,
         tool_config_overrides={"admin_scope": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
 

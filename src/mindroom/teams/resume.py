@@ -326,6 +326,7 @@ async def continue_paused_team_run(
                         config=config,
                         runtime_paths=runtime_paths,
                         execution_identity=execution_identity,
+                        delegation_depth=0,
                     ),
                 )
                 for name in member_names

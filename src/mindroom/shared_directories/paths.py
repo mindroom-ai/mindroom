@@ -16,7 +16,7 @@ from mindroom.shared_directories.store import (
     shared_directory_relative_path,
 )
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, tool_placement
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
 from mindroom.workers.runtime import primary_worker_backend_is_dedicated, worker_visible_storage_root
 
@@ -34,10 +34,15 @@ def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, ag
     """Return whether the agent's file-reading tools run in a dedicated worker that mounts its shares."""
     if agent_name not in config.agents or worker_visible_storage_root(runtime_paths) is None:
         return False
-    worker_tools = config.get_agent_worker_tools(agent_name)
+    # Imported here: tool construction reads shared directory roots, and agent tool resolution reaches tool construction.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+
+    agent_tools = resolve_agent_tools(config, agent_name)
+    placement = tool_placement(runtime_paths)
     return any(
-        sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths, worker_tools_override=worker_tools)
-        for tool_name in _SHARE_READING_TOOLS
+        agent_tools.runs_in_worker(tool_name, placement)
+        for tool_name in agent_tools.tool_names
+        if tool_name in _SHARE_READING_TOOLS
     )
 
 

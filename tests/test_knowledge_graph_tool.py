@@ -24,8 +24,8 @@ from mindroom.knowledge_graph.store import (
     _MergedEntities,
     set_knowledge_graph_store,
 )
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -267,7 +267,7 @@ def test_graph_enabled_agents_are_offered_the_tool() -> None:
     """Enabling the graph gives the agent its tool; disabling removes it."""
 
     def offered(config: Config) -> set[str]:
-        return {entry.name for entry in visible_tool_surface(agent_name="mind", config=config).runtime_tool_configs}
+        return {entry.name for entry in resolve_agent_tools(config, "mind").candidates()}
 
     assert "knowledge_graph" in offered(_config())
     assert "knowledge_graph" not in offered(_config(enabled=False))

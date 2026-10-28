@@ -26,7 +26,8 @@ from mindroom.config.main import Config
 from mindroom.delegation.state import SubagentPersona
 from mindroom.event_journal import ApprovalCall
 from mindroom.tool_jobs.authorization import authority_snapshot, locally_allowed, toolkit_authority
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.sandbox_proxy import tool_placement
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_tool_offer import _identity, _runtime_paths
 from tests.turn_model_helpers import turn_model
@@ -202,19 +203,19 @@ def test_room_context_tools_need_only_a_room_and_invite_router_a_matrix_room(
         # today: an unattached deferred entry hides the toolkit an eager tool implies.
         pytest.param(
             _MESSAGE_ATTACH,
-            {"deferred_tools": []},
+            {"deferred": []},
             "matrix_message matrix_message:matrix_room",
             id="unattached",
         ),
         pytest.param(
             {"tools": ["calculator", {"sleep": {"defer": True}}], "delegate_to": ["helper"], "allow_self_config": True},
-            {"enable_dynamic_tools_manager": True, "include_matrix_room_runtime_tools": True},
+            {"portable_search": True, "matrix_room_tools": True},
             "calculator sleep delegate self_config dynamic_tools invite_router",
             id="injected-after-authored",
         ),
         pytest.param(
             {"tools": ["calculator", "dynamic_tools", {"sleep": {"defer": True}}]},
-            {"enable_dynamic_tools_manager": True},
+            {"portable_search": True},
             "calculator dynamic_tools sleep",
             id="authored-search-keeps-its-place",
         ),
@@ -228,8 +229,8 @@ def test_the_surface_lists_each_toolkit_with_its_owner_in_available_tool_order_t
 ) -> None:
     """Each surface entry reads ``owner:name`` when an authored preset or implier owns it, else its own name."""
     config, _ = _config(tmp_path, agent)
-    surface = visible_tool_surface(agent_name="code", config=config, **options)
-    entries = [(entry.name, entry.authored_name or entry.name) for entry in surface.runtime_tool_configs]
+    candidates = resolve_agent_tools(config, "code").candidates(**options)
+    entries = [(entry.name, entry.authored_name or entry.name) for entry in candidates]
     assert " ".join(name if owner == name else f"{owner}:{name}" for name, owner in entries) == expected
 
 
@@ -247,8 +248,8 @@ def test_a_matrix_room_turn_moves_an_authored_invite_router_to_the_end_without_i
 ) -> None:
     """On a Matrix room turn the authored invite_router entry gives way to the injected one, appended last."""
     config, _ = _config(tmp_path, {"tools": [{"invite_router": {"exclude_tools": ["invite_router"]}}, "calculator"]})
-    surface = visible_tool_surface(agent_name="code", config=config, include_matrix_room_runtime_tools=room_runtime)
-    assert [(entry.name, dict(entry.tool_config_overrides)) for entry in surface.runtime_tool_configs] == expected
+    candidates = resolve_agent_tools(config, "code").candidates(matrix_room_tools=room_runtime)
+    assert [(entry.name, dict(entry.tool_config_overrides)) for entry in candidates] == expected
 
 
 @pytest.mark.parametrize(
@@ -260,8 +261,7 @@ def test_a_matrix_room_turn_moves_an_authored_invite_router_to_the_end_without_i
         pytest.param(_ROOM_TOOL, "matrix_message", "matrix_message", {"room": False}, False, id="roomless"),
         pytest.param(_DELEGATE, "delegate", "run_subagent", {}, True, id="delegate-depth-0"),
         pytest.param(_DELEGATE, "delegate", "run_subagent", {"depth": 3}, False, id="delegate-at-max-depth"),
-        # today: an authored delegate entry stays on the surface at any depth, so max depth still allows it.
-        pytest.param(_AUTHORED_DELEGATE, "delegate", "run_subagent", {"depth": 3}, True, id="authored-delegate"),
+        pytest.param(_AUTHORED_DELEGATE, "delegate", "run_subagent", {"depth": 3}, False, id="authored-delegate"),
     ],
 )
 def test_retained_tool_work_is_allowed_only_while_its_toolkit_rule_still_holds(
@@ -290,11 +290,10 @@ def _locally_allowed(
     config, runtime_paths = _config(tmp_path, agent)
     built = build_agent_toolkit(
         toolkit,
-        agent_name="code",
+        agent_tools=resolve_agent_tools(config, "code"),
+        placement=tool_placement(runtime_paths),
         config=config,
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         execution_identity=_identity(room=True),
     )
     assert built is not None
@@ -316,21 +315,40 @@ def _locally_allowed(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("agent", "toolkit", "identity", "expected"),
+    ("agent", "toolkit", "identity", "depth", "expected"),
     [
-        pytest.param(_ROOM_TOOL, "matrix_message", "room", ("matrix_message",), id="room-context-in-room"),
-        pytest.param(_ROOM_TOOL, "matrix_message", "roomless", "requires room context", id="room-context-roomless"),
-        # today: the preset's last expanded member, matrix_room, decides, so even its shell's approvals need a room.
-        pytest.param({"tools": ["openclaw_compat"]}, "openclaw_compat", "roomless", "requires room", id="preset"),
-        pytest.param({}, "invite_router", "roomless", "no longer permitted", id="room-runtime-roomless"),
-        # today: a non-Matrix turn with a room still counts the Matrix room runtime tool as permitted.
-        pytest.param({}, "invite_router", "api-room", ("invite_router",), id="room-runtime-non-matrix-room"),
-        # today: no memory backend check, so memory restores with backend none.
-        pytest.param({"tools": ["memory"], "memory_backend": "none"}, "memory", "room", ("memory",), id="memory-none"),
-        # today: no graph check, so an authored knowledge_graph restores with the graph off.
-        pytest.param({"tools": ["knowledge_graph"]}, "knowledge_graph", "room", ("knowledge_graph",), id="graph-off"),
-        # today: the function takes no delegation depth, so a delegate approval restores at any depth.
-        pytest.param(_DELEGATE, "delegate", "room", ("delegate",), id="delegate-without-depth"),
+        pytest.param(_ROOM_TOOL, "matrix_message", "room", 0, ("matrix_message",), id="room-context-in-room"),
+        pytest.param(_ROOM_TOOL, "matrix_message", "roomless", 0, "requires room context", id="room-context-roomless"),
+        # The preset's other toolkits need no room, so its shell's approvals restore without one.
+        pytest.param(
+            {"tools": ["openclaw_compat"]},
+            "openclaw_compat",
+            "roomless",
+            0,
+            ("openclaw_compat",),
+            id="preset",
+        ),
+        pytest.param({}, "invite_router", "roomless", 0, "requires room context", id="room-runtime-roomless"),
+        # Only a Matrix room turn offers the Matrix room runtime tools.
+        pytest.param({}, "invite_router", "api-room", 0, "requires room context", id="room-runtime-non-matrix-room"),
+        pytest.param(
+            {"tools": ["memory"], "memory_backend": "none"},
+            "memory",
+            "room",
+            0,
+            "no longer permitted",
+            id="memory-none",
+        ),
+        pytest.param(
+            {"tools": ["knowledge_graph"]},
+            "knowledge_graph",
+            "room",
+            0,
+            "no longer permitted",
+            id="graph-off",
+        ),
+        pytest.param(_DELEGATE, "delegate", "room", 0, ("delegate",), id="delegate"),
+        pytest.param(_DELEGATE, "delegate", "room", 3, "no longer permitted", id="delegate-at-max-depth"),
     ],
 )
 async def test_a_saved_approval_restores_only_toolkits_its_agent_may_still_use(
@@ -338,6 +356,7 @@ async def test_a_saved_approval_restores_only_toolkits_its_agent_may_still_use(
     agent: dict[str, Any],
     toolkit: str,
     identity: str,
+    depth: int,
     expected: tuple[str, ...] | str,
 ) -> None:
     """A saved approval's toolkit restores while the current surface permits it, else refuses with the reason."""
@@ -345,7 +364,14 @@ async def test_a_saved_approval_restores_only_toolkits_its_agent_may_still_use(
     owner = _IDENTITIES[identity]
     assert owner is not None
     calls = (ApprovalCall("call", "function", "code", 100, toolkit_name=toolkit),)
-    restored = required_approval_tool_names("code", calls, config=config, runtime_paths=paths, execution_identity=owner)
+    restored = required_approval_tool_names(
+        "code",
+        calls,
+        config=config,
+        runtime_paths=paths,
+        execution_identity=owner,
+        delegation_depth=depth,
+    )
     if isinstance(expected, str):
         with pytest.raises(RuntimeError, match=expected):
             await restored

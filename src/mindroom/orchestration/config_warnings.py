@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agents import resolve_runtime_worker_tools
 from mindroom.egress_broker.env import egress_broker_enabled, egress_tool_without_worker_commands
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -40,21 +41,12 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
     """Log one warning per agent that isolates code tools in a worker while primary-process tools stay unconfined."""
     # Code-execution tools are built in; loading plugins here would re-import plugin modules mid-reload.
     ensure_tool_registry_loaded(runtime_paths)
+    placement = tool_placement(runtime_paths)
     for agent_name in config.agents:
         entity = config.resolve_entity(agent_name)
-        tool_names = [entry.name for entry in entity.tool_configs if entry.name in TOOL_METADATA]
-        routed = set(
-            resolve_runtime_worker_tools(
-                agent_name,
-                config,
-                runtime_paths,
-                tool_names,
-                tool_registry_preloaded=True,
-            ),
-        )
-        worker_tools = {
-            name for name in tool_names if name in routed and not TOOL_METADATA[name].requires_primary_runtime
-        }
+        agent_tools = resolve_agent_tools(config, agent_name)
+        tool_names = [name for name in agent_tools.tool_names if name in TOOL_METADATA]
+        worker_tools = {name for name in tool_names if agent_tools.runs_in_worker(name, placement)}
         worker_code_tools = sorted(name for name in worker_tools if TOOL_METADATA[name].executes_code)
         unconfined_primary_tools = sorted(
             name

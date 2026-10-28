@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, WORKER_EGRESS_NO_PROXY, RuntimePaths, compose_worker_proxy_env
 from mindroom.origins import connections_sign_in_enabled
 from mindroom.runtime_env_policy import EGRESS_BROKER_ENV_BY_KEY
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
@@ -86,11 +85,14 @@ def egress_agent_scope(config: Config, agent_name: str, runtime_paths: RuntimePa
     """
     if agent_name not in config.agents:
         return None
-    entity = config.resolve_entity(agent_name)
-    tools = entity.available_tools
-    if _EGRESS_TOOL_NAME not in tools or not _runs_commands_in_a_worker(config, agent_name, tools, runtime_paths):
+    if _EGRESS_TOOL_NAME not in _agent_tool_names(config, agent_name) or not _runs_commands_in_a_worker(
+        config,
+        agent_name,
+        runtime_paths,
+    ):
         return None
-    return "unscoped" if entity.execution_scope is None else entity.execution_scope
+    execution_scope = config.resolve_entity(agent_name).execution_scope
+    return "unscoped" if execution_scope is None else execution_scope
 
 
 def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
@@ -101,31 +103,33 @@ def egress_tool_without_worker_commands(config: Config, agent_name: str, runtime
     """
     if agent_name not in config.agents:
         return False
-    tools = config.resolve_entity(agent_name).available_tools
+    tools = _agent_tool_names(config, agent_name)
     return (
         _EGRESS_TOOL_NAME in tools
         and not EXECUTION_ENV_TOOL_NAMES.isdisjoint(tools)
-        and not _runs_commands_in_a_worker(config, agent_name, tools, runtime_paths)
+        and not _runs_commands_in_a_worker(config, agent_name, runtime_paths)
     )
 
 
-def _runs_commands_in_a_worker(
-    config: Config,
-    agent_name: str,
-    tools: Iterable[str],
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether any of the agent's `EXECUTION_ENV_TOOL_NAMES` among `tools` runs in a worker."""
-    # Deferred: the sandbox proxy imports this module.
-    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool  # noqa: PLC0415
+def _agent_tool_names(config: Config, agent_name: str) -> list[str]:
+    # Deferred: the sandbox proxy imports this module, and agent tool resolution imports the sandbox proxy.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
 
-    # Without a `worker_tools` setting, routing follows each tool's registered default target.
-    ensure_tool_registry_loaded(runtime_paths)
-    worker_tools = config.get_agent_worker_tools(agent_name)
+    return resolve_agent_tools(config, agent_name).tool_names
+
+
+def _runs_commands_in_a_worker(config: Config, agent_name: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether any of the agent's own `EXECUTION_ENV_TOOL_NAMES` runs in a worker."""
+    # Deferred: the sandbox proxy imports this module.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
+
+    agent_tools = resolve_agent_tools(config, agent_name)
     try:
+        placement = tool_placement(runtime_paths)
         return any(
-            sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths, worker_tools_override=worker_tools)
-            for tool_name in EXECUTION_ENV_TOOL_NAMES.intersection(tools)
+            agent_tools.runs_in_worker(tool_name, placement)
+            for tool_name in EXECUTION_ENV_TOOL_NAMES.intersection(agent_tools.tool_names)
         )
     except WorkerBackendError:
         # An unreadable worker backend never runs these tools in the primary, so the agent stays listed and each

@@ -634,11 +634,11 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
 
     monkeypatch.setitem(TOOL_REGISTRY, "calculator", original_factory)
     if wrapped:
-        monkeypatch.setattr(metadata_module, "maybe_wrap_toolkit_for_sandbox_proxy", wrap)
+        monkeypatch.setattr(metadata_module, "wrap_toolkit_for_sandbox_proxy", wrap)
     toolkit = get_tool_by_name(
         "calculator",
         coordinator.runtime_paths,
-        disable_sandbox_proxy=not wrapped,
+        runs_in_worker=wrapped,
         worker_target=None,
     )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "lead"))["add"]

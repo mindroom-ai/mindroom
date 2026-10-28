@@ -57,6 +57,7 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm.media import Image
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.declarations import ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -211,10 +212,7 @@ def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path:
         },
     )
 
-    assert not sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-        "approved_egress",
-        runtime_paths=runtime_paths,
-    )
+    assert not sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("approved_egress", None)
 
 
 def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_path: Path) -> None:
@@ -224,11 +222,7 @@ def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_pa
         process_env={},
     )
 
-    assert not sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-        "github",
-        runtime_paths=runtime_paths,
-        worker_tools_override=["github"],
-    )
+    assert not sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("github", ["github"])
 
 
 def test_attachment_save_protocol_payload_fields_round_trip() -> None:
@@ -1445,7 +1439,7 @@ async def test_sync_function_placed_on_the_primary_runs_locally_through_its_asyn
         def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
             return function_name == "where" and arguments.get("place") == "primary"
 
-    toolkit = sandbox_proxy_module.maybe_wrap_toolkit_for_sandbox_proxy(
+    toolkit = sandbox_proxy_module.wrap_toolkit_for_sandbox_proxy(
         "calculator",
         PlacedTools(),
         runtime_paths=runtime_paths,
@@ -1498,7 +1492,7 @@ async def test_stopped_sync_tool_call_keeps_its_completion_owner_waiting(
         execution_mode="all",
     )
     monkeypatch.setattr(sandbox_proxy_module, "_call_proxy_sync", blocking)
-    toolkit = sandbox_proxy_module.maybe_wrap_toolkit_for_sandbox_proxy(
+    toolkit = sandbox_proxy_module.wrap_toolkit_for_sandbox_proxy(
         "calculator",
         PlacedTools(),
         runtime_paths=runtime_paths,
@@ -1610,7 +1604,7 @@ def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
         "calculator",
         runtime_paths,
         credentials_manager=manager,
-        worker_tools_override=["calculator"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["calculator"]),
         worker_target=target,
     )
     entrypoint = tool.functions["add"].entrypoint
@@ -2052,7 +2046,7 @@ async def test_view_file_reports_malformed_worker_responses(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(captured={}, responder=lambda _url, _json: reply),
     )
-    toolkit = AttachmentTools(runtime_paths=runtime_paths, worker_target=worker_target)
+    toolkit = AttachmentTools(runtime_paths=runtime_paths, worker_target=worker_target, workspace_in_worker=True)
 
     with tool_runtime_context(_tool_context(tmp_path)):
         result = await toolkit.view_file(path="plots/result.png")
@@ -2235,7 +2229,7 @@ def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytes
         execution_mode=None,
     )
 
-    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(tool_name, None) is True
 
 
 def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2253,15 +2247,8 @@ def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: 
     )
 
     assert TOOL_METADATA[tool_name].requires_primary_runtime is True
-    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is False
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            tool_name,
-            runtime_paths=runtime_paths,
-            worker_tools_override=[tool_name],
-        )
-        is False
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(tool_name, None) is False
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(tool_name, [tool_name]) is False
 
 
 @pytest.mark.parametrize(
@@ -2321,7 +2308,7 @@ def test_primary_built_provider_tool_ignores_worker_written_settings(
         tool_name,
         runtime_paths,
         credentials_manager=manager,
-        worker_tools_override=[],
+        runs_in_worker=False,
         worker_target=target,
     )
 
@@ -2340,38 +2327,30 @@ def test_primary_default_tool_remains_explicitly_worker_overridable(monkeypatch:
 
     assert TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.PRIMARY
     assert TOOL_METADATA[tool_name].requires_primary_runtime is False
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            tool_name,
-            runtime_paths=runtime_paths,
-            worker_tools_override=[tool_name],
-        )
-        is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(tool_name, [tool_name]) is True
+
+
+def _attachments_use_worker(runtime_paths: RuntimePaths, *, tools: list[str], worker_tools: list[str]) -> bool:
+    """Return whether attachments of an agent with ``tools`` and ``worker_tools`` save where its workspace tools run."""
+    config = Config(
+        agents={"code": AgentConfig(display_name="Code", tools=tools, worker_tools=worker_tools)},
+        models={},
     )
+    agent_tools = resolve_agent_tools(config, "code")
+    return agent_tools.workspace_in_worker(agent_tools.tool_names, sandbox_proxy_module.tool_placement(runtime_paths))
 
 
 def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     """Attachment saves should follow workspace-consumer metadata, not a hardcoded name set."""
     consumer_tool = "metadata_workspace_consumer_test"
     non_consumer_tool = "metadata_non_workspace_consumer_test"
-    monkeypatch.setitem(
-        TOOL_METADATA,
-        consumer_tool,
-        _sandbox_proxy_test_metadata(
-            consumer_tool,
+    for tool_name, consumes_workspace_paths in ((consumer_tool, True), (non_consumer_tool, False)):
+        metadata = _sandbox_proxy_test_metadata(
+            tool_name,
             default_execution_target=ToolExecutionTarget.WORKER,
-            consumes_workspace_paths=True,
-        ),
-    )
-    monkeypatch.setitem(
-        TOOL_METADATA,
-        non_consumer_tool,
-        _sandbox_proxy_test_metadata(
-            non_consumer_tool,
-            default_execution_target=ToolExecutionTarget.WORKER,
-            consumes_workspace_paths=False,
-        ),
-    )
+            consumes_workspace_paths=consumes_workspace_paths,
+        )
+        monkeypatch.setitem(TOOL_METADATA, tool_name, replace(metadata, factory=lambda: Toolkit))
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
@@ -2379,32 +2358,24 @@ def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.Mo
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
     )
+    tools = [consumer_tool, non_consumer_tool]
 
-    assert (
-        sandbox_proxy_module.attachment_save_uses_worker(
-            runtime_paths=runtime_paths,
-            worker_tools_override=[consumer_tool],
-        )
-        is True
-    )
-    assert (
-        sandbox_proxy_module.attachment_save_uses_worker(
-            runtime_paths=runtime_paths,
-            worker_tools_override=[non_consumer_tool],
-        )
-        is False
-    )
+    assert _attachments_use_worker(runtime_paths, tools=tools, worker_tools=[consumer_tool]) is True
+    assert _attachments_use_worker(runtime_paths, tools=tools, worker_tools=[non_consumer_tool]) is False
 
 
 @pytest.mark.parametrize(
-    "worker_tools_override",
+    "worker_tools",
     [["coding"], ["docker"], ["python"], ["shell", "coding"], ["browser_mcp"]],
 )
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
-    worker_tools_override: list[str],
+    worker_tools: list[str],
 ) -> None:
-    """Attachment saves should follow worker-routed workspace consumers, not only file workspaces."""
+    """Attachment saves follow the agent's own worker-routed workspace consumers, not only file workspaces.
+
+    A ``worker_tools`` entry naming a workspace consumer the agent does not have sends nothing to the worker.
+    """
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
@@ -2412,20 +2383,11 @@ def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
     )
-    assert (
-        sandbox_proxy_module.attachment_save_uses_worker(
-            runtime_paths=runtime_paths,
-            worker_tools_override=worker_tools_override,
-        )
-        is True
-    )
-    assert (
-        sandbox_proxy_module.attachment_save_uses_worker(
-            runtime_paths=runtime_paths,
-            worker_tools_override=["calculator"],
-        )
-        is False
-    )
+    tools = [*worker_tools, "calculator"]
+
+    assert _attachments_use_worker(runtime_paths, tools=tools, worker_tools=worker_tools) is True
+    assert _attachments_use_worker(runtime_paths, tools=tools, worker_tools=["calculator"]) is False
+    assert _attachments_use_worker(runtime_paths, tools=["calculator"], worker_tools=worker_tools) is False
 
 
 def test_save_attachment_to_static_runner_posts_without_worker_key(
@@ -2619,7 +2581,7 @@ def test_primary_built_tool_ignores_worker_written_settings(monkeypatch: pytest.
         "postgres",
         runtime_paths,
         credentials_manager=credentials_manager,
-        worker_tools_override=[],
+        runs_in_worker=False,
         worker_target=target,
     )
 
@@ -2646,15 +2608,11 @@ def test_routed_browser_ignores_worker_planted_desktop_target(monkeypatch: pytes
         "browser",
         runtime_paths,
         credentials_manager=manager,
-        worker_tools_override=["browser"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("browser", ["browser"]),
         worker_target=target,
     )
 
-    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-        "browser",
-        runtime_paths=runtime_paths,
-        worker_tools_override=["browser"],
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("browser", ["browser"])
     assert tool._default_target == "host"
     assert tool._desktop_target is None
 
@@ -3051,7 +3009,7 @@ async def test_get_tool_by_name_exposes_runtime_env_to_shell_execution(tmp_path:
         process_env={},
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -3097,7 +3055,7 @@ async def test_local_shell_exposes_configured_extra_parent_env_without_leaking_c
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
@@ -3133,7 +3091,7 @@ async def test_local_shell_does_not_expose_extra_parent_env_without_configuratio
         process_env=dict(os.environ),
     )
 
-    tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -3167,7 +3125,7 @@ async def test_local_shell_prepends_configured_path_entries(
         worker_target=None,
     )
 
-    shell_tool = get_tool_by_name("shell", runtime_paths, disable_sandbox_proxy=True, worker_target=None)
+    shell_tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
     shell_entrypoint = shell_tool.async_functions["run_shell_command"].entrypoint
     assert shell_entrypoint is not None
     result = await shell_entrypoint(
@@ -3799,7 +3757,7 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
-        worker_tools_override=["calculator"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["calculator"]),
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
     )
     entrypoint = tool.functions["add"].entrypoint
@@ -3848,7 +3806,7 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
-        worker_tools_override=["calculator"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["calculator"]),
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
     )
     entrypoint = tool.functions["add"].entrypoint
@@ -3924,7 +3882,7 @@ def test_proxy_worker_routed_lease_uses_worker_context_grants_without_tool_conte
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
-        worker_tools_override=["calculator"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["calculator"]),
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
     )
     entrypoint = tool.functions["add"].entrypoint
@@ -3994,7 +3952,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     tool = get_tool_by_name(
         "calculator",
         runtime_paths,
-        worker_tools_override=["calculator"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["calculator"]),
         worker_target=_worker_target(
             runtime_paths,
             "user_agent",
@@ -4104,7 +4062,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     tool = get_tool_by_name(
         "calculator",
         runtime_paths,
-        worker_tools_override=["calculator"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["calculator"]),
         worker_target=_worker_target(
             runtime_paths,
             "user_agent",
@@ -6447,7 +6405,7 @@ def test_static_runner_views_file_for_agent_added_after_seeding(
     _assert_no_live_config_secrets(sent_payloads)
 
 
-def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_worker_tools_can_use_kubernetes_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker-routed tools should stay proxy-enabled when the Kubernetes backend provides worker handles directly."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -6459,22 +6417,8 @@ def test_worker_tools_override_can_use_kubernetes_backend_without_proxy_url(monk
         execution_mode="off",
     )
 
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=["shell"],
-        )
-        is True
-    )
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=None,
-        )
-        is False
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is False
 
 
 def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
@@ -6492,14 +6436,8 @@ def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url
         proxy_tools={"shell"},
     )
 
-    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "calculator",
-            runtime_paths=runtime_paths,
-        )
-        is False
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is False
 
 
 def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_proxy_url(
@@ -6517,14 +6455,8 @@ def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_pr
         proxy_tools={"shell"},
     )
 
-    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool("shell", runtime_paths=runtime_paths) is True
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "calculator",
-            runtime_paths=runtime_paths,
-        )
-        is False
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is False
 
 
 def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
@@ -6541,14 +6473,7 @@ def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=["shell"],
-        )
-        is True
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is True
 
 
 def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6563,14 +6488,7 @@ def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypat
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=["shell"],
-        )
-        is True
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is True
 
 
 @pytest.mark.asyncio
@@ -6592,7 +6510,7 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
-        worker_tools_override=["shell"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]),
         worker_target=_worker_target(runtime_paths, None, "code", None),
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
@@ -6696,7 +6614,7 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
     )
     # The sync function runs through its async proxy in async runs, so it can be stopped.
@@ -6791,7 +6709,7 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -6860,7 +6778,7 @@ def test_worker_routed_oauth_connection_result_survives_proxy_boundary(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=worker_target,
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -6930,7 +6848,7 @@ def test_worker_routed_worker_failure_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=worker_target,
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -6999,7 +6917,7 @@ def test_worker_routed_legacy_structured_failure_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=worker_target,
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -7063,7 +6981,7 @@ def test_worker_routed_malformed_success_payload_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=worker_target,
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -7122,7 +7040,7 @@ def test_worker_routed_http_request_error_does_not_record_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=worker_target,
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -7182,7 +7100,7 @@ def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        worker_tools_override=["file"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["file"]),
         worker_target=worker_target,
     )
     entrypoint = tool.functions["read_file"].entrypoint
@@ -7207,7 +7125,7 @@ def test_worker_routed_ambiguous_http_client_error_records_worker_failure(
     assert manager.failures[0][0] == worker_target.worker_key
 
 
-def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_worker_tools_can_use_docker_backend_without_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """Worker-routed tools should stay proxy-enabled when the Docker backend provides worker handles directly."""
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "docker")
     monkeypatch.setenv("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
@@ -7218,22 +7136,8 @@ def test_worker_tools_override_can_use_docker_backend_without_proxy_url(monkeypa
         execution_mode="off",
     )
 
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=["shell"],
-        )
-        is True
-    )
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=None,
-        )
-        is False
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is False
 
 
 def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
@@ -7250,20 +7154,8 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-        )
-        is True
-    )
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "calculator",
-            runtime_paths=runtime_paths,
-        )
-        is False
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is True
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is False
 
 
 def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
@@ -7279,14 +7171,7 @@ def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-            "shell",
-            runtime_paths=runtime_paths,
-            worker_tools_override=["shell"],
-        )
-        is True
-    )
+    assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is True
 
 
 @pytest.mark.asyncio
@@ -7307,7 +7192,7 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
-        worker_tools_override=["shell"],
+        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]),
         worker_target=_worker_target(runtime_paths, None, "code", None),
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
@@ -7339,7 +7224,7 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
 
 
 class TestWorkerToolsOverride:
-    """Tests for per-agent worker_tools_override parameter."""
+    """Tests for placement under an agent's explicit worker_tools list."""
 
     def test_override_none_defers_to_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """None override should defer to the standard sandbox-proxy env controls."""
@@ -7351,22 +7236,8 @@ class TestWorkerToolsOverride:
         )
 
         # None override -> falls through to sandbox-proxy env controls
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "calculator",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is True
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is False
 
     def test_override_empty_list_disables_sandboxing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty list override should disable sandboxing even when sandbox env controls enable it."""
@@ -7376,22 +7247,8 @@ class TestWorkerToolsOverride:
             execution_mode="all",
         )
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=[],
-            )
-            is False
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "file",
-                runtime_paths=runtime_paths,
-                worker_tools_override=[],
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", []) is False
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", []) is False
 
     def test_override_explicit_list_selects_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Explicit list override should sandbox only the listed tools."""
@@ -7401,29 +7258,10 @@ class TestWorkerToolsOverride:
             execution_mode="off",
         )
 
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell", "file"]) is True
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("file", ["shell", "file"]) is True
         assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["shell", "file"],
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "file",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["shell", "file"],
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "calculator",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["shell", "file"],
-            )
-            is False
+            sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", ["shell", "file"]) is False
         )
 
     def test_override_still_respects_runner_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -7435,14 +7273,7 @@ class TestWorkerToolsOverride:
             runner_mode=True,
         )
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["shell"],
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is False
 
     def test_override_without_proxy_url_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No proxy URL should keep worker-routed execution tools wrapped so calls fail closed."""
@@ -7453,14 +7284,7 @@ class TestWorkerToolsOverride:
             execution_mode=None,
         )
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["shell"],
-            )
-            is True
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is True
 
     def test_default_static_runner_without_proxy_keeps_execution_tools_local(
         self,
@@ -7474,22 +7298,8 @@ class TestWorkerToolsOverride:
             execution_mode=None,
         )
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is False
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "calculator",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is False
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is False
 
     def test_unset_mode_with_static_proxy_url_preserves_all_tool_proxying(
         self,
@@ -7504,22 +7314,8 @@ class TestWorkerToolsOverride:
         )
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "calculator",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is True
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is True
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is True
 
     def test_explicit_wildcard_without_proxy_url_fails_closed_for_all_tools(
         self,
@@ -7536,22 +7332,8 @@ class TestWorkerToolsOverride:
         runtime_paths = _runtime_paths_from_env()
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "calculator",
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is True
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", None) is True
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("calculator", None) is True
 
     def test_unsafe_local_execution_opt_in_disables_explicit_routing_without_backend(
         self,
@@ -7567,14 +7349,7 @@ class TestWorkerToolsOverride:
         monkeypatch.setenv("MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS", "true")
         runtime_paths = _runtime_paths_from_env()
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "shell",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["shell"],
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("shell", ["shell"]) is False
 
     @pytest.mark.asyncio
     async def test_default_static_runner_shell_call_runs_locally(
@@ -7644,23 +7419,9 @@ class TestWorkerToolsOverride:
             execution_mode="all",
         )
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                tool_name,
-                runtime_paths=runtime_paths,
-                worker_tools_override=None,
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(tool_name, None) is False
         assert TOOL_METADATA[tool_name].requires_primary_runtime is True
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                tool_name,
-                runtime_paths=runtime_paths,
-                worker_tools_override=[tool_name],
-            )
-            is False
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(tool_name, [tool_name]) is False
 
     @pytest.mark.parametrize(
         ("method_name", "arguments"),
@@ -7700,7 +7461,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "chat_ui",
             runtime_paths,
-            worker_tools_override=["chat_ui"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("chat_ui", ["chat_ui"]),
             worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
         )
         entrypoint = tool.async_functions[method_name].entrypoint
@@ -7722,14 +7483,7 @@ class TestWorkerToolsOverride:
             execution_mode="all",
         )
 
-        assert (
-            sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
-                "browser",
-                runtime_paths=runtime_paths,
-                worker_tools_override=["browser"],
-            )
-            is True
-        )
+        assert sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("browser", ["browser"]) is True
 
     def test_get_tool_by_name_keeps_homeassistant_local_even_when_listed(
         self,
@@ -7757,7 +7511,10 @@ class TestWorkerToolsOverride:
             "homeassistant",
             runtime_paths,
             credentials_manager=fake_credentials,
-            worker_tools_override=["homeassistant"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(
+                "homeassistant",
+                ["homeassistant"],
+            ),
             worker_target=_worker_target(runtime_paths, "shared", "general", None),
         )
         entrypoint = tool.async_functions["list_entities"].entrypoint
@@ -7767,7 +7524,7 @@ class TestWorkerToolsOverride:
         assert "Home Assistant is not configured" in result
 
     def test_get_tool_by_name_passes_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """get_tool_by_name should pass worker_tools_override through to the proxy wrapper."""
+        """get_tool_by_name should wrap the toolkit for the proxy when its calls run in a worker."""
         captured: dict[str, Any] = {}
 
         runtime_paths = _configure_proxy_runtime(
@@ -7782,11 +7539,14 @@ class TestWorkerToolsOverride:
             _recording_client_class(captured=captured),
         )
 
-        # Override says sandbox calculator
+        # The agent lists calculator in its worker tools
         tool = get_tool_by_name(
             "calculator",
             runtime_paths,
-            worker_tools_override=["calculator"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker(
+                "calculator",
+                ["calculator"],
+            ),
             worker_target=None,
         )
         entrypoint = tool.functions["add"].entrypoint
@@ -7815,7 +7575,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": "/workspace/demo"},
-            worker_tools_override=["coding"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("coding", ["coding"]),
             worker_target=None,
         )
         entrypoint = tool.functions["ls"].entrypoint
@@ -7860,7 +7620,7 @@ class TestWorkerToolsOverride:
             runtime_paths,
             tool_init_overrides={"base_dir": "/srv/mindroom/agents/general/workspace"},
             shared_storage_root_path=Path("/srv/mindroom"),
-            worker_tools_override=["coding"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("coding", ["coding"]),
             worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
         )
         entrypoint = tool.functions["ls"].entrypoint
@@ -7898,7 +7658,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": str(base_dir)},
-            worker_tools_override=["coding"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("coding", ["coding"]),
             worker_target=None,
         )
         entrypoint = tool.functions["ls"].entrypoint
@@ -7946,7 +7706,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": str(unrelated_base_dir)},
-            worker_tools_override=["coding"],
+            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths).runs_in_worker("coding", ["coding"]),
             worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
         )
         entrypoint = tool.functions["ls"].entrypoint

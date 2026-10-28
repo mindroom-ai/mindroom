@@ -346,7 +346,8 @@ Matrix sync callback
 | `matrix_rtc/audio_process.py` | Main-process side of a GPT-Live call whose media runs in its own process, plus the idle process started ahead of the next call |
 | `matrix_rtc/audio_child.py` | Child process that runs one GPT-Live call's LiveKit room, frame encryption, and agent session away from the MindRoom event loop |
 | `matrix_rtc/audio_protocol.py` | Length-prefixed JSON frames between MindRoom and a call's audio process |
-| `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
+| `tool_system/agent_tools.py` | The toolkits one agent may use per turn (`AgentTools.candidates`) and where each runs |
+| `tool_system/sandbox_proxy.py` | The one tool placement decision (`ToolPlacement`) and the proxy that routes worker calls |
 | `api/sandbox_request_cancellation.py` | Stops an in-flight sandbox runner request when the primary stops waiting for it |
 | `api/sandbox_execute_stream.py` | Streams one runner call's progress and keep-alives before its result, and stops the call when the primary hangs up |
 | `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |

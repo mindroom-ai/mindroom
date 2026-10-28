@@ -476,7 +476,7 @@ def test_built_file_and_coding_tools_reach_the_calling_agents_shares(tmp_path: P
         return get_tool_by_name(
             tool_name,
             runtime_paths,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             runtime_config=config,
             tool_init_overrides={"base_dir": workspace},
             worker_target=resolve_worker_target(None, agent_name, None),
