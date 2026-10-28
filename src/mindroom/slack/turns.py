@@ -29,7 +29,7 @@ from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.slack.api import SlackApiError, slack_permalink
-from mindroom.slack.identity import slack_author
+from mindroom.slack.identity import slack_author, slack_channel_name
 from mindroom.slack.render import slack_plain_text
 
 if TYPE_CHECKING:
@@ -59,6 +59,7 @@ _DELIVERED_SECONDS = 86_400
 _THREAD_SECONDS = 7 * 86_400
 _PENDING_THREAD_SECONDS = 300
 _TILDE_RUN = re.compile(r"~+")
+_DIRECT_CONVERSATIONS = {"im": "a direct message", "mpim": "a group direct message"}
 # Failures a later attempt may not meet: Slack or the replay store unavailable, or responses not admitted right now.
 RETRYABLE_ERRORS = (
     SlackApiError,
@@ -131,6 +132,33 @@ async def event_author(attempt: SlackAttempt) -> SlackAuthor:
         attempt.config,
         attempt.runtime_paths,
     )
+
+
+async def conversation_label(attempt: SlackAttempt) -> str:
+    """Name the event's conversation for a turn header: `#name`, `a direct message` or `a group direct message`.
+
+    A channel whose name Slack cannot give is named by its ID: the name is only for display,
+    so its lookup must never fail or retry a delivery.
+    """
+    event = attempt.event
+    if (direct := _DIRECT_CONVERSATIONS.get(event.channel_type)) is not None:
+        return direct
+    try:
+        name = await slack_channel_name(
+            attempt.client,
+            attempt.app.bot_token,
+            attempt.identity.team_id,
+            event.channel_id,
+        )
+    except (SlackApiError, httpx.HTTPError) as exc:
+        logger.warning(
+            "Slack channel name lookup failed",
+            event_id=event.event_id,
+            channel_id=event.channel_id,
+            reason=failure_reason(exc),
+        )
+        name = event.channel_id
+    return f"#{name}"
 
 
 def running_bot(runtime: SlackRuntime, agent: str) -> tuple[_Bot, nio.AsyncClient] | None:
@@ -258,7 +286,8 @@ async def _send_slack_turn(
         attempt.config,
         attempt.runtime_paths,
     )
-    text = slack_plain_text(attempt.event.text)
+    # The app's own mention is the one name known without a lookup.
+    text = slack_plain_text(attempt.event.text, {attempt.identity.bot_user_id: attempt.identity.bot_name})
     # Longer than any run of `~` in the text, so the text cannot close the fence and reaches the agent unchanged.
     fence = "~" * max([3, *(len(run) + 1 for run in _TILDE_RUN.findall(text))])
     latest_thread_event_id = None

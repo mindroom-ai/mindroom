@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.config.slack import SlackConfig
 from mindroom.slack import identity
 from mindroom.slack.api import SlackApiError
-from mindroom.slack.identity import SlackAuthor, slack_author
+from mindroom.slack.identity import SlackAuthor, slack_author, slack_channel_name
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -24,14 +24,17 @@ if TYPE_CHECKING:
 _BOT_TOKEN = "xoxb-test-bot-token"  # noqa: S105
 _TEAM = "T0123ABCD"
 _USER_ID = "U0123ABCD"
+_CHANNEL_ID = "C0123ABCD"
 _CONFIG = SlackConfig(email_domain="example.com", matrix_user_id_template="@{localpart}:example.org")
 
 
 @pytest.fixture(autouse=True)
 def _empty_author_cache() -> Iterator[None]:
     identity._PROFILES.clear()
+    identity._CHANNEL_NAMES.clear()
     yield
     identity._PROFILES.clear()
+    identity._CHANNEL_NAMES.clear()
 
 
 @pytest.fixture
@@ -319,3 +322,66 @@ async def test_other_slack_errors_propagate_and_are_not_cached(
     assert not identity._PROFILES
     slack.body = {"ok": True, "user": _user()}
     assert (await _author(slack, paths)).matrix_id == "@ada:example.org"
+
+
+async def _channel_name(slack: _FakeSlack, **kwargs: Any) -> str:  # noqa: ANN401
+    async with slack.client() as client:
+        return await slack_channel_name(client, _BOT_TOKEN, _TEAM, _CHANNEL_ID, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_channel_name_comes_from_conversations_info_with_the_bot_token() -> None:
+    """The name is the one `conversations.info` gives for the channel, asked with the bot token."""
+    slack = _FakeSlack({"ok": True, "channel": {"id": _CHANNEL_ID, "name": "launch-eng"}})
+
+    assert await _channel_name(slack) == "launch-eng"
+    (request,) = slack.requests
+    assert request.url.path == "/api/conversations.info"
+    assert request.headers["Authorization"] == f"Bearer {_BOT_TOKEN}"
+    assert parse_qs(request.content.decode()) == {"channel": [_CHANNEL_ID]}
+
+
+@pytest.mark.asyncio
+async def test_channel_name_cache_expires_after_ten_minutes() -> None:
+    """A name is used until 600 seconds old, then looked up again; another channel is another lookup."""
+    slack = _FakeSlack({"ok": True, "channel": {"name": "launch-eng"}})
+    clock = [1000.0]
+
+    def now() -> float:
+        return clock[0]
+
+    await _channel_name(slack, now=now)
+    clock[0] += 599
+    await _channel_name(slack, now=now)
+    assert len(slack.requests) == 1
+
+    clock[0] += 1
+    await _channel_name(slack, now=now)
+    assert len(slack.requests) == 2
+
+    async with slack.client() as client:
+        await slack_channel_name(client, _BOT_TOKEN, _TEAM, "C0456EFGH", now=now)
+    assert len(slack.requests) == 3
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        ({"ok": False, "error": "channel_not_found"}, "channel_not_found"),
+        ({"ok": False, "error": "missing_scope"}, "missing_scope"),
+        ({"ok": True}, "invalid_response"),
+        ({"ok": True, "channel": {"name": ""}}, "invalid_response"),
+        ({"ok": True, "channel": {"name": 7}}, "invalid_response"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_channel_name_failures_raise_and_are_not_cached(body: dict[str, Any], error: str) -> None:
+    """A failed or nameless `conversations.info` raises `SlackApiError`, so the caller decides and the next call asks again."""
+    slack = _FakeSlack(body)
+
+    with pytest.raises(SlackApiError, match=error):
+        await _channel_name(slack)
+
+    assert not identity._CHANNEL_NAMES
+    slack.body = {"ok": True, "channel": {"name": "launch-eng"}}
+    assert await _channel_name(slack) == "launch-eng"

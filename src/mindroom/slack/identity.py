@@ -1,4 +1,4 @@
-"""Map a Slack author to a MindRoom (Matrix) account by the email on their Slack profile."""
+"""Map a Slack author to a MindRoom (Matrix) account by the email on their Slack profile, and name Slack channels."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from mindroom.slack.api import SlackApiError, slack_call
 from mindroom.slack.render import json_object, slack_display_name
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     import httpx
 
@@ -27,6 +27,7 @@ _UNKNOWN_USER_ERRORS = frozenset({"user_not_found", "user_not_visible"})
 _NOT_A_MEMBER_FLAGS = ("deleted", "is_bot", "is_app_user", "is_restricted", "is_ultra_restricted")
 # Oldest first: an entry is re-inserted when it is looked up again after it expired.
 _PROFILES: dict[tuple[str, str], tuple[float, _Profile]] = {}
+_CHANNEL_NAMES: dict[tuple[str, str], tuple[float, str]] = {}
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,34 @@ async def _fetch_profile(client: httpx.AsyncClient, bot_token: str, team_id: str
     return _profile(user, team_id)
 
 
+async def _fetch_channel_name(client: httpx.AsyncClient, bot_token: str, channel_id: str) -> str:
+    body = await slack_call(client, "conversations.info", bot_token, channel=channel_id)
+    name = json_object(body, "channel").get("name")
+    if not isinstance(name, str) or not name:
+        error = "invalid_response"
+        raise SlackApiError(error)
+    return name
+
+
+async def _cached[T](
+    cache: dict[tuple[str, str], tuple[float, T]],
+    key: tuple[str, str],
+    now: Callable[[], float],
+    fetch: Callable[[], Awaitable[T]],
+) -> T:
+    """Return a cached lookup that is under ten minutes old, else fetch it; a failed fetch caches nothing."""
+    looked_up_at = now()
+    cached = cache.get(key)
+    if cached is not None and looked_up_at - cached[0] < _CACHE_TTL_SECONDS:
+        return cached[1]
+    value = await fetch()
+    cache.pop(key, None)
+    while len(cache) >= _CACHE_MAX_ENTRIES:
+        del cache[next(iter(cache))]
+    cache[key] = (looked_up_at, value)
+    return value
+
+
 def _matrix_id(email: str | None, config: Config, runtime_paths: RuntimePaths) -> str | None:
     """Return the Matrix ID an email in the configured domain maps to, unless it names one of MindRoom's own accounts."""
     template = config.slack.matrix_user_id_template
@@ -103,15 +132,31 @@ async def slack_author(
     The display name is always set; someone Slack does not know or show is named by their ID.
     Any other Slack error raises `SlackApiError` and is not cached.
     """
-    key = (team_id, slack_user_id)
-    looked_up_at = now()
-    cached = _PROFILES.get(key)
-    if cached is not None and looked_up_at - cached[0] < _CACHE_TTL_SECONDS:
-        profile = cached[1]
-    else:
-        profile = await _fetch_profile(client, bot_token, team_id, slack_user_id)
-        _PROFILES.pop(key, None)
-        while len(_PROFILES) >= _CACHE_MAX_ENTRIES:
-            del _PROFILES[next(iter(_PROFILES))]
-        _PROFILES[key] = (looked_up_at, profile)
+    profile = await _cached(
+        _PROFILES,
+        (team_id, slack_user_id),
+        now,
+        lambda: _fetch_profile(client, bot_token, team_id, slack_user_id),
+    )
     return SlackAuthor(slack_user_id, profile.display_name, _matrix_id(profile.email, config, runtime_paths))
+
+
+async def slack_channel_name(
+    client: httpx.AsyncClient,
+    bot_token: str,
+    team_id: str,
+    channel_id: str,
+    *,
+    now: Callable[[], float] = time.monotonic,
+) -> str:
+    """Look up a channel's name with `conversations.info`, cached for ten minutes per team and channel.
+
+    `team_id` must be the bot token's own team, as for `slack_author`.
+    Any Slack error, or an answer without a name, raises `SlackApiError` and is not cached.
+    """
+    return await _cached(
+        _CHANNEL_NAMES,
+        (team_id, channel_id),
+        now,
+        lambda: _fetch_channel_name(client, bot_token, channel_id),
+    )

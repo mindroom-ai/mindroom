@@ -54,7 +54,7 @@ REPLY_TS = "1714000100.000200"
 FILE_ID = "F0123ABCD"
 WORKSPACE_URL = "https://example.slack.com/"
 TIMEOUT = "timed out"
-AUTH_TEST = {"ok": True, "url": WORKSPACE_URL, "team_id": "T0123ABCD", "user_id": "U0BOT0000"}
+AUTH_TEST = {"ok": True, "url": WORKSPACE_URL, "team_id": "T0123ABCD", "user_id": "U0BOT0000", "user": "mindroom"}
 DANA = {"id": "U0123ABCD", "name": "dana", "real_name": "Dana Example", "profile": {"display_name": "Dana"}}
 
 type Answer = dict[str, Any] | Callable[[httpx.Request], httpx.Response]

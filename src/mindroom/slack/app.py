@@ -28,10 +28,11 @@ class SlackAppCredentials:
 
 @dataclass(frozen=True)
 class SlackBotIdentity:
-    """Who the bot token belongs to; `workspace_url` keeps Slack's trailing slash."""
+    """Who the bot token belongs to; `bot_name` is its username and `workspace_url` keeps Slack's trailing slash."""
 
     team_id: str
     bot_user_id: str
+    bot_name: str
     workspace_url: str
 
 
@@ -68,9 +69,14 @@ async def slack_bot_identity(client: httpx.AsyncClient, credentials: SlackAppCre
     key = _identity_key(credentials)
     if (identity := _IDENTITIES.get(key)) is None:
         body = await slack_call(client, "auth.test", credentials.bot_token)
-        if not all(isinstance(body.get(key), str) and body[key] for key in ("team_id", "user_id", "url")):
+        if not all(isinstance(body.get(key), str) and body[key] for key in ("team_id", "user_id", "user", "url")):
             error = "invalid_response"
             raise SlackApiError(error)
-        identity = SlackBotIdentity(team_id=body["team_id"], bot_user_id=body["user_id"], workspace_url=body["url"])
+        identity = SlackBotIdentity(
+            team_id=body["team_id"],
+            bot_user_id=body["user_id"],
+            bot_name=body["user"],
+            workspace_url=body["url"],
+        )
         _IDENTITIES[key] = identity
     return identity

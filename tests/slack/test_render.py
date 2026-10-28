@@ -45,3 +45,11 @@ def test_display_name_prefers_what_slack_shows(user: dict[str, Any], name: str) 
 def test_plain_text_renders_slack_markup_without_lookups(text: str, plain: str) -> None:
     """Mentions keep IDs, channels their sent names, links their label and URL, and Slack's escapes are undone."""
     assert slack_plain_text(text) == plain
+
+
+def test_plain_text_names_only_the_users_it_is_given() -> None:
+    """A mention shows the given name, with or without Slack's label, and any other mention keeps its ID."""
+    text = "<@U0BOT0000> and <@U0BOT0000|old-name>, ask <@U0123ABCD> and U0BOT0000 or @U0BOT0000X"
+    names = {"U0BOT0000": "mindroom"}
+
+    assert slack_plain_text(text, names) == "@mindroom and @mindroom, ask @U0123ABCD and U0BOT0000 or @U0BOT0000X"

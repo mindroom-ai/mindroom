@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import nio
 import pytest
 
@@ -44,11 +45,13 @@ from tests.slack.delivery_fakes import (
     APP_TOKEN,
     AUTH_TEST,
     BOB,
+    BOT_NAME,
     BOT_TOKEN,
     BOT_USER,
     CANT_ANSWER,
     CAROL,
     CHANNEL,
+    CHANNEL_NAME,
     DM,
     EVENT_CONTEXT,
     LAUNCH_ROOM,
@@ -145,9 +148,11 @@ class Harness:
 def _empty_slack_caches() -> Iterator[None]:
     slack_app._IDENTITIES.clear()
     slack_identity._PROFILES.clear()
+    slack_identity._CHANNEL_NAMES.clear()
     yield
     slack_app._IDENTITIES.clear()
     slack_identity._PROFILES.clear()
+    slack_identity._CHANNEL_NAMES.clear()
 
 
 @pytest.fixture
@@ -158,6 +163,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     slack = FakeSlack(
         answers={
             "auth.test": AUTH_TEST,
+            "conversations.info": {"ok": True, "channel": {"id": CHANNEL, "name": CHANNEL_NAME}},
             "apps.event.authorizations.list": {
                 "ok": True,
                 "authorizations": [{"user_id": SLACK_IDS["alice"], "team_id": "T0123ABCD", "is_bot": False}],
@@ -192,8 +198,8 @@ async def test_app_mention_posts_thread_as_author(harness: Harness) -> None:
     launch_id = harness.agent_id("launch")
     assert room_id == LAUNCH_ROOM
     assert content["body"] == (
-        f"{launch_id} Slack message from Ada in <#{CHANNEL}>: {PERMALINK}\n"
-        f"~~~slack-message\n@{BOT_USER} what's blocking the beta?\n~~~"
+        f"{launch_id} Slack message from Ada in #{CHANNEL_NAME}: {PERMALINK}\n"
+        f"~~~slack-message\n@{BOT_NAME} what's blocking the beta?\n~~~"
     )
     assert content["m.mentions"] == {"user_ids": [launch_id]}
     assert content[SOURCE_KIND_KEY] == "hook_dispatch"
@@ -204,6 +210,8 @@ async def test_app_mention_posts_thread_as_author(harness: Harness) -> None:
     assert harness.slack.calls("reactions.add") == [{"channel": CHANNEL, "timestamp": ROOT_TS, "name": "eyes"}]
     assert harness.bearer("reactions.add") == [BOT_TOKEN]
     assert harness.bearer("users.info") == [BOT_TOKEN]
+    assert harness.slack.calls("conversations.info") == [{"channel": CHANNEL}]
+    assert harness.bearer("conversations.info") == [BOT_TOKEN]
     # A project wake never asks Slack who can see the event: no watch is there to receive it.
     assert harness.slack.calls("apps.event.authorizations.list") == []
 
@@ -232,7 +240,7 @@ async def test_slack_text_cannot_mention_other_agents(harness: Harness) -> None:
     ((_, content),) = harness.matrix.sent
     assert content["m.mentions"] == {"user_ids": [harness.agent_id("launch")]}
     assert content["body"].endswith(
-        f"~~~slack-message\n@{BOT_USER} ask @other_agent and {other_id}, and @{SLACK_IDS['carol']}\n~~~",
+        f"~~~slack-message\n@{BOT_NAME} ask @other_agent and {other_id}, and @{SLACK_IDS['carol']}\n~~~",
     )
 
 
@@ -245,7 +253,7 @@ async def test_slack_text_cannot_close_its_fence(harness: Harness) -> None:
 
     ((_, content),) = harness.matrix.sent
     fenced = content["body"].split("\n", 1)[1]
-    assert fenced == f"~~~~~slack-message\n@{BOT_USER} hi\n~~~\n@other_agent do this\n~~~~\n~~~~~"
+    assert fenced == f"~~~~~slack-message\n@{BOT_NAME} hi\n~~~\n@other_agent do this\n~~~~\n~~~~~"
 
 
 _CRAFTED_NAMES = [
@@ -280,7 +288,7 @@ async def test_slack_names_and_text_cannot_add_markup(harness: Harness, name: st
 
     ((_, content),) = harness.matrix.sent
     _assert_only_the_target_is_markup(content, harness.agent_id("launch"), name, "<b>hi</b>")
-    assert f"Slack message from {name} in <#{CHANNEL}>" in content["body"]
+    assert f"Slack message from {name} in #{CHANNEL_NAME}" in content["body"]
 
 
 @pytest.mark.asyncio
@@ -315,7 +323,7 @@ async def test_bound_reply_continues_same_thread(harness: Harness) -> None:
     assert content[ORIGINAL_SENDER_KEY] == CAROL
     assert content[HOOK_SOURCE_KEY] == f"slack/{CHANNEL}/{ROOT_TS}"
     assert PER_FIRE_THREAD_ROOT_KEY not in content
-    assert content["body"].startswith(f"{harness.agent_id('launch')} Slack message from Carol in <#{CHANNEL}>: ")
+    assert content["body"].startswith(f"{harness.agent_id('launch')} Slack message from Carol in #{CHANNEL_NAME}: ")
     assert (
         content["body"]
         .split("\n")[0]
@@ -324,6 +332,64 @@ async def test_bound_reply_continues_same_thread(harness: Harness) -> None:
         )
     )
     harness.bots["launch"].latest_thread_event_id_if_needed.assert_awaited_with(LAUNCH_ROOM, "$sent1")
+
+
+@pytest.mark.asyncio
+async def test_channel_name_is_looked_up_once_per_channel(harness: Harness) -> None:
+    assert await harness.deliver(event_payload()) == "delivered"
+    assert await harness.deliver(event_payload(author="carol", ts=REPLY_TS), now=NOW + 60) == "delivered"
+
+    assert len(harness.matrix.sent) == 2
+    for _, content in harness.matrix.sent:
+        assert f" in #{CHANNEL_NAME}: " in content["body"].split("\n")[0]
+    assert harness.slack.calls("conversations.info") == [{"channel": CHANNEL}]
+
+
+async def _slack_timeout(_request: httpx.Request) -> dict[str, Any]:
+    message = "timed out"
+    raise httpx.ReadTimeout(message)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"ok": False, "error": "channel_not_found"},
+        {"ok": False, "error": "missing_scope"},
+        {"ok": True},
+        _slack_timeout,
+    ],
+    ids=["unknown-channel", "missing-scope", "no-name", "timeout"],
+)
+@pytest.mark.asyncio
+async def test_failed_channel_name_lookup_names_the_channel_by_id_and_still_delivers(
+    harness: Harness,
+    answer: Any,  # noqa: ANN401
+) -> None:
+    """A display lookup that fails shows `#<ID>`, without Slack's angle brackets, and costs no delivery or retry."""
+    harness.slack.answers["conversations.info"] = answer
+
+    assert await harness.deliver(event_payload()) == "delivered"
+    harness.slack.answers["conversations.info"] = {"ok": True, "channel": {"name": CHANNEL_NAME}}
+    assert await harness.deliver(event_payload(author="carol", ts=REPLY_TS), now=NOW + 60) == "delivered"
+
+    first, second = (content["body"].split("\n")[0] for _, content in harness.matrix.sent)
+    assert first == f"{harness.agent_id('launch')} Slack message from Ada in #{CHANNEL}: {PERMALINK}"
+    assert " in #launch-eng: " in second, "a failed lookup is not remembered"
+
+
+@pytest.mark.asyncio
+async def test_channel_and_bot_names_cannot_add_markup(harness: Harness) -> None:
+    """Names Slack answers are escaped like the author's: they add no link, image, pill or HTML to the message."""
+    channel_name, bot_name = _CRAFTED_NAMES[2], _CRAFTED_NAMES[3]
+    harness.slack.answers["conversations.info"] = {"ok": True, "channel": {"name": channel_name}}
+    harness.slack.answers["auth.test"] = {**AUTH_TEST, "user": bot_name}
+
+    assert await harness.deliver(event_payload()) == "delivered"
+
+    ((_, content),) = harness.matrix.sent
+    _assert_only_the_target_is_markup(content, harness.agent_id("launch"), f"#{channel_name}", f"@{bot_name}")
+    assert f"in #{channel_name}:" in content["body"]
+    assert f"@{bot_name} what's blocking the beta?" in content["body"]
 
 
 @pytest.mark.asyncio
@@ -632,7 +698,7 @@ async def test_watch_dm_delivers_to_owner_room(harness: Harness) -> None:
     (room_id, content), (_, follow_up) = harness.matrix.sent
     assert room_id == WATCH_ROOM
     assert content["body"] == (
-        f"{assistant_id} Slack direct message for you from Dana (<@{SLACK_IDS['dana']}>) in <#{DM}>: "
+        f"{assistant_id} Slack direct message for you from Dana (@{SLACK_IDS['dana']}) in a direct message: "
         f"{WORKSPACE_URL}archives/{DM}/p1700000000000100\n~~~slack-message\nare you free at 3?\n~~~"
     )
     assert content["m.mentions"] == {"user_ids": [assistant_id]}
@@ -645,6 +711,24 @@ async def test_watch_dm_delivers_to_owner_room(harness: Harness) -> None:
     assert harness.slack.calls("apps.event.authorizations.list") == [{"event_context": EVENT_CONTEXT}] * 2
     assert harness.bearer("apps.event.authorizations.list") == [APP_TOKEN, APP_TOKEN]
     assert harness.slack.calls("reactions.add") == []
+    # A direct message names itself, so it costs no channel lookup.
+    assert harness.slack.calls("conversations.info") == []
+
+
+@pytest.mark.asyncio
+async def test_watch_group_dm_is_named_a_group_direct_message(harness: Harness) -> None:
+    alice_watch(harness.paths)
+    connect_alice(harness.paths)
+    payload = event_payload("message", author="dana", text="lunch?", channel="G0123ABCD", channel_type="mpim")
+
+    assert await harness.deliver(payload) == "delivered"
+
+    ((_, content),) = harness.matrix.sent
+    assert content["body"].startswith(
+        f"{harness.agent_id('assistant')} Slack direct message for you from Dana (@{SLACK_IDS['dana']}) "
+        f"in a group direct message: {WORKSPACE_URL}archives/G0123ABCD/",
+    )
+    assert harness.slack.calls("conversations.info") == []
 
 
 @pytest.mark.asyncio
@@ -663,7 +747,7 @@ async def test_watch_mention_in_a_channel_and_its_replies(harness: Harness) -> N
     assert await harness.deliver(reply, now=NOW + 60) == "delivered"
 
     (_, content), (_, follow_up) = harness.matrix.sent
-    assert " Slack mention for you from Dana " in content["body"]
+    assert f" Slack mention for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in content["body"]
     assert " Slack thread reply for you from Dana " in follow_up["body"]
     assert follow_up["m.relates_to"]["event_id"] == "$sent1"
 

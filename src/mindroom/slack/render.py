@@ -41,10 +41,10 @@ def slack_display_name(user: Mapping[str, Any]) -> str:
     return next((name for name in (*names, user.get("id")) if isinstance(name, str) and name), "")
 
 
-def _plain_markup(match: re.Match[str]) -> str:
+def _plain_markup(match: re.Match[str], names: Mapping[str, str]) -> str:
     target, label = match.group(1), match.group(2)
     if target.startswith("@"):
-        return target
+        return f"@{names.get(target[1:], target[1:])}"
     if target.startswith("#"):
         return f"#{label}" if label else target
     if target.startswith("!"):
@@ -52,13 +52,15 @@ def _plain_markup(match: re.Match[str]) -> str:
     return f"{label} ({target})" if label else target
 
 
-def slack_plain_text(text: str) -> str:
+def slack_plain_text(text: str, names: Mapping[str, str] | None = None) -> str:
     """Return Slack message text (mrkdwn) as plain text, looking up no names.
 
-    A mention keeps the person's ID (`@U0123ABCD`), a channel shows the name Slack sends with it, a special mention
-    shows its label or name (`@here`), and a link shows `label (url)`.
+    A mention shows the name `names` gives for its user ID and otherwise keeps the ID (`@U0123ABCD`),
+    a channel shows the name Slack sends with it, a special mention shows its label or name (`@here`),
+    and a link shows `label (url)`.
     """
-    plain = _SLACK_MARKUP.sub(_plain_markup, text)
+    known = names or {}
+    plain = _SLACK_MARKUP.sub(lambda match: _plain_markup(match, known), text)
     return plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 

@@ -33,7 +33,12 @@ _AUTH_TEST_BODY = {
     "team_id": "T0123ABCD",
     "user_id": "U0123ABCD",
 }
-_IDENTITY = SlackBotIdentity(team_id="T0123ABCD", bot_user_id="U0123ABCD", workspace_url="https://example.slack.com/")
+_IDENTITY = SlackBotIdentity(
+    team_id="T0123ABCD",
+    bot_user_id="U0123ABCD",
+    bot_name="mindroom",
+    workspace_url="https://example.slack.com/",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -180,9 +185,9 @@ async def test_failed_identity_lookup_recovers_on_next_call() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["team_id", "user_id", "url"])
+@pytest.mark.parametrize("missing", ["team_id", "user_id", "user", "url"])
 async def test_incomplete_auth_test_response_is_an_error_and_not_cached(missing: str) -> None:
-    """An `ok` answer without the team, user or URL is reported as `invalid_response`, not a KeyError."""
+    """An `ok` answer without the team, user ID, user name or URL is reported as `invalid_response`, not a KeyError."""
     body = {key: value for key, value in _AUTH_TEST_BODY.items() if key != missing}
 
     async with _client(lambda _request: httpx.Response(200, json=body)) as client:

@@ -27,6 +27,7 @@ from mindroom.slack.render import json_objects, next_cursor
 from mindroom.slack.turns import (
     SlackTurn,
     claim_and_send,
+    conversation_label,
     event_author,
     is_bound,
     refuse_while_closed,
@@ -121,6 +122,7 @@ async def _deliver_to_watch(
         return retry_later(event, "the watch's agent is not running")
     bot, client = running
     author = await event_author(attempt)
+    conversation = await conversation_label(attempt)
     if is_direct_message(event):
         kind = "direct message"
     elif watch.slack_user_id in mentioned_user_ids(event.text):
@@ -143,8 +145,8 @@ async def _deliver_to_watch(
             agent=watch.agent_name,
             room_id=watch.room_id,
             header=(
-                f"Slack {kind} for you from {author.display_name} (<@{event.user_id}>) "
-                f"in <#{event.channel_id}>: {attempt.permalink}"
+                f"Slack {kind} for you from {author.display_name} (@{event.user_id}) "
+                f"in {conversation}: {attempt.permalink}"
             ),
             hook_source=f"slack-watch/{watch.watch_id}",
             requester=watch.owner_id,

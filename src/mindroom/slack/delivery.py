@@ -23,6 +23,7 @@ from mindroom.slack.turns import (
     SlackAttempt,
     SlackTurn,
     claim_and_send,
+    conversation_label,
     event_author,
     failure_reason,
     is_bound,
@@ -232,6 +233,7 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
     if running is None:
         return retry_later(event, "the answering agent is not running")
     author = await event_author(attempt)
+    conversation = await conversation_label(attempt)
     bot, client = running
     requester = author.matrix_id
     async with admitted_response_decision(bot.admission_gate, refuse_while_closed):
@@ -256,7 +258,7 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
             thread_key=thread_key,
             agent=answering.agent,
             room_id=room_id,
-            header=f"Slack message from {author.display_name} in <#{event.channel_id}>: {attempt.permalink}",
+            header=f"Slack message from {author.display_name} in {conversation}: {attempt.permalink}",
             hook_source=f"slack/{event.channel_id}/{event.thread_ts or event.ts}",
             requester=requester,
         )

@@ -36,7 +36,9 @@ if TYPE_CHECKING:
 
 TEAM = "T0123ABCD"
 BOT_USER = "U0BOT0000"
+BOT_NAME = "mindroom"
 CHANNEL = "C0123ABCD"
+CHANNEL_NAME = "launch-eng"
 DM = "D0123ABCD"
 ROOT_TS = "1700000000.000100"
 REPLY_TS = "1700000100.000200"
@@ -53,7 +55,7 @@ CAROL = "@carol:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
 SLACK_IDS = {"ada": "U0ADA0000", "carol": "U0CAROL00", "erin": "U0ERIN000", "dana": "U0DANA000", "alice": "U0ALICE00"}
-AUTH_TEST = {"ok": True, "team_id": TEAM, "user_id": BOT_USER, "url": WORKSPACE_URL}
+AUTH_TEST = {"ok": True, "team_id": TEAM, "user_id": BOT_USER, "user": BOT_NAME, "url": WORKSPACE_URL}
 CANT_ANSWER = "MindRoom can't answer you here."
 UNRECEIVED = "MindRoom couldn't receive your message; try again"
 
