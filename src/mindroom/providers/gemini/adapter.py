@@ -259,6 +259,8 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
         capabilities=Capabilities(
             structured_output="native",
+            # Gemini fetches Cloud Storage and HTTPS files and video links itself.
+            url_media=frozenset({"file", "video"}),
             provider_default_sampling=model_config.id.casefold().endswith(
                 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
             ),

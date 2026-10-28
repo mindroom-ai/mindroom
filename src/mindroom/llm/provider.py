@@ -48,12 +48,15 @@ class ModelIdentity:
 class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
 
-    ``conservative_token_estimates`` marks a route whose tokenizer no local encoding matches and can count more
-    tokens than o200k for the same text, so compaction sizes its input by an upper bound.
+    ``url_media`` holds the media kinds whose URLs the route sends for the provider to fetch; the pipeline downloads
+    the URLs of every other kind (``providers/pipeline/remote_media.py``). ``conservative_token_estimates`` marks a
+    route whose tokenizer no local encoding matches and can count more tokens than o200k for the same text, so
+    compaction sizes its input by an upper bound.
     """
 
     structured_output: StructuredOutput = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
+    url_media: frozenset[MediaKind] = frozenset()
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False

@@ -32,7 +32,6 @@ from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, Usag
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.media_files import read_media_file
-from mindroom.providers.remote_media import download_media
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -125,8 +124,9 @@ async def format_contents(
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Return the request contents and the system instruction for ``messages``, their system prompt as one text.
 
-    Local media is read off the event loop and remote media downloaded; media that cannot be sent raises
-    ``InvalidRequest``, so the media fallback replaces it with its note instead of the model never seeing it.
+    Local media is read off the event loop; a file or video URL goes for Gemini to fetch, and the pipeline downloaded
+    every other URL (``Capabilities.url_media``). Media that cannot be sent raises ``InvalidRequest``, so the media
+    fallback replaces it with its note instead of the model never seeing it.
     """
     contents: list[dict[str, Any]] = []
     # LEGACY_COMPAT: Tool results stored without their tool's name.
@@ -274,10 +274,6 @@ async def _local_part(
     return _file_uri(await route.upload(file_path, file_mime_type), file_mime_type)
 
 
-async def _downloaded(url: str, kind: str, route: MediaRoute) -> tuple[bytes, str | None]:
-    return await download_media(url, kind=kind, limit_bytes=_INLINE_MEDIA_LIMIT_BYTES, provider=route.provider)
-
-
 def _media_mime_type(media: Audio | Video, default: str) -> str:
     if media.mime_type:
         return media.mime_type
@@ -292,9 +288,6 @@ def _media_mime_type(media: Audio | Video, default: str) -> str:
 
 
 async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
-    if image.url is not None:
-        data, _ = await _downloaded(image.url, "image", route)
-        return _inline(data, image_mime_type(image, data))
     if image.filepath is not None:
         return await _local_part(image.filepath, "image", route, partial(image_mime_type, image))
     return _inline(image.content, image_mime_type(image, image.content)) if image.content else None
@@ -302,9 +295,6 @@ async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
 
 async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
     mime_type = _media_mime_type(audio, "audio/mp3")
-    if audio.url is not None:
-        data, _ = await _downloaded(audio.url, "audio", route)
-        return _inline(data, mime_type)
     if audio.filepath is not None:
         return await _local_part(audio.filepath, "audio", route, lambda _: mime_type)
     return _inline(audio.content, mime_type) if audio.content else None
@@ -319,9 +309,9 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     return _inline(video.content, mime_type) if video.content else None
 
 
-def _file_mime_type(file: File, name: str, declared: str | None = None) -> str:
-    """Return the file's own MIME type, else the one its download declared, else its name's, else PDF."""
-    return file.mime_type or declared or mimetypes.guess_type(name)[0] or "application/pdf"
+def _file_mime_type(file: File, name: str) -> str:
+    """Return the file's own MIME type, else its name's, else PDF."""
+    return file.mime_type or mimetypes.guess_type(name)[0] or "application/pdf"
 
 
 def _sent_file_type(mime_type: str) -> str | None:
@@ -347,18 +337,12 @@ def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str,
     return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
 
 
-async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:  # noqa: PLR0911
+async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     if file.content:
         data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
         return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
     if (url := file.url) is not None:
-        # Gemini fetches a Cloud Storage file, or an HTTPS file of known type, itself; other files are downloaded.
-        if url.startswith("gs://") or (url.startswith("https://") and file.mime_type):
-            return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
-        if file.mime_type and _sent_file_type(file.mime_type) is None:
-            return _omitted_file(file, file.mime_type)
-        data, declared = await _downloaded(url, "file", route)
-        return _typed_file_part(file, _file_mime_type(file, url, declared), partial(_inline, data))
+        return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
     if file.filepath is None:
         return None
     mime_type = _file_mime_type(file, file.filepath)

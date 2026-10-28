@@ -37,7 +37,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.providers import credentials as provider_credentials
-from mindroom.providers import google_adc, remote_media, synthetic_adapter
+from mindroom.providers import google_adc, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
@@ -1131,10 +1131,8 @@ async def _stream_media(
     server: _MediaServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[StreamEvent]:
-    """Stream ``request`` with model, Files API, and remote media traffic answered by ``server``."""
+    """Stream ``request`` with model and Files API traffic answered by ``server``."""
     adapter = build_adapter(model_config, tmp_path, server)
-    transport = httpx.MockTransport(server)
-    monkeypatch.setattr(remote_media, "_http_client", lambda: httpx.AsyncClient(transport=transport))
     monkeypatch.setattr(gemini_files, "_PROCESSING_POLL_SECONDS", 0)
     return [event async for event in adapter.stream(request)]
 
@@ -1405,36 +1403,6 @@ async def test_gemini_on_vertex_inlines_local_media_and_rejects_what_is_too_larg
 
 
 @pytest.mark.asyncio
-async def test_gemini_downloads_remote_images_audio_and_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remote images, audio, and files Gemini cannot fetch are downloaded and inlined; remote video is referenced."""
-    server = _MediaServer(
-        remote={
-            "https://media.test/generated": httpx.Response(200, content=PNG),
-            "https://media.test/speech": httpx.Response(200, content=b"RIFF-speech"),
-            "http://media.test/notes": httpx.Response(200, headers={"content-type": "text/plain"}, content=b"notes"),
-        },
-    )
-    message = Message(
-        role="user",
-        content="Use these",
-        images=[Image(url="https://media.test/generated")],
-        audio=[Audio(url="https://media.test/speech", format="wav")],
-        files=[File(url="http://media.test/notes")],
-        videos=[Video(url="https://media.test/clip.mp4")],
-    )
-
-    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
-
-    assert _user_parts(server) == [
-        {"fileData": {"fileUri": "https://media.test/clip.mp4", "mimeType": "video/mp4"}},
-        {"text": "Use these"},
-        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mimeType": "image/png"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"RIFF-speech").decode(), "mimeType": "audio/wav"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"notes").decode(), "mimeType": "text/plain"}},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_gemini_references_an_https_file_of_known_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An HTTPS file with a declared type, such as a tool returns, goes out as a URI that Gemini fetches itself."""
     url = "https://media.test/report.pdf"
@@ -1503,37 +1471,6 @@ async def test_gemini_local_audio_of_unknown_type_is_sent_as_mp3(tmp_path: Path)
     )
 
     assert request["body"]["contents"][0]["parts"][1]["inlineData"]["mime_type"] == "audio/mp3"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["missing_file", "unreachable_url", "oversized_url"])
-async def test_gemini_media_it_cannot_send_is_an_invalid_request(
-    source: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Media that cannot be read or downloaded raises before the model request instead of being dropped silently."""
-    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 128)
-    images = {
-        "missing_file": Image(filepath=str(tmp_path / "missing.png")),
-        "unreachable_url": Image(url="https://media.test/gone"),
-        "oversized_url": Image(url="https://media.test/huge"),
-    }
-    server = _MediaServer(
-        remote={
-            "https://media.test/gone": httpx.Response(404),
-            "https://media.test/huge": httpx.Response(200, content=b"0" * 256),
-        },
-    )
-    message = Message(role="user", content="Look", images=[images[source]])
-
-    with pytest.raises(InvalidRequest) as raised:
-        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
-
-    # The media fallback strips media and retries only for a non-retryable error with no exempt code.
-    assert not raised.value.retryable
-    assert raised.value.code is None
-    assert server.model_requests() == []
 
 
 @pytest.mark.asyncio
@@ -1795,45 +1732,6 @@ async def test_ollama_reads_local_images(tmp_path: Path) -> None:
     )
 
     assert request["body"]["messages"][0]["images"] == [base64.b64encode(PNG).decode()]
-
-
-@pytest.mark.asyncio
-async def test_ollama_downloads_remote_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Images a tool returned as URLs are downloaded and sent as base64."""
-    server = _MediaServer(remote={"https://media.test/generated": httpx.Response(200, content=PNG)})
-    message = Message(role="user", content="Look", images=[Image(url="https://media.test/generated")])
-
-    await _stream_media(OLLAMA, _request(message), tmp_path, server, monkeypatch)
-
-    body = normalized_request(server.model_requests()[-1])["body"]
-    assert body["messages"][-1]["images"] == [base64.b64encode(PNG).decode()]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["missing_file", "unreachable_url"])
-async def test_ollama_images_it_cannot_read_are_an_invalid_request(
-    source: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An image that cannot be read or downloaded raises before the chat request instead of being dropped."""
-    images = {
-        "missing_file": Image(filepath=str(tmp_path / "missing.png")),
-        "unreachable_url": Image(url="https://media.test/gone"),
-    }
-    server = _MediaServer(remote={"https://media.test/gone": httpx.Response(404)})
-
-    with pytest.raises(InvalidRequest) as raised:
-        await _stream_media(
-            OLLAMA,
-            _request(Message(role="user", content="Look", images=[images[source]])),
-            tmp_path,
-            server,
-            monkeypatch,
-        )
-
-    assert not raised.value.retryable
-    assert server.model_requests() == []
 
 
 @pytest.mark.asyncio

@@ -6148,6 +6148,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.providers.pipeline"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.constants",
     "mindroom.llm",
     "mindroom.logging_config",
@@ -8133,10 +8134,6 @@ path = "mindroom.providers.media_files"
 depends_on = ["mindroom.llm", "mindroom.logging_config"]
 
 [[modules]]
-path = "mindroom.providers.remote_media"
-depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config"]
-
-[[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
     "mindroom.llm",
@@ -8147,7 +8144,6 @@ depends_on = [
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
     "mindroom.providers.media_files",
-    "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
 
@@ -8166,7 +8162,6 @@ depends_on = [
     "mindroom.providers.media_files",
     "mindroom.providers.ollama.errors",
     "mindroom.providers.ollama.settings",
-    "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
 

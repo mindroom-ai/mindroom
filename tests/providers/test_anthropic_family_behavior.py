@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -29,7 +28,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.media import Audio, File, Image
+from mindroom.llm.media import Audio, File
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     ModelRequest,
@@ -64,10 +63,6 @@ from tests.providers.golden_support import Wire, claude_stream_events, pipeline_
 if TYPE_CHECKING:
     from pathlib import Path
 
-_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-)
-_GIF = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
 # Sonnet 5.5, the model these tests default to, asks the Anthropic and Vertex routes to drop stale replayed thinking.
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 _DROP_STALE = {"prefix_mismatch_behavior": "drop_block"}
@@ -1763,98 +1758,6 @@ async def test_vertex_token_refresh_failures_map_to_the_shared_provider_errors(
     assert raised.value.__cause__ is failure
     assert wire.requests == []
     assert get_user_friendly_error_message(raised.value).startswith(final_message)
-
-
-@pytest.mark.asyncio
-async def test_url_media_is_fetched_inline_except_pdf_documents(tmp_path: Path) -> None:
-    """URL images and non-PDF URL documents are fetched and sent inline; Claude reads a PDF from its URL itself."""
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host != "media.example":
-            return sse_reply([{"type": "text", "text": "Seen."}])
-        if request.url.path == "/photo":
-            return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
-        if request.url.path == "/pic.png":
-            return httpx.Response(200, content=_PNG, headers={"content-type": "application/octet-stream"})
-        return httpx.Response(200, content=b"# Notes\n", headers={"content-type": "text/markdown; charset=utf-8"})
-
-    wire = Wire(respond)
-    provider = route_provider("anthropic", tmp_path, wire)
-    message = Message(
-        role="user",
-        content="Look.",
-        images=[Image(url="https://media.example/photo"), Image(url="https://media.example/pic.png")],
-        files=[
-            File(url="https://media.example/notes", mime_type="text/markdown"),
-            File(url="https://media.example/report.pdf", mime_type="application/pdf"),
-        ],
-    )
-    await claude_turn(provider, ModelRequest(messages=[message]))
-    blocks = wire.body()["messages"][0]["content"]
-    assert [block["type"] for block in blocks] == ["text", "image", "image", "document", "document"]
-    png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
-    assert blocks[1]["source"] == png
-    assert blocks[2]["source"] == png
-    assert blocks[3]["source"] == {"type": "text", "media_type": "text/plain", "data": "# Notes\n"}
-    assert blocks[4]["source"] == {"type": "url", "url": "https://media.example/report.pdf"}
-    assert [str(request.url) for request in wire.requests[:-1]] == [
-        "https://media.example/photo",
-        "https://media.example/pic.png",
-        "https://media.example/notes",
-    ]
-    assert message.images is not None
-    assert all(image.url is not None for image in message.images), "the request's inlined copies leave the input alone"
-
-
-@pytest.mark.asyncio
-async def test_unreadable_url_media_is_dropped_and_the_request_still_runs(tmp_path: Path) -> None:
-    """An expired or unreachable URL drops its media with a warning; the rest of the message is still sent."""
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        if request.url.host != "media.example":
-            return sse_reply([{"type": "text", "text": "Ok."}])
-        if request.url.path == "/gone":
-            return httpx.Response(404)
-        msg = "connection refused"
-        raise httpx2.ConnectError(msg, request=request)
-
-    wire = Wire(respond)
-    provider = route_provider("anthropic", tmp_path, wire)
-    message = Message(
-        role="user",
-        content="Look.",
-        images=[Image(url="https://media.example/gone")],
-        files=[File(url="https://media.example/down", mime_type="text/plain")],
-    )
-    completed = await claude_turn(provider, ModelRequest(messages=[message]))
-    assert completed.message.content == "Ok."
-    blocks = wire.body()["messages"][0]["content"]
-    assert [(block["type"], block["text"]) for block in blocks] == [("text", "Look.")]
-
-
-@pytest.mark.asyncio
-async def test_url_images_are_inlined_in_every_user_turn_beside_inline_images(tmp_path: Path) -> None:
-    """Each user turn's URL images are fetched where they sat, and images already carried inline stay as they are."""
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.host != "media.example":
-            return sse_reply([{"type": "text", "text": "Seen."}])
-        return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
-
-    wire = Wire(respond)
-    inline = Image(content=_GIF, mime_type="image/gif")
-    messages = [
-        Message(role="user", content="First.", images=[inline, Image(url="https://media.example/one")]),
-        Message(role="assistant", content="Seen."),
-        Message(role="user", content="Second.", images=[Image(url="https://media.example/two")]),
-    ]
-    await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=messages))
-    first, _, second = wire.body()["messages"]
-    gif = {"type": "base64", "media_type": "image/gif", "data": base64.b64encode(_GIF).decode()}
-    png = {"type": "base64", "media_type": "image/png", "data": base64.b64encode(_PNG).decode()}
-    assert [block.get("source") for block in first["content"]] == [None, gif, png]
-    assert [block.get("source") for block in second["content"]] == [None, png]
-    assert [request.url.path for request in wire.requests[:-1]] == ["/one", "/two"]
 
 
 def _markers(payload: object) -> list[dict[str, Any]]:

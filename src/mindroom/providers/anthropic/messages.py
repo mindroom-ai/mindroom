@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anthropic
@@ -76,7 +76,6 @@ from mindroom.providers.anthropic.wire import (
     checks_thinking_prefix,
     format_claude_messages,
     format_claude_tools,
-    inline_url_media,
     parse_claude_usage,
     stop_reason_of,
     supports_forced_tool_use,
@@ -268,7 +267,6 @@ class ClaudeProvider:
         that stops early still settles what Anthropic bills.
         """
         started = time.monotonic()
-        request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         first_output_at: float | None = None

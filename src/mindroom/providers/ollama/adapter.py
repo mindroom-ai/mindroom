@@ -38,7 +38,6 @@ from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings
 from mindroom.providers.media_files import read_media_file
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings
-from mindroom.providers.remote_media import download_media
 from mindroom.providers.tool_policy import disables_tools
 
 if TYPE_CHECKING:
@@ -53,8 +52,6 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
 
 _PROVIDER = "Ollama"
-# Remote images are downloaded up to this size; a larger one is left to the media fallback's note.
-_IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -222,7 +219,7 @@ def _typed_property(schema: Any) -> Any:  # noqa: ANN401 - any JSON schema node
 
 
 async def _format_message(message: Message, provider: str) -> dict[str, Any]:
-    """Return one chat message; images are read off the event loop or downloaded.
+    """Return one chat message; images are read off the event loop, and the pipeline downloaded those at a URL.
 
     A tool result names the tool that answered, as the API documents. An image that cannot be read raises
     ``InvalidRequest``, so the media fallback replaces it with its note.
@@ -248,9 +245,6 @@ async def _format_message(message: Message, provider: str) -> dict[str, Any]:
 
 
 async def _image_bytes(image: Image, provider: str) -> bytes | None:
-    if image.url is not None:
-        data, _ = await download_media(image.url, kind="image", limit_bytes=_IMAGE_LIMIT_BYTES, provider=provider)
-        return data
     if image.filepath is None:
         return image.content
     _, data = await asyncio.to_thread(partial(read_media_file, image.filepath, kind="image", provider=provider))

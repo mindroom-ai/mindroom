@@ -11,12 +11,9 @@ import base64
 import json
 import mimetypes
 from copy import deepcopy
-from dataclasses import dataclass, replace
-from pathlib import Path
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
-import httpx2
 from anthropic.types import RedactedThinkingBlock, TextBlock, ThinkingBlock, ToolUseBlock, Usage
 from anthropic.types.beta import (
     BetaMessage,
@@ -27,7 +24,7 @@ from anthropic.types.beta import (
     BetaUsage,
 )
 
-from mindroom.llm.media import canonical_mime_type, image_format
+from mindroom.llm.media import image_format
 from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
@@ -273,83 +270,6 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
     return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
 
 
-def _url_document_stays_remote(file: File) -> bool:
-    """Return whether Claude reads this URL document itself: a PDF, or a document of unknown type."""
-    return file.url is not None and file.mime_type in {None, "application/pdf"}
-
-
-async def _fetched(url: str, http_client: httpx2.AsyncClient) -> tuple[bytes, str | None] | None:
-    """Return the bytes and media type behind ``url``, or None with a warning when it cannot be read."""
-    try:
-        response = await http_client.get(url)
-        response.raise_for_status()
-    except (httpx2.HTTPError, httpx2.InvalidURL) as error:
-        logger.warning("claude_url_media_dropped", url=url, error=str(error))
-        return None
-    return response.content, canonical_mime_type(response.headers.get("content-type"))
-
-
-async def _inlined_images(images: Sequence[Image] | None, http_client: httpx2.AsyncClient) -> list[Image]:
-    """Return the images with every URL-backed one fetched into ``content``, minus those that failed."""
-    inlined: list[Image] = []
-    for image in images or ():
-        if image.url is None:
-            inlined.append(image)
-            continue
-        fetched = await _fetched(image.url, http_client)
-        if fetched is None:
-            continue
-        data, media_type = fetched
-        url_format = Path(urlparse(image.url).path).suffix[1:].lower() or None
-        inlined.append(
-            replace(
-                image,
-                url=None,
-                content=data,
-                mime_type=image.mime_type or media_type,
-                format=image.format or url_format,
-            ),
-        )
-    return inlined
-
-
-async def _inlined_files(files: Sequence[File] | None, http_client: httpx2.AsyncClient) -> list[File]:
-    """Return the documents with every URL Claude would not read itself fetched into ``content``."""
-    inlined: list[File] = []
-    for file in files or ():
-        if file.url is None or _url_document_stays_remote(file):
-            inlined.append(file)
-            continue
-        fetched = await _fetched(file.url, http_client)
-        if fetched is not None:
-            inlined.append(replace(file, url=None, content=fetched[0]))
-    return inlined
-
-
-async def inline_url_media(messages: Sequence[Message], http_client: httpx2.AsyncClient) -> list[Message]:
-    """Fetch URL-backed images and URL documents Claude would not read itself, so they are sent inline.
-
-    A URL that cannot be read drops its media with a warning instead of failing the request, because the
-    message replays on every later request and an expired or private URL would fail them all.
-    """
-    return [
-        replace(
-            message,
-            images=await _inlined_images(message.images, http_client),
-            files=await _inlined_files(message.files, http_client),
-        )
-        if message.role == "user" and _has_remote_media(message)
-        else message
-        for message in messages
-    ]
-
-
-def _has_remote_media(message: Message) -> bool:
-    return any(image.url is not None for image in message.images or ()) or any(
-        file.url is not None and not _url_document_stays_remote(file) for file in message.files or ()
-    )
-
-
 def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
     data = image.content
     if data is None and image.filepath is not None:
@@ -365,23 +285,19 @@ def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
 
 
 def _document_block(file: File, provider: str) -> dict[str, Any] | None:
-    if file.url is not None:
-        # Only a document ``inline_url_media`` left remote reaches here.
-        source: dict[str, Any] = {"type": "url", "url": file.url}
+    if file.filepath is not None:
+        _, data = read_media_file(file.filepath, kind="file", provider=provider)
+        media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+    elif file.content is not None:
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+        media_type = file.mime_type or "application/pdf"
     else:
-        if file.filepath is not None:
-            _, data = read_media_file(file.filepath, kind="file", provider=provider)
-            media_type = file.mime_type or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
-        elif file.content is not None:
-            data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-            media_type = file.mime_type or "application/pdf"
-        else:
-            return None
-        if media_type in _TEXT_DOCUMENT_MEDIA_TYPES:
-            # The text document source accepts only text/plain; other text types are sent as plain text.
-            source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
-        else:
-            source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
+        return None
+    if media_type in _TEXT_DOCUMENT_MEDIA_TYPES:
+        # The text document source accepts only text/plain; other text types are sent as plain text.
+        source = {"type": "text", "media_type": "text/plain", "data": data.decode("utf-8", errors="replace")}
+    else:
+        source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
     return {"type": "document", "source": source}
 
 
@@ -637,7 +553,6 @@ __all__ = [
     "checks_thinking_prefix",
     "format_claude_messages",
     "format_claude_tools",
-    "inline_url_media",
     "parse_claude_usage",
     "stop_reason_of",
     "supports_forced_tool_use",

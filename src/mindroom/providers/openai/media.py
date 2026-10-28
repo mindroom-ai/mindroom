@@ -2,8 +2,8 @@
 """Inline media content parts for Chat Completions and Responses requests.
 
 Attachments are filepath-backed, so parts are read and base64 encoded here; a file that cannot be read raises
-``InvalidRequest`` (``read_media_file``). Remote file and audio URLs are not fetched (MindRoom never builds them),
-and image URLs pass through for the provider to fetch. ``provider`` names the adapter in that error.
+``InvalidRequest`` (``read_media_file``), and ``provider`` names the adapter in that error. Image URLs, and file URLs
+on Responses, go for the provider to fetch; the pipeline downloaded every other URL (``Capabilities.url_media``).
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import image_mime_type
-from mindroom.logging_config import get_logger
 from mindroom.providers.media_files import read_media_file
 
 if TYPE_CHECKING:
@@ -28,8 +27,6 @@ __all__ = [
     "responses_image_part",
 ]
 
-logger = get_logger(__name__)
-
 # Python's MIME database lacks or misnames these supported formats; host /etc/mime.types must not decide.
 _FILE_MIME_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -41,10 +38,7 @@ _FILE_MIME_TYPES = {
 
 def _image_url(image: Image, provider: str) -> str | None:
     if image.url is not None:
-        if image.url.startswith(("data:image", "http://", "https://")):
-            return image.url
-        logger.warning("Image URL must start with 'data:image' or 'http(s)://'", image_id=image.id)
-        return None
+        return image.url
     if image.filepath is not None:
         _, data = read_media_file(image.filepath, kind="image", provider=provider)
     elif (data := image.content) is None:
@@ -75,14 +69,13 @@ def responses_image_part(image: Image, *, provider: str) -> dict[str, Any] | Non
 
 
 def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``input_audio`` part for local audio, or None."""
+    """Return a Chat Completions ``input_audio`` part, or None for audio without bytes or a format."""
     if audio.content:
         data, audio_format = audio.content, audio.format or "wav"
     elif audio.filepath is not None:
         _, data = read_media_file(audio.filepath, kind="audio", provider=provider)
         audio_format = audio.format or Path(audio.filepath).suffix.lstrip(".")
     else:
-        logger.warning("Remote audio input is not fetched", audio_id=audio.id)
         return None
     if not audio_format:
         return None
@@ -125,13 +118,10 @@ def _file_part_data_url(file: File, name: str, data: bytes) -> str:
 
 
 def chat_file_part(file: File, *, provider: str) -> dict[str, Any] | None:
-    """Return a Chat Completions ``file`` part with an inline data URL, or None.
+    """Return a Chat Completions ``file`` part with an inline data URL, or None for a file without bytes.
 
     It is named and typed as a Responses file part is (``_file_part_name``, ``_file_part_data_url``).
     """
-    if file.filepath is None and file.content is None:
-        logger.warning("Remote file input is not fetched", file_id=file.id)
-        return None
     name = _file_part_name(file, "file")
     data = _content_bytes(file, provider)
     if data is None:
