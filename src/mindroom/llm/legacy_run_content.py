@@ -34,7 +34,7 @@ _TEAM_PAUSED_NOTICE_HEADER = "Team run paused. The following require input:\n"
 # "I have tools to execute, but I need confirmation." for an agent run and "Team run paused. The following require
 # input:" followed by one line per call waiting for confirmation for a team run, or another wording Agno's runtime
 # wrote for both. A paused run held it, and so did the run's later row when its resume wrote no text.
-# Last legacy release: v2026.10.643, whose ``paused_content`` (``agent_loop/run.py``) and ``team_paused_content``
+# Last legacy release: v2026.10.651, whose ``paused_content`` (``agent_loop/run.py``) and ``team_paused_content``
 # (``teams/runtime.py``) wrote it, as the Agno runtime did before them; replacement: the next release, whose paused
 # runs store only the text their model wrote, never a notice, and whose resumes append what the model writes after the
 # approval to that text.
@@ -63,12 +63,13 @@ def _is_paused_notice(text: str) -> bool:
 
 
 # LEGACY_COMPAT: Failed runs that store their failure text as their content.
-# Legacy format: an ``ERROR`` run dict without an ``error`` key. The loop's ``_store_interrupted`` stored the
-# unredacted text of the failure as ``content`` when the model wrote nothing, else the model's text and no reason;
+# Legacy format: an ``ERROR`` run dict without an ``error`` key. The loop's ``_store_interrupted``, which also ended
+# the run of a team member that could not be built (``fail_unbuilt_run``), stored the unredacted text of the failure
+# as ``content`` when the model wrote nothing, else the model's text and no reason;
 # delegation recovery's ``interrupt_child`` stored its reason as ``content`` in place of whatever the child had written:
 # a fixed sentence, the child's failure text with credentials redacted, or, for a delegation it refused, the
 # authorization result.
-# Last legacy release: v2026.10.643, whose ``_store_interrupted`` (``agent_loop/run.py``) and ``interrupt_child``
+# Last legacy release: v2026.10.651, whose ``_store_interrupted`` (``agent_loop/run.py``) and ``interrupt_child``
 # (``delegation/recovery.py``) wrote it, as the Agno runtime did before them; replacement: the next release, which
 # stores the redacted failure text under ``error`` and keeps ``content`` for the model's text.
 # Handling: such a run hands over its content, credentials redacted, as its failure, which is what those releases
