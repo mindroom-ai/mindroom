@@ -88,7 +88,7 @@ async def slack_call(client: httpx.AsyncClient, method: str, token: str, **param
     except ValueError:
         body = None
     if not isinstance(body, dict):
-        error = "invalid_response"
+        error = "invalid_body"
         raise SlackApiError(error)
     if not body.get("ok"):
         error = str(body.get("error", "unknown_error"))

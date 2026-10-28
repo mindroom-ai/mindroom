@@ -204,12 +204,12 @@ def test_slack_http_client_does_not_follow_redirects() -> None:
     ids=["not-json", "json-array", "json-string"],
 )
 async def test_slack_call_rejects_a_body_that_is_not_a_json_object(response: httpx.Response) -> None:
-    """A 2xx answer Slack never sends for a Web API method is an invalid response, not a crash."""
+    """A 2xx answer Slack never sends for a Web API method is an `invalid_body` error, not a crash."""
     async with _client(lambda _request: response) as client:
         with pytest.raises(SlackApiError) as invalid:
             await slack_call(client, "auth.test", "xoxb-test")
 
-    assert invalid.value.error == "invalid_response"
+    assert invalid.value.error == "invalid_body"
 
 
 @pytest.mark.asyncio

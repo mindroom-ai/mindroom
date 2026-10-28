@@ -607,11 +607,22 @@ async def _http_429(_request: httpx.Request) -> httpx.Response:
     return httpx.Response(429, headers={"Retry-After": "3"})
 
 
+async def _not_json(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, text="<html>Bad gateway</html>")
+
+
 # What a later attempt may not meet: Slack's own failures, its rate limit, and the network.
 _PASSING_FAILURES = pytest.mark.parametrize(
     "answer",
-    [_http_500, _http_429, {"ok": False, "error": "internal_error"}, _slack_timeout],
-    ids=["http-500", "rate-limited", "internal-error", "timeout"],
+    [
+        _http_500,
+        _http_429,
+        {"ok": False, "error": "internal_error"},
+        {"ok": False, "error": "request_timeout"},
+        _not_json,
+        _slack_timeout,
+    ],
+    ids=["http-500", "rate-limited", "internal-error", "request-timeout", "not-json", "timeout"],
 )
 # What no later attempt changes, such as a revoked token or a missing scope.
 _FINAL_ERRORS = pytest.mark.parametrize(
@@ -658,6 +669,18 @@ async def test_identity_lookup_refused_for_good_is_not_retried(harness: Harness,
         assert await harness.deliver(event_payload()) == "ignored"
 
     assert _final_error_log(logs, error)["event_id"] == f"Evapp_mention{ROOT_TS}"
+    assert harness.matrix.sent == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_identity_answer_is_not_retried(harness: Harness) -> None:
+    """An `ok` `auth.test` answer without the bot's identity is the same on every attempt, unlike an unparseable one."""
+    harness.slack.answers["auth.test"] = {key: value for key, value in AUTH_TEST.items() if key != "url"}
+
+    with capture_logs() as logs:
+        assert await harness.deliver(event_payload()) == "ignored"
+
+    _final_error_log(logs, "invalid_response")
     assert harness.matrix.sent == []
 
 

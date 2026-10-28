@@ -67,9 +67,12 @@ DELIVERY_ERRORS = (
     DeliveryReplayScopeFullError,
     ResponseAdmissionRefusedError,
 )
-# Slack's own failures, which a later call may not meet, like its HTTP 5xx answers and its rate limit.
+# Slack's own failures, which a later call may not meet: its HTTP 5xx answers, its timeouts, its rate limit
+# and an answer that is not a JSON object.
 # Any other Slack error, such as a revoked token or a missing scope, fails every attempt alike.
-_PASSING_SLACK_ERRORS = frozenset({"ratelimited", "internal_error", "fatal_error", "service_unavailable"})
+_PASSING_SLACK_ERRORS = frozenset(
+    {"ratelimited", "internal_error", "fatal_error", "service_unavailable", "request_timeout", "invalid_body"},
+)
 _SLACK_SERVER_ERROR = re.compile(r"http_5[0-9]{2}")
 
 
