@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { AgentTools } from "./AgentTools";
 import { AgentIdentity } from "./AgentAvatar";
 import { keyCounts, keysSetText } from "./egressRowText";
+import { openInPage } from "./navigation";
 import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
 import type { AgentConnections, ConnectionStatus } from "./types";
 import type { McpSelectionState } from "./useMcpSelection";
@@ -193,6 +194,7 @@ function AgentEgress({ agent }: { agent: AgentConnections }) {
       </span>
       <a
         href={`/connections/egress#egress-agent-${agent.agent_name}`}
+        onClick={openInPage}
         className="ml-auto text-xs font-medium text-primary underline-offset-4 hover:underline"
       >
         {viewOnly ? "View services" : "Manage services"}
