@@ -6494,6 +6494,7 @@ from = ["mindroom.session_storage.legacy_agno3_backup"]
 
 [[interfaces]]
 expose = [
+    "create_agent_state_storage",
     "create_session_storage",
     "create_state_storage",
     "prepare_conversation_database",
