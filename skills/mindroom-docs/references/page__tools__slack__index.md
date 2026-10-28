@@ -18,7 +18,7 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 | Function | Does | Personal | Project |
 | --- | --- | --- | --- |
 | `slack_search` | Finds messages, conversations, or people and returns the IDs the other functions take | `messages` (Slack search syntax, such as `launch in:#general from:@dana after:2026-10-01`), `conversations`, and `people` | `conversations` only, among the agent's channels |
-| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link, in batches when Slack limits it | `dms` (direct and group direct messages, named after the other person, leaving out deactivated people) or `channels`, active within `active_within` such as `30d`, `12h`, or `90m` | `channels` only: the agent's channels the app has joined |
+| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link, in batches when Slack limits it | `dms` (direct and group direct messages, named after the other person, leaving out deactivated people) or `channels`, with a message in the last `days` (default 30) | needs a personal connection; `slack_search` lists the agent's channels |
 | `slack_read` | Reads a conversation's latest messages, or one thread | any conversation the person can see | the agent's channels |
 | `slack_download` | Saves a file of up to 50 MB in the agent workspace's `slack-downloads/` folder | any file the person can see | files shared in the agent's channels |
 | `slack_upload` | Shares a workspace file of up to 50 MB in a conversation or thread, with an optional `title` and `comment` | as the person; a user ID opens a direct message | as the app, in the agent's channels |
@@ -313,8 +313,6 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
 | `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
 | `Use <conversation>:<ts> or a message link to edit a message` | `slack_edit`, `slack_delete`, and `slack_react` act on one message, not a conversation or a person. |
-| `active_within looks like 30d, 12h or 90m` | Give a whole number of days, hours, or minutes. |
-| `Direct messages need a personal Slack connection` | A project agent lists only its channels, with `kind="channels"`. |
 | `path '<path>' must be an existing file inside the agent workspace` | `slack_upload` reads only workspace files under the default `file_access`; save the file in the workspace first. |
 | `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_upload` takes files of up to 50 MB. |
 | `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |

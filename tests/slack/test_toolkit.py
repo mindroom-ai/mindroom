@@ -720,13 +720,13 @@ async def test_recent_lists_direct_messages_newest_first_with_the_other_persons_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("active_within", "listed"),
-    [("2h", ["C0000000B", "C0000000A"]), ("90m", ["C0000000B"]), ("1d", ["C0000000B", "C0000000A", "C0000000C"])],
+    ("days", "listed"),
+    [(1, ["C0000000B"]), (3, ["C0000000B", "C0000000A"]), (None, ["C0000000B", "C0000000A", "C0000000C"])],
 )
 async def test_recent_keeps_conversations_active_within_the_window(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
-    active_within: str,
+    days: int | None,
     listed: list[str],
 ) -> None:
     _connect_alice(paths)
@@ -738,16 +738,18 @@ async def test_recent_keeps_conversations_active_within_the_window(
             "users.conversations": {"ok": True, "channels": channels},
             "conversations.history": _latest(
                 {
-                    "C0000000A": {"ts": _ago(100 * 60), "text": "a"},
+                    "C0000000A": {"ts": _ago(2 * 86_400), "text": "a"},
                     "C0000000B": {"ts": _ago(30 * 60), "text": "b"},
-                    "C0000000C": {"ts": _ago(5 * 3_600), "text": "c"},
+                    # Inside the default 30 days.
+                    "C0000000C": {"ts": _ago(29 * 86_400), "text": "c"},
                 },
             ),
             "auth.test": AUTH_TEST,
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_recent("channels", active_within=active_within))
+    window = {} if days is None else {"days": days}
+    result = json.loads(await _tools(paths).slack_recent("channels", **window))
 
     assert [conversation["channel_id"] for conversation in result["conversations"]] == listed
     assert {conversation["kind"] for conversation in result["conversations"]} == {"channel"}
@@ -778,18 +780,18 @@ async def test_recent_returns_the_newest_limit_conversations(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("active_within", ["30", "0d", "1w", "d", "-1d", "1.5h", "30 days"])
+@pytest.mark.parametrize("days", [0, -1, 366, True, 1.5])
 async def test_recent_refuses_a_window_it_cannot_read(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
-    active_within: str,
+    days: Any,  # noqa: ANN401
 ) -> None:
     _connect_alice(paths)
     fake = FakeSlack().install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_recent(active_within=active_within))
+    result = json.loads(await _tools(paths).slack_recent(days=days))
 
-    assert result["message"] == "active_within looks like 30d, 12h or 90m"
+    assert result["message"] == "days must be an integer from 1 to 365"
     assert fake.requests == []
 
 
@@ -851,6 +853,45 @@ async def test_recent_continues_after_a_rate_limit_with_the_conversations_it_did
     assert "next_cursor" not in second
     assert [_form(request).get("cursor") for request in fake.calls("users.conversations")] == ["page-2"]
     assert _history_reads(fake) == ["C000000cA", "C000000dA"]
+
+
+@pytest.mark.asyncio
+async def test_recent_batches_never_overlap(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reads that finish after a rate limit stopped the rest are made again in the next batch, never listed twice."""
+    _connect_alice(paths)
+    channels = [{"id": f"C{index:08d}", "name": f"c{index}"} for index in range(12)]
+    limited = {channels[2]["id"]}
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        request.read()
+        if request.url.path == "/api/users.conversations":
+            return httpx.Response(200, json={"ok": True, "channels": channels})
+        if request.url.path == "/api/auth.test":
+            return httpx.Response(200, json=AUTH_TEST)
+        # Every read in flight is sent before any is answered, so reads after the limited one finish.
+        await asyncio.sleep(0)
+        channel_id = _form(request)["channel"]
+        if channel_id in limited:
+            limited.discard(channel_id)
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return httpx.Response(200, json={"ok": True, "messages": [{"ts": _ago(60), "text": channel_id}]})
+
+    monkeypatch.setattr(
+        slack_toolkit,
+        "slack_http_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle), follow_redirects=False),
+    )
+    tools = _tools(paths)
+
+    first = json.loads(await tools.slack_recent("channels", limit=100))
+    second = json.loads(await tools.slack_recent("channels", limit=100, cursor=first["next_cursor"]))
+
+    first_ids = {entry["channel_id"] for entry in first["conversations"]}
+    second_ids = {entry["channel_id"] for entry in second["conversations"]}
+    assert not first_ids & second_ids
+    assert first_ids | second_ids == {channel["id"] for channel in channels}
+    assert first["skipped"] == len(channels) - len(first_ids)
+    assert second["complete"] is True
 
 
 @pytest.mark.asyncio
@@ -1058,39 +1099,15 @@ async def test_recent_reads_at_most_eight_conversations_at_once(
 
 
 @pytest.mark.asyncio
-async def test_project_recent_lists_only_its_joined_channels(
-    paths: RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    joined_ts = _ago(60)
-    fake = FakeSlack(
-        {
-            "conversations.info": lambda request: httpx.Response(
-                200,
-                json=_member(_form(request)["channel"], is_member=_form(request)["channel"] == CHANNEL),
-            ),
-            "conversations.history": _latest(
-                {CHANNEL: {"ts": joined_ts, "text": "ship it"}, UNLISTED: {"ts": joined_ts, "text": "x"}},
-            ),
-            "auth.test": AUTH_TEST,
-        },
-    ).install(monkeypatch)
-    tools = _tools(paths, channels=[CHANNEL, UNLISTED])
+async def test_project_recent_needs_a_personal_connection(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A project agent lists its channels with `slack_search(kind="conversations")` instead."""
+    fake = FakeSlack().install(monkeypatch)
+    tools = _tools(paths, channels=[CHANNEL])
 
-    result = json.loads(await tools.slack_recent("channels"))
-
-    assert [(entry["channel_id"], entry["name"], entry["latest_text"]) for entry in result["conversations"]] == [
-        (CHANNEL, "launch-eng", "ship it"),
-    ]
-    assert "users.conversations" not in fake.methods()
-    assert [_form(request)["channel"] for request in fake.calls("conversations.history")] == [CHANNEL]
-    assert {_bearer(request) for request in fake.requests} == {BOT_TOKEN}
-
-    refusing = FakeSlack().install(monkeypatch)
-    refused = json.loads(await tools.slack_recent("dms"))
-
-    assert refused["message"] == "Direct messages need a personal Slack connection"
-    assert refusing.requests == []
+    for kind in ("channels", "dms"):
+        result = json.loads(await tools.slack_recent(kind))
+        assert result["message"] == "Recent conversations need a personal Slack connection"
+    assert fake.requests == []
 
 
 def _gateway_context(tmp_path: Path) -> AgentToolContext:
