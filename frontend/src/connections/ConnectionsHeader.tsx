@@ -18,8 +18,8 @@ const LINKS: readonly { page: Page; href: string; label: string }[] = [
 const ADMIN_ONLY_NOTICE =
   "The dashboard is for administrators. Manage your agents' keys and accounts here.";
 
-// The identity last loaded. A switch to the other page shows it at once, while it still names the signed-in account,
-// so the tabs and the account do not blink out until the page's own request returns.
+// The identity last loaded, which a switch to the other page shows at once so the tabs and the account do not blink out.
+// The account is fixed for the page's lifetime; the check keeps an identity loaded for another sign-in from showing.
 let knownIdentity: ConnectionsIdentity | null = null;
 
 const dismissedKey = (id: string) => `connections-notice-dismissed:${id}`;
