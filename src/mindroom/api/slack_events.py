@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -19,10 +20,13 @@ from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
 from mindroom.slack.events import verify_slack_signature
 
 if TYPE_CHECKING:
+    from fastapi import FastAPI
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.slack.delivery import DeliveryResult, SlackRuntime
+    from mindroom.slack.delivery import SlackRuntime
+    from mindroom.slack.turns import DeliveryResult
 
 router = APIRouter(prefix="/api/slack", tags=["slack"])
 _MAX_BODY_BYTES = 1_048_576
@@ -73,7 +77,7 @@ async def post_slack_event(request: Request) -> Response:
                 attempt,
                 payload,
                 runtime=runtime,
-                config=config,
+                current_config=partial(_committed_config, request.app),
                 runtime_paths=runtime_paths,
                 credentials_manager=credentials_manager,
             ),
@@ -104,6 +108,14 @@ async def _deliver_now(
             client=client,
             now=int(time.time()),
         )
+
+
+def _committed_config(api_app: FastAPI) -> Config | None:
+    """Return the config committed now, which a retry long after the request must follow, or None without one."""
+    try:
+        return config_lifecycle.read_app_committed_runtime_config(api_app)[0]
+    except HTTPException:
+        return None
 
 
 async def _read_body(request: Request) -> bytes:

@@ -68,7 +68,10 @@ def slack_user(name: str, **flags: object) -> dict[str, Any]:
 
 @dataclass
 class FakeSlack:
-    """Answer Slack Web API methods by name, recording every request; an answer may be a coroutine."""
+    """Answer Slack Web API methods by name, recording every request; an answer may be a coroutine.
+
+    `users.info` answers from `users` unless `answers` has an entry for it.
+    """
 
     answers: dict[str, Answer] = field(default_factory=dict)
     users: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -77,7 +80,7 @@ class FakeSlack:
     async def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         method = request.url.path.removeprefix("/api/")
-        if method == "users.info":
+        if method == "users.info" and method not in self.answers:
             user = self.users.get(form(request)["user"])
             return httpx.Response(
                 200,
@@ -141,7 +144,11 @@ def runtime_for(
     return SlackRuntime(cast("Mapping[str, AgentBot | TeamBot]", bots), memberships, http_client=slack.client)
 
 
-def config_data(*, assistant_tools: tuple[str, ...] = ("slack",)) -> dict[str, object]:
+def config_data(
+    *,
+    assistant_tools: tuple[str, ...] = ("slack",),
+    launch_users: tuple[str, ...] = (ADA, CAROL),
+) -> dict[str, object]:
     """Return a config with a project agent answering `CHANNEL` in `launch` and a personal agent for watches."""
     return {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
@@ -150,7 +157,7 @@ def config_data(*, assistant_tools: tuple[str, ...] = ("slack",)) -> dict[str, o
             "launch": {
                 "display_name": "Launch",
                 "rooms": ["launch"],
-                "access": {"users": [ADA, CAROL], "members_of_rooms": []},
+                "access": {"users": list(launch_users), "members_of_rooms": []},
                 "tools": [{"slack": {"channels": [CHANNEL], "room": "launch"}}],
             },
             "assistant": {"display_name": "Assistant", "tools": list(assistant_tools)},

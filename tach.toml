@@ -3376,6 +3376,7 @@ visibility = [
     "mindroom.reaction_dispatch",
     "mindroom.response_runner",
     "mindroom.slack.delivery",
+    "mindroom.slack.turns",
     "mindroom.slack.watch_delivery",
     "mindroom.text_ingress_dispatch",
     "mindroom.turn_controller",
@@ -9746,7 +9747,6 @@ depends_on = ["mindroom.slack.api"]
 [[modules]]
 path = "mindroom.slack.delivery"
 depends_on = [
-    "mindroom.delivery_replay",
     "mindroom.matrix.state",
     "mindroom.response_admission",
     "mindroom.slack.api",
@@ -9778,6 +9778,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.delivery_replay",
     "mindroom.hooks.sender",
+    "mindroom.response_admission",
     "mindroom.slack.api",
     "mindroom.slack.identity",
     "mindroom.slack.render",

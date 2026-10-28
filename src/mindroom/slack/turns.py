@@ -7,9 +7,12 @@ mention, and Slack's retries, reach each target once.
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
+
+import httpx
 
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.delivery_replay import (
@@ -24,15 +27,15 @@ from mindroom.hooks.sender import send_matrix_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
-from mindroom.slack.api import slack_permalink
+from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.slack.api import SlackApiError, slack_permalink
 from mindroom.slack.identity import slack_author
 from mindroom.slack.render import slack_plain_text
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Mapping
     from pathlib import Path
 
-    import httpx
     import nio
 
     from mindroom.bot import AgentBot, TeamBot
@@ -55,7 +58,15 @@ _DELIVERED_SECONDS = 86_400
 # A Slack thread keeps reaching the same Matrix thread for a week after its last delivery.
 _THREAD_SECONDS = 7 * 86_400
 _PENDING_THREAD_SECONDS = 300
-_TILDE_RUN = re.compile(r"~{3,}")
+_TILDE_RUN = re.compile(r"~+")
+# Failures a later attempt may not meet: Slack or the replay store unavailable, or responses not admitted right now.
+RETRYABLE_ERRORS = (
+    SlackApiError,
+    httpx.HTTPError,
+    DeliveryReplayStoreError,
+    DeliveryReplayScopeFullError,
+    ResponseAdmissionRefusedError,
+)
 
 
 @dataclass(frozen=True)
@@ -228,7 +239,7 @@ async def _send_slack_turn(
 ) -> str | None:
     """Post a Slack message to Matrix through the agent's own account as a hook dispatch for the turn's requester.
 
-    Only the agent is mentioned. Slack's text is shown as plain text in a `~~~slack-message` fence and never parsed for
+    Only the agent is mentioned. Slack's text is shown as plain text in a `slack-message` block and never parsed for
     mentions, so it cannot wake anyone else. Without a `thread_id`, the message is the root of a new thread.
     """
     plain_target, mentioned_user_ids, markdown_target = format_entity_mention(
@@ -236,8 +247,9 @@ async def _send_slack_turn(
         attempt.config,
         attempt.runtime_paths,
     )
-    text = _TILDE_RUN.sub(lambda run: "\\~" * len(run[0]), slack_plain_text(attempt.event.text))
-    fenced = f"~~~slack-message\n{text}\n~~~"
+    text = slack_plain_text(attempt.event.text)
+    # Longer than any run of `~` in the text, so the text cannot close the fence and reaches the agent unchanged.
+    fence = "~" * max([3, *(len(run) + 1 for run in _TILDE_RUN.findall(text))])
     latest_thread_event_id = None
     if thread_id is not None:
         latest_thread_event_id = await bot._conversation_reader.latest_thread_event_id(
@@ -251,9 +263,15 @@ async def _send_slack_turn(
     }
     if thread_id is None:
         metadata[PER_FIRE_THREAD_ROOT_KEY] = True
+    # Only the target's mention, which MindRoom builds, is rendered as markup: Slack's names and text are escaped as
+    # they are, so they cannot add links, images, or mentions.
+    target_html = markdown_to_html(markdown_target).strip().removeprefix("<p>").removesuffix("</p>")
     content = build_message_content(
-        body=f"{plain_target} {turn.header}\n{fenced}",
-        formatted_body=markdown_to_html(f"{markdown_target} {turn.header}\n{fenced}"),
+        body=f"{plain_target} {turn.header}\n{fence}slack-message\n{text}\n{fence}",
+        formatted_body=(
+            f"<p>{target_html} {html.escape(turn.header)}</p>\n"
+            f'<pre><code class="language-slack-message">{html.escape(text)}\n</code></pre>\n'
+        ),
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=thread_id,
         latest_thread_event_id=latest_thread_event_id,
@@ -261,6 +279,26 @@ async def _send_slack_turn(
     )
     delivered = await send_matrix_message(client, turn.room_id, content)
     return None if delivered is None else delivered.event_id
+
+
+async def retry_on_failure(event: SlackMessageEvent, delivery: Awaitable[DeliveryResult]) -> DeliveryResult:
+    """Await one target's delivery, so that its failure, which a later attempt may not meet, spares the others."""
+    try:
+        return await delivery
+    except RETRYABLE_ERRORS as exc:
+        return retry_later(event, failure_reason(exc))
+    except Exception:
+        logger.exception(
+            "Slack event delivery failed unexpectedly and will be retried",
+            event_id=event.event_id,
+            channel_id=event.channel_id,
+        )
+        return "retry"
+
+
+def failure_reason(exc: Exception) -> str:
+    """Return what a log may say about a failure: Slack's error code, or the error's type."""
+    return exc.error if isinstance(exc, SlackApiError) else type(exc).__name__
 
 
 def skipped(event: SlackMessageEvent, reason: str) -> DeliveryResult:

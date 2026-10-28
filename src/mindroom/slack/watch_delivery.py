@@ -31,6 +31,7 @@ from mindroom.slack.turns import (
     is_bound,
     refuse_while_closed,
     retry_later,
+    retry_on_failure,
     running_bot,
     skipped,
 )
@@ -56,19 +57,24 @@ async def deliver_to_watches(attempt: SlackAttempt) -> list[DeliveryResult]:
         # An unreadable watch file must not stop the project delivery, nor every later event.
         logger.exception("Slack watches could not be read and are skipped", event_id=event.event_id)
         return []
+    # The watches the event could be for if their threads were bound; only theirs are worth a replay store read.
+    possible = watch_candidates(event, watches, bound_watch_ids=frozenset(watch.watch_id for watch in watches))
     bound = frozenset(
         [
             watch.watch_id
-            for watch in watches
+            for watch in possible
             if await is_bound(attempt, _watch_scope(watch), watch_thread_key(watch.watch_id, event), watch.room_id)
         ],
     )
-    candidates = watch_candidates(event, watches, bound_watch_ids=bound)
+    candidates = watch_candidates(event, possible, bound_watch_ids=bound)
     if not candidates:
         return []
     visible_to = await _visible_to(attempt, app_token)
     return [
-        await _deliver_to_watch(attempt, watch, bound=watch.watch_id in bound, visible_to=visible_to)
+        await retry_on_failure(
+            event,
+            _deliver_to_watch(attempt, watch, bound=watch.watch_id in bound, visible_to=visible_to),
+        )
         for watch in candidates
     ]
 

@@ -17,7 +17,7 @@ from structlog.testing import capture_logs
 
 from mindroom import background_tasks, constants
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.api import config_lifecycle
+from mindroom.api import config_lifecycle, slack_events
 from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
@@ -50,6 +50,9 @@ if TYPE_CHECKING:
 
 # Slack gives up on an answer after 3 s; the route must answer well before.
 _SLACK_TIMEOUT_SECONDS = 3.0
+# The budget the tests run with: a delivery still blocked when the route answers proves the route did not wait for it,
+# and a fast failure still fits inside it on a loaded machine.
+_TEST_BUDGET_SECONDS = 1.0
 
 
 @dataclass
@@ -102,12 +105,18 @@ def events_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Even
     slack = FakeSlack(answers={"auth.test": AUTH_TEST}, users={SLACK_IDS["ada"]: slack_user("ada")})
     matrix = FakeMatrix()
     monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
+    monkeypatch.setattr(slack_events, "_ACK_BUDGET_SECONDS", _TEST_BUDGET_SECONDS)
     runtime = runtime_for({"launch": FakeBot(AsyncMock())}, AgentReplyMembershipIndex(), slack)
     config_lifecycle.app_state(api_main.app).slack_runtime = runtime
     try:
         yield EventsApi(paths, slack, matrix, runtime)
     finally:
         api_main.unbind_slack_runtime(api_main.app)
+
+
+def test_acknowledgement_budget_leaves_headroom_within_slacks_timeout() -> None:
+    """The route waits at most 2.5 s for a delivery, so its answer reaches Slack before Slack's 3 s timeout."""
+    assert slack_events._ACK_BUDGET_SECONDS == 2.5 < _SLACK_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -190,7 +199,7 @@ async def test_slow_delivery_answers_200_within_budget(events_api: EventsApi) ->
     response, elapsed = await events_api.timed_post(event_payload())
 
     assert response.status_code == 200
-    assert 2.5 <= elapsed < _SLACK_TIMEOUT_SECONDS
+    assert elapsed >= _TEST_BUDGET_SECONDS
     assert events_api.matrix.sent == []
     events_api.matrix.gate.set()
     assert await wait_for_background_tasks(5.0, owner=events_api.runtime)
@@ -211,7 +220,8 @@ async def test_cold_identity_lookup_stays_within_ack_budget(events_api: EventsAp
     response, elapsed = await events_api.timed_post(event_payload())
 
     assert response.status_code == 200
-    assert elapsed < _SLACK_TIMEOUT_SECONDS
+    assert elapsed >= _TEST_BUDGET_SECONDS
+    assert events_api.matrix.sent == []
     released.set()
     assert await wait_for_background_tasks(5.0, owner=events_api.runtime)
     assert len(events_api.matrix.sent) == 1

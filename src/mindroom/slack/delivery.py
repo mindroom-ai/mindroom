@@ -12,21 +12,23 @@ import httpx
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import create_background_task
 from mindroom.config.slack import slack_answering_agents
-from mindroom.delivery_replay import DeliveryReplayScopeFullError, DeliveryReplayStoreError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
-from mindroom.response_admission import ResponseAdmissionRefusedError, admitted_response_decision
+from mindroom.response_admission import admitted_response_decision
 from mindroom.slack.api import SlackApiError, slack_call, slack_http_client
 from mindroom.slack.app import load_slack_app, slack_bot_identity
 from mindroom.slack.events import parse_message_event, project_thread_key, project_wake_agent
 from mindroom.slack.turns import (
+    RETRYABLE_ERRORS,
     SlackAttempt,
     SlackTurn,
     claim_and_send,
     event_author,
+    failure_reason,
     is_bound,
     refuse_while_closed,
     retry_later,
+    retry_on_failure,
     running_bot,
     skipped,
 )
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
+    from mindroom.config.slack import SlackAnsweringAgent
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.slack.turns import DeliveryResult
@@ -49,14 +52,6 @@ _NOTICE_SECONDS = 86_400
 _RETRY_DELAYS_SECONDS = (5, 30, 120)
 _CANT_ANSWER = "MindRoom can't answer you here."
 _UNRECEIVED = "MindRoom couldn't receive your message; try again"
-# Failures a later attempt may not meet: Slack or the replay store unavailable, or responses not admitted right now.
-_RETRYABLE_ERRORS = (
-    SlackApiError,
-    httpx.HTTPError,
-    DeliveryReplayStoreError,
-    DeliveryReplayScopeFullError,
-    ResponseAdmissionRefusedError,
-)
 
 
 @dataclass(frozen=True, eq=False)
@@ -100,11 +95,11 @@ async def deliver_slack_event(
             now=now,
             last_attempt=last_attempt,
         )
-    except _RETRYABLE_ERRORS as exc:
+    except RETRYABLE_ERRORS as exc:
         logger.warning(
             "Slack event delivery failed and will be retried",
             event_id=_event_id(payload),
-            reason=_reason(exc),
+            reason=failure_reason(exc),
         )
     except Exception:
         logger.exception("Slack event delivery failed unexpectedly and will be retried", event_id=_event_id(payload))
@@ -116,16 +111,24 @@ async def retry_slack_event(
     payload: Mapping[str, Any],
     *,
     runtime: SlackRuntime,
-    config: Config,
+    current_config: Callable[[], Config | None],
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
-    """Retry an event acknowledged before its first attempt finished, after 5, 30 and 120 s, until one succeeds."""
+    """Retry an event acknowledged before its first attempt finished, after 5, 30 and 120 s, until one succeeds.
+
+    Each retry reads `current_config` again, so a reload that revokes access stops later retries;
+    None means no config is committed right now, which skips that retry.
+    """
     if await first_attempt != "retry":
         return
     for number, delay in enumerate(_RETRY_DELAYS_SECONDS, start=1):
         await sleep(delay)
+        config = current_config()
+        if config is None:
+            logger.warning("Slack event retry skipped without a committed config", event_id=_event_id(payload))
+            continue
         async with runtime.http_client() as client:
             result = await deliver_slack_event(
                 payload,
@@ -189,16 +192,25 @@ def _combined(results: Iterable[DeliveryResult]) -> DeliveryResult:
 
 
 async def _deliver_to_project(attempt: SlackAttempt) -> DeliveryResult:
-    """Wake the agent answering the event's channel for an app mention, or for a reply in a thread it answers.
-
-    The author must map to a MindRoom account the agent answers; anyone else gets a notice only they see.
-    """
+    """Wake the agent answering the event's channel; on the last attempt, a wake that still fails tells its author."""
     event = attempt.event
     answering = project_wake_agent(event, slack_answering_agents(attempt.config), bound=True)
     if answering is None:
         return "ignored"
-    scope = f"slack:agent:{answering.agent}"
     thread_key = project_thread_key(event)
+    result = await retry_on_failure(event, _wake_project_agent(attempt, answering, thread_key))
+    if result == "retry" and attempt.last_attempt:
+        _notify_author(attempt, thread_key, _UNRECEIVED)
+    return result
+
+
+async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAgent, thread_key: str) -> DeliveryResult:
+    """Post an app mention, or a reply in a thread the agent answers, as a turn of the author's MindRoom account.
+
+    The author must map to a MindRoom account the agent answers; anyone else gets a notice only they see.
+    """
+    event = attempt.event
+    scope = f"slack:agent:{answering.agent}"
     room_id = resolve_room_id(answering.room, attempt.runtime_paths)
     if not event.is_app_mention and not await is_bound(attempt, scope, thread_key, room_id):
         return "ignored"
@@ -230,8 +242,6 @@ async def _deliver_to_project(attempt: SlackAttempt) -> DeliveryResult:
         result = await claim_and_send(attempt, bot, client, turn)
     if result == "delivered":
         _call_slack_later(attempt, "reactions.add", channel=event.channel_id, timestamp=event.ts, name="eyes")
-    elif result == "retry" and attempt.last_attempt:
-        _notify_author(attempt, thread_key, _UNRECEIVED)
     return result
 
 
@@ -269,7 +279,7 @@ def _call_slack_later(attempt: SlackAttempt, method: str, **params: str) -> None
                 method=method,
                 event_id=event.event_id,
                 channel_id=event.channel_id,
-                reason=_reason(exc),
+                reason=failure_reason(exc),
             )
 
     create_background_task(call(), name=f"slack_{method}", owner=runtime)
@@ -278,7 +288,3 @@ def _call_slack_later(attempt: SlackAttempt, method: str, **params: str) -> None
 def _event_id(payload: Mapping[str, Any]) -> str | None:
     event_id = payload.get("event_id")
     return event_id if isinstance(event_id, str) else None
-
-
-def _reason(exc: Exception) -> str:
-    return exc.error if isinstance(exc, SlackApiError) else type(exc).__name__
