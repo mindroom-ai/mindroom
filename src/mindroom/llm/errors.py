@@ -7,19 +7,20 @@ from typing import TYPE_CHECKING, ClassVar
 if TYPE_CHECKING:
     from mindroom.llm.usage import MessageMetrics
 
-# The ``ProviderError.code`` for a tool call the provider could not parse from the model's output, such as
-# Gemini's MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback
-# never strips media for it.
+# MindRoom's own ``ProviderError.code`` markers, which a code the provider sent never matches.
+# The marker for a tool call the provider could not parse from the model's output, such as Gemini's
+# MALFORMED_FUNCTION_CALL; the request pipeline answers it with one guidance retry, and the media fallback never strips
+# media for it.
 MALFORMED_TOOL_CALL = "malformed_tool_call"
-# The ``ProviderError.code`` of a transport failure that timed out, such as an HTTP connect or read timeout, so callers
-# that report timeouts need not read the error's text; other transport failures carry ``connection_error``.
+# The marker of a transport failure that timed out, such as an HTTP connect or read timeout, so callers that report
+# timeouts need not read the error's text; other transport failures carry ``connection_error``.
 TRANSPORT_TIMEOUT = "timeout"
-# The ``ProviderError.code`` of a response the model's safeguards refused: neither a retry nor a resend without the
-# request's media can change the answer.
+# The marker of a response the model's safeguards refused: neither a retry nor a resend without the request's media can
+# change the answer.
 SAFEGUARD_REFUSAL = "refusal"
-# The ``ProviderError.code`` of a request whose route has no credential at all, so the reply can say how to add one.
+# The marker of a request whose route has no credential at all, so the reply can say how to add one.
 MISSING_API_KEY = "missing_api_key"
-# The text of a safeguard refusal; error runs store it, and the runtime recognizes stored refusals by it.
+# The text of a safeguard refusal, which error runs store.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "Claude returned stop_reason=refusal"
 
 
@@ -27,7 +28,10 @@ class ProviderError(Exception):
     """A model provider rejected or failed a request.
 
     ``retryable`` tells the loop whether the same request may succeed later, and each error class fixes it;
-    ``provider`` is the metrics provider name of the adapter that raised.
+    ``provider`` is the metrics provider name of the adapter that raised. ``code`` is a marker MindRoom sets for a failure
+    its type alone does not tell apart, one of those above or the pipeline's stall marker, and ``provider_code`` is the
+    code the provider sent, such as ``context_length_exceeded``, kept apart so it never reads as a marker.
+    ``retry_after_seconds`` is how long the provider's ``Retry-After`` header asked to wait before a retry.
     """
 
     retryable: ClassVar[bool] = False
@@ -39,11 +43,15 @@ class ProviderError(Exception):
         provider: str,
         status_code: int | None = None,
         code: str | None = None,
+        provider_code: str | None = None,
+        retry_after_seconds: float | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.status_code = status_code
         self.code = code
+        self.provider_code = provider_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 class AuthenticationFailed(ProviderError):  # noqa: N818

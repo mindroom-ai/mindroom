@@ -19,7 +19,7 @@ Matrix sync callback
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
-            -> response_turn.py                                  (shared blocking/streaming turn drivers)
+            -> response_turn.py                                  (shared streaming turn driver; blocking replies collect it)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
        -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
 ```
@@ -83,7 +83,7 @@ Matrix sync callback
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
-| `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, model-switch continuation, empty-run retry, interrupt recording), and the run metadata and request-log context a turn binds around its model requests and stream pulls |
+| `response_turn.py` | The shared streaming response-turn driver behind the agent and team envelopes, which blocking replies collect (attempt loop, model-switch continuation, empty-run retry, interrupt recording), and the run metadata and request-log context a turn binds around its model requests and stream pulls |
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
@@ -171,15 +171,15 @@ Matrix sync callback
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One or OpenAI Decisions responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams/formation.py` | Forming a team from one turn: who was asked, who is eligible, which members can be materialized, and the execution-time mode choice for an ad hoc team |
-| `teams/members.py` | Materializing a team's exact members as agent builds without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's prompt, role, and loop hooks |
-| `teams/spec.py` | `TeamMode`, `TeamMember`, and `TeamSpec`: what a team run is built from |
+| `teams/members.py` | Resolving a team's exact members without silent shrinkage, the leader's and members' model aliases for a turn, and `build_team_spec`: the leader's model, prompt, job controls, call budget, and history settings with each member's roster entry and the build its first delegation makes |
+| `teams/spec.py` | `TeamMode`, `TeamMember` with its `MemberBuild`, and `TeamSpec`: what a team run is built from |
 | `teams/prompt.py` | The leader's system messages, rendered like an agent's: the stable one holds the team's identity, the markdown line, the roster and mode block, and tool instructions; the turn one holds the date, session context, and enrichment |
 | `teams/delegate_tools.py` | `delegate_task_to_member` and `delegate_task_to_members`, the member result texts, the pause a paused member propagates to the team run, and the answer its resumed run gives the waiting call |
 | `teams/runtime.py` | `run_team` and `continue_team` over the agent loop: members as child runs, member decisions routed by member and call, team usage |
-| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, the document's text without tool markers that a streamed reply records, and `format_team_response`, the blocking Matrix reply rendered from a finished run's records, which a stopped or failed blocking turn also records |
-| `teams/envelope.py` | `team_response` and `team_response_stream`: prepare a team turn, run its leader through the turn drivers, and render the reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
+| `teams/presentation.py` | The team reply document: header, member slots, consensus, tool trace, the durable `team_stream` snapshot an approval resume restores, the live document a resumed run publishes, and the document's text without tool markers that a reply records |
+| `teams/envelope.py` | `team_response_stream`: prepare a team turn, run its leader through the turn driver, and render the reply, which `team_response` collects for a blocking reply; `run_prepared_team` runs an OpenAI-compatible API team turn under the same leader hooks and storage |
 | `teams/leader.py` | `LeaderRun`: how a team's leader runs in one turn or resume, its storage, hooks, request settings, and model, which a live turn and a saved approval's resume both build to start or continue the leader's run |
-| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (a streamed turn's document without tool markers, a blocking turn's document of the runs' records), and its run metadata |
+| `teams/attempt.py` | One attempt of a team run, a turn's or a resume's: the reply document its events build, the records the run hands over, the text an interrupted turn records (its document without tool markers), and its run metadata |
 | `teams/resume.py` | Resuming a paused team run: `TeamResume` routes decisions to the calls the team waits for, `drive_team_delegations` runs a member's delegations and continues with their results, `continue_paused_team_run` rebuilds the team from a saved approval, and the document a team pause shows |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `agent_cli/minimal_agent.py` | Minimal mode: the bootstrap prompt and context documents from the build surface, and the turn's one provider-facing Bash tool over the build's catalog |

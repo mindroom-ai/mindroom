@@ -114,6 +114,7 @@ def test_mark_failed_increments_count_and_records_reason() -> None:
     assert failed.last_used_at == 9.0
 
 
+@pytest.mark.usefixtures("current_static_runner")
 def test_static_backend_touch_revives_idle_worker() -> None:
     """The static backend adopts the helper: a touch revives an idled worker."""
     backend = StaticSandboxRunnerBackend(
@@ -131,6 +132,7 @@ def test_static_backend_touch_revives_idle_worker() -> None:
     assert touched.status == "ready"
 
 
+@pytest.mark.usefixtures("current_static_runner")
 def test_static_backend_touch_does_not_revive_failed_worker() -> None:
     """Touching a failed static worker keeps it failed (only idle revives)."""
     backend = StaticSandboxRunnerBackend(

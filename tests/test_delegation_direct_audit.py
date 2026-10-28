@@ -515,7 +515,7 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
             "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="native child answer",
-        ) as response,
+        ),
     ):
         child = prepare_child_turn(
             "leader",
@@ -541,7 +541,6 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
         )
 
     assert result == "native child answer"
-    assert response.await_args.kwargs["collect_streamed_response"] is True
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
 

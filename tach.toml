@@ -807,8 +807,8 @@ visibility = [
     "mindroom.matrix_rtc.call_tools",
 ]
 
-# The shared response-turn drivers own the turn lifecycle for both the agent
-# and (after adoption) team envelopes; entity modules inject adapters.
+# The single response-turn driver owns the turn lifecycle for both the agent
+# and team envelopes; entity modules inject adapters.
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
@@ -1897,6 +1897,7 @@ depends_on = [
     "mindroom.api.openai_streaming_protocol",
     "mindroom.api.response_activity",
     "mindroom.constants",
+    "mindroom.failure_text",
     "mindroom.helper_usage",
     "mindroom.history.session_context",
     "mindroom.knowledge.utils",
@@ -2745,7 +2746,6 @@ depends_on = [
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
-    "mindroom.error_handling",
     "mindroom.history.conversation_text",
     "mindroom.history.replay",
     "mindroom.history.storage",
@@ -3697,10 +3697,13 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials.manager",
+    "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
     "mindroom.memory._mem0_usage",
+    # Deferred (function-level) import that loads the Ollama SDK only once Mem0's Ollama embedder fails.
+    "mindroom.providers.ollama.errors",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
@@ -6531,7 +6534,7 @@ expose = [
     "members.ResolvedExactTeamMembers",
     "members.TeamTurnModelSelection",
     "members.build_team_spec",
-    "members.materialize_exact_team_members",
+    "members.resolve_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
     "presentation.finished_run_text",
@@ -7912,6 +7915,7 @@ depends_on = [
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_jobs.background_after",
+    "mindroom.tool_jobs.results",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
@@ -7967,6 +7971,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.audit"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.delegation.records",
     "mindroom.delegation.state",
     "mindroom.llm",
@@ -8147,6 +8152,7 @@ depends_on = ["mindroom.llm", "mindroom.logging_config"]
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
+    "mindroom.constants",
     "mindroom.llm",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
@@ -8176,11 +8182,12 @@ depends_on = [
     "mindroom.providers.tool_policy",
 ]
 
-# Importing this module loads the Ollama SDK, so only the two Ollama modules, each imported on first use, may import it.
+# Importing this module loads the Ollama SDK, so only the Ollama modules, each imported on first use, and Mem0's
+# memory build, which imports it once Mem0's own Ollama embedder fails, may import it.
 [[modules]]
 path = "mindroom.providers.ollama.errors"
 depends_on = ["mindroom.providers.errors"]
-visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama.adapter"]
+visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.memory.config", "mindroom.providers.ollama.adapter"]
 
 [[modules]]
 path = "mindroom.providers.ollama.settings"
@@ -8836,6 +8843,7 @@ path = "mindroom.tool_jobs.results"
 depends_on = ["mindroom.llm", "mindroom.tool_jobs.legacy_results", "mindroom.tool_system.tool_function"]
 visibility = [
     "mindroom.delegation.background",
+    "mindroom.delegation.execution",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.consumption",
 ]

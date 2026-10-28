@@ -349,17 +349,6 @@ async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and
 # --- The composed pipeline --------------------------------------------------------------------------------------
 
 
-def _without_sdk_retries(spec: Family) -> Family:
-    """Return ``spec`` with the SDK's own HTTP retries authored off, so the pipeline alone reissues a request.
-
-    The Gemini and Ollama SDKs retry only when a config authors it.
-    """
-    if spec.config["provider"] in {"google", "ollama"}:
-        return spec
-    extra_kwargs = {**spec.config.get("extra_kwargs", {}), "client_params": {"max_retries": 0}}
-    return replace(spec, config={**spec.config, "extra_kwargs": extra_kwargs})
-
-
 def _error_reply(family: str) -> httpx.Response:
     gemini = {"error": {"code": 503, "message": _OVERLOADED, "status": "UNAVAILABLE"}}
     bodies = {
@@ -390,7 +379,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     the tool list and the request is reissued after the transient failure, with the request log recording every
     attempt.
     """
-    spec = _without_sdk_retries(FAMILIES[family])
+    spec = FAMILIES[family]
     wire = Wire(_error_reply(family), spec.reply())
     log_dir = tmp_path / "logs"
     provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)

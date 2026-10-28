@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -253,6 +254,17 @@ def _google_token_parser(
         token_data["expires_at"] = expires_at
 
     return OAuthTokenResult(token_data=token_data, claims=claims, claims_verified=True)
+
+
+def with_google_account_picker(provider: OAuthProvider) -> OAuthProvider:
+    """Return `provider` with Google's account picker before consent; any other provider is returned as it is.
+
+    A browser signed in to one Google account otherwise goes straight to consent for it, so a connection meant for
+    another account, such as a service's own beside the tools' one, would connect the same account again.
+    """
+    if provider.authorization_url != _GOOGLE_AUTHORIZATION_URL:
+        return provider
+    return replace(provider, extra_auth_params={**provider.extra_auth_params, "prompt": "consent select_account"})
 
 
 def _google_domain_env_names(provider_id: str, suffix: str) -> tuple[str, ...]:

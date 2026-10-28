@@ -39,7 +39,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -353,7 +353,7 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
 def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:
     """Materialize the code and research members on scripted providers, as a team reply does."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    members = materialize_exact_team_members(
+    return resolve_exact_team_members(
         ["code", "research"],
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -361,8 +361,6 @@ def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedEx
         refresh_scheduler=None,
         active_model_names=None,
     )
-    assert members.failed_agent_names == []
-    return members
 
 
 def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enrichment: str = "") -> BuiltTeam:
@@ -397,7 +395,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     spec = built.spec
 
     assert rendered.strip() in system_text(spec.leader.system_messages)
-    assert all(rendered.strip() in system_text(member.spec.system_messages) for member in spec.members)
+    assert all(rendered.strip() in system_text(member.build().spec.system_messages) for member in spec.members)
     prepared = await prepare_materialized_team_execution(
         make_turn_context(
             room_id="!room:localhost",
@@ -410,7 +408,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
         ),
         scope_context=unstored_team_scope_context(
             config,
-            [member.spec.id for member in built.spec.members],
+            [member.id for member in built.spec.members],
             team_name=None,
         ),
         built=built,
@@ -443,7 +441,7 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
         make_turn_context(room_id=None, thread_id=None, requester_id=None, reply_to_event_id="$event"),
         scope_context=unstored_team_scope_context(
             config,
-            [member.spec.id for member in built.spec.members],
+            [member.id for member in built.spec.members],
             team_name=None,
         ),
         built=built,

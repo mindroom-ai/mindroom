@@ -11,7 +11,7 @@ from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
     capture_embedder_health_recorder,
 )
-from mindroom.embeddings.errors import as_embedder_error, classified_embedder_error
+from mindroom.embeddings.errors import EmbedderRequestError, classified_embedder_error
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage, record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
@@ -82,13 +82,13 @@ async def _run_mem0_embedder_mutation(
     operation: Callable[[], Awaitable[_T]],
     health_recorder: EmbedderHealthRecorder,
 ) -> _T:
-    """Run a Mem0 write without allowing raw provider exceptions to escape."""
+    """Run a Mem0 write, recording a classified embedder failure as embedder health and raising it alone.
+
+    A raw provider failure, such as one from Mem0's memory model, propagates as raised and records no embedder health.
+    """
     try:
         result = await operation()
-    except Exception as exc:
-        error = as_embedder_error(exc)
-        if error is None:
-            raise
+    except EmbedderRequestError as error:
         health_recorder.record(str(error))
         # Raise the classified error itself, so it keeps its retry judgment, without the raw provider exception.
         raise error from None

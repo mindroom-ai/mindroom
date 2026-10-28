@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+from mindroom.ai_run_metadata import ReplyUsage
 from mindroom.delegation.records import (
     DelegationEvent,
     DelegationMetadata,
@@ -251,11 +252,16 @@ async def _append_response_events(
 
 
 def child_response_usage(response: RunRecord) -> dict[str, object] | None:
-    """Return the usage one child attempt reports."""
-    # TODO(simplify): the usage record is the stored run metrics dict, per-model details and provider metrics included.
-    # Record the usage a reply publishes (``ai_run_metadata._ReplyUsage``) instead. Agents reading events.jsonl and
-    # run.json would notice.
-    return response.metrics.to_dict() if response.metrics is not None else None
+    """Return the usage one child attempt reports, in the shape a reply publishes it."""
+    if response.metrics is None:
+        return None
+    # The child's configured model is not at hand here; its run names the provider of each model it called.
+    return ReplyUsage.of(
+        response.metrics,
+        provider=response.model_provider,
+        configured_provider=None,
+        model_id=response.model,
+    ).to_wire()
 
 
 async def finish_child_record(

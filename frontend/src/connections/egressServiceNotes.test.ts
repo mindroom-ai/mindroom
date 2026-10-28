@@ -5,6 +5,7 @@ import {
   configPlaceholderWarning,
   overlapWarnings,
   presetPlaceholderWarnings,
+  rulesOverlap,
   scopeNote,
 } from "./egressServiceNotes";
 import { bearerRule, presets } from "@/test/egressServiceTestKit";
@@ -145,7 +146,7 @@ describe("a placeholder the preset sets that an administrator's service also set
   });
 });
 
-describe("services of the agent that already send a key to a website", () => {
+describe("services of the agent that already handle a website", () => {
   const rule = (host: string, auth_type: string | null = "bearer") => ({
     host,
     port: null,
@@ -183,7 +184,7 @@ describe("services of the agent that already send a key to a website", () => {
         undefined,
       ),
     ).toEqual([
-      "GitHub already sends a key to api.github.com and github.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.",
+      "GitHub already handles api.github.com and github.com for this agent, so requests there may use it instead of this service.",
     ]);
   });
 
@@ -197,7 +198,7 @@ describe("services of the agent that already send a key to a website", () => {
         undefined,
       ),
     ).toEqual([
-      "Mine already sends a key to uploads.github.com for this agent. An exact host wins, then a specific port, then the longest path, then your administrator's services before your own, then the service name alphabetically.",
+      "Mine already handles uploads.github.com for this agent, so requests there may use it instead of this service.",
     ]);
     expect(
       overlapWarnings(
@@ -226,5 +227,76 @@ describe("services of the agent that already send a key to a website", () => {
         undefined,
       ),
     ).toEqual([]);
+  });
+});
+
+describe("overlaps between the Google presets, by path", () => {
+  const preset = (id: string) => presets.find((option) => option.id === id)!;
+  // A preset service as the listing sends it: the preset's rules, each sending the account.
+  const listed = (id: string) => ({
+    name: id,
+    display_name: preset(id).display_name,
+    restrict_only: false,
+    rules: preset(id).rules.map((rule) => ({
+      ...rule,
+      auth_type: "bearer" as const,
+    })),
+  });
+  const gmailForm = formFromService("svc", { preset: "google_gmail" });
+
+  it("Gmail against Drive, Calendar and Tasks warns nothing", () => {
+    expect(
+      overlapWarnings(
+        gmailForm,
+        preset("google_gmail"),
+        [
+          listed("google_drive"),
+          listed("google_calendar"),
+          listed("google_tasks"),
+        ],
+        undefined,
+      ),
+    ).toEqual([]);
+  });
+
+  it("Gmail against Gmail warns once with both addresses", () => {
+    expect(
+      overlapWarnings(
+        gmailForm,
+        preset("google_gmail"),
+        [listed("google_gmail"), listed("google_drive")],
+        undefined,
+      ),
+    ).toEqual([
+      "Gmail already handles gmail.googleapis.com and www.googleapis.com/gmail/ for this agent, so requests there may use it instead of this service.",
+    ]);
+  });
+
+  it("rulesOverlap by segment and port", () => {
+    const at = (
+      path_prefix: string | null,
+      port: number | null = null,
+      host = "www.googleapis.com",
+    ) => ({
+      host,
+      port,
+      path_prefix,
+    });
+    expect(rulesOverlap(at("/"), at("/x/"))).toBe(true);
+    expect(rulesOverlap(at(""), at("/x/"))).toBe(true);
+    expect(rulesOverlap(at(null), at("/x/"))).toBe(true);
+    expect(rulesOverlap(at("/gmail"), at("/gmail/x"))).toBe(true);
+    expect(rulesOverlap(at("/gmail/x"), at("/gmail/"))).toBe(true);
+    expect(rulesOverlap(at("/gmail/"), at("/gmail"))).toBe(true);
+    expect(rulesOverlap(at("/gmail"), at("/gmailx"))).toBe(false);
+    expect(rulesOverlap(at("/gmail/"), at("/drive/"))).toBe(false);
+    expect(rulesOverlap(at("/", 443), at("/", null))).toBe(true);
+    expect(rulesOverlap(at("/", 443), at("/", 8443))).toBe(false);
+    expect(rulesOverlap(at("/", null, "WWW.googleapis.com"), at("/"))).toBe(
+      true,
+    );
+    expect(rulesOverlap(at("/", null, "gmail.googleapis.com"), at("/"))).toBe(
+      false,
+    );
   });
 });
