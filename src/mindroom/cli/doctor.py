@@ -17,11 +17,7 @@ from rich.markup import escape
 
 from mindroom import constants
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
-from mindroom.credentials.sync import (
-    get_api_key_and_origin_for_provider,
-    get_secret_from_env,
-    sync_env_to_credentials,
-)
+from mindroom.credentials.sync import get_secret_from_env, get_stored_provider_key, sync_env_to_credentials
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.sentence_transformers_embedder import create_sentence_transformers_embedder
@@ -207,15 +203,17 @@ def _models_reading_shared_key(config: Config, env_key: str, runtime_paths: Runt
 def _shared_key(provider: str, env_key: str, runtime_paths: RuntimePaths) -> tuple[str | None, str]:
     """Return the shared key the runtime reads for ``provider``, if any, and the name doctor reports it by.
 
-    The runtime reads it from the credential store, which doctor's startup import fills from the environment without
-    replacing a key saved in the dashboard. A key imported from the environment is named by ``env_key``; without the
-    store, doctor reads ``env_key`` itself.
+    The runtime reads it from the credential store, which doctor's startup import fills from the environment. The name
+    is the variable the import copies the key from, which may be a credential seed's, or says that the key was saved in
+    the dashboard or imported by an earlier start. Without the store, doctor reads ``env_key`` itself.
     """
     try:
-        api_key, from_env = get_api_key_and_origin_for_provider(provider, runtime_paths)
+        key = get_stored_provider_key(provider, runtime_paths)
     except (OSError, ValueError):
         return get_secret_from_env(env_key, runtime_paths=runtime_paths), env_key
-    return api_key, env_key if from_env else "key saved in the dashboard"
+    if not key.imported:
+        return key.api_key, "key saved in the dashboard"
+    return key.api_key, key.import_variable or "key imported earlier from the environment"
 
 
 def _endpoint_settings(value: object, path: str) -> list[str]:
@@ -608,13 +606,15 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
             f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
         )
         return 0, 0, 1
-    # Any endpoint setting or variable skips the check, whichever key it is, and so does an exported OPENROUTER_API_KEY,
-    # which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of any other key.
+    # Any endpoint setting or variable skips the check, whichever key it is, and so does an OPENROUTER_API_KEY in the
+    # process environment, which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of
+    # the key it is given; only an openrouter key equal to it is the key Mem0 sends.
     if env_key:
         reasons = _endpoint_settings(config.memory.llm.config, "memory.llm.config")
         reasons += _endpoint_variables(env_key, runtime_paths)
-        replaced = provider_route(llm_provider) in {"openai", "openrouter"} and key_name != "OPENROUTER_API_KEY"
-        if replaced and runtime_paths.env_value("OPENROUTER_API_KEY"):
+        route = provider_route(llm_provider)
+        mem0_key = runtime_paths.process_env.get("OPENROUTER_API_KEY")
+        if route in {"openai", "openrouter"} and mem0_key and not (route == "openrouter" and mem0_key == api_key):
             reasons.append("OPENROUTER_API_KEY")
         if _report_key_not_checked("Memory LLM", llm_provider, key_name, reasons):
             return 0, 0, 1
