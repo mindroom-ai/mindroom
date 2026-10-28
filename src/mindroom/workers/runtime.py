@@ -108,6 +108,7 @@ class _ConfiguredPrimaryWorkerManagerInputs:
     dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
     kubernetes_config_snapshot: dict[str, object] | None
     worker_grantable_credentials: frozenset[str] | None
+    generated_agents: dict[str, dict[str, object]] | None = None
 
 
 _PRIMARY_WORKER_MANAGER_ENTRY: _WorkerManagerEntry | None = None
@@ -298,6 +299,7 @@ def _lease_configured_primary_worker_manager(
         dedicated_worker_validation_snapshot=inputs.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=inputs.kubernetes_config_snapshot,
         worker_grantable_credentials=inputs.worker_grantable_credentials,
+        generated_agents=inputs.generated_agents,
     )
 
 
@@ -357,6 +359,7 @@ def _configured_primary_worker_manager_inputs(
         dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=kubernetes_config_snapshot,
         worker_grantable_credentials=worker_grantable_credentials,
+        generated_agents=runtime_config.generated_agent_data() if runtime_config is not None else None,
     )
 
 
@@ -715,6 +718,13 @@ def _resolve_primary_worker_manager_entry(
     _dispose_fenced_primary_worker_manager(built_manager, config_signature)
 
 
+def _share_generated_agents(manager: WorkerBackend, generated_agents: dict[str, dict[str, object]] | None) -> None:
+    # They change with the roster, and a replaced Docker manager removes every container, so they stay out of its
+    # identity and reach the projection with each lease instead.
+    if generated_agents is not None and isinstance(manager, DockerWorkerBackend):
+        manager.use_generated_agents(generated_agents)
+
+
 def _release_primary_worker_manager_entry(entry: _WorkerManagerEntry) -> None:
     with _PRIMARY_WORKER_MANAGER_CONDITION:
         if entry.active_leases <= 0:
@@ -740,6 +750,7 @@ def get_primary_worker_manager(
     dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
+    generated_agents: dict[str, dict[str, object]] | None = None,
 ) -> WorkerBackend:
     """Return the current primary worker manager snapshot for the current backend config."""
     entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
@@ -758,6 +769,7 @@ def get_primary_worker_manager(
             suppress_errors=True,
             log_message="Failed to shut down retired primary worker manager",
         )
+    _share_generated_agents(entry.manager, generated_agents)
     return entry.manager
 
 
@@ -770,6 +782,7 @@ def lease_primary_worker_manager(
     dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
     kubernetes_config_snapshot: dict[str, object] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
+    generated_agents: dict[str, dict[str, object]] | None = None,
 ) -> PrimaryWorkerManagerLease:
     """Borrow the active primary worker manager for one request-scoped operation."""
     entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
@@ -788,6 +801,7 @@ def lease_primary_worker_manager(
             suppress_errors=True,
             log_message="Failed to shut down retired primary worker manager",
         )
+    _share_generated_agents(entry.manager, generated_agents)
     return PrimaryWorkerManagerLease(entry)
 
 

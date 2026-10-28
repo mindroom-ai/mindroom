@@ -20,7 +20,7 @@ import pytest
 import yaml
 from structlog.testing import capture_logs
 
-from mindroom.config.main import load_config
+from mindroom.config.main import Config, load_config
 from mindroom.config.personal_agents import CreatedAgentEntry, GeneratedAgentEdits, PersonalAgentRoster
 from mindroom.constants import (
     RuntimePaths,
@@ -704,7 +704,7 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Created agents and owners' edits live in the roster too, so the projection builds them as loading does."""
+    """Created agents and owners' edits come from the config the runtime accepted, even once the file is broken."""
     paths = test_runtime_paths(tmp_path)
     helper = {"display_name": "Helper", "model": "default", "tools": ["shell"], "worker_scope": "shared"}
     config_data = PERSONAL_AGENTS_BASE | {"agents": {"helper": helper | {"created_agents_per_owner": 1}}}
@@ -723,11 +723,11 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
         runtime_paths=paths,
         storage_path=paths.storage_root,
     )
-    manager = backend._projection_manager
+    backend.use_generated_agents(Config.validate_with_runtime(config_data, paths).generated_agent_data())
 
     def projected_agents(worker_key: str | None) -> dict[str, dict[str, object]]:
         state = local_worker_state_paths_for_root(tmp_path / "workers" / str(worker_key))
-        projection = manager._projected_config(state, worker_key=worker_key, materialize=True)
+        projection = backend._projection_manager._projected_config(state, worker_key=worker_key, materialize=True)
         return yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))["agents"]
 
     agents = projected_agents(None)
@@ -735,42 +735,10 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
     assert agents["mind_alice_smith"]["display_name"] == "Scout"
     assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
 
-
-def test_docker_worker_projection_keeps_working_when_the_config_file_does_not_validate(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A config edit the reload rejected keeps the generated agents of the last valid file, as the runtime does."""
-    paths = test_runtime_paths(tmp_path)
-    helper = {"display_name": "Helper", "model": "default", "tools": ["shell"], "worker_scope": "shared"}
-    config_data = PERSONAL_AGENTS_BASE | {"agents": {"helper": helper | {"created_agents_per_owner": 1}}}
-    created = CreatedAgentEntry(
-        agent_name="helper_research",
-        creator="helper",
-        owner="@alice:example.org",
-        edits=GeneratedAgentEdits(display_name="Research"),
-    )
-    _write_personal_agent_roster(paths, PersonalAgentRoster(created=[created]))
-    backend, _fake_client, _credential_sync_calls = _backend(
-        monkeypatch,
-        tmp_path,
-        config_text=yaml.safe_dump(config_data),
-        runtime_paths=paths,
-        storage_path=paths.storage_root,
-    )
-
-    def projected_agents(worker_key: str) -> list[str]:
-        state = local_worker_state_paths_for_root(tmp_path / "workers" / worker_key)
-        projection = backend._projection_manager._projected_config(state, worker_key=worker_key, materialize=True)
-        return list(yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))["agents"])
-
-    assert projected_agents("v1:default:shared:helper_research") == ["helper_research"]
-    broken = {"display_name": "Broken", "model": "default", "delegate_to": ["nobody"]}
-    config_data["agents"]["broken"] = broken
+    # A rejected edit to the file leaves the runtime, and so the workers, on the accepted config.
+    config_data["agents"]["broken"] = {"display_name": "Broken", "model": "default", "delegate_to": ["nobody"]}
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(config_data), encoding="utf-8")
-
-    assert projected_agents("v1:default:shared:helper_research") == ["helper_research"]
-    assert projected_agents("v1:default:shared:helper") == ["helper"]
+    assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
 
 
 def test_docker_worker_projection_sees_roster_change_while_config_is_cached(

@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from mindroom import yaml_io
-from mindroom.config.main import Config
-from mindroom.config.personal_agents import expand_personal_agents, read_personal_agent_roster_file
+from mindroom.config.personal_agents import expand_personal_agents, read_personal_agent_roster
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
@@ -266,8 +265,8 @@ class DockerProjectionManager:
         self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
         self._config_data_cache: tuple[Path, str | None, dict[str, object], frozenset[Path]] | None = None
-        # The generated agents of the last config file that validated, kept while a rejected edit is on disk.
-        self._last_generated_agents: dict[str, object] = {}
+        # Personal and created agents as the runtime's accepted config built them, handed over with each lease.
+        self.generated_agents: dict[str, dict[str, object]] = {}
 
     def config_mount_specs(
         self,
@@ -480,27 +479,17 @@ class DockerProjectionManager:
 
         The cache keeps the raw file data, so a roster change shows up without a config change.
         """
-        paths = self._runtime_paths
         try:
-            roster = read_personal_agent_roster_file(paths)
-            data = cast("dict[str, object]", expand_personal_agents(config_data, roster.entries).data)
+            expansion = expand_personal_agents(config_data, read_personal_agent_roster(self._runtime_paths))
         except (OSError, ValueError) as exc:
             msg = f"Failed to add personal agents to the Docker worker config: {exc}"
             raise WorkerBackendError(msg) from exc
-        if not roster.created and all(entry.edits is None for entry in roster.entries):
+        data = cast("dict[str, object]", expansion.data)
+        if not self.generated_agents:
             return data
-        try:
-            # Owners' edits and created agents are built from the validated config, so take them from loading.
-            config = Config.validate_with_runtime(config_data, paths, tolerate_plugin_load_errors=True)
-        except (OSError, ValueError) as exc:
-            # The runtime keeps its last valid config when a reload rejects the file, so the workers do too.
-            logger.warning("Docker worker config kept the last valid generated agents", error=str(exc))
-        else:
-            agents = cast("dict[str, object]", config.runtime_model_dump().get("agents", {}))
-            generated = {name: agent for name, agent in agents.items() if config.generated_agent(name) is not None}
-            self._last_generated_agents = generated
+        # Owners' edits and created agents need a validated config, so they come from the runtime's, not the file.
         authored = cast("dict[str, object]", data.get("agents", {}))
-        return {**data, "agents": {**authored, **copy.deepcopy(self._last_generated_agents)}}
+        return {**data, "agents": {**authored, **copy.deepcopy(self.generated_agents)}}
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()

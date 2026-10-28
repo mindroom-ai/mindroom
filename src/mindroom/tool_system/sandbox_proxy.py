@@ -173,6 +173,7 @@ class _PrimaryWorkerManagerContext:
     kubernetes_config_snapshot: dict[str, object] | None
     worker_grantable_credentials: frozenset[str] | None
     runtime_config: Config | None
+    generated_agents: dict[str, dict[str, object]] | None = None
 
 
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
@@ -422,6 +423,7 @@ def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWork
             context.config.get_worker_grantable_credentials() if context is not None else None
         ),
         runtime_config=context.config if context is not None else None,
+        generated_agents=context.config.generated_agent_data() if context is not None else None,
     )
 
 
@@ -453,6 +455,7 @@ def _get_worker_manager(
         dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
+        generated_agents=manager_context.generated_agents,
     )
 
 
@@ -470,6 +473,7 @@ def _lease_worker_manager(
         dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
         kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
         worker_grantable_credentials=manager_context.worker_grantable_credentials,
+        generated_agents=manager_context.generated_agents,
     )
 
 

@@ -3450,8 +3450,10 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
         dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None,
         kubernetes_config_snapshot: dict[str, object] | None = None,
         worker_grantable_credentials: frozenset[str] | None = None,
+        generated_agents: dict[str, dict[str, object]] | None = None,
     ) -> str:
         captured["runtime_paths"] = runtime_paths_arg
+        captured["generated_agents"] = generated_agents
         captured["proxy_url"] = proxy_url
         captured["proxy_token"] = proxy_token
         captured["storage_root"] = storage_root
@@ -3481,6 +3483,7 @@ def test_get_worker_manager_falls_back_to_runtime_storage_root_without_tool_cont
     assert captured["runtime_paths"] == runtime_paths
     assert captured["storage_root"] == (tmp_path / "storage").resolve()
     assert captured["dedicated_worker_validation_snapshot"] is None
+    assert captured["generated_agents"] is None
     assert captured["kubernetes_config_snapshot"] is None
     assert captured["worker_grantable_credentials"] is None
 
@@ -5602,6 +5605,7 @@ def test_get_docker_worker_manager_passes_committed_snapshot_from_tool_runtime_c
 
     assert captured_kwargs["dedicated_worker_validation_snapshot"] is not None
     assert captured_kwargs["kubernetes_config_snapshot"] is None
+    assert captured_kwargs["generated_agents"] == runtime_config.generated_agent_data()
 
 
 def test_get_worker_manager_reuses_cached_kubernetes_validation_snapshot(

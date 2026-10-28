@@ -564,6 +564,10 @@ class DockerWorkerBackend:
             worker_grantable_credentials=worker_grantable_credentials,
         )
 
+    def use_generated_agents(self, agents: dict[str, dict[str, object]]) -> None:
+        """Project these personal and created agents, which the runtime's accepted config built from the roster."""
+        self._projection_manager.generated_agents = agents
+
     def shutdown(self) -> None:
         """Remove backend-owned containers before discarding this Docker manager."""
         failures: list[str] = []
