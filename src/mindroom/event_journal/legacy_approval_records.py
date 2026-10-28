@@ -187,6 +187,20 @@ class _Legacy:
         return self.deliveries.get((principal_id, delivery_id), _Delivery())
 
 
+def _scope(row: Row) -> dict[str, object]:
+    """Return the scope row of the consent an old grant card or grant row copied, at its card's membership epoch."""
+    return {
+        "scope_key": row["scope_key"],
+        "operation": row["operation"],
+        "requester_id": row["requester_id"],
+        "entity_name": row["entity_name"],
+        "invoking_agent": row["invoking_agent"],
+        "responder_principal_id": row["responder_principal_id"],
+        "responder_epoch": int(row["responder_epoch"]),
+        "consent_epoch": int(row["membership_epoch"]),
+    }
+
+
 def _old_call(row: Row) -> CallKey:
     """Name the call an old card row or grant card row showed; a detached run's cards used generation -1."""
     return CallKey(str(row["continuation_id"]), max(0, int(row["continuation_generation"])), str(row["tool_call_id"]))
@@ -203,8 +217,8 @@ class _Converted:
     grants: list[dict[str, object]] = field(default_factory=list)
     bindings: list[dict[str, object]] = field(default_factory=list)
     pending_jobs: list[CallKey] = field(default_factory=list)
-    # Rebuilt calls whose card never got a terminal edit, which the conversion queues.
-    _final_edits: list[tuple[CallKey, str | None]] = field(default_factory=list)
+    # Rebuilt calls whose card never got a terminal edit, which the conversion queues as the timeout would have.
+    _final_edits: list[CallKey] = field(default_factory=list)
 
     def build(self, legacy: _Legacy) -> None:  # noqa: C901, PLR0912, PLR0915 - one pass per legacy table
         bindings_by_delivery = {(str(row["principal_id"]), str(row["delivery_id"])): row for row in legacy.bindings}
@@ -314,16 +328,7 @@ class _Converted:
             live_request = (principal_id, delivery_id) in self.cards
             originating = (principal_id, delivery_id) in grants_by_delivery
             if live_request or originating:
-                self.scopes[principal_id, delivery_id] = {
-                    "scope_key": row["scope_key"],
-                    "operation": row["operation"],
-                    "requester_id": row["requester_id"],
-                    "entity_name": row["entity_name"],
-                    "invoking_agent": row["invoking_agent"],
-                    "responder_principal_id": row["responder_principal_id"],
-                    "responder_epoch": int(row["responder_epoch"]),
-                    "consent_epoch": int(row["membership_epoch"]),
-                }
+                self.scopes[principal_id, delivery_id] = _scope(row)
             if live_request or row["grant_id"] is None:
                 continue
             delivery = legacy.delivery(principal_id, delivery_id)
@@ -361,19 +366,7 @@ class _Converted:
         for row in legacy.grants:
             principal_id = str(row["principal_id"])
             delivery_id = str(row["original_delivery_id"])
-            self.scopes.setdefault(
-                (principal_id, delivery_id),
-                {
-                    "scope_key": row["scope_key"],
-                    "operation": row["operation"],
-                    "requester_id": row["requester_id"],
-                    "entity_name": row["entity_name"],
-                    "invoking_agent": row["invoking_agent"],
-                    "responder_principal_id": row["responder_principal_id"],
-                    "responder_epoch": int(row["responder_epoch"]),
-                    "consent_epoch": int(row["membership_epoch"]),
-                },
-            )
+            self.scopes.setdefault((principal_id, delivery_id), _scope(row))
             if (principal_id, delivery_id) not in self.cards:
                 # Its timed-grant card row is gone too; a retired card's call is never read.
                 self._card(
@@ -514,7 +507,7 @@ class _Converted:
         else:
             # No terminal edit was ever queued; the call ends as its deadline would have ended it.
             decision, reason, decided = "expired", approval_cards.TIMEOUT_REASON, {}
-            self._final_edits.append((call, reason))
+            self._final_edits.append(call)
         self.calls[call] = {
             "principal_id": principal_id,
             "owner_kind": "reply",
@@ -564,10 +557,16 @@ class _Converted:
             _insert(transaction, "approval_grants", row)
         for row in self.bindings:
             _insert(transaction, "scheduled_call_approvals", row)
-        for call, reason in self._final_edits:
+        for call in self._final_edits:
             card = approval_cards.request_card(transaction, call)
             if card is not None:
-                approval_cards.queue_terminal_edit(transaction, card, status="expired", reason=reason, metadata=None)
+                approval_cards.queue_terminal_edit(
+                    transaction,
+                    card,
+                    status="expired",
+                    reason=approval_cards.TIMEOUT_REASON,
+                    metadata=None,
+                )
 
 
 def _key(call: CallKey) -> dict[str, object]:

@@ -1369,7 +1369,7 @@ async def _card(
         runtime_generation="runtime",
     )
     assert await paused_for_approval(responder, continuation) is not None
-    card = await manager.prepare_detached_approval(
+    card = await manager.prepare_reply_card(
         approval_id="card-" + name,
         continuation_id=name,
         continuation_generation=0,

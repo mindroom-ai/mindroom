@@ -233,7 +233,7 @@ async def _publish_cards(
             continue
         if manager is None or approver is None:
             raise RuntimeError(failure_reason)
-        card = await manager.prepare_detached_approval(
+        card = await manager.prepare_reply_card(
             approval_id=f"{continuation.approval_id}-{continuation.generation}-{index}",
             continuation_id=continuation.approval_id,
             continuation_generation=continuation.generation,

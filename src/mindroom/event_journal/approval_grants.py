@@ -226,14 +226,13 @@ def apply_active(
     principal_id: str,
     *,
     call: CallKey,
-    card: ApprovalCardReservation,
     offer: _ScopeOffer,
     room_id: str,
     thread_id: str | None,
     membership_epoch: int,
 ) -> bool:
-    """Approve a new call under an active grant of its scope and reserve its receipt in the card's place."""
-    scope = offer.scope
+    """Approve a new call under an active grant of its scope and reserve its receipt in the offered card's place."""
+    card, scope = offer.card, offer.scope
     if scope is None or not _current(
         transaction,
         principal_id,
@@ -380,7 +379,7 @@ def create(
     }
     first = approval_calls.resolve_call(
         transaction,
-        _call(row),
+        approval_calls.CallKey.of_row(row),
         requested="approved",
         reason=reason,
         metadata=replace(metadata, auto_approval=grant.wire(), provenance=provenance),
@@ -414,7 +413,7 @@ def create(
         *(
             approval_calls.resolve_call(
                 transaction,
-                _call(candidate),
+                approval_calls.CallKey.of_row(candidate),
                 requested="approved",
                 reason=None,
                 metadata=batch,
@@ -423,10 +422,6 @@ def create(
             for candidate in candidates
         ),
     )
-
-
-def _call(row: Row) -> CallKey:
-    return approval_calls.CallKey(str(row["owner_id"]), int(row["generation"]), str(row["tool_call_id"]))
 
 
 def revoke(

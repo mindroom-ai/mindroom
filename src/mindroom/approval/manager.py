@@ -242,7 +242,7 @@ class ApprovalManager:
         if self.recovery is not None:
             self.recovery.bind(self)
 
-    async def prepare_detached_approval(
+    async def prepare_reply_card(
         self,
         *,
         approval_id: str,
@@ -261,7 +261,7 @@ class ApprovalManager:
         thread_id: str | None,
         grant_operation: ApprovalOperation | None,
     ) -> ApprovalCardReservation | None:
-        """Prepare one exact frozen payload without creating delivery debt."""
+        """Prepare the frozen card payload of one paused-reply call without creating delivery debt."""
         return await self._prepare_approval_card(
             approval_id=approval_id,
             tool_call_id=tool_call_id,

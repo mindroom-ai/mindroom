@@ -158,19 +158,8 @@ class _DecidedCardListener(_Listener):
 
 
 @dataclass(eq=False, slots=True)
-class _Wakeup:
-    loop: asyncio.AbstractEventLoop
-    event: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def set(self) -> None:
-        """Set the event on its own loop."""
-        if self.loop is _running_loop():
-            self.event.set()
-        elif not self.loop.is_closed():
-            try:
-                self.loop.call_soon_threadsafe(self.event.set)
-            except RuntimeError:
-                logger.debug("approval_signal_waiter_loop_closed")
+class _Wakeup(_Listener):
+    event: asyncio.Event = field(default_factory=asyncio.Event, kw_only=True)
 
 
 @dataclass
@@ -212,7 +201,7 @@ class ApprovalSignals:
         assert isinstance(signal, _Decided), f"unknown approval signal {signal!r}"
         wakeup = self._wakeups.get(signal.call)
         if wakeup is not None:
-            wakeup.set()
+            wakeup.deliver(wakeup.event.set)
         card = signal.card
         if card is None:
             return []

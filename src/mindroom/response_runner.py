@@ -1757,7 +1757,7 @@ class ResponseRunner:
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:
         """Return whether a pending approval keeps this conversation busy."""
-        return self._approvals.is_held_for_approval(target)
+        return bool(self._lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
 
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn."""

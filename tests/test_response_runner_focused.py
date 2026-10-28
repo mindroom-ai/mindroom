@@ -3001,7 +3001,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         state="waiting",
     )
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
         transport=FakeApprovalTransport(),
     )
@@ -3021,8 +3021,8 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
 
     assert plan.waiting_text == "Waiting for approval: `conditional_write`"
     assert [call.decision for call in plan.calls] == [ApprovalDecision.APPROVED, None]
-    approval_store.prepare_detached_approval.assert_awaited_once()
-    assert approval_store.prepare_detached_approval.await_args.kwargs["tool_name"] == "conditional_write"
+    approval_store.prepare_reply_card.assert_awaited_once()
+    assert approval_store.prepare_reply_card.await_args.kwargs["tool_name"] == "conditional_write"
     approval_store.reserve_and_publish.assert_awaited_once()
 
 
@@ -3063,7 +3063,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
         state="waiting",
     )
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
         transport=FakeApprovalTransport(),
     )
@@ -3083,7 +3083,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
 
     assert plan.waiting_text == "Waiting for approval: `dangerous_one`, `dangerous_two`"
     assert [call.decision for call in plan.calls] == [None, None]
-    assert [awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list] == [
+    assert [awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list] == [
         "dangerous_one",
         "dangerous_two",
     ]
@@ -3193,7 +3193,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
     retry_sources = Mock()
     runner.deps = replace(runner.deps, retry_approval_sources=retry_sources)
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
         transport=FakeApprovalTransport(),
     )
@@ -3217,10 +3217,10 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
             )
 
     if card_expected:
-        approval_store.prepare_detached_approval.assert_awaited_once()
+        approval_store.prepare_reply_card.assert_awaited_once()
         assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING}
     else:
-        approval_store.prepare_detached_approval.assert_not_awaited()
+        approval_store.prepare_reply_card.assert_not_awaited()
         retry_sources.assert_called_once_with(request.room_id, ("$source",))
         assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
 
@@ -4077,7 +4077,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         },
     )
     approval_store = MagicMock(
-        prepare_detached_approval=AsyncMock(return_value=object()),
+        prepare_reply_card=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
         transport=FakeApprovalTransport(),
     )
@@ -4127,7 +4127,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
     }
     assert [
-        awaited.kwargs["tool_name"] for awaited in approval_store.prepare_detached_approval.await_args_list
+        awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list
     ] == expected_cards
     if expected_state == "ready":
         retry_sources.assert_called_once_with(current.room_id, ("$source",))

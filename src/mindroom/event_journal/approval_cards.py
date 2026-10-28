@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.tool_approval_grants import ApprovalGrantScope
 
-from . import approval_calls, approval_continuations, approval_grants, outbox, reads
+from . import approval_calls, approval_continuations, approval_grants, membership_state, outbox
 from .identity import decode_thread_id, encode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
 
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 type _CardKind = Literal["request", "grant_receipt", "scheduled_receipt"]
 
 TIMEOUT_REASON = "Tool approval request timed out."
-_DEFAULT_ROOM_CARD_LIMIT = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,18 +174,33 @@ def terminal_content(
     return resolution
 
 
-def _insert_card(
+def _reserve(
     transaction: Transaction,
     principal_id: str,
     *,
-    delivery_id: str,
     kind: _CardKind,
     call: CallKey,
+    delivery_id: str,
+    event_type: str,
+    payload: Mapping[str, object],
     room_id: str,
     thread_id: str | None,
-    approvable: bool,
     membership_epoch: int,
+    approvable: bool,
 ) -> None:
+    """Reserve one card's frozen INITIAL delivery in the shared Matrix delivery lifecycle, with its card row."""
+    outbox.enqueue(
+        transaction,
+        principal_id,
+        delivery_id=delivery_id,
+        stage=DeliveryStage.INITIAL,
+        event_type=event_type,
+        room_id=room_id,
+        membership_epoch=membership_epoch,
+        thread_id=thread_id,
+        payload=payload,
+        edits_event_id=None,
+    )
     transaction.execute(
         """
         INSERT INTO approval_cards (
@@ -209,42 +223,6 @@ def _insert_card(
     )
 
 
-def _reserve_request(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    call: CallKey,
-    room_id: str,
-    thread_id: str | None,
-    membership_epoch: int,
-    card: ApprovalCardReservation,
-) -> None:
-    """Reserve one call's frozen request card in the shared Matrix delivery lifecycle."""
-    outbox.enqueue(
-        transaction,
-        principal_id,
-        delivery_id=card.delivery_id,
-        stage=DeliveryStage.INITIAL,
-        event_type=card.event_type,
-        room_id=room_id,
-        membership_epoch=membership_epoch,
-        thread_id=thread_id,
-        payload=card.payload,
-        edits_event_id=None,
-    )
-    _insert_card(
-        transaction,
-        principal_id,
-        delivery_id=card.delivery_id,
-        kind="request",
-        call=call,
-        room_id=room_id,
-        thread_id=thread_id,
-        approvable=card.approvable,
-        membership_epoch=membership_epoch,
-    )
-
-
 def reserve_receipt(
     transaction: Transaction,
     principal_id: str,
@@ -259,28 +237,18 @@ def reserve_receipt(
     payload: Mapping[str, object],
 ) -> None:
     """Reserve the receipt that shows a call an automatic approval decided."""
-    outbox.enqueue(
+    _reserve(
         transaction,
         principal_id,
-        delivery_id=delivery_id,
-        stage=DeliveryStage.INITIAL,
-        event_type=event_type,
-        room_id=room_id,
-        membership_epoch=membership_epoch,
-        thread_id=thread_id,
-        payload=payload,
-        edits_event_id=None,
-    )
-    _insert_card(
-        transaction,
-        principal_id,
-        delivery_id=delivery_id,
         kind=kind,
         call=call,
+        delivery_id=delivery_id,
+        event_type=event_type,
+        payload=payload,
         room_id=room_id,
         thread_id=thread_id,
-        approvable=False,
         membership_epoch=membership_epoch,
+        approvable=False,
     )
 
 
@@ -303,7 +271,6 @@ def _reserve_card(
         transaction,
         principal_id,
         call=call,
-        card=offer.card,
         offer=offer,
         room_id=room_id,
         thread_id=thread_id,
@@ -311,14 +278,18 @@ def _reserve_card(
     ):
         return
     reserved = card if offer is None else offer.card
-    _reserve_request(
+    _reserve(
         transaction,
         principal_id,
+        kind="request",
         call=call,
+        delivery_id=reserved.delivery_id,
+        event_type=reserved.event_type,
+        payload=reserved.payload,
         room_id=room_id,
         thread_id=thread_id,
         membership_epoch=membership_epoch,
-        card=reserved,
+        approvable=reserved.approvable,
     )
     if offer is not None and offer.scope is not None:
         approval_grants.insert_scope(transaction, principal_id, delivery_id=card.delivery_id, scope=offer.scope)
@@ -420,7 +391,7 @@ def _claim_membership(transaction: Transaction, principal_id: str, room_id: str)
         (principal_id, room_id),
     )
     membership_epoch = 0 if epoch is None else int(epoch["membership_epoch"])
-    if not reads.claim_membership_epoch(
+    if not membership_state.claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
@@ -603,7 +574,7 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
         (principal_id, delivery_id),
     )
     transaction.execute(
-        """
+        f"""
         DELETE FROM approval_calls
         WHERE owner_kind = 'reply'
           AND EXISTS (
@@ -617,12 +588,8 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
               SELECT 1 FROM approval_continuations AS continuations
               WHERE continuations.approval_id = approval_calls.owner_id
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM approval_cards AS live
-              WHERE live.owner_id = approval_calls.owner_id AND live.generation = approval_calls.generation
-                AND live.tool_call_id = approval_calls.tool_call_id AND live.retired = 0
-          )
-        """,
+          AND NOT {approval_calls.LIVE_CARD.format(calls="approval_calls")}
+        """,  # noqa: S608 - a fixed predicate, not input
         (principal_id, delivery_id),
     )
 
@@ -716,7 +683,7 @@ def _view(row: Row, card_event_id: str | None) -> ApprovalCardView:
     return ApprovalCardView(
         delivery_id=str(row["delivery_id"]),
         kind=cast("_CardKind", str(row["kind"])),
-        call=approval_calls.CallKey(str(row["owner_id"]), int(row["generation"]), str(row["tool_call_id"])),
+        call=approval_calls.CallKey.of_row(row),
         room_id=str(row["room_id"]),
         thread_id=decode_thread_id(str(row["thread_id"])),
         card_event_id=card_event_id,
@@ -795,7 +762,7 @@ def pending_cards(
     principal_id: str,
     *,
     room_id: str,
-    limit: int = _DEFAULT_ROOM_CARD_LIMIT,
+    limit: int,
     after: tuple[int, str] | None = None,
 ) -> tuple[ApprovalCardView, ...]:
     """Return one room's live request cards, oldest first.
@@ -919,7 +886,7 @@ def deny_for_departed_card_owner(
         delivery_id = str(row["delivery_id"])
         approval_calls.resolve_call(
             transaction,
-            approval_calls.CallKey(str(row["owner_id"]), int(row["generation"]), str(row["tool_call_id"])),
+            approval_calls.CallKey.of_row(row),
             requested="denied",
             reason=reason,
             metadata=None,
@@ -983,7 +950,7 @@ def expire_for_departed_responder(
             continue
         approval_calls.resolve_call(
             transaction,
-            approval_calls.CallKey(str(row["owner_id"]), int(row["generation"]), str(row["tool_call_id"])),
+            approval_calls.CallKey.of_row(row),
             requested="expired",
             reason=reason,
             metadata=None,

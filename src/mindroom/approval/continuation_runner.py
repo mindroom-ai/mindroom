@@ -345,7 +345,9 @@ class ApprovalContinuationRunner:
             if isinstance(error, asyncio.CancelledError)
             else str(error) or "Tool approval suspension failed."
         )
-        continuation = await self._fail_publication(approval_id, failure=_error(detail))
+        # Fence the continuation the suspension created, whose card publication did not finish.
+        born = await self.deps.approval_store.approval_continuation(approval_id)
+        continuation = None if born is None else await self._request_failure(born, _error(detail))
         if continuation is None or continuation.state != "failing":
             return None
         response_event_id = continuation.response_event_id
@@ -949,8 +951,6 @@ class ApprovalContinuationRunner:
             )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
-            show_tool_calls = claimed.show_tool_calls
-            visible_tool_trace = tool_trace if show_tool_calls else []
             return (
                 await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
@@ -958,7 +958,7 @@ class ApprovalContinuationRunner:
                         existing_event_id=claimed.response_event_id,
                         response_text=result.response_text,
                         identity=identity,
-                        tool_trace=visible_tool_trace if show_tool_calls else None,
+                        tool_trace=tool_trace if claimed.show_tool_calls else None,
                         extra_content=merge_response_extra_content(result.metadata_content, claimed.attachment_ids),
                     ),
                 ),
@@ -1369,10 +1369,6 @@ class ApprovalContinuationRunner:
                 )
         return response_text
 
-    def is_held_for_approval(self, target: MessageTarget) -> bool:
-        """Return whether a pending approval keeps this conversation busy."""
-        return bool(self.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
-
     async def run_owned_approvals(
         self,
         owned: ApprovalContinuation,
@@ -1682,11 +1678,6 @@ class ApprovalContinuationRunner:
         if failing is not None:
             self.deps.retry_approval_sources(failing.room_id, failing.source_event_ids)
         return failing
-
-    async def _fail_publication(self, approval_id: str, *, failure: ApprovalFailure) -> ApprovalContinuation | None:
-        """Fence a born continuation whose card publication did not finish."""
-        continuation = await self.deps.approval_store.approval_continuation(approval_id)
-        return None if continuation is None else await self._request_failure(continuation, failure)
 
     async def _settle(self, observed: ApprovalContinuation, failure: ApprovalFailure) -> bool:
         """Settle a failed paused reply: fence it, expire its cards, cancel its delegations, and end its reply.

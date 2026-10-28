@@ -56,6 +56,11 @@ class CallKey:
         """Name one call of a detached run, which owns its calls at generation 0."""
         return cls(owner_id, 0, tool_call_id)
 
+    @classmethod
+    def of_row(cls, row: Row) -> CallKey:
+        """Name the call a row's ``owner_id``, ``generation``, and ``tool_call_id`` columns hold."""
+        return cls(str(row["owner_id"]), int(row["generation"]), str(row["tool_call_id"]))
+
 
 @dataclass(frozen=True, slots=True)
 class ApprovalCall:
@@ -93,13 +98,6 @@ def approval_arguments_digest(tool_args: Mapping[str, object] | None) -> str:
     """Return the canonical digest that binds one approval to its call's exact arguments."""
     encoded = json.dumps(dict(tool_args or {}), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode()).hexdigest()
-
-
-_REPLY_CALL_COLUMNS = """
-    calls.owner_id, calls.generation, calls.tool_call_id, calls.tool_name, calls.invoking_agent,
-    calls.expires_at_ns, calls.decision, calls.reason, calls.human_approval_required,
-    calls.toolkit_name, calls.arguments_digest
-"""
 
 
 def insert_reply_generation(
@@ -145,7 +143,9 @@ def reply_call_rows(transaction: Transaction, approval_ids: tuple[str, ...]) -> 
     placeholders = ", ".join("?" for _approval_id in approval_ids)
     return transaction.fetchall(
         f"""
-        SELECT {_REPLY_CALL_COLUMNS}
+        SELECT calls.owner_id, calls.generation, calls.tool_call_id, calls.tool_name, calls.invoking_agent,
+               calls.expires_at_ns, calls.decision, calls.reason, calls.human_approval_required,
+               calls.toolkit_name, calls.arguments_digest
         FROM approval_calls AS calls
         JOIN approval_continuations AS continuations
           ON continuations.approval_id = calls.owner_id
@@ -171,21 +171,6 @@ def reply_call(row: Row) -> ApprovalCall:
         human_approval_required=(
             None if row["human_approval_required"] is None else bool(row["human_approval_required"])
         ),
-    )
-
-
-def has_undecided(transaction: Transaction, *, approval_id: str, generation: int) -> bool:
-    """Return whether one paused generation still waits on a decision."""
-    return (
-        transaction.fetchone(
-            """
-            SELECT 1 AS present FROM approval_calls
-            WHERE owner_id = ? AND generation = ? AND decision IS NULL
-            LIMIT 1
-            """,
-            (approval_id, generation),
-        )
-        is not None
     )
 
 
@@ -216,14 +201,14 @@ def delete_reply_calls(transaction: Transaction, *, approval_id: str) -> None:
         f"""
         DELETE FROM approval_calls
         WHERE owner_kind = 'reply' AND owner_id = ?
-          AND NOT {_LIVE_CARD.format(calls="approval_calls")}
+          AND NOT {LIVE_CARD.format(calls="approval_calls")}
         """,  # noqa: S608 - a fixed predicate, not input
         (approval_id,),
     )
 
 
-# A call some card that has not retired still shows.
-_LIVE_CARD = """EXISTS (
+# A call some card that has not retired still shows, for the ``approval_calls`` row ``{calls}`` names.
+LIVE_CARD = """EXISTS (
     SELECT 1 FROM approval_cards AS live
     WHERE live.owner_id = {calls}.owner_id AND live.generation = {calls}.generation
       AND live.tool_call_id = {calls}.tool_call_id AND live.retired = 0
@@ -315,7 +300,7 @@ def prune(transaction: Transaction, principal_id: str, *, owner_id: str) -> bool
         f"""
         SELECT 1 AS present FROM approval_calls AS calls
         WHERE calls.principal_id = ? AND calls.owner_id = ?
-          AND (calls.decision IS NULL OR {_LIVE_CARD.format(calls="calls")})
+          AND (calls.decision IS NULL OR {LIVE_CARD.format(calls="calls")})
         LIMIT 1
         """,  # noqa: S608 - a fixed predicate, not input
         (principal_id, owner_id),
@@ -391,7 +376,8 @@ def resolve_call(
         row["state"] not in {"waiting", "failing"} or int(row["continuation_generation"]) != call.generation
     ):
         return approval_cards.RecordedApprovalDecision(resolution=None, recorded=False)
-    failure = None if owner_kind != "reply" else approval_continuations.failure_of_row(row)
+    # Only a paused reply joins a continuation, so only a reply-owned call can carry a failure.
+    failure = approval_continuations.failure_of_row(row)
     now = time.time_ns()
     decision, decision_reason = _effective_decision(
         requested=requested,

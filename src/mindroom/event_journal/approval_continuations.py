@@ -615,7 +615,11 @@ def activate(
     expected_generation: int,
 ) -> ApprovalContinuation | None:
     """Release one publication lease and make its generation decidable or executable."""
-    undecided = approval_calls.has_undecided(transaction, approval_id=approval_id, generation=expected_generation)
+    undecided = approval_calls.undecided_tool_call_ids(
+        transaction,
+        approval_id=approval_id,
+        generation=expected_generation,
+    )
     state: Literal["waiting", "ready"] = "waiting" if undecided else "ready"
     updated = transaction.fetchone(
         """
