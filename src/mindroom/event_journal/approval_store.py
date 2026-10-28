@@ -130,15 +130,10 @@ class ApprovalStore:
             ),
         )
 
-    async def deny_pending_detached_calls(self, *, owner_id: str, reason: str) -> int:
-        """Deny every pending call of one detached run atomically, returning how many this decided."""
+    async def deny_pending_detached_calls(self, *, owner_id: str, reason: str) -> tuple[RecordedApprovalDecision, ...]:
+        """Deny every pending call of one detached run atomically, returning the decisions this recorded."""
         return await self._backend.write(
-            lambda transaction: approval_calls.deny_pending(
-                transaction,
-                self._principal_id,
-                owner_id=owner_id,
-                reason=reason,
-            ),
+            lambda transaction: approval_calls.deny_pending(transaction, owner_id=owner_id, reason=reason),
         )
 
     async def prune_detached_calls(self, *, owner_id: str) -> bool:

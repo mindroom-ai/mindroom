@@ -374,7 +374,12 @@ class ApprovalManager:
                 return decision
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
-                await self.recover_cards_on_startup()
+                expired = await cards.approvals.resolve_approval_call(
+                    call,
+                    requested_status="expired",
+                    reason=TIMEOUT_REASON,
+                )
+                await self._flush_decided(expired)
                 decision = await cards.approvals.detached_decision(call)
                 if decision is not None:
                     return decision
@@ -509,9 +514,9 @@ class ApprovalManager:
         """Withdraw a cancelled task's approval and deny its card if it is still pending."""
         if self.cards is None:
             return
-        recorded = await self.cards.approvals.withdraw_scheduled_call_approval(task_id=task_id, reason=reason)
-        if recorded.recorded and recorded.delivery_id is not None:
-            await self._flush_card_delivery(recorded.delivery_id, recorded.card_event_id)
+        await self._flush_decided(
+            await self.cards.approvals.withdraw_scheduled_call_approval(task_id=task_id, reason=reason),
+        )
 
     async def _prepare_approval_card(
         self,
@@ -590,17 +595,17 @@ class ApprovalManager:
         )
         if recorded.resolution is None:
             return False
-        await self.recover_cards_on_startup()
+        await self._flush_decided(recorded)
         return recorded.recorded
 
     async def settle_pending_background_approvals(self, run_id: str, *, reason: str) -> int:
-        """Deny only the still-pending approval targets owned by one run."""
+        """Deny only the still-pending approval targets owned by one run, and deliver their cards' terminal edits."""
         if self.cards is None:
             return 0
-        recorded = await self.cards.approvals.deny_pending_detached_calls(owner_id=run_id, reason=reason)
-        if recorded:
-            await self.recover_cards_on_startup()
-        return recorded
+        decided = await self.cards.approvals.deny_pending_detached_calls(owner_id=run_id, reason=reason)
+        for recorded in decided:
+            await self._flush_decided(recorded)
+        return len(decided)
 
     async def prune_background_approvals(self, run_id: str) -> bool:
         """Prune settled background targets only after terminal card retirement."""
@@ -907,6 +912,11 @@ class ApprovalManager:
         if recorded.recorded and recorded.continuation_ready:
             await self._wake_continuation(recorded)
         return await self._flush_card_delivery(card.delivery_id, recorded.card_event_id, room_id=card.room_id)
+
+    async def _flush_decided(self, recorded: RecordedApprovalDecision) -> None:
+        """Deliver the terminal edit of the card that shows one decided call; the deadline sweep retries what fails."""
+        if recorded.delivery_id is not None:
+            await self._flush_card_delivery(recorded.delivery_id, recorded.card_event_id)
 
     async def _flush_card_delivery(
         self,

@@ -281,26 +281,27 @@ def detached_decision(transaction: Transaction, principal_id: str, call: CallKey
     return BackgroundApprovalDecision(status=cast("_DecisionStatus", str(row["decision"])), reason=row["reason"])
 
 
-def deny_pending(transaction: Transaction, principal_id: str, *, owner_id: str, reason: str) -> int:
-    """Deny every pending call of one detached run, returning how many this decided."""
+def deny_pending(transaction: Transaction, *, owner_id: str, reason: str) -> tuple[RecordedApprovalDecision, ...]:
+    """Deny every pending call of one detached run, returning the decisions this recorded."""
     rows = transaction.fetchall(
         """
         SELECT tool_call_id FROM approval_calls
-        WHERE principal_id = ? AND owner_id = ? AND generation = 0 AND decision IS NULL
+        WHERE owner_id = ? AND generation = 0 AND decision IS NULL
         ORDER BY tool_call_id/*bytes*/
         """,
-        (principal_id, owner_id),
+        (owner_id,),
     )
-    return sum(
+    decisions = [
         resolve_call(
             transaction,
             CallKey.detached(owner_id, str(row["tool_call_id"])),
             requested="denied",
             reason=reason,
             metadata=None,
-        ).recorded
+        )
         for row in rows
-    )
+    ]
+    return tuple(decision for decision in decisions if decision.recorded)
 
 
 def prune(transaction: Transaction, principal_id: str, *, owner_id: str) -> bool:

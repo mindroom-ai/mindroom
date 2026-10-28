@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
@@ -405,6 +406,74 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
             await journal.principal("router@shared").approvals.detached_decision(CallKey.detached("run-1", "call-1"))
             is None
         )
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["call", "run", "timeout"])
+async def test_a_detached_ending_delivers_only_the_cards_it_decided(tmp_path: Path, ending: str) -> None:
+    """A call's denial, its run's settlement, or its timeout sends its own card's edit; other owed edits wait for the sweep."""
+    manager, journal, initial_sent = await _approval_manager(tmp_path, unique_event_ids=True)
+    sent: list[tuple[str, DeliveryStage]] = []
+    send = manager.transport.send_approval_delivery
+
+    async def record(delivery: MatrixDelivery) -> str:
+        sent.append((delivery.delivery_id, delivery.stage))
+        return await send(delivery)
+
+    manager.transport.send_approval_delivery = record
+    approvals = journal.principal("router@shared").approvals
+    # Another run's card whose decision is committed and whose edit is still owed.
+    other = CallKey.detached("run-2", "other")
+    assert await approvals.reserve_detached_card(
+        call=other,
+        owner_kind="script",
+        tool_name="add",
+        toolkit_name="calculator",
+        invoking_agent="watcher",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        expires_at_ns=time.time_ns() + 60_000_000_000,
+        card=ApprovalCardReservation(
+            delivery_id="script-approval:run-2:other",
+            tool_call_id="other",
+            event_type="io.mindroom.tool_approval",
+            approver_user_id="@alice:localhost",
+            approvable=True,
+            payload={"tool_name": "add", "status": "pending"},
+        ),
+    )
+    assert (await approvals.resolve_approval_call(other, requested_status="denied", reason="decided")).recorded
+    decision_task = asyncio.create_task(
+        manager.request_background_approval(
+            owner_kind="script",
+            origin=_origin(),
+            room_id="!room:localhost",
+            thread_id="$thread",
+            agent_name="watcher",
+            requester_id="@alice:localhost",
+            approver_user_id="@alice:localhost",
+            tool_name="add",
+            arguments={"a": 1, "b": 2},
+            timeout_seconds=0.2 if ending == "timeout" else 30.0,
+        ),
+    )
+    try:
+        await asyncio.wait_for(initial_sent.wait(), timeout=1.0)
+        if ending == "call":
+            assert await manager.settle_background_approval(_origin(), reason="Cancelled.") is True
+        elif ending == "run":
+            assert await manager.settle_pending_background_approvals("run-1", reason="Cancelled.") == 1
+        decision = await asyncio.wait_for(decision_task, timeout=_SETTLED_DECISION_WAIT_SECONDS)
+
+        assert decision.status == ("expired" if ending == "timeout" else "denied")
+        assert ("script-approval:run-1:call-1", DeliveryStage.FINAL) in sent
+        assert [delivery for delivery in sent if delivery[0] == "script-approval:run-2:other"] == []
     finally:
         if not decision_task.done():
             decision_task.cancel()
