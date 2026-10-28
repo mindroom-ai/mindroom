@@ -164,7 +164,6 @@ _APPROVAL_CARD_EVENTS_TABLE = """
         -- Every Matrix event known to show a card.
         principal_id TEXT NOT NULL,
         card_event_id TEXT NOT NULL,
-        room_id TEXT NOT NULL,
         delivery_id TEXT NOT NULL,
         PRIMARY KEY (principal_id, card_event_id)
     )

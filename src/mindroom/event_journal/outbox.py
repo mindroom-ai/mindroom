@@ -474,8 +474,8 @@ def acknowledge(
         # The event now shows the approval card this delivery carries, if any.
         transaction.execute(
             """
-            INSERT INTO approval_card_events (principal_id, card_event_id, room_id, delivery_id)
-            SELECT principal_id, ?, room_id, delivery_id FROM approval_cards
+            INSERT INTO approval_card_events (principal_id, card_event_id, delivery_id)
+            SELECT principal_id, ?, delivery_id FROM approval_cards
             WHERE principal_id = ? AND delivery_id = ?
             ON CONFLICT (principal_id, card_event_id) DO NOTHING
             """,

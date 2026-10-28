@@ -207,7 +207,7 @@ def _for_event(transaction: Transaction, principal_id: str, *, room_id: str, car
         + """
         JOIN approval_card_events AS clicked
           ON clicked.principal_id = grants.principal_id AND clicked.delivery_id = grants.delivery_id
-        WHERE grants.principal_id = ? AND clicked.room_id = ? AND clicked.card_event_id = ?
+        WHERE grants.principal_id = ? AND origin.room_id = ? AND clicked.card_event_id = ?
         """,
         (principal_id, room_id, card_event_id),
     )
@@ -344,7 +344,7 @@ def create(
         + """
         JOIN approval_card_events AS clicked
           ON clicked.principal_id = cards.principal_id AND clicked.delivery_id = cards.delivery_id
-        WHERE cards.principal_id = ? AND clicked.room_id = ? AND clicked.card_event_id = ?
+        WHERE cards.principal_id = ? AND cards.room_id = ? AND clicked.card_event_id = ?
           AND cards.kind = 'request' AND cards.retired = 0 AND calls.decision IS NULL
         """,
         (principal_id, room_id, card_event_id),

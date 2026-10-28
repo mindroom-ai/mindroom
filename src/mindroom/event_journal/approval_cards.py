@@ -534,8 +534,8 @@ def remember_alias(
     """Remember a transport-verified copy of an automatic receipt as another event of that receipt."""
     transaction.execute(
         """
-        INSERT INTO approval_card_events (principal_id, card_event_id, room_id, delivery_id)
-        SELECT principal_id, ?, room_id, delivery_id FROM approval_cards
+        INSERT INTO approval_card_events (principal_id, card_event_id, delivery_id)
+        SELECT principal_id, ?, delivery_id FROM approval_cards
         WHERE principal_id = ? AND delivery_id = ? AND room_id = ? AND kind <> 'request'
         ON CONFLICT (principal_id, card_event_id) DO NOTHING
         """,
@@ -749,9 +749,9 @@ def card_for_event(
          AND initial.delivery_id = cards.delivery_id
          AND initial.stage = 'initial'
         {_VIEW_JOINS}
-        WHERE events.principal_id = ? AND events.room_id = ? AND events.card_event_id = ?
+        WHERE events.principal_id = ? AND events.card_event_id = ? AND cards.room_id = ?
         """,  # noqa: S608 - a fixed column list and joins, not input
-        (principal_id, room_id, card_event_id),
+        (principal_id, card_event_id, room_id),
     )
     return None if row is None else _view(row, card_event_id)
 

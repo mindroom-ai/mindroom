@@ -9999,7 +9999,7 @@ class TestHotQueriesAreIndexCovered:
             "SELECT * FROM approval_card_events AS events "
             "JOIN approval_cards AS cards ON cards.principal_id=events.principal_id "
             "AND cards.delivery_id=events.delivery_id "
-            "WHERE events.principal_id=? AND events.room_id=? AND events.card_event_id=?"
+            "WHERE events.principal_id=? AND events.card_event_id=? AND cards.room_id=?"
         ),
         "approval call's request card": (
             "SELECT * FROM approval_cards WHERE owner_id=? AND generation=? AND tool_call_id=? "

@@ -33,7 +33,7 @@ Grant scope keys and operations hash the whole config model, so recording at ano
 
 ## Recording again
 
-The recorder only describes a journal that still writes these tables, so record again only by checking out commit `b19c4c4acd5ea2f3b8aa126ab55048b3ca41713a` in a separate worktree and running, from its root inside the NixOS development shell:
+The recorder only describes a journal that still writes these tables, so record again only by checking out commit `de42248a302217b735c10496935fad5adb5085ef`, which adds the recorder to that commit and stays reachable from pull request #3311 (`git fetch origin pull/3311/head`), in a separate worktree, and running from its root inside the NixOS development shell:
 
 ```bash
 nix-shell shell.nix --run "env -u TMPDIR -u TEMP -u TMP MINDROOM_RECORD_APPROVAL_FIXTURES=1 uv run pytest tests/approval_records_recorder.py -n 0 --no-cov"

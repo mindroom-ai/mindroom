@@ -376,7 +376,7 @@ class _Converted:
                     retired=True,
                     event_id=str(row["card_event_id"]),
                 )
-            self._event(principal_id, str(row["card_event_id"]), room_id=str(row["room_id"]), delivery_id=delivery_id)
+            self._event(principal_id, str(row["card_event_id"]), delivery_id=delivery_id)
             self.grants.append(
                 {
                     "principal_id": principal_id,
@@ -493,10 +493,10 @@ class _Converted:
             },
         )
         if event_id is not None:
-            self._event(principal_id, event_id, room_id=room_id, delivery_id=delivery_id)
+            self._event(principal_id, event_id, delivery_id=delivery_id)
 
-    def _event(self, principal_id: str, event_id: str, *, room_id: str, delivery_id: str) -> None:
-        self.events.setdefault((principal_id, event_id), {"room_id": room_id, "delivery_id": delivery_id})
+    def _event(self, principal_id: str, event_id: str, *, delivery_id: str) -> None:
+        self.events.setdefault((principal_id, event_id), {"delivery_id": delivery_id})
 
     def _rebuilt_call(self, principal_id: str, call: CallKey, delivery: _Delivery, *, grant_id: str | None) -> None:
         """Rebuild a decided paused-reply call from the payloads of the card that still shows it."""
