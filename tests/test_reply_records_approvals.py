@@ -15,7 +15,16 @@ from mindroom import reply_lifecycle as rl
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
-from mindroom.event_journal import ApprovalFailure, DeliveryStage, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import (
+    ApprovalFailure,
+    DeliveryStage,
+    EventClass,
+    EventJournalStore,
+    EventKind,
+    InboundEvent,
+    approval_signals,
+)
+from mindroom.event_journal.approval_signals import PausedReply
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -405,6 +414,27 @@ async def test_a_restart_keeps_the_conversation_of_a_pending_approval_busy(tmp_p
         assert not restarted._response_runner.is_held_for_approval(_target())
         await restarted._take_over_replies()
         assert restarted._response_runner.is_held_for_approval(_target())
+
+
+async def test_a_stopped_bot_holds_no_conversation_for_an_approval_that_pauses_later(tmp_path: Path) -> None:
+    """Stopping a bot stops it following its principal's approvals, so only its replacement holds what pauses next."""
+    store = EventJournalStore.open_sqlite(tmp_path / "shared.db")
+    bot = _bot(tmp_path, journal_store=store)
+    held, later = _target(thread_id="$held"), _target(thread_id="$later")
+
+    async def pause(approval_id: str, target: MessageTarget) -> None:
+        paused = PausedReply(bot._journal_principal_id, approval_id, target.room_id, target.resolved_thread_id)
+        await store.backend.write(lambda transaction: approval_signals.paused(transaction, paused))
+
+    try:
+        await bot._take_over_replies()
+        await pause("approval-1", held)
+        assert bot._response_runner.is_held_for_approval(held)
+        await bot.stop()
+        await pause("approval-2", later)
+        assert not bot._response_runner.is_held_for_approval(later)
+    finally:
+        await store.close()
 
 
 async def test_deleting_the_message_of_a_paused_reply_cancels_its_approval_and_removes_the_reply(
