@@ -25,15 +25,16 @@ if TYPE_CHECKING:
 class AgentManagerTools(Toolkit):
     """Tools to create agents and to manage this agent when it is generated for an owner."""
 
-    def __init__(self, agent_name: str, *, can_create: bool, generated: bool) -> None:
+    def __init__(self, agent_name: str, *, can_create: bool, generated: bool, created: bool) -> None:
         self.agent_name = agent_name
         changes = [
             *([self.create_agent] if can_create else []),
-            *([self.update_agent, self.delete_agent] if generated else []),
+            *([self.update_agent] if generated else []),
+            *([self.delete_agent] if created else []),
         ]
         super().__init__(
             name="agent_manager",
-            tools=[*changes, *([self.agent_settings] if generated else [])],
+            tools=[*([self.agent_settings] if generated else []), *changes],
             # The owner confirms each change, because the model issuing the call also reads untrusted content.
             requires_confirmation_tools=[change.__name__ for change in changes],
         )
@@ -66,6 +67,7 @@ class AgentManagerTools(Toolkit):
     ) -> str:
         """Create an agent for the person asking, with a role of its own and some of your tools.
 
+        The new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.
         `tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.
         The owner approves on a card unless their own !auto_approve window is open;
         on "Tool approval needs the router in this room", call `invite_router` and retry.

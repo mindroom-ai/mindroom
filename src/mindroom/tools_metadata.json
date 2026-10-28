@@ -1580,8 +1580,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_agent",
         "agent_settings",
+        "create_agent",
         "update_agent",
         "delete_agent"
       ],

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _CONFIRMED = {"create_agent", "update_agent", "delete_agent"}
-_MANAGED = {"agent_settings", "update_agent", "delete_agent"}
+_MANAGED = {"agent_settings", "update_agent"}
 
 
 @contextmanager
@@ -55,24 +55,27 @@ def _as_requester(
 
 
 def _created_agent_tool() -> AgentManagerTools:
-    return AgentManagerTools("creator_research", can_create=False, generated=True)
+    return AgentManagerTools("creator_research", can_create=False, generated=True, created=True)
 
 
 @pytest.mark.parametrize(
-    ("can_create", "generated", "offered"),
+    ("can_create", "generated", "created", "offered"),
     [
-        (True, False, {"create_agent"}),
-        (False, True, _MANAGED),
-        (True, True, _MANAGED | {"create_agent"}),
+        (True, False, False, {"create_agent"}),
+        (False, True, False, _MANAGED),
+        (False, True, True, _MANAGED | {"delete_agent"}),
+        (True, True, False, _MANAGED | {"create_agent"}),
     ],
 )
 def test_functions_follow_the_flags_and_changes_need_confirmation(
     can_create: bool,
     generated: bool,
+    created: bool,
     offered: set[str],
 ) -> None:
-    """A creator is offered create_agent and a generated agent its settings, update and delete; changes ask the owner."""
-    functions = adapt_toolkit(AgentManagerTools("agent", can_create=can_create, generated=generated)).functions
+    """A creator is offered create_agent, a generated agent its settings and update, and a created agent delete too."""
+    tool = AgentManagerTools("agent", can_create=can_create, generated=generated, created=created)
+    functions = adapt_toolkit(tool).functions
 
     assert {function.name for function in functions} == offered
     assert {function.name for function in functions if function.requires_confirmation} == offered & _CONFIRMED
@@ -96,7 +99,7 @@ async def test_create_agent_registers_it_for_the_owner_and_requests_a_reload(tmp
     """A creator's call stores an agent for the requester, names its Matrix ID and asks the orchestrator to reload."""
     config = _config(tmp_path)
     paths = test_runtime_paths(tmp_path)
-    tool = AgentManagerTools("creator", can_create=True, generated=False)
+    tool = AgentManagerTools("creator", can_create=True, generated=False, created=False)
     orchestrator = MagicMock()
 
     with (
@@ -121,7 +124,7 @@ async def test_create_agent_refusals_come_back_as_errors_without_a_reload(tmp_pa
     """A tool the creator lacks is refused with the allowed names, nothing is stored and no reload is asked for."""
     config = _config(tmp_path)
     paths = test_runtime_paths(tmp_path)
-    tool = AgentManagerTools("creator", can_create=True, generated=False)
+    tool = AgentManagerTools("creator", can_create=True, generated=False, created=False)
     orchestrator = MagicMock()
 
     with _as_requester(tool, config, paths, orchestrator=orchestrator):
@@ -210,7 +213,7 @@ async def test_calls_without_a_runtime_context_fail_closed(tmp_path: Path) -> No
     """With no live requester the toolkit refuses instead of guessing who is asking."""
     _load(tmp_path, created=[_created()])
     paths = test_runtime_paths(tmp_path)
-    tool = AgentManagerTools("creator_research", can_create=True, generated=True)
+    tool = AgentManagerTools("creator_research", can_create=True, generated=True, created=True)
 
     results = [
         await tool.agent_settings(),

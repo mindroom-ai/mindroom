@@ -613,7 +613,7 @@ update_own_config(
 ## [`agent_manager`]
 
 `agent_manager` is added automatically, never listed under `tools`.
-An agent with `created_agents_per_owner` above 0 gets `create_agent`, and a generated agent gets `agent_settings`, `update_agent`, and `delete_agent` for its own owners.
+An agent with `created_agents_per_owner` above 0 gets `create_agent`, a generated agent gets `agent_settings` and `update_agent` for its own owners, and a created agent also gets `delete_agent`.
 `create_agent`, `update_agent`, and `delete_agent` show an approval card.
 
 ## [`claude_agent`]

@@ -5,7 +5,7 @@
     "functions": [
       {
         "name": "create_agent",
-        "description": "Create an agent for the person asking, with a role of its own and some of your tools.\n`tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.\nThe owner approves on a card unless their own !auto_approve window is open;\non \"Tool approval needs the router in this room\", call `invite_router` and retry.",
+        "description": "Create an agent for the person asking, with a role of its own and some of your tools.\nThe new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.\n`tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.\nThe owner approves on a card unless their own !auto_approve window is open;\non \"Tool approval needs the router in this room\", call `invite_router` and retry.",
         "parameters": {
           "type": "object",
           "properties": {
