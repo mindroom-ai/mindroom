@@ -1502,10 +1502,6 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
         )
 
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
-    # The hooks see the running turn's folded tool work, not only the earlier runs.
-    assert any(message.role == "tool" for message in observed[0].messages)
-    # They see each folded message once, not the per-call copies the summarizer reads.
-    assert len({message.id for message in observed[0].messages}) == len(observed[0].messages)
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
 

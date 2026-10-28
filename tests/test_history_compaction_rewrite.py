@@ -34,7 +34,7 @@ from mindroom.history.storage import (
     read_scope_state,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
-from mindroom.history.summary_input import build_summary_input, messages_for_runs
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     HistoryScope,
@@ -996,7 +996,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
             (
                 ctx.event_name,
                 ctx.scope.key,
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
                 ctx.token_count_before,
                 ctx.token_count_after,
                 ctx.compaction_summary,
@@ -1014,7 +1014,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
             (
                 ctx.event_name,
                 ctx.scope.key,
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
                 ctx.token_count_before,
                 ctx.token_count_after,
                 ctx.compaction_summary,
@@ -1176,7 +1176,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
     *,
     second_chunk_stored: bool,
 ) -> None:
-    """Every chunk exposes its raw messages before it is stored; compaction:after sees only the stored chunks'."""
+    """Every chunk exposes its transcript before it is stored; compaction:after sees only the stored chunks'."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -1231,7 +1231,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             (
                 ctx.event_name,
                 [run.run_id for run in persisted.runs],
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
             ),
         )
 
@@ -1243,7 +1243,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             (
                 ctx.event_name,
                 [run.run_id for run in persisted.runs],
-                [str(message.content) for message in ctx.messages],
+                [line.text for line in ctx.transcript],
             ),
         )
 
@@ -1288,11 +1288,11 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
 
     assert outcome is not None
     assert appended == [True, second_chunk_stored]
-    stored_messages = ["u" * 200, "a" * 200, "v" * 200, "b" * 200] if second_chunk_stored else ["u" * 200, "a" * 200]
+    stored_lines = ["u" * 200, "a" * 200, "v" * 200, "b" * 200] if second_chunk_stored else ["u" * 200, "a" * 200]
     assert observed == [
         ("compaction:before", ["run-1", "run-2"], ["u" * 200, "a" * 200]),
         ("compaction:before", ["run-2"], ["v" * 200, "b" * 200]),
-        ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_messages),
+        ("compaction:after", [] if second_chunk_stored else ["run-2"], stored_lines),
     ]
 
 
@@ -1345,7 +1345,7 @@ async def test_prepare_history_for_run_does_not_emit_compaction_hooks_for_no_op_
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_does_not_collect_compaction_messages_without_hooks(
+async def test_prepare_history_for_run_does_not_build_the_compaction_transcript_without_hooks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1371,8 +1371,8 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             new=AsyncMock(return_value="merged summary"),
         ),
         patch(
-            "mindroom.history.compaction.messages_for_runs",
-            side_effect=AssertionError("compaction messages should not be collected without hooks"),
+            "mindroom.history.compaction.utterances",
+            side_effect=AssertionError("the compaction transcript should not be built without hooks"),
         ),
     ):
         prepared = await prepare_history_for_run_for_test(
@@ -1563,7 +1563,6 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         await _emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=HistoryScope(kind="team", scope_id="team_general"),
-            messages=[Message(role="user", content="hello")],
             transcript=(),
             session_id="session-1",
             token_count_before=10,
@@ -1686,28 +1685,6 @@ async def test_compaction_hooks_continue_after_runtime_error(tmp_path: Path, mon
 
     assert prepared.compaction_reply_outcome == "success"
     assert observed == ["failed", "fast:session-1"]
-
-
-def test_the_compaction_hook_input_keeps_stored_thinking() -> None:
-    """Hooks read the stored messages as copies, thinking and signatures included; the Claude wire decides what to send."""
-    old_assistant = Message(
-        role="assistant",
-        content="old answer",
-        reasoning_content="old thinking",
-        provider_data={
-            "signature": "sig-old",
-            "content_blocks": [{"type": "thinking", "thinking": "old thinking", "signature": "sig-old"}],
-        },
-    )
-    messages = [Message(role="user", content="old question"), old_assistant, Message(role="user", content="now")]
-
-    copied = messages_for_runs([_completed_run("old-run", messages=messages)], _ALL_HISTORY_SETTINGS)
-
-    assert copied[1] is not old_assistant
-    assert (copied[1].reasoning_content, copied[1].provider_data) == (
-        old_assistant.reasoning_content,
-        old_assistant.provider_data,
-    )
 
 
 @pytest.mark.asyncio

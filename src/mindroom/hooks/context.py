@@ -46,7 +46,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
-    from mindroom.llm.messages import Message
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.message_target import MessageTarget
     from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -561,13 +560,11 @@ class CompactionHookContext(HookContext):
     scope: HistoryScope
     room_id: str
     thread_id: str | None
-    messages: list[Message]
+    transcript: tuple[TranscriptLine, ...]
     session_id: str
     token_count_before: int
     token_count_after: int | None
     compaction_summary: str | None
-    # Optional only while plugins still build this context without it; required once `messages` goes.
-    transcript: tuple[TranscriptLine, ...] = field(default=(), kw_only=True)
 
 
 @dataclass(slots=True)
