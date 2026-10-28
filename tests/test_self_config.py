@@ -20,6 +20,12 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSpaceConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.personal_agents import (
+    CreatedAgentEntry,
+    GeneratedAgentEdits,
+    PersonalAgentRoster,
+    personal_agent_roster_path,
+)
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
 from mindroom.message_target import MessageTarget
@@ -320,6 +326,36 @@ class TestUpdateOwnConfig:
             # Verify persisted
             reloaded = load_config_yaml(config_path)
             assert reloaded.agents["coder"].role == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
+    def test_update_of_a_created_agent_is_refused_instead_of_lost(self) -> None:
+        """A created agent lives in the roster, so saving an in-place change would drop it without a word."""
+        _, config_path = _make_config(
+            agents={
+                "coder": AgentConfig(
+                    display_name="Coder",
+                    role="Code",
+                    tools=["self_config"],
+                    created_agents_per_owner=1,
+                ),
+            },
+        )
+        try:
+            roster_path = personal_agent_roster_path(resolve_runtime_paths(config_path=config_path))
+            roster_path.parent.mkdir(parents=True, exist_ok=True)
+            created = CreatedAgentEntry(
+                agent_name="coder_helper",
+                creator="coder",
+                owner=_ADMIN_USER_ID,
+                edits=GeneratedAgentEdits(display_name="Helper"),
+            )
+            roster_path.write_text(PersonalAgentRoster(created=[created]).model_dump_json(), encoding="utf-8")
+            tool = _self_config_tools(agent_name="coder_helper", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(role="Changed")
+            assert "its owners change it with update_agent" in result
+            assert "coder_helper" not in config_path.read_text(encoding="utf-8")
         finally:
             config_path.unlink(missing_ok=True)
 
