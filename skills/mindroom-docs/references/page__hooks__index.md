@@ -217,7 +217,7 @@ Custom events default to 1000 ms.
   `role` is `"user"` for a message the agent was sent and `"assistant"` for the agent's or team's own reply.
   `sender` is `None` for a reply; for a user line it is the sender's Matrix ID, or a placeholder such as `"unknown"` when MindRoom recorded no sender, and `display_name` is the name the message carried, or `None`.
   `text` is the message's text without the context `message:enrich` hooks attached, and is not redacted.
-  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, and job and media follow-up prompts are left out.
+  Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, and the reply of a stopped turn are left out.
   A few notes MindRoom adds to a thread's context still appear as user lines: the note that earlier thread messages were omitted, the note that the agent's previous reply is still being delivered, and that reply's unfinished text under the agent's own Matrix ID.
   A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
   `ctx.messages` holds the raw `mindroom.llm.messages.Message` objects being compacted, unsanitized, including attachments, media, tool calls and arguments, provider metadata, reasoning, and metrics; it will be removed in a later release, so new hooks should read `ctx.transcript`.
