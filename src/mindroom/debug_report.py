@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, LiteralString, cast
 
 _AI_RUN_KEY = "io.mindroom.ai_run"
-_JOURNAL_SOURCES = ("turns", "journal_events", "delivery_outbox")
+_JOURNAL_SOURCES = ("turns", "event_redactions", "journal_events", "delivery_outbox")
 _MAX_JSONL_RECORDS = 1000
 _MAX_RUNS = 100
 # The JSON text columns of a run row and of its message and tool rows.
@@ -181,7 +181,7 @@ def _journal_results(status: str, location: str, error: str | None = None) -> di
 
 
 def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[str, _SourceResult]:
-    """Read turn records, admitted events, and outbound deliveries for the identifiers."""
+    """Read turns, redactions, admitted events, and outbound deliveries for the identifiers."""
     results = _journal_results("ok", location)
     thread_known = bool(ids.room_id and ids.thread_id)
 
@@ -218,14 +218,29 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
         )
         items = [_decode_json_columns(turn) for turn in turns]
         for item in items:
+            turn = [item["agent_name"], item["turn_key"]]
             item["sources"] = [
                 _decode_json_columns(source)
                 for source in query(
                     "SELECT * FROM turn_sources WHERE agent_name = ? AND turn_key = ? ORDER BY ordinal",
-                    [item["agent_name"], item["turn_key"]],
+                    turn,
                 )
             ]
+            item["aliases"] = query(
+                "SELECT * FROM turn_aliases WHERE agent_name = ? AND turn_key = ? ORDER BY event_id",
+                turn,
+            )
+            item["revisions"] = query(
+                "SELECT * FROM turn_revisions WHERE agent_name = ? AND turn_key = ? "
+                "ORDER BY source_event_id, timestamp_ms, revision_id",
+                turn,
+            )
         results["turns"].items = items
+        results["event_redactions"].items = query(
+            f"SELECT * FROM event_redactions WHERE event_id IN ({marks}) "  # noqa: S608 - placeholders only
+            "ORDER BY agent_name, room_id, event_id",
+            event_ids,
+        )
 
     if thread_known:
         rows = query(

@@ -508,7 +508,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         ),
         patch.object(
             turn_store,
-            "load_turn",
+            "get_turn_record_after_writes",
             return_value=turn_record,
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),

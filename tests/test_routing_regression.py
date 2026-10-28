@@ -36,6 +36,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.router_relay import execute_router_relay
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
@@ -272,7 +273,8 @@ def _router_readiness_event(event_id: str) -> nio.RoomMessageText:
 
 
 def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> Awaitable[None]:
-    return router_bot._turn_dispatcher._execute_router_relay(
+    return execute_router_relay(
+        router_bot._turn_dispatcher.deps,
         room,
         _router_readiness_event(event_id),
         [],
@@ -994,7 +996,8 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._turn_dispatcher._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1078,7 +1081,8 @@ class TestRoutingRegression:
         message_event.server_timestamp = 1000
         message_event.source = {"content": {"body": "Please route this"}}
 
-        await router_bot._turn_dispatcher._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1161,7 +1165,8 @@ class TestRoutingRegression:
             },
         }
 
-        await router_bot._turn_dispatcher._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -1326,7 +1331,8 @@ class TestRoutingRegression:
         message_event.server_timestamp = 1000
         message_event.source = {"content": {"body": "Who can help?"}}
 
-        await router_bot._turn_dispatcher._execute_router_relay(
+        await execute_router_relay(
+            router_bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],

@@ -9033,7 +9033,7 @@ class TestOffloadedStatementsOutliveTheAwaitThatStartedThem:
         directions, and both were observed: the second write committed the
         first one's statements along with its own, and the first write's
         ``rollback`` threw away a second write that had already reported
-        success to its caller. On a durable turn ledger either one means a
+        success to its caller. On durable turn rows either one means a
         message answered twice or an answer that was never recorded.
         """
         first_running = threading.Event()

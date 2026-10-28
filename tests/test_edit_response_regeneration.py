@@ -1308,12 +1308,17 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
     )
 
     turn_store = unwrap_extracted_collaborator(bot._edit_regenerator).deps.turn_store
-    with patch.object(turn_store, "load_turn", new_callable=AsyncMock, return_value=None) as mock_load_turn:
+    with patch.object(
+        turn_store,
+        "get_turn_record_after_writes",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as mock_get_turn_record:
         await bot._on_message(room, actual_edit_event)
-        mock_load_turn.assert_not_called()
+        mock_get_turn_record.assert_not_called()
 
         await bot._on_message(room, stale_generated_edit_event)
-        mock_load_turn.assert_awaited_once_with("$original:example.com")
+        mock_get_turn_record.assert_awaited_once_with("$original:example.com")
 
 
 @pytest.mark.asyncio
@@ -2351,7 +2356,7 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
         )
         await finish_edit_regenerations(bot)
 
-        loaded_turn = await bot._turn_store.load_turn("$selection:example.com")
+        loaded_turn = await bot._turn_store.get_turn_record_after_writes("$selection:example.com")
 
     generate_response.assert_awaited_once()
     assert loaded_turn is not None

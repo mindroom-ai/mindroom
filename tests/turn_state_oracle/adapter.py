@@ -216,7 +216,7 @@ class TurnStateAdapter:
 
     async def edit(self, source: str, edit: str, ts: int, *, commit: bool = True) -> str:
         """Register an edit's revision and, as its regeneration claims the reply, commit its text, like the regenerator."""
-        loaded = await self.store.load_turn(source)
+        loaded = await self.store.get_turn_record_after_writes(source)
         if loaded is None:
             return "declined"
         registered = await self.store.register_edit_revision(loaded, source, (ts, edit))

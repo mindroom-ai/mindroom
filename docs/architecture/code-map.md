@@ -16,6 +16,7 @@ Matrix sync callback
        -> ingress_validation.py                                  (classify provenance once, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> voice/ingress.py + turns/interactive_selection.py      (voice readiness and selection answers, admitted in receipt order)
+       -> coalescing/ingress_ticket.py                           (one item's lane slot, turn claim, and queued notice until admission)
        -> coalescing/ingress_lanes.py                            (per-(room, sender) receipt-order FIFO; STT readiness waits here)
        -> coalescing/gate.py                                     (ordinary text dispatches immediately; adaptive text and media debounce)
   -> turns/dispatch.py (owns one turn from gate exit: prepare -> decide -> execute -> record)
@@ -55,6 +56,7 @@ Matrix sync callback
 | `turns/facts.py` | One inbound event's classified provenance (`IngressFacts`), the turn origin derived from it, and the one command rule |
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and envelope assembly from classified provenance |
+| `coalescing/ingress_ticket.py` | `IngressTicket`: one ingress item's lane slot, turn claim, and queued notice until gate admission moves them, released by one idempotent `close` |
 | `coalescing/ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
 | `coalescing/gate.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing/batch.py` | Coalesced dispatch batch construction |

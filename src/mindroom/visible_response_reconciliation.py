@@ -129,7 +129,7 @@ class VisibleResponseReconciler:
         return recovered_response_event_id
 
     async def settle_source_events_ignored(self, handled_turn: TurnRecord) -> None:
-        """Compact exact callback obligations without growing the handled-turn ledger."""
+        """Settle exact callback obligations without recording a turn."""
         await self.deps.settle_ignored_sources(handled_turn.source_event_ids)
 
     async def settle_superseded_turn(self, handled_turn: TurnRecord) -> bool:
@@ -180,8 +180,7 @@ class VisibleResponseReconciler:
         The journal sources this turn answers settle inside the enqueue, so the
         answer becoming durably owed and the turn stopping being the journal's
         work are one commit. On the direct path the terminal record would land
-        in the handled-turn ledger first and the journal would settle
-        afterwards, leaving a window where a pending row describes finished
+        in the turn rows first and the journal would settle afterwards, leaving a window where a pending row describes finished
         work -- the window the degraded replay guard has to consult two records
         to survive.
 

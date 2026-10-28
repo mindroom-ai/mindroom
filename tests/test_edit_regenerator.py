@@ -29,7 +29,7 @@ from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, 
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.turn_policy import ResponseAction
-from mindroom.turn_record import SourceEventMetadata, TurnRecord
+from mindroom.turn_record import SourceEventMetadata, TurnRecord, canonicalize_turn_record
 from mindroom.turn_store import TurnStore
 from tests.conftest import make_ingress_facts, make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
@@ -268,7 +268,7 @@ def _harness(
     turn_store = MagicMock(spec=TurnStore)
     current_turn_record = [turn_record]
     deleted_sources = set(deleted)
-    turn_store.load_turn.side_effect = lambda _original_event_id: current_turn_record[0]
+    turn_store.get_turn_record_after_writes.side_effect = lambda _original_event_id: current_turn_record[0]
     turn_store.get_turn_record.side_effect = lambda _event_id: current_turn_record[0]
     turn_store.deleted_sources.side_effect = lambda _record: frozenset(deleted_sources)
     turn_store.register_edit_revision.side_effect = lambda _record, _event_id, _revision: current_turn_record[0]
@@ -1032,7 +1032,8 @@ async def test_coalesced_routed_alias_edit_updates_owned_relay_prompt(tmp_path: 
     assert "first base" not in request.prompt
     recorded = harness.turn_store.record_edit.call_args.args[0]
     assert recorded.source_event_prompts == {first_relay: "first edited", second_relay: "second base"}
-    assert recorded.source_event_revisions == {first_human: (event.server_timestamp, event.event_id)}
+    # Keyed by the relay's physical source, as the turn rows store a selection.
+    assert recorded.source_event_revisions == {first_relay: (event.server_timestamp, event.event_id)}
 
 
 @pytest.mark.asyncio
@@ -1077,7 +1078,7 @@ async def test_edit_without_original_event_id_returns_early(tmp_path: Path) -> N
     await _handle_edit(harness, event, event_info)
 
     harness.resolver.extract_message_context.assert_not_awaited()
-    harness.turn_store.load_turn.assert_not_called()
+    harness.turn_store.get_turn_record_after_writes.assert_not_called()
     _assert_no_regeneration(harness)
 
 
@@ -1094,6 +1095,29 @@ async def test_edit_without_turn_record_returns_early(tmp_path: Path) -> None:
     harness.resolver.build_envelope.assert_not_called()
     # As for a message still waiting for media or voice before it reaches its turn.
     assert _not_regenerated_reasons(logs) == ["no_turn_record"]
+
+
+@pytest.mark.asyncio
+async def test_replaying_a_committed_edit_of_a_relayed_message_runs_no_hooks_again(tmp_path: Path) -> None:
+    """An edit of the human message a relay answered is committed on the relay's source, so its replay is no new text."""
+    relay_event_id = "$relay:example.org"
+    record = canonicalize_turn_record(
+        _turn_record(
+            source_event_ids=(relay_event_id,),
+            discovery_event_ids=(ORIGINAL_EVENT_ID,),
+            source_event_metadata={
+                relay_event_id: SourceEventMetadata(sender=USER_ID, discovery_event_id=ORIGINAL_EVENT_ID),
+            },
+        ),
+        # As the turn rows store a committed edit: keyed by the physical source it edits.
+        source_event_revisions={relay_event_id: (1_000_001, EDIT_EVENT_ID)},
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    event, event_info = _edit_event(original_event_id=ORIGINAL_EVENT_ID, server_timestamp=1_000_001)
+
+    await _handle_edit(harness, event, event_info)
+
+    harness.ingress_hook_runner.emit_message_received_hooks.assert_not_awaited()
 
 
 @pytest.mark.asyncio

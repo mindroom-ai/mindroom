@@ -1773,10 +1773,7 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        _sync_turn_policy_runtime(bot)
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         # Create context with no mentions and no agents in thread
         mock_context = _message_context(
@@ -1807,6 +1804,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
@@ -1823,7 +1821,7 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Verify router didn't attempt to route
-        bot._turn_dispatcher._execute_router_relay.assert_not_called()
+        mock_relay.assert_not_called()
 
         # Verify it logged that it's skipping routing
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
@@ -1863,9 +1861,7 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         # Create context with no mentions and no agents in thread
         mock_context = _message_context(
@@ -1897,6 +1893,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
@@ -1916,15 +1913,16 @@ class TestRouterSkipsSingleAgent:
             await drain_coalescing(bot)
 
         # Verify router DID attempt to route
-        bot._turn_dispatcher._execute_router_relay.assert_called_once()
-        routed_call = bot._turn_dispatcher._execute_router_relay.call_args
-        assert routed_call.args[0] is room
-        routed_event = routed_call.args[1]
+        mock_relay.assert_called_once()
+        routed_call = mock_relay.call_args
+        assert routed_call.args[0] is bot._turn_dispatcher.deps
+        assert routed_call.args[1] is room
+        routed_event = routed_call.args[2]
         assert routed_event.event_id == event.event_id
         assert routed_event.body == event.body
         assert routed_event.source == event.source
-        assert routed_call.args[2] == []
-        assert routed_call.args[3] == "$event123"
+        assert routed_call.args[3] == []
+        assert routed_call.args[4] == "$event123"
         assert routed_call.kwargs == {
             "message": None,
             "requester_user_id": "@user:localhost",
@@ -1966,10 +1964,8 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         replace_turn_deps(bot, settle_ignored_sources=AsyncMock())
         _sync_turn_policy_runtime(bot)
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         mock_context = _message_context(
             am_i_mentioned=False,
@@ -2003,6 +1999,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
             patch("mindroom.turn_policy.get_agents_in_thread", return_value=[]),
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
@@ -2032,7 +2029,7 @@ class TestRouterSkipsSingleAgent:
                 ),
             )
 
-        bot._turn_dispatcher._execute_router_relay.assert_not_called()
+        mock_relay.assert_not_called()
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
         assert "Skipping routing: thread already requires explicit responder targeting" in info_calls
 
@@ -2211,9 +2208,7 @@ class TestRouterSkipsSingleAgent:
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()
         wrap_extracted_collaborators(bot, "_turn_policy")
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
         _sync_turn_policy_runtime(bot)
-        bot._turn_dispatcher._execute_router_relay = AsyncMock()
 
         # Room with router + one agent + a human
         room = nio.MatrixRoom(room_id="!test:server", own_user_id="@mindroom_router:localhost")
@@ -2249,6 +2244,7 @@ class TestRouterSkipsSingleAgent:
         )
 
         with (
+            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_relay,
             patch(
                 "mindroom.turn_policy.classify_responder_candidates_from_cached_room",
                 new_callable=MagicMock,
@@ -2265,9 +2261,7 @@ class TestRouterSkipsSingleAgent:
 
         # Voice transcriptions should work: router skips routing but doesn't interfere
         # This is a regression test to ensure voice works in single-responder rooms.
-        assert not bot._turn_dispatcher._execute_router_relay.called, (
-            "Router should skip routing for voice in single-responder room"
-        )
+        assert not mock_relay.called, "Router should skip routing for voice in single-responder room"
         info_calls = [call[0][0] for call in bot.logger.info.call_args_list]
         assert "Skipping routing: only one responder candidate" in info_calls
 

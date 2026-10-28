@@ -8,9 +8,9 @@ way of not knowing lets the older turn run.
 
 The case that matters most here is the one that justifies the branch's only
 remaining pair of durable state. "Has this turn finished?" is answered by two
-records that live in different substrates -- the journal's pending set and the
-handled-turn ledger -- and they settle at different moments. A turn recorded in
-the ledger and then interrupted before its journal source settles comes back as
+records that live in different tables -- the journal's pending set and the
+turn rows -- and they settle at different moments. A turn recorded in the turn
+rows and then interrupted before its journal source settles comes back as
 a pending row describing work that is already done. Trusting pending alone
 would let that finished turn suppress an older one forever, so the guard
 consults both.
@@ -214,12 +214,12 @@ async def test_history_and_journal_share_requester_turn_eligibility(
 
 
 class TestTheTwoRecordsAreBothConsulted:
-    """Why "is this turn finished?" needs the ledger as well as the journal."""
+    """Why "is this turn finished?" needs the turn rows as well as the journal."""
 
     async def test_a_pending_event_already_in_the_ledger_does_not_suppress(self) -> None:
         """The interruption window between the two records, made concrete.
 
-        The newer turn ran and was recorded in the handled-turn ledger, then
+        The newer turn ran and was recorded in the turn rows, then
         the process died before its journal source settled. It comes back as a
         pending row that describes finished work. If the guard trusted the
         journal alone it would read that row as "a newer question is still

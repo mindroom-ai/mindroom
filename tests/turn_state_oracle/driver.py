@@ -100,17 +100,6 @@ def run_scenario(scenario: dict[str, Any], root: Path) -> list[dict[str, Any]]:
     return asyncio.run(_run(scenario, root))
 
 
-def changes(previous: State, state: State) -> State:
-    """Return what differs from ``previous``; a key that went back to its default maps to ``None``."""
-    delta: State = {}
-    for observable in OBSERVABLES:
-        before, after = previous.get(observable, {}), state[observable]
-        changed = {key: after.get(key) for key in sorted({*before, *after}) if before.get(key) != after.get(key)}
-        if changed:
-            delta[observable] = changed
-    return delta
-
-
 def apply_changes(state: State, delta: State) -> None:
     """Advance ``state`` by one recorded step."""
     for observable in OBSERVABLES:

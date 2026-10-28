@@ -1724,7 +1724,6 @@ class PrincipalStore:
     ) -> bool:
         """Release sources after permanent owner loss and visible card cleanup, ending the reply the approval paused."""
         # The owner that could settle the reply is gone; the notice is what the room sees.
-        # No live ledger of that owner learns it; its next start loads it.
         ended = await self._backend.write(
             lambda transaction: _end_approval(
                 transaction,

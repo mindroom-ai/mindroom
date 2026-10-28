@@ -517,7 +517,7 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
 
 @pytest.mark.asyncio
 async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_path: Path) -> None:
-    """Non-router agents explicitly ignore unresolvable commands without growing the turn ledger."""
+    """Non-router agents explicitly ignore unresolvable commands without recording a turn."""
     bot = _make_bot(tmp_path)
     settle_ignored = AsyncMock()
     replace_turn_deps(bot, settle_ignored_sources=settle_ignored)

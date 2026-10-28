@@ -1,21 +1,23 @@
-"""Record the oracle's goldens: ``python -m tests.turn_state_oracle.record [--inputs]``.
+"""The oracle's scenarios and their recordings in ``tests/fixtures/turn_state_oracle/<group>/<name>.json``.
 
-Every named sequence, seeded sequence, and legacy input is driven through the current turn store, and each step's
-action, outcome, and changed observables are written to ``tests/fixtures/turn_state_oracle/<group>/<name>.json``.
-``--inputs`` first rebuilds the legacy inputs, which only the turn-record schema they capture can produce.
+Each recording holds every step's action, outcome, and changed observables as the turn store before the row rewrite
+produced them, driven through every named sequence, seeded sequence, and legacy input.
+That store is gone, so the recordings are frozen evidence and cannot be regenerated: recording from the current store
+would compare it with itself.
+The scenario set is therefore closed; test new turn-state behavior at its owning seam, such as
+``tests/test_turn_rows.py`` or ``tests/test_turn_store.py``, and declare a deliberate change to a recorded behavior as
+a mask in ``masks.py``.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from tests.turn_state_oracle.actions import NAMED, SEEDS, generate
-from tests.turn_state_oracle.driver import changes, run_scenario, scenario_ids
-from tests.turn_state_oracle.legacy import FIXTURES, build_inputs
+from tests.turn_state_oracle.driver import scenario_ids
+from tests.turn_state_oracle.legacy import FIXTURES
 
 GOLDENS = Path(__file__).resolve().parents[1] / "fixtures" / "turn_state_oracle"
 GROUPS = ("named", "generated", "legacy")
@@ -47,35 +49,3 @@ def recordings() -> list[Path]:
 def recording_id(path: Path) -> str:
     """Return a golden's ``<group>/<name>``."""
     return f"{path.parent.name}/{path.stem}"
-
-
-def record(scenario: dict[str, Any], root: Path) -> dict[str, Any]:
-    """Return the golden of one scenario driven under ``root``."""
-    steps, previous = [], {}
-    for action, step in zip([None, *scenario["actions"]], run_scenario(scenario, root), strict=True):
-        steps.append({"action": action, "outcome": step["outcome"], "changes": changes(previous, step["state"])})
-        previous = step["state"]
-    return {"scenario": scenario, "steps": steps}
-
-
-def main(argv: list[str] | None = None) -> None:
-    """Rebuild the goldens, and the legacy inputs with ``--inputs``."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inputs", action="store_true", help="rebuild the legacy input databases and files first")
-    if parser.parse_args(argv).inputs:
-        build_inputs()
-    wanted = scenarios()
-    for path in recordings():
-        if recording_id(path) not in wanted:
-            path.unlink()
-    for name, scenario in wanted.items():
-        with tempfile.TemporaryDirectory() as root:
-            golden = record(scenario, Path(root))
-        path = GOLDENS / f"{name}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(golden, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(name, len(golden["steps"]))
-
-
-if __name__ == "__main__":
-    main()

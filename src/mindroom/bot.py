@@ -196,8 +196,8 @@ __all__ = ["AgentBot", "create_bot_for_entity"]
 _SYNC_TIMEOUT_MS = 5_000
 _DELIVERY_RECOVERY_RETRY_INITIAL_DELAY_SECONDS = 1.0
 _DELIVERY_RECOVERY_RETRY_MAX_DELAY_SECONDS = 30.0
-# Startup recovery prunes the handled-turn ledger once. A running bot repeats
-# that pass this often so its in-memory records stay near the retention bound.
+# Startup recovery applies turn retention once. A running bot repeats that pass
+# this often so the turn tables stay near the retention bound between restarts.
 _HANDLED_TURN_CLEANUP_INTERVAL_SECONDS = 60 * 60
 
 

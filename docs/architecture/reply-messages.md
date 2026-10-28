@@ -31,7 +31,7 @@ The [decisions](#decisions) and [accepted limitations](#accepted-limitations) be
 Every fact about an AI reply has one owner and one writer, so no two stores can disagree about a reply:
 
 - I-S1. Everything about an AI reply, including its event, state, presentation, Stop, each span's sources and their settlement, its tool calls, its redactions, and which bot instance claims its approval, is read from the reply records or from an in-memory cache of them that is never written separately; no other store writes it.
-  The turn ledger keeps user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
+  The turn rows keep user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
 - I-S2. A reply settles its journal sources in the same transaction that marks the turn they index answered when the reply answered them, so a crash cannot leave one without the other.
   Deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.

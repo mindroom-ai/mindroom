@@ -34,6 +34,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.router_relay import execute_router_relay
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from mindroom.turn_record import TurnRecord
@@ -476,7 +477,8 @@ class TestRouterHandoffThreadMode:
                 new_callable=AsyncMock,
             ) as mock_get_latest,
         ):
-            await bot._turn_dispatcher._execute_router_relay(
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
                 room,
                 self._routing_event(),
                 [],
@@ -514,7 +516,8 @@ class TestRouterHandoffThreadMode:
                 return_value="$latest",
             ) as mock_get_latest,
         ):
-            await bot._turn_dispatcher._execute_router_relay(
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
                 room,
                 self._routing_event(),
                 [],

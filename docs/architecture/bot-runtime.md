@@ -82,7 +82,7 @@ A callback that raises stays pending at the head of its room lane and retries wi
 Only a callback that recognizes a deterministic refusal settles its event, by returning an outcome instead of raising.
 A message or media event whose relation target the homeserver refuses to serve can never be placed in a conversation, so it settles as intentionally ignored.
 A successful but empty readiness result settles as intentionally ignored instead of repeating download or transcription work forever.
-Pure-policy ignores, such as unmentioned managed senders, blocked deep synthetic relays, and commands another entity owns, settle their journal rows without recording a turn, which keeps high-volume ignored traffic out of the handled-turn ledger without weakening deduplication.
+Pure-policy ignores, such as unmentioned managed senders, blocked deep synthetic relays, and commands another entity owns, settle their journal rows without recording a turn, which keeps high-volume ignored traffic out of the turn tables without weakening deduplication.
 
 ### Room lanes
 

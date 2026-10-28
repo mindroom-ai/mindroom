@@ -175,7 +175,7 @@ class EditRegenerator:
 
         # Every decision below is taken from the record's own conversation target, never from the thread the
         # edit names.
-        turn_record = await self.deps.turn_store.load_turn(original_event_id)
+        turn_record = await self.deps.turn_store.get_turn_record_after_writes(original_event_id)
         if turn_record is None:
             # Usually this agent never took the message; it may also still wait for media or voice before its turn.
             logger.info(
@@ -213,7 +213,9 @@ class EditRegenerator:
         assert reply is not None
 
         revision = (event.server_timestamp, event.event_id)
-        committed = (turn_record.source_event_revisions or {}).get(original_event_id)
+        # The edited message can be the human message a relay answers for; its revisions live on the relay's source.
+        prompt_source = turn_record.prompt_source_event_id(original_event_id)
+        committed = (turn_record.source_event_revisions or {}).get(prompt_source)
         watermark = turn_record.revision_watermark(original_event_id)
         if watermark is not None and revision < watermark:
             return None
@@ -252,11 +254,8 @@ class EditRegenerator:
 
         record = canonicalize_turn_record(
             registered,
-            source_event_prompts={
-                **(registered.source_event_prompts or {}),
-                registered.prompt_source_event_id(original_event_id): edited_content,
-            },
-            source_event_revisions={**(registered.source_event_revisions or {}), original_event_id: revision},
+            source_event_prompts={**(registered.source_event_prompts or {}), prompt_source: edited_content},
+            source_event_revisions={**(registered.source_event_revisions or {}), prompt_source: revision},
         )
         live_sources = tuple(source for source in record.source_event_ids if source not in deleted)
         prompt, structured = self._prompt(room, record, live_sources, edited_content)

@@ -642,7 +642,8 @@ class TurnDispatcher:
         if prepared.dispatch.scheduled_history_budget is not None:
             routing_kwargs["scheduled_prompt"] = prepared.event.body
         await self._run_admitted_router_relay(
-            lambda: self._execute_router_relay(
+            lambda: execute_router_relay(
+                self.deps,
                 room,
                 route_event,
                 prepared.dispatch.context.thread_history,
@@ -991,35 +992,6 @@ class TurnDispatcher:
                 scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
             ),
             replay_guard=replay_guard,
-        )
-
-    async def _execute_router_relay(
-        self,
-        room: nio.MatrixRoom,
-        event: DispatchEvent,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        thread_id: str | None = None,
-        message: str | None = None,
-        *,
-        requester_user_id: str,
-        extra_content: dict[str, Any] | None = None,
-        media_events: list[MediaDispatchEvent] | None = None,
-        handled_turn: TurnRecord | None = None,
-        scheduled_prompt: str | None = None,
-    ) -> None:
-        """Run one explicit router relay through the router-relay executor."""
-        await execute_router_relay(
-            self.deps,
-            room,
-            event,
-            thread_history,
-            thread_id,
-            message,
-            requester_user_id=requester_user_id,
-            extra_content=extra_content,
-            media_events=media_events,
-            handled_turn=handled_turn,
-            scheduled_prompt=scheduled_prompt,
         )
 
     async def _router_handled_turn_outcome(

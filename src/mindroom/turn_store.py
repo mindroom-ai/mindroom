@@ -185,8 +185,8 @@ _CLAIM_REGISTRIES: dict[str, _ClaimRegistry] = {}
 def _shared_claim_registry(store_key: str, agent_name: str) -> _ClaimRegistry:
     """Return the claim registry every ``TurnStore`` of one agent over one database shares.
 
-    Keyed like the shared ledger state: by the database as well as the agent,
-    so stores over two databases never see each other's claims.
+    Keyed by the database as well as the agent, so stores over two databases
+    never see each other's claims.
     """
     return _CLAIM_REGISTRIES.setdefault(f"{store_key}\x00{agent_name}", _ClaimRegistry())
 
@@ -294,7 +294,7 @@ class TurnStore:
         """Return the turn one source or alias answers to: a completed owner first, then its own turn."""
         return await self.deps.turn_records.read(turn_rows.get_turn_record, event_id)
 
-    async def load_turn(self, original_event_id: str) -> TurnRecord | None:
+    async def get_turn_record_after_writes(self, original_event_id: str) -> TurnRecord | None:
         """Return the turn a message belongs to, ordered after every write already queued in this process."""
         return await self.deps.turn_records.write(turn_rows.get_turn_record, original_event_id)
 
@@ -805,10 +805,10 @@ def _recovery_gap(turn_record: TurnRecord, state: ResponseRecoveryState) -> _Rec
     if reply is not None:
         # The reply's records own an AI turn's outcome, and recovery sends any row it still owes.
         return None if reply.terminal else _RecoveryGap("reply_unfinished")
-    return _ledger_turn_recovery_gap(turn_record, state)
+    return _unreplied_turn_recovery_gap(turn_record, state)
 
 
-def _ledger_turn_recovery_gap(turn_record: TurnRecord, state: ResponseRecoveryState) -> _RecoveryGap | None:
+def _unreplied_turn_recovery_gap(turn_record: TurnRecord, state: ResponseRecoveryState) -> _RecoveryGap | None:
     """Return why a turn no reply answers is neither complete nor still owned by its outbox row, if it is not."""
     if turn_record.anchor_event_id is None:
         return _RecoveryGap("missing_turn_anchor")

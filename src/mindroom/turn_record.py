@@ -56,7 +56,7 @@ class PreparedVoiceSource:
         return typing.cast("dict[str, typing.Any]", json.loads(self.content_json))
 
     def to_record(self) -> dict[str, object]:
-        """Encode the checkpoint only in the handled-turn ledger."""
+        """Encode the checkpoint for its source's ``turn_sources`` row."""
         return {
             "body": self.body,
             "content_json": self.content_json,
@@ -282,7 +282,7 @@ class TurnRecord:
             for event_id, value in (self.revision_replay or {}).items()
             if value.source_event_id == source
         ]
-        selected = (self.source_event_revisions or {}).get(source_event_id)
+        selected = (self.source_event_revisions or {}).get(source)
         if selected is not None:
             revisions.append(selected)
         return max(revisions, default=None)

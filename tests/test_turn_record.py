@@ -120,3 +120,17 @@ def test_turn_record_proves_all_live_sources_belong_to_requester(
 ) -> None:
     """Whole-turn decisions fail closed unless every source nobody deleted has the requester."""
     assert record.sources_all_from_requester("@bob:localhost", deleted=deleted) is expected
+
+
+def test_a_relay_alias_reads_the_watermark_of_the_source_it_answers_for() -> None:
+    """An edit of the message a relay answered is bounded by the revision selected on the relay's own source."""
+    record = TurnRecord.create(
+        ["$relay"],
+        discovery_event_ids=["$original"],
+        source_event_metadata={
+            "$relay": SourceEventMetadata(sender="@user:example.org", discovery_event_id="$original"),
+        },
+        source_event_revisions={"$relay": (2_000, "$edit")},
+    )
+
+    assert record.revision_watermark("$original") == (2_000, "$edit")

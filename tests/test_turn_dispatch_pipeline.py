@@ -1072,6 +1072,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         async def fake_execute_router_relay(
+            _deps: object,
             _room: nio.MatrixRoom,
             _event: nio.RoomMessageText,
             _thread_history: Sequence[ResolvedVisibleMessage],
@@ -1109,9 +1110,8 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 ),
             ),
-            patch.object(
-                bot._turn_dispatcher,
-                "_execute_router_relay",
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
                 new=AsyncMock(side_effect=fake_execute_router_relay),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),

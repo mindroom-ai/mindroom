@@ -185,13 +185,13 @@ def test_a_team_reply_records_the_history_scope_of_the_members_it_formed_with(tm
 
 @pytest.mark.asyncio
 async def test_an_edit_load_sees_a_write_already_queued_before_it(journal_store: EventJournalStore) -> None:
-    """``load_turn`` runs on the writer, after every write this process queued before it."""
+    """``get_turn_record_after_writes`` runs on the writer, after every write this process queued before it."""
     store = await _store(journal_store)
     recording = asyncio.create_task(
         store.record_pending_turn(_in_room(TurnRecord.create(["$event"], completed=False, response_owner="owner"))),
     )
     await asyncio.sleep(0)
-    loaded = await store.load_turn("$event")
+    loaded = await store.get_turn_record_after_writes("$event")
     recorded = await recording
 
     assert loaded is not None
@@ -617,7 +617,7 @@ async def test_edit_registration_after_retention_evicted_the_turn_finds_nothing(
     store = await _store(journal_store)
     with patch.object(turn_rows.time, "time", return_value=time.time() - 40 * 24 * 60 * 60):
         await store.record_turn(_in_room(TurnRecord.create(["$old"])))
-    loaded = await store.load_turn("$old")
+    loaded = await store.get_turn_record_after_writes("$old")
     assert loaded is not None
 
     await store.cleanup()
@@ -2131,7 +2131,7 @@ async def test_router_turn_replay_uses_persisted_turns_across_two_restarts(
 
     for _restart in range(2):
         restarted = await router_store()
-        loaded = await restarted.load_turn("$source")
+        loaded = await restarted.get_turn_record_after_writes("$source")
 
         assert loaded is not None
         assert loaded.turn_key is not None
@@ -2332,7 +2332,7 @@ async def test_completed_root_retains_unsettled_physical_edit(journal_store: Eve
     store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     await store.record_turn(_owned_turn_record(target))
-    owner = await store.load_turn("$user_msg")
+    owner = await store.get_turn_record_after_writes("$user_msg")
     assert owner is not None
     await store.register_edit_revision(owner, "$user_msg", (10, "$unsettled-edit"))
     with patch("mindroom.turn_store.time.time", return_value=time.time() + 40 * 86400):
@@ -2349,7 +2349,7 @@ async def test_late_completed_edit_keeps_consumption_proof_without_restoring_tex
     store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     await store.record_turn(_owned_turn_record(target))
-    loaded = await store.load_turn("$user_msg")
+    loaded = await store.get_turn_record_after_writes("$user_msg")
     await store.register_edit_revision(loaded, "$user_msg", (10, "$physical-edit"))
     snapshot = replace(
         await store.get_turn_record("$user_msg"),
@@ -2432,7 +2432,7 @@ async def test_newer_registration_during_refill_invalidates_older_selected_snaps
     store = await _store(journal_store)
     target = MessageTarget.resolve("!room:example.org", "$thread", "$user_msg")
     await store.record_turn(_owned_turn_record(target))
-    loaded = await store.load_turn("$user_msg")
+    loaded = await store.get_turn_record_after_writes("$user_msg")
     await store.register_edit_revision(loaded, "$user_msg", (10, "$older"))
     newer = await store.register_edit_revision(loaded, "$user_msg", (20, "$newer"))
     assert newer is not None
@@ -2469,7 +2469,7 @@ async def test_edits_of_two_messages_of_one_turn_let_the_newer_edit_regenerate(
             source_event_prompts={"$first": "FIRST", "$user_msg": "SECOND"},
         ),
     )
-    loaded = await store.load_turn("$user_msg")
+    loaded = await store.get_turn_record_after_writes("$user_msg")
     older_revision, newer_revision = (10, "$first-edit"), (20, "$second-edit")
     if registration_order == "older_first":
         older = await store.register_edit_revision(loaded, "$first", older_revision)
@@ -2524,7 +2524,7 @@ async def test_an_older_sibling_edit_registered_after_the_snapshot_does_not_stop
             source_event_revisions={"$first": (5, "$first-earlier-edit")},
         ),
     )
-    loaded = await store.load_turn("$user_msg")
+    loaded = await store.get_turn_record_after_writes("$user_msg")
     newer = await store.register_edit_revision(loaded, "$user_msg", (20, "$second-edit"))
     assert newer is not None
     newer_snapshot = replace(
@@ -2561,7 +2561,7 @@ async def test_edit_snapshot_rechecks_what_changed_since_it_was_built(
         source_event_revisions={"$sibling": (10, "$sibling-edit"), "$user_msg": (20, "$driving-edit")},
     )
     await store.record_responded_turn(record)
-    snapshot = await store.load_turn("$user_msg")
+    snapshot = await store.get_turn_record_after_writes("$user_msg")
     assert snapshot is not None
     if mutation == "newer":
         await store.register_edit_revision(snapshot, "$user_msg", (30, "$newer-edit"))
@@ -2814,7 +2814,7 @@ async def test_prepared_voice_checkpoint_retention_follows_unsettled_sources(
 
 async def _edited(store: TurnStore, revision: tuple[int, str], text: str) -> tuple[TurnRecord, int, str, str]:
     """Register an edit of ``$source`` and return what its regeneration commits: the turn, revision, and text."""
-    loaded = await store.load_turn("$source")
+    loaded = await store.get_turn_record_after_writes("$source")
     assert loaded is not None
     assert await store.register_edit_revision(loaded, "$source", revision) is not None
     return loaded, revision[0], revision[1], text

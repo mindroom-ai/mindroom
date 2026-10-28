@@ -257,8 +257,8 @@ class ClaimRefused(Enum):
     RETIRED = "retired"
 
 
-# As long as the handled-turn ledger keeps a turn: nothing reaches a finished
-# reply after its turn is forgotten.
+# As long as turn retention keeps a turn: nothing reaches a finished reply after
+# its turn is forgotten.
 _FINISHED_REPLY_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 _FORGET_BATCH = 500
 
@@ -427,7 +427,7 @@ class ReplyRuntime:
         return tuple(ending.reply_id for ending in endings)
 
     async def forget_finished(self) -> None:
-        """Drop the records of replies finished as long ago as the handled-turn ledger forgets their turns."""
+        """Drop the records of replies finished as long ago as turn retention forgets their turns."""
         before_ns = time.time_ns() - _FINISHED_REPLY_RETENTION_NS
         while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
             pass

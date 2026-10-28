@@ -484,7 +484,7 @@ async def test_regular_agent_ignores_edits(tmp_path: Path) -> None:
     # Mock the generate_response seam covering both dispatch and edit-regeneration paths
     mock_generate = AsyncMock()
     install_generate_response_mock(bot, mock_generate)
-    with patch.object(bot._turn_store, "load_turn", return_value=None):
+    with patch.object(bot._turn_store, "get_turn_record_after_writes", return_value=None):
         # Process the edit event
         await bot._on_message(room, edit_event)
 

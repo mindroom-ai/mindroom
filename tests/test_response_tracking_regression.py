@@ -19,6 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.router_relay import execute_router_relay
 from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -247,7 +248,7 @@ class TestResponseTrackingRegression:
         mock_config: Config,
         tmp_path: Path,
     ) -> None:
-        """Test that router AI routing is tracked in the handled-turn ledger.
+        """Test that router AI routing is tracked in the turn rows.
 
         Regression test for issue where router would re-route messages
         after restart.
@@ -303,7 +304,8 @@ class TestResponseTrackingRegression:
         }
 
         # Process routing
-        await bot._turn_dispatcher._execute_router_relay(
+        await execute_router_relay(
+            bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],
@@ -333,7 +335,8 @@ class TestResponseTrackingRegression:
         mock_suggest_responder.reset_mock()
 
         # Process same message again (simulating restart)
-        await bot._turn_dispatcher._execute_router_relay(
+        await execute_router_relay(
+            bot._turn_dispatcher.deps,
             mock_room,
             message_event,
             [],

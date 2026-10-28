@@ -2,7 +2,7 @@
 
 These tests construct ``TurnIngress``, ``TurnDispatcher``, ``InteractiveSelections``, and
 ``VoiceIngress`` directly from their deps — no ``AgentBot``/orchestrator boot — with real ``TurnPolicy``, ``ConversationResolver``,
-``TurnStore`` (disk-backed ledger), and ``CoalescingGate`` collaborators, and typed
+``TurnStore`` (journal-backed turn rows), and ``CoalescingGate`` collaborators, and typed
 recording fakes only at the execution and delivery seams (``ResponseRunner``,
 ``DeliveryGateway``). They pin the turn contract: precheck filtering (via ``IngressValidator``),
 replay-guard rejection, policy decision routing, ingress-level command dispatch
@@ -112,6 +112,7 @@ from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.router_relay import execute_router_relay
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -1039,7 +1040,7 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
     """A turn superseded by a newer unresponded requester message never reaches policy.
 
     The dispatch replay guard must consume the exact callback obligation without
-    growing the handled-turn ledger, evaluating policy, or sending anything.
+    recording a turn, evaluating policy, or sending anything.
     """
     newer_history = thread_history_result(
         [
@@ -2423,7 +2424,7 @@ async def test_sender_outside_reply_allowlist_is_dropped_at_precheck(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_policy_ignore_sends_nothing_and_compacts_callback(config: Config, tmp_path: Path) -> None:
-    """An ignore plan compacts exact callback truth without growing the turn ledger."""
+    """An ignore plan compacts exact callback truth without recording a turn."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", "research")
     event = _text_event("untagged message with multiple visible responders")
@@ -5449,7 +5450,8 @@ async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_p
     handled_turn = TurnRecord.create([event.event_id], completed=False)
 
     with patch.object(harness.turn_store, "record_responded_turn"):
-        await harness.dispatcher._execute_router_relay(
+        await execute_router_relay(
+            harness.dispatcher.deps,
             room,
             event,
             (),
@@ -5462,7 +5464,8 @@ async def test_router_relay_replay_adopts_durable_response(config: Config, tmp_p
     assert pending_turn.completed is False
     assert pending_turn.response_event_id == "$sent-1:localhost"
 
-    await harness.dispatcher._execute_router_relay(
+    await execute_router_relay(
+        harness.dispatcher.deps,
         room,
         event,
         (),
@@ -6895,7 +6898,8 @@ async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_
     send_text = harness.gateway.send_text
     monkeypatch.setattr(harness.gateway, "send_text", AsyncMock(side_effect=RuntimeError("crash before the relay")))
     with pytest.raises(RuntimeError, match="crash before the relay"):
-        await harness.dispatcher._execute_router_relay(
+        await execute_router_relay(
+            harness.dispatcher.deps,
             room,
             event,
             (),
@@ -6908,7 +6912,8 @@ async def test_router_recovery_relays_once_past_every_echo_of_a_coalesced_voice_
         "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
         return_value=frozenset(echoes.values()),
     ):
-        await harness.dispatcher._execute_router_relay(
+        await execute_router_relay(
+            harness.dispatcher.deps,
             room,
             event,
             (),

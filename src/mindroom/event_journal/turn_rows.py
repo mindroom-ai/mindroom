@@ -1542,11 +1542,11 @@ def record_redaction(transaction: Transaction, agent_name: str, *, room_id: str,
         "ON CONFLICT (agent_name, room_id, event_id) DO NOTHING RETURNING event_id",
         (agent_name, room_id, event_id),
     )
-    scrub_redacted_event(transaction, agent_name, room_id=room_id, event_id=event_id)
+    _scrub_redacted_event(transaction, agent_name, room_id=room_id, event_id=event_id)
     return row is not None
 
 
-def scrub_redacted_event(transaction: Transaction, agent_name: str, *, room_id: str, event_id: str) -> None:
+def _scrub_redacted_event(transaction: Transaction, agent_name: str, *, room_id: str, event_id: str) -> None:
     """Clear the plaintext a redacted event leaves in this agent's turns in ``room_id``.
 
     A source that is the event, or whose discovery alias it is, loses its
@@ -1787,7 +1787,6 @@ __all__ = [
     "record_visible_echo",
     "redacted_events",
     "retain",
-    "scrub_redacted_event",
     "sources_deleted_by",
     "turn_for_response_event",
     "visible_echo",

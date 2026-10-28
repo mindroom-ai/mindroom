@@ -1,26 +1,18 @@
-"""Legacy inputs: every stored turn-record shape the codec still reads, as the databases and files that hold them.
+"""Legacy inputs: every stored turn-record shape the conversion still reads, as the databases and files that hold them.
 
-Each fixture seeds raw ``turn_records`` rows, journal ``redaction_tombstones`` rows, or a pre-journal JSON ledger
-file, and lists the actions to run after opening it; the oracle observes every event id these name. ``build_inputs`` writes them
-under ``inputs/`` as a SQLite dump of the current journal schema plus those rows, and as the ledger file; a later
-schema opens those dumps as an upgrade does, so they are built once and kept rather than re-recorded.
+Each fixture lists the raw ``turn_records`` rows, journal ``redaction_tombstones`` rows, or pre-journal JSON ledger
+file it was seeded with, and the actions to run after opening it; the oracle observes every event id these name.
+Their dumps under ``inputs/`` were written by the journal schema before the row rewrite, which the current journal
+can no longer create, so they are frozen and open as an upgrade does.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import sqlite3
-import tempfile
-from contextlib import closing
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from mindroom.event_journal import EventJournalStore
 from tests.turn_state_oracle.actions import Action, op
 from tests.turn_state_oracle.adapter import AGENT, EPOCH, PRINCIPAL, REQUESTER, ROOMS, SCOPE, TARGETS
-from tests.turn_state_oracle.driver import INPUTS
 
 # A day before the oracle's clock starts: fresh for retention until a cleanup lets 30 days pass.
 _WRITTEN = EPOCH - 24 * 60 * 60
@@ -261,40 +253,3 @@ FIXTURES: dict[str, LegacyFixture] = {
         actions=(op("reopen"),),
     ),
 }
-
-
-async def _seed(database: Path, fixture: LegacyFixture) -> None:
-    journal = EventJournalStore.open_sqlite(database)
-
-    def insert(transaction: Any) -> None:  # noqa: ANN401
-        for index_event_id, record in fixture.rows:
-            transaction.execute(
-                "INSERT INTO turn_records (agent_name, index_event_id, anchor_event_id, record_json) VALUES (?, ?, ?, ?)",
-                (AGENT, index_event_id, record["anchor_event_id"], json.dumps(record, sort_keys=True)),
-            )
-        for principal_id, room_id, event_id in fixture.tombstones:
-            transaction.execute(
-                "INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id) VALUES (?, ?, ?)",
-                (principal_id, room_id, event_id),
-            )
-
-    await journal.backend.write(insert)
-    await journal.close()
-
-
-def build_inputs() -> None:
-    """Write every fixture's database dump and ledger file under ``inputs/``."""
-    INPUTS.mkdir(parents=True, exist_ok=True)
-    for name, fixture in FIXTURES.items():
-        if fixture.rows or fixture.tombstones:
-            with tempfile.TemporaryDirectory() as root:
-                database = Path(root) / "journal.db"
-                asyncio.run(_seed(database, fixture))
-                with closing(sqlite3.connect(database)) as connection:
-                    dump = "\n".join(connection.iterdump()) + "\n"
-            (INPUTS / f"{name}.sql").write_text(dump, encoding="utf-8")
-        if fixture.ledger is not None:
-            (INPUTS / f"{name}.ledger.json").write_text(
-                json.dumps(fixture.ledger, indent=1, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
