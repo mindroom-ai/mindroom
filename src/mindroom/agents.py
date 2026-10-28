@@ -124,6 +124,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.turn_model import TurnModel
 
 logger = get_logger(__name__)
 
@@ -1814,7 +1815,7 @@ def create_agent(
     execution_identity: ToolExecutionIdentity | None,
     *,
     knowledge: AgentKnowledge | None,
-    active_model_name: str | None,
+    model: TurnModel,
     hook_registry: HookRegistry | None = None,
     history_storage: ConversationStore | None = None,
     include_interactive_questions: bool = True,
@@ -1842,7 +1843,7 @@ def create_agent(
         knowledge: The shared knowledge of a RAG-enabled agent, or None; for a persona, callers resolve
             it narrowed to the persona's kept knowledge bases. A graph-enabled agent's graph is added to it,
             unless a persona names the bases it keeps.
-        active_model_name: The runtime-selected model name overriding the configured model, or None.
+        model: The model this agent's turn runs, which the caller resolved for the turn.
         hook_registry: Optional hook registry for plugin-based tool call
             interception and event hooks.
         history_storage: Optional already-open conversation store to reuse for this agent.
@@ -1894,9 +1895,7 @@ def create_agent(
         ensure_default_agent_workspaces(config, runtime_paths.storage_root)
     defaults = config.defaults
 
-    # Gate on this agent's resolved runtime model (thread overrides and team
-    # members resolve per agent), not on any surrounding team's model.
-    model_name = active_model_name or agent_config.model or "default"
+    model_name = model.model_name
     provider = _build_agent_model_provider(
         config,
         runtime_paths,

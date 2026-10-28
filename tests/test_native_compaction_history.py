@@ -33,7 +33,7 @@ from mindroom.native_compaction import checkpoint_summary, replay_basis
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
     _completed_run,
@@ -75,6 +75,7 @@ def _inputs(config: Config) -> HistoryPreparationInputs:
         entity_name="test_agent",
         history_settings=config.resolve_entity("test_agent").history_settings,
         config=config,
+        runtime_paths=runtime_paths_for(config),
         static_prompt_tokens=100,
         active_model_name=None,
         active_context_window=None,

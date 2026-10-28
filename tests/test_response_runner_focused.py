@@ -47,7 +47,6 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.cold_cache import ColdCacheConfig
-from mindroom.config.main import ResolvedRuntimeModel
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -164,6 +163,7 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_model import TurnModel
 from mindroom.turn_policy import PreparedDispatch
 from tests.approval_continuation_helpers import (
     advance_continuation,
@@ -7826,7 +7826,12 @@ async def test_cold_cache_skipped_for_edit_regeneration(tmp_path: Path, edit_reg
     ):
         chosen = await coordinator._cold_cache_model(
             request,
-            runtime_model=ResolvedRuntimeModel(model_name="default", context_window=None),
+            runtime_model=TurnModel(
+                model_name="default",
+                requested_model_name="default",
+                context_window=None,
+                overridden=False,
+            ),
             thread_id="$event",
         )
     assert (chosen, select.await_count) == (("default", 0) if edit_regeneration else ("cheap", 1))

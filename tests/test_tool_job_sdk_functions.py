@@ -38,6 +38,7 @@ from tests.tool_job_helpers import (
     team_coordinator,
     tool_job_runtime,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -103,7 +104,14 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
                 tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)),
                 tool_execution_identity(owner),
             ):
-                build = create_agent("lead", config, paths, owner, knowledge=knowledge, active_model_name=None)
+                build = create_agent(
+                    "lead",
+                    config,
+                    paths,
+                    owner,
+                    knowledge=knowledge,
+                    model=turn_model(config, paths, "lead"),
+                )
                 record = await run_built_turn(
                     build,
                     config=config,

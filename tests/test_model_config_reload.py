@@ -23,6 +23,7 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.teams.members import BuiltTeam, build_team_spec, materialize_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -33,12 +34,14 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.providers.bare_adapter import bare_adapter
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.constants import RuntimePaths
     from mindroom.history.types import ResolvedHistoryExecutionPlan
     from mindroom.llm.provider import ModelProvider
 
@@ -120,7 +123,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         runtime.runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime.runtime_paths, "general"),
     )
     members = materialize_exact_team_members(
         ["general"],
@@ -128,7 +131,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         runtime_paths=runtime.runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={"general": turn_model(config, runtime.runtime_paths, "general").model_name},
     )
     team = build_team_spec(
         members=members,
@@ -152,10 +155,10 @@ def _temperature(model: ModelProvider) -> float | None:
     return adapter.settings.temperature
 
 
-def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
+def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
     settings = config.resolve_entity(entity_name).history_settings
-    model = config.resolve_runtime_model(entity_name=entity_name)
+    model = resolve_turn_model(config, runtime_paths, ModelScope(entity=entity_name), None)
     return resolve_history_execution_plan(
         config=config,
         compaction_config=settings.compaction_config,
@@ -182,6 +185,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         entity_name="general",
         history_settings=old_agent.history_settings,
         config=old,
+        runtime_paths=runtime.runtime_paths,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,
@@ -212,6 +216,7 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
         entity_name="general",
         history_settings=agent.history_settings,
         config=runtime.config,
+        runtime_paths=runtime.runtime_paths,
         static_prompt_tokens=0,
         active_model_name=None,
         active_context_window=None,
@@ -242,7 +247,7 @@ async def test_compaction_model_reload_updates_effective_budgets(
     else:
         old.agents["general"].compaction = CompactionOverrideConfig.model_validate(compaction)
         old.teams["team"].compaction = CompactionOverrideConfig.model_validate(compaction)
-    before = {name: _history_plan(old, name) for name in ("general", "team")}
+    before = {name: _history_plan(old, runtime.runtime_paths, name) for name in ("general", "team")}
     model_name = compaction[model_field]
     new = old.model_copy(deep=True)
     new.models[model_name].context_window = 96000
@@ -254,7 +259,7 @@ async def test_compaction_model_reload_updates_effective_budgets(
         build_model_provider(runtime.config, runtime.runtime_paths, model_name).identity.id == "updated-summary-model"
     )
     for name in ("general", "team"):
-        after = _history_plan(runtime.config, name)
+        after = _history_plan(runtime.config, runtime.runtime_paths, name)
         assert after.replay_window_tokens == before[name].replay_window_tokens
         if model_field == "model":
             assert after.summary_input_budget_tokens == compute_compaction_input_budget(
@@ -285,7 +290,7 @@ async def test_context_window_reload_preserves_explicit_replay_cap(runtime: _Mul
     await _reload(runtime, new)
 
     assert runtime.config is not None
-    plan = _history_plan(runtime.config, "general")
+    plan = _history_plan(runtime.config, runtime.runtime_paths, "general")
     assert plan.replay_window_tokens == 3000
     assert plan.summary_input_budget_tokens == compute_compaction_input_budget(
         64000,

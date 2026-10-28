@@ -245,7 +245,6 @@ def _config(
     return bind_runtime_paths(
         Config(
             agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
-            models={},
             memory=memory or {},
             knowledge_bases={
                 "docs": KnowledgeBaseConfig(

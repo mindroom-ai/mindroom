@@ -13,6 +13,7 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import offered_function, source_toolkit
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,7 +57,7 @@ def _offered(tmp_path: Path, agent: dict[str, Any], *, room: bool = True, depth:
         runtime_paths,
         execution_identity=_identity(room=room),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
         delegation_depth=depth,
     )
     return sorted(toolkit.name for toolkit in build.spec.toolkits)
@@ -144,7 +145,7 @@ def test_an_agent_only_tool_setting_reaches_the_toolkit_once_normalized(tmp_path
         runtime_paths,
         execution_identity=_identity(room=True),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
     )
     shell = source_toolkit(offered_function(build, "run_shell_command"))
     assert shell._shell_path_prepend == "/opt/a, /opt/b"
@@ -204,7 +205,7 @@ def test_attachments_save_where_the_agents_workspace_tools_run(
         runtime_paths,
         execution_identity=_identity(room=True),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "code"),
         persona=None
         if persona_tools is None
         else SubagentPersona(source_kind="inline", source_name="", system_prompt="Attach.", tools=persona_tools),

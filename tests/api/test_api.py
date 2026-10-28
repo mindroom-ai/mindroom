@@ -3498,7 +3498,10 @@ def test_save_config(test_client: TestClient, temp_config_file: Path) -> None:
                 "config": {"model": "nomic-embed-text", "host": "http://localhost:11434"},
             },
         },
-        "models": {"default": {"provider": "openai", "id": "test-model-2"}},
+        "models": {
+            "default": {"provider": "openai", "id": "test-model-2"},
+            "ollama": {"provider": "ollama", "id": "test-model"},
+        },
         "agents": {
             "new_agent": {
                 "display_name": "New Agent",
@@ -4873,6 +4876,12 @@ def test_update_team(test_client: TestClient, temp_config_file: Path) -> None:
     }
     test_client.post("/api/config/teams", json=team_data)
 
+    model_response = test_client.put(
+        "/api/config/models/gpt-6-astra",
+        json={"provider": "openai", "id": "gpt-6-astra"},
+    )
+    assert model_response.status_code == 200
+
     # Update the team
     updated_data = {
         "display_name": "Updated Team",
@@ -4975,6 +4984,12 @@ def test_get_room_models(test_client: TestClient) -> None:
 def test_update_room_models(test_client: TestClient, temp_config_file: Path) -> None:
     """Test updating room-specific model overrides."""
     test_client.post("/api/config/load")
+
+    for model_name, model in {
+        "gpt-6-astra": {"provider": "openai", "id": "gpt-6-astra"},
+        "claude-sonnet-5": {"provider": "anthropic", "id": "claude-sonnet-5-5"},
+    }.items():
+        assert test_client.put(f"/api/config/models/{model_name}", json=model).status_code == 200
 
     room_models = {"lobby": "gpt-6-astra", "tech-room": "claude-sonnet-5", "general": "default"}
 

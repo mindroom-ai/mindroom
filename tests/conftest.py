@@ -730,6 +730,7 @@ async def prepare_history_for_run_for_test(
         static_prompt_tokens = static_token_estimator.estimate(full_prompt)
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
+        runtime_paths=runtime_paths,
         entity_name=agent_name,
         history_settings=history_settings or config.resolve_entity(agent_name).history_settings,
         active_model_name=active_model_name,
@@ -2460,9 +2461,12 @@ def bind_runtime_paths(
 
     Unless the test config authors them, a reply waits no coalescing debounce and starts no automatic thread summary.
     A summary builds a model by name in the background, usually the reply's own ``default``, so it would take a turn
-    that the test scripted for the reply.
+    that the test scripted for the reply. A config that authors no models gets the ``default`` model its entities name.
     """
-    bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
+    data = config.authored_model_dump()
+    if not data.get("models"):
+        data["models"] = {"default": {"provider": "openai", "id": "test-model"}}
+    bound = Config.validate_with_runtime(data, runtime_paths)
     _persist_bound_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:

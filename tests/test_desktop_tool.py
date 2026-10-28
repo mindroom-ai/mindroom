@@ -96,6 +96,7 @@ def test_desktop_supports_normal_and_private_agents(tmp_path: Path, private: dic
     config = Config.validate_with_runtime(
         {
             "defaults": {"tools": []},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {"computer": agent},
         },
         test_runtime_paths(tmp_path),
@@ -110,6 +111,7 @@ def test_desktop_rejects_authored_device_identity(tmp_path: Path) -> None:
         Config.validate_with_runtime(
             {
                 "defaults": {"tools": []},
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "computer": {
                         "display_name": "Computer",

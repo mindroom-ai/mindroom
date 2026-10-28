@@ -10,7 +10,6 @@ from uuid import uuid4
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.budgets.monitor import budget_model
 from mindroom.delegation.audit import (
     child_audit_context,
     child_response_usage,
@@ -30,6 +29,7 @@ from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -456,23 +456,26 @@ def prepare_child_turn(
             session_id=session_id,
         )
     )
-    if previous is not None:
-        # LEGACY_COMPAT: Delegated children persisted without a requested model.
-        # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
-        # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
-        # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
-        # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
-        requested_model_name = previous.requested_model_name or previous.model_name
-    else:
-        requested_model_name = config.resolve_runtime_model(
-            entity_name=agent_name,
-            active_model_name=model,
+    # LEGACY_COMPAT: Delegated children persisted without a requested model.
+    # Legacy format: Parent delegation state and subagent session records stored only model_name, the model the child ran on.
+    # Last legacy release: v2026.10.244; replacement: the next release also persists requested_model_name.
+    # Handling: An absent requested model reads as the recorded model, so follow-ups keep the model they ran on before.
+    # Coverage: tests/test_budget_enforcement.py::test_delegated_follow_up_of_a_child_saved_without_a_requested_model.
+    explicit = (previous.requested_model_name or previous.model_name) if previous is not None else model
+    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
+    turn_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=agent_name,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
-            runtime_paths=runtime_paths,
-        ).model_name
-    # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
-    model_name = budget_model(config, runtime_paths, budget_monitor, owner.requester_id, requested_model_name)
+            explicit=explicit,
+        ),
+        TurnBudget(monitor=budget_monitor, requester_id=owner.requester_id),
+    )
+    requested_model_name = turn_model.requested_model_name
+    model_name = turn_model.model_name
     return DelegationChild(
         delegation_id=delegation_id,
         parent_tool_call_id=parent_tool_call_id,

@@ -475,7 +475,7 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             runtime_paths=runtime_paths,
             execution_identity=identity,
             refresh_scheduler=None,
-            active_model_names=None,
+            active_model_names=dict.fromkeys(["alpha", "zeta"], "default"),
         )
         built = build_team_spec(
             members=members,
@@ -560,7 +560,7 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
             runtime_paths=runtime_paths,
             execution_identity=identity,
             refresh_scheduler=None,
-            active_model_names=None,
+            active_model_names=dict.fromkeys(["alpha", "zeta"], "default"),
         )
         hooks = {
             build.spec.id: _team_member(

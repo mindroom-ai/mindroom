@@ -51,6 +51,7 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "echo": {
                     "transport": "stdio",

@@ -36,6 +36,7 @@ from tests.tool_job_helpers import (
     run_built_turn,
     tool_job_journal,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -89,7 +90,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
             owner,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, paths, "lead"),
         )
         record = await run_built_turn(build, config=config, runtime_paths=paths, prompt="hello")
         assert "mindroom_tool_authority" not in (record.metadata or {})
@@ -238,7 +239,7 @@ async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
         execution_identity=None,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, paths, "lead"),
     )
     assert (build.tool_jobs is not None) is enabled
     if build.tool_jobs is not None:

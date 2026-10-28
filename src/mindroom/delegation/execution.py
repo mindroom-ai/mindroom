@@ -108,6 +108,7 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 logger = get_logger(__name__)
@@ -371,7 +372,12 @@ async def _execute_child(
         config,
         runtime_paths,
         identity,
-        active_model_name=child.model_name,
+        model=resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=child.child_agent_name, explicit=child.model_name),
+            None,
+        ),
         knowledge=knowledge.knowledge,
         history_storage=store,
         refresh_scheduler=refresh_scheduler,

@@ -24,6 +24,7 @@ from tests.agent_tool_helpers import call_entrypoint, offered_function, run_offe
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +71,7 @@ def _create_routing_agent(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "routing"),
     )
 
 
@@ -336,7 +337,7 @@ async def test_room_context_tool_uses_primary_matrix_client(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "routing"),
     )
     with tool_runtime_context(context):
         result = await run_offered(agent, "list_schedules")

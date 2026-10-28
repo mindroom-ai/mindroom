@@ -648,7 +648,10 @@ def test_a_retired_knowledge_option_fails_config_load_and_says_to_remove_it(tmp_
 
     with pytest.raises(ConfigRuntimeValidationError) as exc_info:
         Config.validate_with_runtime(
-            {"agents": {"researcher": {"display_name": "Researcher", "tools": [{"website": {"knowledge": "docs"}}]}}},
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "agents": {"researcher": {"display_name": "Researcher", "tools": [{"website": {"knowledge": "docs"}}]}},
+            },
             runtime_paths,
         )
 

@@ -55,6 +55,7 @@ from tests.conftest import bind_runtime_paths, install_model_providers, test_run
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.history_helpers import _forced_compaction_context, _session
 from tests.identity_helpers import persist_actual_entity_accounts, persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -303,7 +304,14 @@ async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     config, paths, owner, context = _conversation(tmp_path)
     _scripted(monkeypatch, "Sample helper output.")
     identity = build_execution_identity_from_runtime_context(context)
-    build = create_agent("test_agent", config, paths, identity, knowledge=None, active_model_name=None)
+    build = create_agent(
+        "test_agent",
+        config,
+        paths,
+        identity,
+        knowledge=None,
+        model=turn_model(config, paths, "test_agent"),
+    )
     with helper_usage_owner_context(owner):
         await _run_room_agent_turn(context, build, "Sample task.")
     return paths.storage_root

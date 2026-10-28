@@ -13,7 +13,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
-from mindroom.config.main import Config, ResolvedRuntimeModel
+from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
@@ -43,6 +43,7 @@ from mindroom.execution_preparation import (
     prepare_agent_execution_context,
     render_prepared_messages_text,
 )
+from mindroom.history import runtime as history_runtime
 from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
@@ -59,6 +60,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 from tests.conftest import (
     bind_runtime_paths,
     build_unseen_context_messages_for_test,
@@ -68,6 +70,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel
 from tests.history_helpers import replay_settings
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -120,7 +123,7 @@ def _build(config: Config, runtime_paths: RuntimePaths) -> AgentBuild:
         runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "test_agent"),
     )
 
 
@@ -254,12 +257,12 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
 ) -> None:
     """History preparation should use the same runtime-model snapshot as agent construction."""
     config, runtime_paths = _bound_agent_config(tmp_path)
-    snapshot = ResolvedRuntimeModel(model_name="default", context_window=6_000)
+    snapshot = TurnModel(model_name="default", requested_model_name="default", context_window=6_000, overridden=False)
     prepared = MagicMock()
     prepare_common = AsyncMock(return_value=prepared)
-    resolve_runtime_model = MagicMock(side_effect=AssertionError("runtime model was re-resolved"))
+    re_resolve = MagicMock(side_effect=AssertionError("runtime model was re-resolved"))
     build = _build(config, runtime_paths)
-    monkeypatch.setattr(Config, "resolve_runtime_model", resolve_runtime_model)
+    monkeypatch.setattr(history_runtime, "resolve_turn_model", re_resolve)
     monkeypatch.setattr(execution_preparation, "_prepare_execution_context_common", prepare_common)
 
     result = await _prepare_agent_execution_context_for_test(
@@ -276,7 +279,7 @@ async def test_prepare_agent_execution_context_uses_supplied_runtime_model_snaps
     )
 
     assert result is prepared
-    resolve_runtime_model.assert_not_called()
+    re_resolve.assert_not_called()
     assert prepare_common.await_args.kwargs["fallback_static_token_budget"] == 6_000
 
 
@@ -311,7 +314,12 @@ async def test_prepare_agent_execution_context_caps_fallback_at_replay_window(
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
-        resolved_runtime_model=ResolvedRuntimeModel(model_name="default", context_window=6_000),
+        resolved_runtime_model=TurnModel(
+            model_name="default",
+            requested_model_name="default",
+            context_window=6_000,
+            overridden=False,
+        ),
         include_openai_compat_guidance=True,
     )
 
@@ -774,7 +782,12 @@ async def test_prepare_agent_execution_context_sizes_history_against_the_model_t
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
-        resolved_runtime_model=ResolvedRuntimeModel(model_name="large", context_window=48_000),
+        resolved_runtime_model=TurnModel(
+            model_name="large",
+            requested_model_name="large",
+            context_window=48_000,
+            overridden=False,
+        ),
     )
 
     resolved_inputs = prepare_scope_history.await_args.kwargs["resolved_inputs"]
@@ -817,7 +830,7 @@ async def test_prepare_agent_execution_context_sizes_history_by_the_requests_sta
         runtime_paths=runtime_paths,
         config=config,
         current_sender_id="@alice:localhost",
-        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
     )
 
     tools = PreparedTools(functions=build.spec.functions).specs()
@@ -988,7 +1001,7 @@ async def test_prepare_agent_execution_context_names_real_author_of_forged_relay
         runtime_paths=runtime_paths,
         config=config,
         current_sender_id="@alice:localhost",
-        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
     )
 
     assert [message.content for message in prepared.turn.context] == [
@@ -1024,7 +1037,7 @@ async def test_prepare_agent_execution_context_names_the_current_prompts_sender_
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
-        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
         current_sender_id="@alice:localhost",
         current_event_id="$current",
         current_timestamp_ms=1_700_000_000_000,
@@ -1064,7 +1077,7 @@ async def test_current_message_time_is_rendered_in_the_responding_agents_timezon
         thread_history=None,
         runtime_paths=runtime_paths,
         config=config,
-        resolved_runtime_model=config.resolve_runtime_model(entity_name="test_agent", runtime_paths=runtime_paths),
+        resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
         current_sender_id="@alice:localhost",
         current_event_id="$current",
         current_timestamp_ms=1_774_018_800_000,

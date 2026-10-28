@@ -3952,9 +3952,11 @@ models:
     assert projected_config["agents"]["alpha"]["delegate_to"] == []
     assert "calls" not in projected_config
 
+    # A dedicated worker loads its projection in runner mode, which runs no model.
     projected_runtime_paths = resolve_runtime_paths(
         config_path=projection_root / "config.yaml",
         storage_path=tmp_path / "projected-storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
     )
 
     assert set(load_config(projected_runtime_paths).agents) == {"alpha"}
@@ -4669,9 +4671,11 @@ models:
         projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "private" / "template_dir" / "README.md"
     ).read_text(encoding="utf-8") == "template scaffold\n"
 
+    # A dedicated worker loads its projection in runner mode, which runs no model.
     projected_runtime_paths = resolve_runtime_paths(
         config_path=projection_root / "config.yaml",
         storage_path=tmp_path / "projected-storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
     )
     projected_runtime_config = load_config(projected_runtime_paths)
     workspace = resolve_agent_workspace_from_state_path(

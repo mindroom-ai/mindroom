@@ -32,7 +32,6 @@ from mindroom.approval.response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
-from mindroom.budgets.monitor import budget_model
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
@@ -141,7 +140,7 @@ from mindroom.streaming import (
     clean_partial_reply_text,
 )
 from mindroom.teams.envelope import team_response, team_response_stream
-from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models, select_model_for_team
+from mindroom.teams.members import requested_team_agent_names
 from mindroom.teams.presentation import strip_team_display
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
@@ -161,6 +160,7 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
+from mindroom.turn_model import ModelScope, TurnBudget, TurnModel, resolve_team_turn_models, resolve_turn_model
 from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_turn_time import prefix_user_turn_time
@@ -204,7 +204,7 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.bot_runtime_view import BotRuntimeView
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
@@ -1463,15 +1463,12 @@ class ResponseRunner:
             persist_response_event_id=persist_response_event_id,
         )
 
-    def _budgeted_model(self, request: ResponseRequest, model_name: str) -> str:
-        """Return the model this request's requester may use under their budget."""
+    def _turn_budget(self, request: ResponseRequest) -> TurnBudget:
+        """Return the budget this request's requester spends."""
         orchestrator = self.deps.runtime.orchestrator
-        return budget_model(
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            orchestrator.budgets if orchestrator is not None else None,
-            request.response_envelope.requester_id,
-            model_name,
+        return TurnBudget(
+            monitor=orchestrator.budgets if orchestrator is not None else None,
+            requester_id=request.response_envelope.requester_id,
         )
 
     def _response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
@@ -2642,15 +2639,17 @@ class ResponseRunner:
                         run_id=continuation.run_id,
                         user_id=continuation.requester_id,
                         configured_team_name=continuation.entity_name,
-                        model_name=select_model_for_team(
-                            continuation.entity_name,
-                            continuation.room_id,
+                        model_name=resolve_turn_model(
                             self.deps.runtime.config,
                             self.deps.runtime_paths,
-                            thread_id=continuation.thread_id,
-                        )
-                        if continuation.runtime_model_name is None
-                        else continuation.runtime_model_name,
+                            ModelScope(
+                                entity=continuation.entity_name,
+                                room_id=continuation.room_id,
+                                thread_id=continuation.thread_id,
+                                explicit=continuation.runtime_model_name,
+                            ),
+                            None,
+                        ).model_name,
                         decisions=decisions,
                         denial_reasons=denial_reasons,
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
@@ -4526,26 +4525,18 @@ class ResponseRunner:
             None
             if team_request.resolution_reason is not None
             else resolve_team_turn_models(
-                self.deps.agent_name,
-                agent_names,
-                request.room_id,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
-                thread_id=resolved_target.resolved_thread_id,
-                active_model_name=request.scheduled_model,
+                ModelScope(
+                    entity=self.deps.agent_name,
+                    room_id=request.room_id,
+                    thread_id=resolved_target.resolved_thread_id,
+                    explicit=request.scheduled_model,
+                ),
+                requested_team_agent_names(agent_names),
+                self._turn_budget(request),
             )
         )
-        if turn_models is not None:
-            budgeted = {
-                model_name: self._budgeted_model(request, model_name)
-                for model_name in {turn_models.team_model_name, *turn_models.member_model_names.values()}
-            }
-            turn_models = TeamTurnModelSelection(
-                team_model_name=budgeted[turn_models.team_model_name],
-                member_model_names={
-                    member: budgeted[model_name] for member, model_name in turn_models.member_model_names.items()
-                },
-            )
         request = await self._prepare_admitted_locked_turn(
             request,
             resolved_target=resolved_target,
@@ -5068,15 +5059,17 @@ class ResponseRunner:
         media_inputs = request.media or MediaInputs()
         session_id = resolved_target.session_id
         resolved_model_prompt = request.model_prompt or request.prompt
-        if active_model_name is None:
-            active_model_name = self.deps.runtime.config.resolve_runtime_model(
-                entity_name=self.deps.agent_name,
-                active_model_name=request.scheduled_model,
+        active_model_name = resolve_turn_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            ModelScope(
+                entity=self.deps.agent_name,
                 room_id=resolved_target.room_id,
                 thread_id=response_thread_id,
-                runtime_paths=self.deps.runtime_paths,
-            ).model_name
-        active_model_name = self._budgeted_model(request, active_model_name)
+                explicit=active_model_name if active_model_name is not None else request.scheduled_model,
+            ),
+            self._turn_budget(request),
+        ).model_name
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             resolved_target,
             user_id=request.user_id,
@@ -5637,7 +5630,7 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
-        runtime_model: ResolvedRuntimeModel,
+        runtime_model: TurnModel,
         thread_id: str | None,
     ) -> str:
         """Let a judge move a thread whose prompt cache went cold to the agent's cheap model."""
@@ -5727,12 +5720,17 @@ class ResponseRunner:
         request = admitted_request
         _approve_continued_reply(participation, request)
         response_thread_id = _response_thread_id(request, resolved_target)
-        runtime_model = self.deps.runtime.config.resolve_runtime_model(
-            entity_name=self.deps.agent_name,
-            active_model_name=request.scheduled_model,
-            room_id=resolved_target.room_id,
-            thread_id=response_thread_id,
-            runtime_paths=self.deps.runtime_paths,
+        # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
+        runtime_model = resolve_turn_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            ModelScope(
+                entity=self.deps.agent_name,
+                room_id=resolved_target.room_id,
+                thread_id=response_thread_id,
+                explicit=request.scheduled_model,
+            ),
+            None,
         )
         prepared_request = await self._prepare_admitted_locked_turn(
             request,

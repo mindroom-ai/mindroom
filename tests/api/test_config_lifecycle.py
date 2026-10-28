@@ -112,6 +112,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
 ) -> None:
     """A structured save must preserve tool selection after the runtime overlay is disabled."""
     payload: dict[str, Any] = {
+        "models": {"default": {"provider": "ollama", "id": "test-model"}},
         "agents": {"research": {"display_name": "Research"}},
         "timezone": "Europe/Paris",
     }

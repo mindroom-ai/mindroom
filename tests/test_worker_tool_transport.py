@@ -46,6 +46,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_worker_routing import _create_routing_agent
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -404,7 +405,7 @@ def _context_agent(
         persist_runtime_state=False,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "routing"),
     )
     return agent, context
 

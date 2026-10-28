@@ -9,8 +9,8 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.teams.members import TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.thread_models import set_thread_model_override
+from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -44,15 +44,13 @@ def _override(config: Config, model_name: str, *entities: str) -> None:
     )
 
 
-def _team_models(config: Config, *, explicit: str | None = None) -> tuple[str, dict[str, str]]:
+def _team_models(config: Config, *, entity: str = "crew", explicit: str | None = None) -> tuple[str, dict[str, str]]:
     selection = resolve_team_turn_models(
-        "crew",
-        ["a", "b"],
-        _ROOM,
         config,
         runtime_paths_for(config),
-        thread_id=_THREAD,
-        active_model_name=explicit,
+        ModelScope(entity=entity, room_id=_ROOM, thread_id=_THREAD, explicit=explicit),
+        ["a", "b"],
+        None,
     )
     assert isinstance(selection, TeamTurnModelSelection)
     return selection.team_model_name, selection.member_model_names
@@ -90,5 +88,4 @@ def test_an_ad_hoc_team_runs_its_hosts_model_without_governing_members(tmp_path:
     """A team an agent hosts runs that agent's model; the host's thread override reaches only the host as a member."""
     config = _config(tmp_path)
     _override(config, "mx", "a")
-    selection = resolve_team_turn_models("a", ["a", "b"], _ROOM, config, runtime_paths_for(config), thread_id=_THREAD)
-    assert (selection.team_model_name, selection.member_model_names) == ("mx", {"a": "mx", "b": "m2"})
+    assert _team_models(config, entity="a") == ("mx", {"a": "mx", "b": "m2"})

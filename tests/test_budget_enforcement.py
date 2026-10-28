@@ -31,9 +31,9 @@ from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
 from mindroom.teams.envelope import PreparedTeamExecution
-from mindroom.teams.members import BuiltTeam, TeamTurnModelSelection
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_model import TeamTurnModelSelection
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.constants import RuntimePaths
+    from mindroom.teams.members import BuiltTeam
 
 
 def _budget(config: Config, *, monthly_limit_usd: float | None = 0) -> None:

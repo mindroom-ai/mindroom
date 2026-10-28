@@ -62,6 +62,7 @@ from tests.tool_job_helpers import (
     toolkit_job_tools,
     wait_for_status,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -571,7 +572,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 execution_identity=owner,
                 persist_runtime_state=False,
                 knowledge=None,
-                active_model_name=None,
+                model=turn_model(config, coordinator.runtime_paths, "lead"),
             )
             assert build.tool_jobs is not None
             tool = build.tool_jobs.tools[function_name]

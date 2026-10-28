@@ -100,6 +100,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_approval_helpers import gated_functions
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -195,14 +196,17 @@ def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) ->
     """Create an agent with the test config's explicit runtime context."""
     from tests.conftest import runtime_paths_for  # noqa: PLC0415
 
+    runtime_paths = runtime_paths_for(config)
     execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
     kwargs.setdefault("supports_native_tool_approval", True)
+    if "model" not in kwargs:
+        kwargs["model"] = turn_model(config, runtime_paths, agent_name)
     return create_agent(
         agent_name,
         config,
-        runtime_paths_for(config),
+        runtime_paths,
         execution_identity=execution_identity,
-        **({"knowledge": None, "active_model_name": None} | kwargs),
+        **({"knowledge": None} | kwargs),
     )
 
 
@@ -220,6 +224,7 @@ def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_pa
                     rooms=["ops"],
                 ),
             },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -236,6 +241,7 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
     config = _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -834,7 +840,7 @@ def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
         execution_identity=identity,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     toolkits = {tool.name: tool for tool in agent.spec.toolkits}
@@ -2683,9 +2689,13 @@ def test_get_agent_summary() -> None:
 
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
+    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+
     config = _test_config()
+    # The turn model names an explicit model, so the build itself is what rejects the unknown agent.
+    model = turn_model(config, runtime_paths_for(config), "unknown", "default")
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
-        _create_agent_for_test("unknown", config=config)
+        _create_agent_for_test("unknown", config=config, model=model)
 
 
 def test_get_agent_uses_storage_path_for_sessions(tmp_path: Path) -> None:
@@ -3845,7 +3855,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
@@ -3859,7 +3869,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     bob_agent = create_agent(
@@ -3868,7 +3878,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         runtime_paths=runtime_paths,
         execution_identity=bob_identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
@@ -3922,7 +3932,7 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
         runtime_paths=runtime_paths,
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     assert "Template user." not in _role(agent)
@@ -3966,7 +3976,7 @@ def test_create_agent_loads_private_workspace_skills(
         runtime_paths=runtime_paths,
         execution_identity=identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     assert agent.prompt.skills_block is not None
@@ -3992,7 +4002,7 @@ def test_create_agent_private_root_requires_execution_identity(
             runtime_paths=_runtime_paths(tmp_path),
             execution_identity=None,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, _runtime_paths(tmp_path), "general"),
         )
 
     assert not (tmp_path / "mind_data").exists()
@@ -4307,7 +4317,7 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
             execution_identity=None,
             disable_runtime_capabilities=True,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths, "general"),
         )
 
     assert built_tools == []
@@ -4361,7 +4371,7 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "general"),
     )
 
     assert agent.spec.toolkits == ()
@@ -5495,7 +5505,7 @@ def test_team_member_matches_solo_agent_construction() -> None:
         runtime_paths,
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "calculator"),
     )
     [member] = materialize_exact_team_members(
         ["calculator"],
@@ -5503,7 +5513,7 @@ def test_team_member_matches_solo_agent_construction() -> None:
         runtime_paths=runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={"calculator": turn_model(config, runtime_paths, "calculator").model_name},
     ).builds
     assert member.prompt.role == solo.prompt.role
     assert (member.spec.id, member.spec.name) == (solo.spec.id, solo.spec.name)

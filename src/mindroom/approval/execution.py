@@ -56,6 +56,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
+    from mindroom.turn_model import TurnModel
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,21 @@ async def _persisted_events(persisted: RunRecord) -> AsyncIterator[RunEvent]:
     yield RunFinished(persisted)
 
 
+def _continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
+    """Return the model a paused agent run resumes on: the one it ran, else the one its room and thread choose now."""
+    return resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=continuation.entity_name,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            explicit=continuation.runtime_model_name,
+        ),
+        None,
+    )
+
+
 async def _continue_persisted_agent(
     build: AgentBuild,
     continuation: ApprovalContinuation,
@@ -184,7 +201,7 @@ async def _continue_persisted_agent(
     A run the delegation driver owns resumes through it with the decisions on its children's calls; any other run
     resumes with the decisions on its own calls, and the driver continues it if it pauses on a delegation.
     """
-    model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
+    model_name = _continuation_model(config, runtime_paths, continuation).model_name
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -458,7 +475,7 @@ class AgentApprovalExecution:
             self.runtime_paths,
             execution_identity,
             history_storage=store,
-            active_model_name=continuation.runtime_model_name,
+            model=_continuation_model(config, self.runtime_paths, continuation),
             knowledge=knowledge,
             refresh_scheduler=self.refresh_scheduler(),
             supports_native_tool_approval=True,

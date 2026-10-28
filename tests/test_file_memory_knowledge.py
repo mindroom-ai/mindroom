@@ -39,7 +39,6 @@ def test_memory_and_agent_resolvers_share_base_and_index_identity(tmp_path: Path
     config = bind_runtime_paths(
         Config(
             agents={"alpha": AgentConfig(display_name="Alpha")},
-            models={},
             memory={
                 "backend": "file",
                 "search": {
@@ -99,7 +98,6 @@ def test_agent_resolver_returns_none_for_non_agent_before_runtime_resolution(
     config = bind_runtime_paths(
         Config(
             agents={"alpha": AgentConfig(display_name="Alpha")},
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,
@@ -138,7 +136,6 @@ def test_agent_resolver_requires_file_backend_and_semantic_mode(
     config = bind_runtime_paths(
         Config(
             agents={"alpha": AgentConfig(display_name="Alpha")},
-            models={},
             memory={"backend": backend, "search": {"mode": mode}},
         ),
         runtime_paths,
@@ -166,7 +163,6 @@ def test_private_agent_resolver_fails_closed_and_scopes_requesters(tmp_path: Pat
                     private=AgentPrivateConfig(per="user", root="mind_data"),
                 ),
             },
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,

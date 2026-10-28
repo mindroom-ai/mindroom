@@ -60,6 +60,7 @@ from tests.history_helpers import (
     seed_summary,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -130,7 +131,7 @@ def test_create_agent_replays_the_configured_number_of_runs(tmp_path: Path) -> N
         execution_identity=None,
         include_interactive_questions=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "test_agent"),
     )
 
     assert build.history_settings.policy == HistoryPolicy(mode="runs", limit=2)
@@ -185,7 +186,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Prov
         config,
         runtime_paths,
         execution_identity=None,
-        active_model_name="large",
+        model=turn_model(config, runtime_paths, "test_agent", "large"),
         include_interactive_questions=False,
         knowledge=None,
     )

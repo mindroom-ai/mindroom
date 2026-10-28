@@ -66,6 +66,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -489,11 +490,16 @@ def _build_room_agent_participant(
     session_id: str,
 ) -> tuple[ToolRuntimeContext, AgentBuild]:
     """Resolve a room agent's model and build it; both walk the filesystem, so callers run this off the event loop."""
-    active_model_name = _budgeted_model(context, _runtime_model_name(context, agent_name))
+    model = resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        _participant_scope(context, agent_name),
+        TurnBudget(monitor=context.budget_monitor, requester_id=context.requester_id),
+    )
     participant_context = replace(
         context,
         agent_name=agent_name,
-        active_model_name=active_model_name,
+        active_model_name=model.model_name,
         target=replace(context.target, session_id=session_id),
     )
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
@@ -506,7 +512,7 @@ def _build_room_agent_participant(
         execution_identity=build_execution_identity_from_runtime_context(participant_context),
         hook_registry=context.hook_registry,
         knowledge=None,
-        active_model_name=active_model_name,
+        model=model,
         include_interactive_questions=False,
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
@@ -980,33 +986,33 @@ def _validate_workflow_policy_for_context(
     return requests
 
 
-def _budgeted_model(context: ToolRuntimeContext, model_name: str, *, log_fallback: bool = True) -> str:
-    return budget_model(
-        context.config,
-        context.runtime_paths,
-        context.budget_monitor,
-        context.requester_id,
-        model_name,
-        log_fallback=log_fallback,
-    )
-
-
 def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
     """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
     substitutes = {
-        _budgeted_model(context, model_name, log_fallback=False)
+        budget_model(
+            context.config,
+            context.runtime_paths,
+            context.budget_monitor,
+            context.requester_id,
+            model_name,
+            log_fallback=False,
+        )
         for model_name in context.config.models
         if not _model_refs(context, model_name).isdisjoint(model_refs)
     }
     return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
 
 
+def _participant_scope(context: ToolRuntimeContext, agent_name: str) -> ModelScope:
+    return ModelScope(entity=agent_name, room_id=context.room_id, thread_id=context.resolved_thread_id)
+
+
 def _runtime_model_name(context: ToolRuntimeContext, agent_name: str) -> str:
-    return context.config.resolve_runtime_model(
-        entity_name=agent_name,
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-        runtime_paths=context.runtime_paths,
+    return resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        _participant_scope(context, agent_name),
+        None,
     ).model_name
 
 

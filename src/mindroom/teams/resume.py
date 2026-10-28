@@ -50,6 +50,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -337,7 +338,20 @@ async def continue_paused_team_run(
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
-            active_model_names=member_model_names,
+            # A continuation saved before member models were recorded resolves them by the team rule now.
+            active_model_names=member_model_names
+            if member_model_names is not None
+            else resolve_team_turn_models(
+                config,
+                runtime_paths,
+                ModelScope(
+                    entity=configured_team_name,
+                    room_id=execution_identity.room_id,
+                    thread_id=execution_identity.resolved_thread_id,
+                ),
+                list(member_names),
+                None,
+            ).member_model_names,
             required_tool_names={name: task.result() for name, task in required_tool_tasks.items()},
         )
         if team_name is None:

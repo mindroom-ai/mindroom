@@ -15,7 +15,6 @@ import hashlib
 import time
 import weakref
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -57,7 +56,6 @@ from mindroom.api.openai_streaming_protocol import (
 )
 from mindroom.api.response_activity import track_openai_request
 from mindroom.authorization import is_sender_allowed_for_responder
-from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.helper_usage import helper_usage_context
@@ -76,7 +74,6 @@ from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
 from mindroom.teams.members import (
     BuiltTeam,
-    TeamTurnModelSelection,
     build_team_spec,
     materialize_exact_team_members,
 )
@@ -91,9 +88,16 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
     tool_execution_identity,
 )
+from mindroom.turn_model import (
+    ModelScope,
+    TeamTurnModelSelection,
+    TurnBudget,
+    resolve_team_turn_models,
+    resolve_turn_model,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
     from mindroom.api.openai_request_parsing import ChatCompletionRequest
     from mindroom.api.openai_streaming_protocol import ToolStreamState
@@ -695,7 +699,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
     )
     knowledge_refresh_scheduler = config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
     budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
-    budget = partial(budget_model, config, runtime_paths, budget_monitor, execution_identity.requester_id)
+    budget = TurnBudget(monitor=budget_monitor, requester_id=execution_identity.requester_id)
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
@@ -707,7 +711,14 @@ async def _chat_completions(  # noqa: C901, PLR0912
         # Team execution path
         if agent_name.startswith(TEAM_MODEL_PREFIX):
             team_name = agent_name.removeprefix(TEAM_MODEL_PREFIX)
-            team_models = _openai_team_models(team_name, config, budget)
+            # No room or thread: the team and each member run their authored models, under the requester's budget.
+            team_models = resolve_team_turn_models(
+                config,
+                runtime_paths,
+                ModelScope(entity=team_name),
+                config.teams[team_name].agents,
+                budget,
+            )
             if req.stream:
                 response: JSONResponse | StreamingResponse = await _stream_team_completion(
                     team_name,
@@ -753,7 +764,7 @@ async def _chat_completions(  # noqa: C901, PLR0912
                 knowledge = knowledge_resolution.knowledge
                 unavailable_bases = dict(knowledge_resolution.unavailable)
             prompt = prepend_knowledge_availability_notice(prompt, unavailable_bases)
-            model_name = budget(config.resolve_runtime_model(entity_name=agent_name).model_name)
+            model_name = resolve_turn_model(config, runtime_paths, ModelScope(entity=agent_name), budget).model_name
             if req.stream:
                 response = await _stream_completion(
                     agent_name,
@@ -962,17 +973,6 @@ async def _stream_completion(
 # ---------------------------------------------------------------------------
 
 
-def _openai_team_models(team_name: str, config: Config, budget: Callable[[str], str]) -> TeamTurnModelSelection:
-    """Freeze the coordinator and member models of one team completion under the requester's budget."""
-    team_config = config.teams[team_name]
-    return TeamTurnModelSelection(
-        team_model_name=budget(team_config.model or "default"),
-        member_model_names={
-            member: budget(config.resolve_runtime_model(entity_name=member).model_name) for member in team_config.agents
-        },
-    )
-
-
 def _build_team(
     team_name: str,
     config: Config,
@@ -1037,7 +1037,12 @@ async def _prepare_openai_team_execution(
         thread_history=thread_history,
         config=config,
         runtime_paths=runtime_paths,
-        runtime_model=config.resolve_runtime_model(entity_name=team_name, active_model_name=team_model_name),
+        runtime_model=resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=team_name, explicit=team_model_name),
+            None,
+        ),
         response_sender_id=None,
         current_sender_id=None,
         configured_team_name=team_name,

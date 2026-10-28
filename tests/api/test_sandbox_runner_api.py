@@ -1752,7 +1752,7 @@ def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         (
-            "models: {}\n"
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
             "agents:\n"
             "  admin:\n"
             "    display_name: Admin\n"
@@ -2126,6 +2126,7 @@ def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
 
     def write_config(label: str) -> None:
         config_path.write_text(
+            "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
             "agents:\n"
             "  unrelated:\n"
             "    display_name: Unrelated\n"
@@ -3160,7 +3161,8 @@ def test_sandbox_runner_enforces_snapshot_agent_file_access_over_seed(
     """The primary's snapshot decides the agent's settings, so a stale seed cannot widen them."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "models: {}\nagents:\n  mind:\n    display_name: Mind\n    file_access: unrestricted\n",
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
+        "agents:\n  mind:\n    display_name: Mind\n    file_access: unrestricted\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
@@ -5291,6 +5293,7 @@ def test_dedicated_worker_reports_an_agent_workspace_its_pod_does_not_mount(
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(shared_root))
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_MODE", "true")
     _refresh_runner_app_from_env()
 
     request = {

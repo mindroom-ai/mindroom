@@ -37,6 +37,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -115,7 +116,7 @@ def _build(config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> AgentB
         config,
         runtime_paths,
         identity,
-        **({"knowledge": None, "active_model_name": None} | kwargs),
+        **({"knowledge": None, "model": turn_model(config, runtime_paths, "assistant")} | kwargs),
     )
 
 
@@ -608,7 +609,7 @@ def test_matrix_message_guidance_reaches_the_prompt_only_with_the_matrix_message
         runtime_paths,
         identity,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, "assistant"),
         persist_runtime_state=False,
         tool_function_filter=call_filter if realtime_call else None,
         # Chat asks for the approval; the realtime call builds as build_call_tools does.

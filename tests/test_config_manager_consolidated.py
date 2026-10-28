@@ -159,6 +159,7 @@ def test_membership_config_mutations_require_platform_administrator(
     config = Config.model_validate(
         {
             "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "talent": {
                     "display_name": "Talent",
@@ -198,6 +199,7 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     config = Config.model_validate(
         {
             "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "talent": {
                     "display_name": "Talent",
@@ -240,6 +242,7 @@ def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) 
         Config.model_validate(
             {
                 "administrators": ["@admin:example.org"],
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
             },
         ),
@@ -773,7 +776,7 @@ class TestConsolidatedConfigManager:
         """Initialization should preserve the explicitly provided config path."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test"] = AgentConfig(
                 display_name="Test Agent",
                 role="Test role",
@@ -794,7 +797,7 @@ class TestConsolidatedConfigManager:
         """Test get_info with agents info type."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test"] = AgentConfig(
                 display_name="Test Agent",
                 role="Test role",
@@ -921,6 +924,7 @@ class TestConsolidatedConfigManager:
                     "agent2": AgentConfig(display_name="Agent Two"),
                 },
                 teams={},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             )
             config.teams["test_team"] = TeamConfig(
                 display_name="Test Team",
@@ -1036,7 +1040,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with create operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             write_config_yaml(config, config_path)
 
         try:
@@ -1065,6 +1069,7 @@ class TestConsolidatedConfigManager:
         write_config_yaml(
             Config(
                 agents={"agent1": AgentConfig(display_name="Agent 1", role="Original")},
+                models={"default": {"provider": "openai", "id": "test-model"}},
             ),
             config_path,
         )
@@ -1460,7 +1465,7 @@ class TestConsolidatedConfigManager:
         """Agent create should accept preset entries in tools."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             write_config_yaml(config, config_path)
 
         try:
@@ -1601,7 +1606,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with update operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test_agent"] = AgentConfig(
                 display_name="Old Name",
                 role="Old role",
@@ -1629,6 +1634,7 @@ class TestConsolidatedConfigManager:
         """Mixed string and mapping syntax should normalize and merge defaults with agent overrides."""
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "defaults": {
                     "tools": [
                         "scheduler",
@@ -1663,6 +1669,7 @@ class TestConsolidatedConfigManager:
         """A per-agent sentinel should remove an inherited required override and fall back to lower layers."""
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "defaults": {
                     "tools": [
                         {"clickup": {"master_space_id": "space-default"}},
@@ -1736,6 +1743,7 @@ class TestConsolidatedConfigManager:
     ) -> None:
         """The runtime overlay adds egress without changing default-tool inheritance."""
         data: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "agents": {
                 "assistant": {"display_name": "Assistant"},
                 "standalone": {"display_name": "Standalone", "include_default_tools": False},
@@ -1839,6 +1847,7 @@ class TestConsolidatedConfigManager:
         """Saving and reloading should preserve inline override entries for defaults and agents."""
         config_path = tmp_path / "config.yaml"
         config = Config(
+            models={"default": {"provider": "openai", "id": "test-model"}},
             defaults=DefaultsConfig(
                 tools=[
                     "scheduler",
@@ -1880,6 +1889,7 @@ class TestConsolidatedConfigManager:
         """Only explicit tool entries should carry overrides after preset expansion."""
         config = Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "code": {
                         "display_name": "Code",
@@ -1904,6 +1914,7 @@ class TestConsolidatedConfigManager:
         """String-only tool updates should keep overrides for retained tools."""
         config_path = tmp_path / "config.yaml"
         config = Config(
+            models={"default": {"provider": "openai", "id": "test-model"}},
             agents={
                 "code": AgentConfig(
                     display_name="Code",
@@ -1947,6 +1958,7 @@ class TestConsolidatedConfigManager:
         with pytest.raises(ValueError, match=r"Unknown tool 'does_not_exist'") as exc_info:
             Config.validate_with_runtime(
                 {
+                    "models": {"default": {"provider": "openai", "id": "test-model"}},
                     "agents": {
                         "code": {
                             "display_name": "Code",
@@ -1983,6 +1995,7 @@ class TestConsolidatedConfigManager:
             config_path = Path(f.name)
             config = Config(
                 agents={},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 knowledge_bases={
                     "docs": KnowledgeBaseConfig(path="./docs"),
                 },
@@ -2014,6 +2027,7 @@ class TestConsolidatedConfigManager:
             config_path = Path(f.name)
             config = Config(
                 agents={},
+                models={"default": {"provider": "openai", "id": "test-model"}},
                 knowledge_bases={
                     "docs": KnowledgeBaseConfig(path="./docs"),
                 },
@@ -2043,7 +2057,7 @@ class TestConsolidatedConfigManager:
         """Test manage_agent with validate operation."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={})
+            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
             config.agents["test_agent"] = AgentConfig(
                 display_name="Test Agent",
                 role="Test role",
@@ -2075,7 +2089,10 @@ class TestConsolidatedConfigManager:
         """Regression: memory tool must be accepted in create/update/validate."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            write_config_yaml(Config(agents={}), config_path)
+            write_config_yaml(
+                Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}}),
+                config_path,
+            )
 
         try:
             cm = _config_manager(config_path)
@@ -2114,7 +2131,7 @@ class TestConsolidatedConfigManager:
         """Test manage_team tool."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_path = Path(f.name)
-            config = Config(agents={}, teams={})
+            config = Config(agents={}, teams={}, models={"default": {"provider": "openai", "id": "test-model"}})
             # Add agents that the team will reference
             config.agents["agent1"] = AgentConfig(
                 display_name="Agent 1",

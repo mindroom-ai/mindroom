@@ -173,7 +173,7 @@ async def test_reload_drains_active_responses_before_applying(
     assert gate.closed is False
 
 
-_AGENT1_YAML = "agents:\n  agent1:\n    display_name: Agent 1\n"
+_AGENT1_YAML = "models:\n  default: {provider: openai, id: test-model}\nagents:\n  agent1:\n    display_name: Agent 1\n"
 
 
 @pytest.mark.asyncio

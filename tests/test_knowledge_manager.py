@@ -242,7 +242,6 @@ def _file_memory_config(tmp_path: Path, *agent_names: str) -> Config:
     return bind_runtime_paths(
         Config(
             agents={name: AgentConfig(display_name=name.title()) for name in agent_names},
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,
@@ -328,7 +327,6 @@ async def test_only_bases_whose_files_workers_write_limit_the_vectors_a_search_l
                 "docs": KnowledgeBaseConfig(path=str(docs), watch=False),
                 "exports": KnowledgeBaseConfig(path=str(exports), watch=False),
             },
-            models={},
             memory={"backend": "file", "search": {"mode": "semantic"}},
         ),
         runtime_paths,
@@ -708,7 +706,6 @@ async def test_knowledge_binding_failure_is_not_reported_as_initializing(tmp_pat
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
@@ -3364,7 +3361,6 @@ def test_config_allows_exact_duplicate_local_roots_with_different_filters(tmp_pa
                     knowledge_bases=["markdown", "python"],
                 ),
             },
-            models={},
             knowledge_bases={
                 "markdown": KnowledgeBaseConfig(path=str(docs), include_extensions=[".md"]),
                 "python": KnowledgeBaseConfig(path=str(docs), include_extensions=[".py"]),
@@ -3758,7 +3754,6 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
@@ -3844,7 +3839,6 @@ async def test_private_git_updated_refresh_preserves_execution_identity(
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
@@ -6917,7 +6911,7 @@ async def test_subprocess_refresh_tolerates_broken_unused_plugin(tmp_path: Path)
     config = Config.validate_with_runtime(
         {
             "agents": {"helper": {"display_name": "Helper", "knowledge_bases": ["docs"]}},
-            "models": {},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "plugins": ["./plugins/broken"],
             "knowledge_bases": {"docs": {"path": str(docs_path)}},
         },
@@ -7954,7 +7948,6 @@ def test_shared_knowledge_path_named_memory_stays_config_relative(tmp_path: Path
                     knowledge_bases=["daily_memory"],
                 ),
             },
-            models={},
             knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
             memory={"backend": "file", "file": {"path": "./memory"}},
         ),
@@ -7998,7 +7991,6 @@ def test_shared_relative_knowledge_base_keeps_non_memory_path_config_relative(tm
                 knowledge_bases=["docs"],
             ),
         },
-        models={},
         knowledge_bases={"docs": KnowledgeBaseConfig(path="./knowledge_docs")},
         memory={"backend": "file", "file": {"path": "./memory"}},
     )
@@ -8026,7 +8018,6 @@ def test_shared_literal_dollar_path_stays_config_relative(tmp_path: Path) -> Non
                 knowledge_bases=["daily_memory"],
             ),
         },
-        models={},
         knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./notes$archive")},
         memory={"backend": "file", "file": {"path": "./notes$archive"}},
     )
@@ -8054,7 +8045,6 @@ def test_file_memory_agent_without_configured_file_path_keeps_shared_base_config
                 knowledge_bases=["daily_memory"],
             ),
         },
-        models={},
         knowledge_bases={"daily_memory": KnowledgeBaseConfig(path="./memory")},
         memory={"backend": "mem0"},
     )
@@ -8087,7 +8077,6 @@ async def test_private_agent_knowledge_publishes_isolated_indexes(tmp_path: Path
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
@@ -8160,7 +8149,6 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
@@ -8233,7 +8221,6 @@ def test_private_agent_knowledge_bookkeeping_is_bounded(tmp_path: Path, monkeypa
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )
@@ -8311,7 +8298,6 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
                     ),
                 ),
             },
-            models={},
         ),
         runtime_paths,
     )

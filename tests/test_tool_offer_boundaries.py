@@ -29,6 +29,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot, locally_allowed
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_tool_offer import _identity, _runtime_paths
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,7 +84,15 @@ def _config(tmp_path: Path, agent: dict[str, Any]) -> tuple[Config, RuntimePaths
 
 def _build(tmp_path: Path, agent: dict[str, Any], identity: str = "room", **options: Any) -> AgentBuild:  # noqa: ANN401
     config, paths = _config(tmp_path, agent)
-    return create_agent("code", config, paths, _IDENTITIES[identity], knowledge=None, active_model_name=None, **options)
+    return create_agent(
+        "code",
+        config,
+        paths,
+        _IDENTITIES[identity],
+        knowledge=None,
+        model=turn_model(config, paths, "code"),
+        **options,
+    )
 
 
 def _offered(build: AgentBuild) -> str:

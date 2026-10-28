@@ -43,6 +43,7 @@ from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_text_tokens
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -1009,7 +1010,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
     assert decision.reason == "history_exceeds_hard_budget"
 
 
-def test_resolve_runtime_model_uses_room_override_for_team(
+def test_resolve_turn_model_uses_room_override_for_team(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1036,17 +1037,18 @@ def test_resolve_runtime_model_uses_room_override_for_team(
     )
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="team_123",
-        room_id="!room:localhost",
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="team_123", room_id="!room:localhost"),
+        None,
     )
 
     assert runtime_model.model_name == "large"
     assert runtime_model.context_window == 32_000
 
 
-def test_resolve_runtime_model_uses_room_override_for_agent(
+def test_resolve_turn_model_uses_room_override_for_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1065,10 +1067,11 @@ def test_resolve_runtime_model_uses_room_override_for_agent(
     )
     monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id="!room:localhost",
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id="!room:localhost"),
+        None,
     )
 
     assert runtime_model.model_name == "large"

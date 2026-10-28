@@ -59,6 +59,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
+from tests.turn_model_helpers import turn_model
 
 
 def _function_names(build) -> list[str]:
@@ -135,7 +136,7 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         None,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime, "helper"),
     )
     minimal = agents.create_agent(
         "helper",
@@ -145,7 +146,7 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         persist_runtime_state=False,
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime, "helper"),
     )
     assert standard.surface.mode == "standard"
     assert standard.surface.minimal_instructions == ()
@@ -176,7 +177,7 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
         persist_runtime_state=False,
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime, "helper"),
     )
 
     functions = {function.name: function for toolkit in minimal.spec.toolkits for function in toolkit.functions}
@@ -225,7 +226,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
             persist_runtime_state=False,
             delegation_depth=delegation_depth,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
 
     message = get_user_friendly_error_message(raised.value, "helper")
@@ -241,7 +242,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         identity,
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     functions = _function_names(standard)
     assert "run_shell_command" in functions
@@ -283,7 +284,7 @@ def test_context_files_remain_complete_and_notes_untouched(
         persist_runtime_state=False,
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime, "helper"),
     )
     turn = _turn(minimal)
     system = system_text(turn.system_messages)
@@ -362,7 +363,7 @@ async def test_minimal_attempt_requires_managed_owner(tmp_path: Path) -> None:
         agent_mode="minimal",
         persist_runtime_state=False,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="response owner"):
         await _attempt(build, runtime, _session(runtime))
@@ -413,7 +414,7 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
         build_execution_identity_from_runtime_context(context),
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(context.config, context.runtime_paths, "helper"),
     )
     with tool_runtime_context(context):
         async with response_cli_lifetime() as lifetime:
@@ -488,7 +489,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             identity,
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
         )
 
     def stored_runs(build):
@@ -561,7 +562,7 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
         identity,
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
@@ -651,7 +652,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     session = _session(runtime)
     with tool_runtime_context(runtime):
@@ -895,7 +896,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
         build_execution_identity_from_runtime_context(runtime),
         agent_mode="minimal",
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
     )
     assert _function_names(presented_build(build)) == ["bash"]
     with tool_runtime_context(runtime):

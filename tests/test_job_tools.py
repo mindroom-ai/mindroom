@@ -48,6 +48,7 @@ from tests.tool_job_helpers import (
     toolkit_job_tools,
     wait_for_status,
 )
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -110,7 +111,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                     persist_runtime_state=False,
                     tool_function_filter=lambda function: function.name != "job",
                     knowledge=None,
-                    active_model_name=None,
+                    model=turn_model(config, paths, "leader"),
                 )
                 assert build.spec.functions["job"].toolkit == "job"
             else:
@@ -122,7 +123,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                         execution_identity=owner,
                         persist_runtime_state=False,
                         knowledge=None,
-                        active_model_name=None,
+                        model=turn_model(config, paths, "leader"),
                     )
     finally:
         await runtime.shutdown()
@@ -193,7 +194,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
             execution_identity=owner,
             persist_runtime_state=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, paths, "leader"),
         )
         names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1

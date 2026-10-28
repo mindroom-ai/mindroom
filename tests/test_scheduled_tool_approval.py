@@ -24,6 +24,7 @@ from mindroom.approval.tool_approval import ToolApprovalTransportError, schedule
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
 from mindroom.entity_resolution import entity_identity_registry
@@ -90,6 +91,7 @@ from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
 from tests.tool_approval_helpers import gated_functions
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1020,6 +1022,7 @@ def _gated_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1274,6 +1277,7 @@ async def test_schedule_tool_call_refuses_a_team() -> None:
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1373,7 +1377,12 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     config = (
         _gated_config()
         if gated
-        else _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+        else _bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
+        )
     )
     context = _tool_context(config, thread_id=thread_id)
     request = AsyncMock(return_value=True)
@@ -1953,6 +1962,7 @@ def _code_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={_AGENT: AgentConfig(display_name="Code Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -2134,7 +2144,7 @@ def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: st
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), agent_name),
     )
 
 
@@ -2178,7 +2188,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), _AGENT),
     )
 
     functions = build.spec.functions

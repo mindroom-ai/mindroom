@@ -537,7 +537,7 @@ class TeamConfig(BaseModel):
             "invites from matching inviter Matrix IDs or glob patterns"
         ),
     )
-    model: str | None = Field(
+    model: str = Field(
         default="default",
         description="Configured model alias used for this team's replies",
         json_schema_extra=dashboard_hint(reference="model"),

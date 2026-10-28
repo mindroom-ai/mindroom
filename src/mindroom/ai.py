@@ -107,6 +107,7 @@ from mindroom.tool_system.events import (
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
+from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -116,7 +117,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.ai_turn_state import AITurnState
     from mindroom.approval.resume import ResumeDecisions
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
     from mindroom.history.request_messages import TurnMessages
@@ -988,18 +989,17 @@ async def _prepare_agent_and_prompt(
     """
     agent_name = ctx.entity_label
 
-    def _resolve_model_and_build_agent() -> tuple[ResolvedRuntimeModel, AgentBuild]:
+    def _resolve_model_and_build_agent() -> tuple[TurnModel, AgentBuild]:
         """Resolve the runtime model and build the agent off the event loop (#1260).
 
         Both walk the filesystem per dispatch: thread-model overrides, workspace
         scaffolding, context-file reads, and session storage opens.
         """
-        runtime_model = config.resolve_runtime_model(
-            entity_name=agent_name,
-            active_model_name=ctx.active_model_name,
-            room_id=ctx.room_id,
-            thread_id=ctx.thread_id,
-            runtime_paths=runtime_paths,
+        runtime_model = resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity=agent_name, room_id=ctx.room_id, thread_id=ctx.thread_id, explicit=ctx.active_model_name),
+            None,
         )
         build = reusable_build
         if build is None:
@@ -1008,7 +1008,7 @@ async def _prepare_agent_and_prompt(
                 config,
                 runtime_paths,
                 history_storage=scope_context.storage if scope_context is not None else None,
-                active_model_name=runtime_model.model_name,
+                model=runtime_model,
                 knowledge=knowledge,
                 include_interactive_questions=include_interactive_questions,
                 tool_function_filter=tool_function_filter,

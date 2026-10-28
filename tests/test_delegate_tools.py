@@ -40,6 +40,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -592,7 +593,7 @@ class TestDelegateKnowledge:
             include_interactive_questions=False,
             refresh_scheduler=_FakeRefreshScheduler(),
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "leader"),
         )
         run_subagent = next(
             function
@@ -994,7 +995,7 @@ class TestDelegateAutoInjection:
             execution_identity=None,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "leader"),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" in tool_names
@@ -1014,7 +1015,7 @@ class TestDelegateAutoInjection:
             execution_identity=None,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "worker"),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1040,7 +1041,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "leader"),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1064,7 +1065,7 @@ class TestDelegateAutoInjection:
             execution_identity=None,
             include_interactive_questions=False,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "leader"),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1091,7 +1092,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "leader"),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1119,7 +1120,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             delegation_depth=MAX_DELEGATION_DEPTH,
             knowledge=None,
-            active_model_name=None,
+            model=turn_model(config, runtime_paths_for(config), "leader"),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names

@@ -10,6 +10,7 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import first_scope_session, set_force_compaction
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -39,11 +40,11 @@ async def request_compaction_before_next_reply(
     """
     # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
     entity_name = scope.scope_id if scope.kind == "agent" else config.configured_team_name(scope.scope_id)
-    runtime_model = config.resolve_runtime_model(
-        entity_name=entity_name,
-        active_model_name=active_model_name,
-        room_id=room_id,
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity=entity_name, room_id=room_id, explicit=active_model_name),
+        None,
     )
     execution_plan = resolve_history_execution_plan(
         config=config,

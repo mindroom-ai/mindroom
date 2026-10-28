@@ -63,6 +63,7 @@ from tests.team_turn_helpers import (
     squad_turn,
 )
 from tests.teams.squad import start_team
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.llm.provider import ModelRequest
@@ -110,7 +111,7 @@ def _build_pair(
         runtime_paths=runtime_paths,
         execution_identity=None,
         refresh_scheduler=None,
-        active_model_names=None,
+        active_model_names={name: turn_model(config, runtime_paths, name).model_name for name in ("zeta", "alpha")},
     )
     assert members.failed_agent_names == []
     return build_team_spec(
@@ -242,7 +243,7 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         thread_history=None,
         config=config,
         runtime_paths=runtime_paths,
-        runtime_model=config.resolve_runtime_model(entity_name="pair", active_model_name="default"),
+        runtime_model=turn_model(config, runtime_paths, "pair", "default"),
         response_sender_id=None,
         current_sender_id=None,
         configured_team_name="pair",

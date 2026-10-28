@@ -60,6 +60,7 @@ from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _toolkit
 from tests.test_compact_context import _make_config
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -580,7 +581,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 history_storage=catalog.store,
                 supports_native_tool_approval=True,
                 knowledge=None,
-                active_model_name=None,
+                model=turn_model(config, paths, "helper"),
             )
 
             async def authorize_binding(binding):

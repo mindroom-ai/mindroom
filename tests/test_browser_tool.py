@@ -2425,6 +2425,7 @@ async def test_agent_browser_profiles_live_in_each_agent_state_root(
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "agents": {
                 "research": {"display_name": "Research", "role": "Browse", "tools": ["browser"]},
@@ -2481,6 +2482,7 @@ def test_agent_browser_artifacts_are_uploadable_only_by_their_agent(tmp_path: Pa
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "defaults": {"tools": []},
             "agents": {
                 "research": {"display_name": "Research", "role": "Browse", "tools": ["browser"]},

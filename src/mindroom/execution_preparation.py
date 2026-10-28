@@ -62,13 +62,14 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.attachments.storage import AttachmentRecord
-    from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.config.main import Config
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ResolvedHistorySettings
     from mindroom.llm.provider import ModelProvider, ToolSpec
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.turn_model import TurnModel
 
 logger = get_logger(__name__)
 
@@ -830,7 +831,7 @@ async def prepare_agent_execution_context(
     thread_history: Sequence[ResolvedVisibleMessage] | None,
     runtime_paths: RuntimePaths,
     config: Config,
-    resolved_runtime_model: ResolvedRuntimeModel,
+    resolved_runtime_model: TurnModel,
     compaction_lifecycle: CompactionLifecycle | None,
     current_sender_id: str | None,
     current_timestamp_ms: float | None,
@@ -861,6 +862,7 @@ async def prepare_agent_execution_context(
     ) -> PreparedScopeHistory:
         resolved_inputs = resolve_entity_preparation_inputs(
             config=config,
+            runtime_paths=runtime_paths,
             entity_name=agent_name,
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,

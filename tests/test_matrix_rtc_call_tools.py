@@ -74,6 +74,7 @@ from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import replay_settings
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -323,7 +324,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         None,
         supports_native_tool_approval=True,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths, AGENT),
     )
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)
@@ -1180,7 +1181,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     assert finalize is not None
     await finalize
 
-    assert create_agent_mock.call_args.kwargs["active_model_name"] == expected_model_name
+    assert create_agent_mock.call_args.kwargs["model"].model_name == expected_model_name
     run_metadata = persisted_interruptions[0]["run_metadata"]
     assert isinstance(run_metadata, dict)
     payload = run_metadata[AI_RUN_METADATA_KEY]
@@ -1478,7 +1479,7 @@ async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_cross
 
     assert ai_models == ["large", "cheap"]
     assert turn_models == ["large", "cheap"]
-    assert [call.kwargs["active_model_name"] for call in create_agent_mock.call_args_list] == ["large", "cheap"]
+    assert [call.kwargs["model"].model_name for call in create_agent_mock.call_args_list] == ["large", "cheap"]
     assert tooling.close is not None
     await tooling.close()
 
@@ -1746,7 +1747,7 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
         authorize_operation=_authorized_call_operation,
     )
 
-    assert create_agent_mock.call_args.kwargs["active_model_name"] == "cheap"
+    assert create_agent_mock.call_args.kwargs["model"].model_name == "cheap"
     assert await tooling.tools[0]({"prompt": "fix it"}) == "done: fix it"
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
     assert [(user.user_id, user.totals.input_tokens) for user in report.user_breakdown] == [(REQUESTER, 100)]

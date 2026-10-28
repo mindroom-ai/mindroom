@@ -74,6 +74,7 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
 def _config(tmp_path: Path) -> Config:
     return Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -95,6 +96,7 @@ def _config(tmp_path: Path) -> Config:
 def _oauth_config(tmp_path: Path) -> Config:
     return Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "streamable-http",
@@ -197,6 +199,7 @@ def test_sync_mcp_tool_registry_removes_deleted_servers(tmp_path: Path) -> None:
     sync_mcp_tool_registry(
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "code": {
                         "display_name": "Code",
@@ -234,6 +237,7 @@ def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path
     sync_mcp_tool_registry(
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "code": {
                         "display_name": "Code",
@@ -318,6 +322,7 @@ def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -
     with pytest.raises(ConfigRuntimeValidationError, match="conflicts with an existing registered tool"):
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "plugins": ["./plugins/demo"],
                 "mcp_servers": {
                     "demo": {
@@ -367,6 +372,7 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
 
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "plugins": ["./plugins/demo"],
             "agents": {
                 "code": {
@@ -440,6 +446,7 @@ def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path
     """A failed required MCP server keeps the old hard-fail toolkit behavior."""
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",

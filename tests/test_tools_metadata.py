@@ -2274,6 +2274,7 @@ def test_config_load_rejects_a_retired_add_instructions_setting(tmp_path: Path) 
     with pytest.raises(ConfigRuntimeValidationError) as exc_info:
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "agents": {
                     "researcher": {
                         "display_name": "Researcher",

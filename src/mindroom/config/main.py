@@ -119,9 +119,8 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
-from mindroom.room_model_overrides import resolve_room_model_override
 from mindroom.room_thread_modes import resolve_room_thread_mode_override
-from mindroom.thread_models import resolve_thread_model_override
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
 from mindroom.workspaces import control_plane_owns_private_templates, validate_workspace_template_dir
@@ -249,16 +248,6 @@ def format_invalid_config_message(
     if footer:
         response = f"{response}\n\n{footer}"
     return response
-
-
-@dataclass(frozen=True)
-class ResolvedRuntimeModel:
-    """Resolved active runtime model and context window for one execution context."""
-
-    model_name: str
-    context_window: int | None
-    # A scheduled, thread, or persisted room choice rather than the configured model.
-    overridden: bool = False
 
 
 @dataclass(frozen=True)
@@ -1261,6 +1250,9 @@ class Config(BaseModel):
         from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
 
         validate_call_agent_room_ownership(config, runtime_paths)
+        # A sandbox runner runs tool calls, never a model, and its config snapshot carries no models.
+        if not runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]):
+            config._validate_model_references()
         config._validate_model_extra_kwargs(runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
         config._runtime_approved_egress_inherited_default_tools = approved_egress_overlay.inherited_default_tools
@@ -1657,6 +1649,29 @@ class Config(BaseModel):
             chunk_overlap=private_knowledge.chunk_overlap,
             git=private_knowledge.git,
         )
+
+    def _validate_model_references(self) -> None:
+        """Reject a model choice of a configured entity, room, or enabled feature that names no configured model.
+
+        Runtime validation of a model-running process only: a config without agents or teams runs no model.
+        """
+        references = [(f"agents.{name}.model", agent.model) for name, agent in self.agents.items()]
+        references += [(f"teams.{name}.model", team.model) for name, team in self.teams.items()]
+        if self.agents or self.teams:
+            references.append(("router.model", self.router.model))
+        references += [(f"room_models.{room}", model) for room, model in self.room_models.items()]
+        references += [
+            (f"room_thread_summary_models.{room}", model) for room, model in self.room_thread_summary_models.items()
+        ]
+        if self.defaults.thread_summary_model is not None:
+            references.append(("defaults.thread_summary_model", self.defaults.thread_summary_model))
+        if self.voice.enabled:
+            references.append(("voice.intelligence.model", self.voice.intelligence.model))
+        unknown = [f"{path}: {model!r}" for path, model in references if model not in self.models]
+        if unknown:
+            available = ", ".join(sorted(self.models)) or "none"
+            msg = f"Unknown model for {'; '.join(unknown)}. Configured models: {available}"
+            raise ConfigRuntimeValidationError(msg)
 
     def _validate_model_extra_kwargs(self, runtime_paths: RuntimePaths) -> None:
         """Reject an ``extra_kwargs`` key the route serving its model does not accept, naming the model."""
@@ -2296,13 +2311,8 @@ class Config(BaseModel):
         # Router uses router model
         if entity_name == ROUTER_AGENT_NAME:
             return self.router.model
-        # Teams use their configured model (required to have one)
         if entity_name in self.teams:
-            model = self.teams[entity_name].model
-            if model is None:
-                msg = f"Team {entity_name} has no model configured"
-                raise ValueError(msg)
-            return model
+            return self.teams[entity_name].model
         # Regular agents use their configured model
         if entity_name in self.agents:
             return self.agents[entity_name].model
@@ -2311,64 +2321,6 @@ class Config(BaseModel):
         available = sorted(set(self.agents.keys()) | set(self.teams.keys()) | {ROUTER_AGENT_NAME})
         msg = f"Unknown entity: {entity_name}. Available entities: {', '.join(available)}"
         raise ValueError(msg)
-
-    def resolve_runtime_model(
-        self,
-        *,
-        entity_name: str | None,
-        active_model_name: str | None = None,
-        active_context_window: int | None = None,
-        room_id: str | None = None,
-        thread_id: str | None = None,
-        runtime_paths: RuntimePaths | None = None,
-        default_model_name: str = "default",
-    ) -> ResolvedRuntimeModel:
-        """Resolve the active runtime model plus its configured context window.
-
-        Precedence: explicit `active_model_name`, persisted thread override for
-        the entities its setter may address, persisted room override,
-        configured room override, then authored entity model.
-        """
-        resolved_model_name = active_model_name
-        if resolved_model_name is None and thread_id is not None:
-            if runtime_paths is None:
-                msg = "runtime_paths are required to resolve a thread-specific runtime model"
-                raise ValueError(msg)
-            thread_overrides = resolve_thread_model_override(runtime_paths, thread_id, config=self).active
-            if entity_name is not None:
-                resolved_model_name = thread_overrides.get(entity_name)
-        overridden = resolved_model_name is not None
-        if resolved_model_name is None:
-            if entity_name is None:
-                resolved_model_name = default_model_name
-            elif room_id is not None:
-                if runtime_paths is None:
-                    msg = "runtime_paths are required to resolve a room-specific runtime model"
-                    raise ValueError(msg)
-                room_override = resolve_room_model_override(
-                    runtime_paths,
-                    room_id,
-                    configured_models=self.models,
-                ).active
-                if room_override is not None:
-                    resolved_model_name = room_override
-                    overridden = True
-                else:
-                    from mindroom.entity_resolution import effective_entity_model_name  # noqa: PLC0415
-
-                    resolved_model_name = effective_entity_model_name(self, entity_name, room_id, runtime_paths)
-            else:
-                resolved_model_name = self._entity_model_name(entity_name)
-
-        resolved_context_window = active_context_window
-        if resolved_context_window is None:
-            resolved_context_window = self.get_model_context_window(resolved_model_name)
-
-        return ResolvedRuntimeModel(
-            model_name=resolved_model_name,
-            context_window=resolved_context_window,
-            overridden=overridden,
-        )
 
 
 def _tag_automation_unions(node: Any) -> None:  # noqa: ANN401 - a JSON schema node

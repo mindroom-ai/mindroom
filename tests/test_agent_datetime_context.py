@@ -15,7 +15,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.llm.messages import system_text
 from mindroom.system_prompt import render_session_context
 from mindroom.teams.members import build_team_spec, materialize_exact_team_members
@@ -28,6 +28,7 @@ from tests.conftest import (
     unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
@@ -47,6 +48,7 @@ def _datetime_test_config() -> Config:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         runtime_paths,
     )
@@ -90,7 +92,7 @@ def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:
         runtime_paths_for(config),
         execution_identity=None,
         knowledge=None,
-        active_model_name=None,
+        model=turn_model(config, runtime_paths_for(config), "general"),
     )
 
 
@@ -190,7 +192,7 @@ def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pyte
             runtime_paths=runtime_paths,
             execution_identity=None,
             refresh_scheduler=None,
-            active_model_names=None,
+            active_model_names={"general": turn_model(config, runtime_paths, "general").model_name},
         )
         team = build_team_spec(
             members=members,
