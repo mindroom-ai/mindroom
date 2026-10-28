@@ -1,6 +1,6 @@
 """What the owned codecs write for a dict Agno stored: the same dict minus the keys the owned types dropped.
 
-A run's content that is a paused notice, as Agno and the owned runtime up to v2026.10.627 stored for a run paused
+A run's content that is a paused notice, as Agno and the owned runtime up to v2026.10.640 stored for a run paused
 without text, goes too, since the owned reader reads it as no content (``mindroom.llm.legacy_run_content``).
 """
 

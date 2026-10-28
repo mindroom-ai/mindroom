@@ -422,4 +422,3 @@ delete_user_service_route  # FastAPI route (src/mindroom/api/egress_credentials.
 get_presets  # FastAPI route (src/mindroom/api/egress_broker.py, src/mindroom/api/egress_credentials.py)
 _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/script_gateway.py)
 _.audio_total_tokens  # Token counter read by name in the stored, reported, and published usage dicts (src/mindroom/llm/usage.py)
-_.regenerated  # RunStatus member MindRoom never writes, kept so a stored row with that status still reads (src/mindroom/llm/runs.py)
