@@ -103,8 +103,8 @@ def structured_output_tools(
 class RequestOverrides:
     """Per-request knobs that override the adapter's configured defaults; a None temperature leaves it untouched.
 
-    ``caller_retries`` says the caller retries a failed request itself, so nothing below it may: neither the SDK's
-    own HTTP retries nor the pipeline's stream retry reissues the request. ``prompt_cache=False`` turns the route's
+    ``caller_retries`` says the caller retries a failed request itself, so the pipeline's stream retry does not reissue
+    the request; the SDK clients' configurable retries are off. ``prompt_cache=False`` turns the route's
     configured prompt caching off for the request. ``omit_thinking_setting`` sends a Claude request no thinking setting,
     neither the authored one nor the default ``drop_block`` binding, so a model that thinks by default, such as every
     Claude 5 model, still thinks; every other route keeps its authored setting.

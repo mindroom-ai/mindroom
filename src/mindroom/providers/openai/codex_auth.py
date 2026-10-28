@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -83,8 +82,7 @@ def _codex_auth_path(*, codex_home: str | Path | None) -> Path:
 
 
 def _codex_home_path(*, codex_home: str | Path | None) -> Path:
-    configured_home = codex_home if codex_home is not None else os.environ.get("CODEX_HOME", "~/.codex")
-    return Path(configured_home).expanduser()
+    return Path(codex_home if codex_home is not None else "~/.codex").expanduser()
 
 
 def _read_codex_auth(auth_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:

@@ -1,8 +1,8 @@
 """One portable summary call and its bounded retry policy.
 
-The summary request goes through the provider pipeline as one call with every retry below this module, the SDK's and
-the pipeline's, and the prompt cache turned off, and on the Claude routes without the model's authored thinking setting,
-bounded by the compaction deadline. This module owns the call's lifecycle, cancellation, complete-output validation,
+The summary request goes through the provider pipeline as one call, with every retry below this module and the prompt
+cache turned off, and on the Claude routes without the model's authored thinking setting, bounded by the compaction
+deadline. This module owns the call's lifecycle, cancellation, complete-output validation,
 and the retry decision chunk execution uses.
 """
 
@@ -37,9 +37,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
-# A provider that times out on its own side says so only in the text of its HTTP error or stream error event, such as
-# a gateway's "upstream request timed out": no status or code marks it, so provider errors are matched by wording.
-_PROVIDER_TIMEOUT_FRAGMENT = "timed out"
 # ``SummaryRetryPolicy`` alone retries a failed summary, and a one-off summary never reuses its prefix. Leaving out the
 # authored thinking setting keeps a model that thinks only when asked, such as Claude 4.x, from spending the
 # output budget the summary needs; a model that thinks by default still thinks. The transport timeout stays the route's
@@ -81,22 +78,17 @@ def _is_transient(error: Exception) -> bool:
 
 
 def is_summary_timeout(error: BaseException) -> bool:
-    """Return whether a compaction failure was a timeout: the deadline, a transport timeout, or a provider-side one."""
-    if isinstance(error, TimeoutError):
-        return True
-    if not isinstance(error, ProviderError):
-        return False
-    return error.code == TRANSPORT_TIMEOUT or _PROVIDER_TIMEOUT_FRAGMENT in str(error).casefold()
+    """Return whether a compaction failure was a timeout: the deadline, or a transport timeout the adapter typed."""
+    return isinstance(error, TimeoutError) or (isinstance(error, ProviderError) and error.code == TRANSPORT_TIMEOUT)
 
 
 def _is_size_error(error: Exception) -> bool:
-    """Return whether a rate limit says the input alone was too large, or a final request timed out.
+    """Return whether a rate limit says the input alone was too large.
 
     A request above the account's tokens-per-minute limit fails as a rate limit worded "Request too large"; waiting
     never lets it through, but a smaller input does.
     """
-    oversized = isinstance(error, RateLimited) and is_context_window_error(str(error), code=error.code)
-    return oversized or (is_summary_timeout(error) and not _is_transient(error))
+    return isinstance(error, RateLimited) and is_context_window_error(str(error), code=error.provider_code)
 
 
 @dataclass(frozen=True)
