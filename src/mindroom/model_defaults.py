@@ -224,7 +224,7 @@ def claude_max_output_tokens(model_id: str) -> int:
     The model's name is read out of every spelling of its id: direct, dated, Vertex ``@`` snapshot, and Bedrock region
     and version. A model the table does not list, a newer point release included, keeps 8192.
     """
-    name = _CLAUDE_MODEL_NAME.fullmatch(model_id.casefold())
+    name = _CLAUDE_MODEL_NAME.fullmatch(model_id)
     return _CLAUDE_MAX_OUTPUT_TOKENS.get(name[1] if name else model_id, _CLAUDE_UNLISTED_MAX_OUTPUT_TOKENS)
 
 
