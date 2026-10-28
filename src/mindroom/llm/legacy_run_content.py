@@ -38,19 +38,25 @@ _TEAM_PAUSED_NOTICE_HEADER = "Team run paused. The following require input:\n"
 # runs store only the text their model wrote, never a notice, and whose resumes append what the model writes after the
 # approval to that text.
 # Handling: the content reads as none, so neither a resume nor a delegation's settlement hands the notice to a team
-# leader or a delegating parent, and a row written back stores none.
+# leader or a delegating parent, and a row written back stores none. A run whose own answer reads like a notice wrote
+# it itself, since a notice stood in only for text the model never wrote, so its content reads as stored.
 # Coverage: tests/llm/test_legacy_run_content.py::test_paused_rows_earlier_releases_stored_read_without_their_notices,
 #   tests/llm/test_legacy_run_content.py::test_a_completed_row_that_carried_the_notice_hands_over_none,
 #   tests/llm/test_legacy_run_content.py::test_every_other_wording_agno_wrote_reads_as_no_content,
-#   tests/llm/test_legacy_run_content.py::test_a_reply_that_only_opens_like_a_notice_keeps_its_content
+#   tests/llm/test_legacy_run_content.py::test_a_reply_that_only_opens_like_a_notice_keeps_its_content,
+#   tests/llm/test_legacy_run_content.py::test_a_reply_the_model_wrote_that_matches_a_notice_keeps_its_content,
+#   tests/llm/test_legacy_run_content.py::test_a_requester_quoting_a_notice_leaves_it_read_as_no_content
 def stored_content(data: Mapping[str, Any]) -> str | None:
     """Return the content a stored run dict holds, or None when it holds a paused notice instead of the model's text."""
     content = data.get("content")
-    if not isinstance(content, str):
+    if not isinstance(content, str) or not _is_paused_notice(content):
         return content
-    if content in _AGENT_PAUSED_NOTICES or content == _TEAM_PAUSED_NOTICE:
-        return None
-    return None if content.startswith(_TEAM_PAUSED_NOTICE_HEADER) else content
+    answers = [message.get("content") for message in data.get("messages") or () if message.get("role") == "assistant"]
+    return content if any(isinstance(text, str) and _is_paused_notice(text.strip()) for text in answers) else None
+
+
+def _is_paused_notice(text: str) -> bool:
+    return text in _AGENT_PAUSED_NOTICES or text == _TEAM_PAUSED_NOTICE or text.startswith(_TEAM_PAUSED_NOTICE_HEADER)
 
 
 # LEGACY_COMPAT: Failed runs that store their failure text as their content.

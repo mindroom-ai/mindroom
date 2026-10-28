@@ -8,6 +8,7 @@ its model wrote anything, and a team run paused on its member's confirmation, wi
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,32 @@ def test_a_reply_that_only_opens_like_a_notice_keeps_its_content(content: str) -
     stored = {**_ROWS["agent_resumed_without_text"], "content": content}
 
     assert RunRecord.from_dict(stored).content == content
+
+
+@pytest.mark.parametrize(
+    ("row", "content"),
+    [
+        ("agent_resumed_without_text", "I have tools to execute, but I need confirmation."),
+        ("team_paused", "Team run paused. The following require input:\n- Checker: multiply requires confirmation"),
+    ],
+)
+def test_a_reply_the_model_wrote_that_matches_a_notice_keeps_its_content(row: str, content: str) -> None:
+    """Text the run's model answered with is its reply, even when it reads exactly like a notice."""
+    stored = deepcopy(_ROWS[row])
+    stored["content"] = content
+    [*_, answer] = [message for message in stored["messages"] if message["role"] == "assistant"]
+    answer["content"] = content
+
+    assert stored_run_record(stored).content == content
+
+
+def test_a_requester_quoting_a_notice_leaves_it_read_as_no_content() -> None:
+    """Only the run's own answer marks notice-like text as the model's; the requester's message quoting it does not."""
+    stored = deepcopy(_ROWS["agent_paused"])
+    [*_, request] = [message for message in stored["messages"] if message["role"] == "user"]
+    request["content"] = stored["content"]
+
+    assert stored_run_record(stored).content is None
 
 
 def test_a_completed_row_that_carried_the_notice_hands_over_none() -> None:
