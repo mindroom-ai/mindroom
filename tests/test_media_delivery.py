@@ -7,7 +7,6 @@ import random
 from pathlib import Path
 
 import pytest
-from agno.tools.function import ToolResult
 from PIL import Image
 
 from mindroom import media_delivery
@@ -24,7 +23,6 @@ def test_image_result_carries_image_bytes_separately() -> None:
     """Image result carries image bytes separately."""
     data = image_bytes()
     result = media_delivery.image_result(data, metadata={"path": "plots/result.png"})
-    assert isinstance(result, ToolResult)
     assert result.images
     assert result.images[0].content == data
     assert result.images[0].mime_type == "image/png"

@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.file_access import resolve_agent_file
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Image
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.file_access import AuthorizedFile
-    from mindroom.tool_system.agno_toolkits import ToolResult
 
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -32,12 +32,9 @@ _MAX_EDGE = 2048
 _SUPPORTED_FORMATS = {"PNG", "JPEG", "GIF", "WEBP"}
 
 
-def media_error(message: str, *, metadata: dict[str, object]) -> ToolResult:
+def media_error(message: str, *, metadata: dict[str, object]) -> ToolValue:
     """Keep the artifact receipt while explicitly reporting unsuccessful viewing."""
-    # The Agno tool types load on first use, so importing this module stays free of them.
-    from mindroom.tool_system.agno_toolkits import ToolResult  # noqa: PLC0415
-
-    return ToolResult(content=json.dumps({**metadata, "view_status": "error", "message": message}, sort_keys=True))
+    return ToolValue(content=json.dumps({**metadata, "view_status": "error", "message": message}, sort_keys=True))
 
 
 def _encode_image(image: PillowImage) -> tuple[bytes, str]:
@@ -53,10 +50,8 @@ def _encode_image(image: PillowImage) -> tuple[bytes, str]:
     return output.getvalue(), "image/jpeg"
 
 
-def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # noqa: PLR0911
+def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolValue:  # noqa: PLR0911
     """Deliver supported image bytes as model media with disclosed transformations."""
-    from mindroom.tool_system.agno_toolkits import AgnoImage, ToolResult  # noqa: PLC0415
-
     if not data:
         return media_error("Image file is empty.", metadata=metadata)
     if len(data) > MAX_SOURCE_BYTES:
@@ -117,9 +112,9 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
         "converted": converted,
         "first_frame_only": animated,
     }
-    return ToolResult(
+    return ToolValue(
         content=json.dumps(receipt, sort_keys=True),
-        images=[AgnoImage(id=f"{VIEWED_IMAGE_ID_PREFIX}{uuid4().hex}", content=data, mime_type=mime_type)],
+        images=(Image(id=f"{VIEWED_IMAGE_ID_PREFIX}{uuid4().hex}", content=data, mime_type=mime_type),),
     )
 
 
@@ -132,7 +127,7 @@ def _read_authorized_image(authorized: AuthorizedFile) -> bytes:
         return file.read(MAX_SOURCE_BYTES + 1)
 
 
-def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolResult:
+def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolValue:
     """Read one regular image under the agent's file access, resolving relative paths from the workspace."""
     metadata: dict[str, object] = {"path": path}
     if not isinstance(path, str) or not path.strip():

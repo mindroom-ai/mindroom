@@ -1,8 +1,7 @@
 """Team resumes route each decision to the member that waits for it, then continue the leader.
 
-The pre-resume dump of ``team-approved`` (a team paused on its checker's ``multiply``) is resumed with the
-member's approval and compared with the ``team-approved`` rows Agno stored after the same resume, except that the
-leader reads the member's result as it reads a member that never paused, where Agno wrote its member-results message.
+Most resumes start from the team run Agno stored paused on its checker's ``multiply`` (the ``team-approved``
+pre-resume dump), so a run paused before the upgrade resumes after it; the resumed records are asserted as typed values.
 """
 # ruff: noqa: D103
 
@@ -10,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -25,6 +24,7 @@ from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.run_record_helpers import PRODUCT, approved_call, reply, result, resumed, run_metrics, settled, waiting_call
 from tests.teams.squad import (
     CHECKER_PAUSED_PIECE,
     PROVIDER,
@@ -34,9 +34,6 @@ from tests.teams.squad import (
     approval,
     calculator,
     collect,
-    comparable,
-    golden_metadata,
-    golden_run,
     pre_resume_runs,
     prompt,
     resume_team,
@@ -67,27 +64,12 @@ def _resume_request(paused: TeamRunRecord) -> list[Message]:
     return build_resume_request(paused=paused.messages, summary=None, history=[])
 
 
-def _answered(team_row: dict[str, Any], result: str) -> dict[str, Any]:
-    """Return a team row Agno stored after a resume, its delegation answered with ``result`` as the owned runtime does.
-
-    Agno answered the delegation with its member-results message; the owned runtime with the member's result.
-    """
-    [tool] = team_row["tools"]
-    answered = {**tool, "result": result}
-    messages = [
-        {**message, "content": result} if message.get("tool_call_id") == tool["tool_call_id"] else message
-        for message in team_row["messages"]
-    ]
-    return {**team_row, "tools": [answered], "messages": messages}
-
-
-async def test_an_approved_member_call_resumes_into_the_team_approved_rows() -> None:
+async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() -> None:
     paused = _paused_team_approved()
     before = paused.to_dict()
-    team_row = golden_run("team_squad", SQUAD_APPROVED, "team-approved")
-    checker_row = golden_run("team_squad", SQUAD_APPROVED, "00000000-0000-4000-8000-000000000063")
-    leader = scripted("leader-model", answer("The checker found 42.", usage(470, 7, time_to_first_token=0.25)))
-    checker = scripted("checker-model", answer("42", usage(95, 1, time_to_first_token=0.25)))
+    leader_usage, checker_usage = usage(470, 7, time_to_first_token=0.25), usage(95, 1, time_to_first_token=0.25)
+    leader = scripted("leader-model", answer("The checker found 42.", leader_usage))
+    checker = scripted("checker-model", answer("42", checker_usage))
     store = Store()
 
     events, record = await collect(
@@ -98,17 +80,50 @@ async def test_an_approved_member_call_resumes_into_the_team_approved_rows() -> 
             approved={
                 ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
             },
-            context=lambda run_id: run_context(run_id, SQUAD_APPROVED, golden_metadata(team_row)),
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
             persist=store,
         ),
     )
 
-    # The paused row names no member run on its delegation, as rows stored before the link do, and is answered.
+    # The paused row names no member run on its delegation, as rows stored before the link do, and is answered with
+    # the member's result where it held the pause notice; the run keeps the metadata it paused with.
     assert paused.tools is not None
-    assert paused.tools[0].child_run_id is None
-    assert comparable(record.to_dict()) == comparable(_answered(team_row, "42"))
+    [delegation] = paused.tools
+    assert delegation.child_run_id is None
+    assert settled(record) == settled(
+        replace(
+            paused,
+            status=RunStatus.completed,
+            content="The checker found 42.",
+            messages=[
+                *(
+                    replace(message, content="42") if message.tool_call_id == delegation.tool_call_id else message
+                    for message in paused.messages
+                ),
+                reply("The checker found 42.", model="leader-model", metrics=leader_usage),
+            ],
+            tools=[replace(delegation, result="42")],
+            requirements=[],
+            member_responses=[],
+            metrics=run_metrics(("leader-model", leader_usage), start=paused.metrics),
+        ),
+    )
+    # The member runs the approved call and answers; its record keeps the decision and names the member.
+    [paused_member] = paused.member_responses
+    call, waiting = waiting_call(paused_member)
     [member] = store.members
-    assert comparable(member.to_dict()) == comparable(checker_row)
+    assert settled(member) == settled(
+        resumed(
+            paused_member,
+            decided=approved_call(waiting, PRODUCT),
+            added=[result(call, PRODUCT)],
+            answered=("42", checker_usage),
+            confirmation=True,
+            member_agent_id="checker",
+            member_display_name="Checker",
+            member_run_id=paused_member.run_id,
+        ),
+    )
     assert paused.to_dict() == before
     assert store.statuses == [("checker", "COMPLETED"), ("squad", "COMPLETED")]
     # The leader reads the member's result where it read the pause notice, and keeps its stored prompt first.
@@ -245,7 +260,7 @@ async def test_a_collaborate_resume_keeps_the_text_of_the_member_that_finished_b
     )
     team = squad(leader, writer, checker, mode=TeamMode.COLLABORATE)
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.tools is not None
     assert paused.tools[0].result == ("Agent Writer: Six times seven is 42.\n\n" + CHECKER_PAUSED_PIECE)
@@ -299,7 +314,7 @@ async def test_a_resume_keeps_the_members_that_ended_before_the_pause_with_the_r
     )
     team = squad(leader, writer, checker)
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     ended = [(run.agent_id, run.run_id, run.status) for run in paused.ended_member_runs]
     assert [(agent, status) for agent, _, status in ended] == [
@@ -340,7 +355,7 @@ async def test_a_leader_level_approval_runs_the_leader_s_call_and_continues() ->
         leader_toolkits=(gated(echo, name="job_controls"),),
     )
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
@@ -376,7 +391,7 @@ async def test_a_resume_refuses_an_approved_leader_call_the_team_no_longer_offer
         leader_toolkits=(gated(echo, name="job_controls"),),
     )
     _, paused = await collect(
-        start_team(gated_team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(gated_team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
     before = paused.to_dict()
@@ -415,7 +430,7 @@ async def test_a_resumed_leader_s_calls_run_under_the_paused_team_run_s_id() -> 
         leader_toolkits=(gated(calling_run, name="job_controls"),),
     )
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
@@ -445,7 +460,7 @@ async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader
     )
     team = squad(leader, scripted("writer-model"), scripted("checker-model"), leader_toolkits=(stopping,))
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
@@ -503,7 +518,7 @@ async def test_an_external_result_resumes_the_member_that_waits_for_it(checker_t
     )
     team = squad(leader, scripted("writer-model"), checker, checker_toolkits=(external(run_subagent),))
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
 
     store = Store()
@@ -637,7 +652,7 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
         writer_toolkits=(calculator(gate_multiply=True),),
     )
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.requirements is not None
     assert sorted((r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements) == [
@@ -705,7 +720,7 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_its_memb
     )
     team = squad(leader, writer, checker, writer_toolkits=(calculator(gate_multiply=True),))
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
     assert paused.requirements is not None
@@ -784,7 +799,7 @@ async def test_two_delegations_to_one_member_each_read_the_result_of_the_run_the
     _, paused = await collect(
         start_team(
             team,
-            prompt({"messages": [{"role": "user", "content": "hi"}]}),
+            prompt("hi"),
             ctx=run_context("r", SQUAD),
             persist=persist,
         ),
@@ -849,7 +864,7 @@ async def test_a_waiting_delegation_under_a_call_id_an_earlier_request_used_is_a
     )
     team = squad(leader, writer, checker)
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.tools is not None
     assert [(tool.result, tool.child_run_id) for tool in paused.tools] == [
@@ -910,7 +925,7 @@ async def test_a_row_a_streamed_agno_turn_paused_answers_each_call_with_its_own_
         checker = scripted("checker-model", answer("Drafted.", usage(5, 1)), pause, answer("42", usage(5, 1)))
     team = squad(leader, writer, checker)
     _, live = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     [paused_run] = live.member_responses
     [finished_run] = [run for run in live.ended_member_runs if run.run_id != paused_run.run_id]
@@ -959,7 +974,7 @@ async def test_a_member_renamed_while_its_approval_waits_still_answers_the_call_
     )
     team = squad(leader, scripted("writer-model", answer("Six times seven is 42.")), checker, mode=mode)
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     writer_member, checker_member = team.members
     inspector = replace(checker_member, spec=replace(checker_member.spec, name="Inspector"))
@@ -1002,7 +1017,7 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
     )
     team = squad(leader, writer, checker)
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.requirements is not None
     assert [(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements] == [("checker", "call-w")]
@@ -1066,7 +1081,7 @@ async def test_a_finished_member_whose_answer_mentions_human_input_keeps_its_ans
     )
     team = squad(leader, writer, checker, mode=mode)
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
 
@@ -1111,7 +1126,7 @@ async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the
     )
     team = squad(leader, scripted("writer-model"), checker, leader_toolkits=(gated(echo, name="job_controls"),))
     _, paused = await collect(
-        start_team(team, prompt({"messages": [{"role": "user", "content": "hi"}]}), ctx=run_context("r", SQUAD)),
+        start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.requirements is not None
     assert {(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements} == {

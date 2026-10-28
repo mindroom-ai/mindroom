@@ -1,0 +1,114 @@
+{
+ "value": {
+  "type": "dict",
+  "value": {
+   "error": null,
+   "state_delta": {
+    "type": "dict",
+    "value": {
+     "counter": {
+      "type": "dict",
+      "value": {
+       "before_present": false,
+       "present": true,
+       "value": 1
+      }
+     }
+    }
+   },
+   "value": {
+    "type": "ToolResult",
+    "value": {
+     "type": "dict",
+     "value": {
+      "audios": {
+       "type": "list",
+       "value": [
+        {
+         "type": "Audio",
+         "value": {
+          "type": "dict",
+          "value": {
+           "channels": 1,
+           "content": null,
+           "duration": null,
+           "expires_at": null,
+           "filepath": null,
+           "format": null,
+           "id": "audio-1",
+           "metadata": null,
+           "mime_type": null,
+           "sample_rate": 24000,
+           "transcript": null,
+           "url": "https://example.org/a.mp3"
+          }
+         }
+        }
+       ]
+      },
+      "content": "drawn",
+      "files": {
+       "type": "list",
+       "value": [
+        {
+         "type": "File",
+         "value": {
+          "type": "dict",
+          "value": {
+           "content": {
+            "type": "bytes",
+            "value": "YSxi"
+           },
+           "file_type": null,
+           "filename": "t.csv",
+           "filepath": null,
+           "format": null,
+           "id": "file-1",
+           "metadata": null,
+           "mime_type": "text/csv",
+           "name": null,
+           "size": null,
+           "url": null
+          }
+         }
+        }
+       ]
+      },
+      "images": {
+       "type": "list",
+       "value": [
+        {
+         "type": "Image",
+         "value": {
+          "type": "dict",
+          "value": {
+           "alt_text": null,
+           "content": {
+            "type": "bytes",
+            "value": "iVBORw=="
+           },
+           "detail": null,
+           "filepath": null,
+           "format": null,
+           "id": "image-1",
+           "metadata": null,
+           "mime_type": "image/png",
+           "original_prompt": null,
+           "revised_prompt": null,
+           "url": null
+          }
+         }
+        }
+       ]
+      },
+      "videos": {
+       "type": "list",
+       "value": []
+      }
+     }
+    }
+   }
+  }
+ },
+ "version": 1
+}

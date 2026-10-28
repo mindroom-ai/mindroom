@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.tools.function import FunctionCall, ToolResult
+from agno.tools.function import FunctionCall
 
 from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
@@ -35,6 +35,7 @@ from mindroom.tool_system.runtime_context import (
     register_tool_runtime_media_attachment,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import (
@@ -221,11 +222,11 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
 
     assert execution.status == "success"
     result = execution.result
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     receipt = json.loads(result.content)
     assert receipt.items() >= json.loads(metadata).items()
     assert receipt["view_status"] == "ready"
-    assert result.images is not None
+    assert result.images
     assert len(result.images) == 1
     assert result.images[0].content == image_bytes
     assert result.images[0].mime_type == "image/png"
@@ -257,9 +258,8 @@ async def test_get_attachment_view_returns_other_media(
         registered = json.loads(await tool.register_attachment(filename))
         result = await tool.get_attachment(registered["attachment_id"], view=True)
 
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     media = {"audios": result.audios, "files": result.files, "videos": result.videos}[media_field]
-    assert media is not None
     assert len(media) == 1
     assert media[0].content == payload_bytes
     assert media[0].mime_type == mime_type
@@ -295,8 +295,8 @@ async def test_get_attachment_view_uses_source_filename_when_none_is_given(tmp_p
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
 
-    assert isinstance(result, ToolResult)
-    assert result.files is not None
+    assert isinstance(result, ToolValue)
+    assert result.files
     assert result.files[0].filename == "document.pdf"
 
 
@@ -1203,8 +1203,8 @@ async def test_registered_workspace_file_swapped_for_link_never_reads_link_targe
         notes.symlink_to(secret)
         if use == "view":
             result = await tool.get_attachment(attachment_id, view=True)
-            assert isinstance(result, ToolResult)
-            assert result.files is not None
+            assert isinstance(result, ToolValue)
+            assert result.files
             assert result.files[0].content == b"public notes"
         elif use == "save":
             payload = json.loads(await tool.get_attachment(attachment_id, mindroom_output_path="copy.txt"))

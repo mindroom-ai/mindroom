@@ -745,7 +745,6 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
             (),
             {"client": None, "orchestrator": None, "config": loaded_workloop.config, "runtime_started_at": 0.0},
         )(),
-        logger=get_logger("tests.workloop.delivery"),
         runtime_paths=loaded_workloop.runtime_paths,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
