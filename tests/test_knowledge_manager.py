@@ -49,6 +49,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config
+from mindroom.config.resolution import memory_search
 from mindroom.constants import (
     DEFAULT_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS,
     KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_ENV,
@@ -415,7 +416,7 @@ async def test_cold_file_memory_overlay_waits_for_managed_content_before_publish
         scope_user_id=agent_scope_user_id("helper"),
         root=root,
         config=config,
-        search_config=config.resolve_scope("helper").memory_search,
+        search_config=memory_search(config, "helper"),
     )
 
     empty_result = await refresh_knowledge_binding(

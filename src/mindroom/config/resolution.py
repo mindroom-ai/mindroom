@@ -322,6 +322,18 @@ class AgentToolFacts:
     worker_tools: tuple[str, ...] | None
 
 
+def expanded_tool_names(config: Config, tool_names: list[str], disabled: frozenset[str]) -> tuple[str, ...]:
+    """Return ``tool_names`` with presets and implied toolkits expanded, less disabled and unavailable toolkits.
+
+    A preset or implied toolkit can name a tool that is unavailable here, as an authored entry can.
+    """
+    return tuple(
+        name
+        for name in config.expand_tool_names(tool_names)
+        if name not in disabled and config.tool_name_is_available(name)
+    )
+
+
 def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPolicy) -> AgentToolFacts:
     """Return what ``agent_name``'s config decides about its toolkits."""
     agent = config.get_agent(agent_name)
@@ -354,12 +366,7 @@ def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPo
     authored = authored_tool_entries(config, agent_name)
 
     def expanded(entries: list[EffectiveToolConfig]) -> tuple[str, ...]:
-        # A preset or implied toolkit can name a tool that is unavailable here, as an authored entry can.
-        return tuple(
-            name
-            for name in config.expand_tool_names([entry.name for entry in entries])
-            if name not in disabled and config.tool_name_is_available(name)
-        )
+        return expanded_tool_names(config, [entry.name for entry in entries], disabled)
 
     scope = policy.effective_execution_scope
     worker_tools = agent.worker_tools if agent.worker_tools is not None else config.defaults.worker_tools
@@ -393,7 +400,6 @@ class ResolvedScope:
     max_tool_calls_per_turn: int
     file_access: FileAccess
     memory_backend: MemoryBackend
-    memory_search: MemorySearchConfig
     timezone: str
     show_tool_calls: bool
 
@@ -403,7 +409,6 @@ class ResolvedAgent(ResolvedScope):
     """What one configured agent gets."""
 
     model_name: str
-    cheap_model: str | None
     policy: ResolvedAgentPolicy
     tools: AgentToolFacts
     knowledge_base_ids: tuple[str, ...]
@@ -422,7 +427,6 @@ def resolve_scope(config: Config, name: str | None) -> ResolvedScope:
         max_tool_calls_per_turn=own_calls if own_calls is not None else config.defaults.max_tool_calls_per_turn,
         file_access=file_access(config, name),
         memory_backend=memory_backend(config, name),
-        memory_search=memory_search(config, name),
         timezone=entity_timezone(config, name),
         show_tool_calls=show_tool_calls(config, name),
     )
@@ -454,7 +458,6 @@ def resolve_agent(config: Config, name: str) -> ResolvedAgent:
     return ResolvedAgent(
         **vars(resolve_scope(config, name)),
         model_name=agent.model,
-        cheap_model=cheap_model(config, name),
         policy=policy,
         tools=agent_tool_facts(config, name, policy=policy),
         knowledge_base_ids=agent_knowledge_base_ids(config, name),

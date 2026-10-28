@@ -996,13 +996,17 @@ def _runner_agent_workspace(
     config: Config,
 ) -> Path:
     """Return the agent workspace this runner resolves in its own storage for one agent-routed request."""
-    return resolve_agent_runtime(
-        agent_name,
-        config,
-        _runtime_paths_for_runner_agent_paths(runtime_paths),
-        execution_identity=_request_execution_identity(request),
-        create=True,
-    ).workspace.root
+    try:
+        return resolve_agent_runtime(
+            agent_name,
+            config,
+            _runtime_paths_for_runner_agent_paths(runtime_paths),
+            execution_identity=_request_execution_identity(request),
+            create=True,
+        ).workspace.root
+    except OSError as exc:
+        msg = f"Agent workspace cannot be prepared in this runner: {exc}"
+        raise sandbox_worker_prep.WorkerRequestPreparationError(msg) from exc
 
 
 def _prepared_request_base_dir(prepared: sandbox_worker_prep.PreparedWorkerRequest | None) -> Path | None:

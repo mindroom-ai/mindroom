@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
-from mindroom.config.resolution import agent_policy, agent_tool_facts
+from mindroom.config.resolution import agent_policy, agent_tool_facts, expanded_tool_names
 from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
 from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
 
@@ -85,11 +85,7 @@ class AgentTools:
         )
 
     def _expanded(self, tool_names: list[str]) -> list[str]:
-        return [
-            name
-            for name in self.config.expand_tool_names(tool_names)
-            if name not in self.facts.disabled and self.config.tool_name_is_available(name)
-        ]
+        return list(expanded_tool_names(self.config, tool_names, self.facts.disabled))
 
     @property
     def tool_names(self) -> tuple[str, ...]:

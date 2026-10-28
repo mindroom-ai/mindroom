@@ -12,6 +12,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
+from mindroom.config.resolution import cheap_model
 from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
@@ -84,15 +85,15 @@ def test_cold_cache_requires_cheap_model() -> None:
 def test_default_cheap_model_applies_to_agents_without_their_own() -> None:
     """One defaults.cheap_model serves every agent, and an agent's own cheap_model wins."""
     inherited = _config({}, cheap_model=None, default_cheap_model="haiku")
-    assert inherited.resolve_agent("assistant").cheap_model == "haiku"
+    assert cheap_model(inherited, "assistant") == "haiku"
     own = _config({}, cheap_model="haiku", default_cheap_model="unsized")
-    assert own.resolve_agent("assistant").cheap_model == "haiku"
+    assert cheap_model(own, "assistant") == "haiku"
 
 
 def test_default_cheap_model_skips_the_agent_already_on_it() -> None:
     """An agent whose model is the default cheap model has no cheaper alternative."""
     config = _config(agent_model="haiku", cheap_model=None, default_cheap_model="haiku")
-    assert config.resolve_agent("assistant").cheap_model is None
+    assert cheap_model(config, "assistant") is None
     with pytest.raises(ValidationError, match="cold_cache needs a cheap_model"):
         _config({}, agent_model="haiku", cheap_model=None, default_cheap_model="haiku")
 
@@ -104,7 +105,7 @@ def test_default_cheap_model_is_validated() -> None:
     with pytest.raises(ValidationError, match="context window"):
         _config({}, cheap_model=None, default_cheap_model="tiny")
     # Unused by an agent without cold_cache, an ill-fitting default is harmless.
-    assert _config(cheap_model=None, default_cheap_model="tiny").resolve_agent("assistant").cheap_model == "tiny"
+    assert cheap_model(_config(cheap_model=None, default_cheap_model="tiny"), "assistant") == "tiny"
 
 
 @pytest.mark.parametrize(

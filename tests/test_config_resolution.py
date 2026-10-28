@@ -18,7 +18,7 @@ from mindroom.config.models import (
     ModelConfig,
     ToolConfigEntry,
 )
-from mindroom.config.resolution import ResolvedAgent, entity_model_name
+from mindroom.config.resolution import ResolvedAgent, entity_model_name, memory_search
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -137,14 +137,14 @@ def test_memory_resolution() -> None:
     config = _representative_config()
 
     assert config.resolve_scope("overriding_agent").memory_backend == "file"
-    overridden_search = config.resolve_scope("overriding_agent").memory_search
+    overridden_search = memory_search(config, "overriding_agent")
     assert overridden_search.mode == "semantic"
     assert overridden_search.include == ["notes/**/*.md"]
 
     for inheriting_scope in ("inheriting_agent", "overriding_team", ROUTER_AGENT_NAME, None):
         assert config.resolve_scope(inheriting_scope).memory_backend == "none"
-        assert config.resolve_scope(inheriting_scope).memory_search.mode == "keyword"
-        assert config.resolve_scope(inheriting_scope).memory_search.include == ["notes/**/*.md"]
+        assert memory_search(config, inheriting_scope).mode == "keyword"
+        assert memory_search(config, inheriting_scope).include == ["notes/**/*.md"]
 
 
 def test_model_name_resolution() -> None:

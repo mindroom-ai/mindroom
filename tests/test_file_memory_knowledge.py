@@ -8,6 +8,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.resolution import memory_search
 from mindroom.knowledge.file_memory_knowledge import (
     resolve_agent_file_memory_knowledge,
     resolve_file_memory_knowledge,
@@ -50,7 +51,7 @@ def test_memory_and_agent_resolvers_share_base_and_index_identity(tmp_path: Path
         runtime_paths,
     )
     root = agent_workspace_root_path(runtime_paths.storage_root, "alpha")
-    search_config = config.resolve_scope("alpha").memory_search
+    search_config = memory_search(config, "alpha")
 
     memory_resolution = resolve_file_memory_knowledge(
         scope_user_id=agent_scope_user_id("alpha"),

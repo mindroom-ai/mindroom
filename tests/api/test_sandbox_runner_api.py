@@ -2537,6 +2537,31 @@ def test_a_static_runner_works_in_its_own_agent_workspace_not_the_primary_path(
     assert base_dir.is_dir()
 
 
+def test_a_static_runner_that_cannot_create_the_agent_workspace_fails_the_request(tmp_path: Path) -> None:
+    """A runner whose storage cannot hold the agent workspace refuses the call as a request preparation failure."""
+    runner_paths = resolve_runtime_paths(
+        config_path=tmp_path / "runner" / "config.yaml",
+        storage_path=tmp_path / "runner" / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"},
+    )
+    config = Config.validate_with_runtime({"agents": {"general": {"display_name": "General"}}}, runner_paths)
+    agent_storage = sandbox_runner_module._runtime_paths_for_runner_agent_paths(runner_paths).storage_root / "agents"
+    agent_storage.parent.mkdir(parents=True, exist_ok=True)
+    agent_storage.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(sandbox_runner_module.sandbox_worker_prep.WorkerRequestPreparationError, match="cannot be"):
+        sandbox_runner_module._prepare_execute_request(
+            sandbox_runner_module.SandboxRunnerExecuteRequest(
+                tool_name="file",
+                function_name="read_file",
+                routing_agent_name="general",
+                tool_init_overrides={"base_dir": str(tmp_path / "primary" / "agents" / "general" / "workspace")},
+            ),
+            runner_paths,
+            config=config,
+        )
+
+
 def test_prepared_dedicated_shell_request_preserves_explicit_execution_env(tmp_path: Path) -> None:
     """Prepared Docker/Kubernetes shell workers must keep broker env passed by the primary runtime."""
     config_path = tmp_path / "config.yaml"

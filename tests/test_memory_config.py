@@ -29,6 +29,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config, config_validation_issues
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig, RouterConfig
+from mindroom.config.resolution import memory_search
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import _EMBEDDER_KEYLESS_PLACEHOLDER_API_KEY
@@ -1398,7 +1399,7 @@ def test_memory_search_defaults_to_keyword_daily_files() -> None:
     """File-memory search should default to keyword mode over daily memory files."""
     config = Config(router=RouterConfig(model="default"))
 
-    search = config.resolve_scope(None).memory_search
+    search = memory_search(config, None)
 
     assert search.mode == "keyword"
     assert search.include == ["memory/**/*.md"]
@@ -1425,7 +1426,7 @@ def test_agent_memory_search_override_merges_per_field() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.resolve_scope("openclaw").memory_search
+    search = memory_search(config, "openclaw")
 
     assert search.mode == "semantic"
     assert search.include == ["memory/**/*.md"]
@@ -1455,7 +1456,7 @@ def test_agent_memory_search_can_override_include_patterns() -> None:
         router=RouterConfig(model="default"),
     )
 
-    search = config.resolve_scope("openclaw").memory_search
+    search = memory_search(config, "openclaw")
 
     assert search.include == ["memory/**/*.md", "decisions/**/*.md"]
     assert search.include_entrypoint is True
