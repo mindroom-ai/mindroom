@@ -1723,6 +1723,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.config.load_attempt",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.config.reload_status",
@@ -3131,6 +3132,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.config_lifecycle"
 depends_on = [
+    "mindroom.api.main",
+    "mindroom.config.load_attempt",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.config.reload_status",
@@ -7822,6 +7825,10 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.config.reload_status"
 depends_on = []
+
+[[modules]]
+path = "mindroom.config.load_attempt"
+depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.config.bundle"

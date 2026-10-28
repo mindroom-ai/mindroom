@@ -113,6 +113,7 @@ from tests.conftest import (
     bind_mock_config_event_journal,
     initialize_approval_store_for_test,
     make_matrix_client_mock,
+    published_config_load,
     runtime_paths_for,
 )
 
@@ -355,6 +356,7 @@ def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from contextlib import AbstractContextManager
 
     from mindroom.bot import TeamBot
 
@@ -377,6 +379,11 @@ def _retry_tasks() -> list[asyncio.Task[Any]]:
     only ever confirm that it was set to None.
     """
     return [task for task in asyncio.all_tasks() if task.get_name() == "approval_startup_cleanup_retry"]
+
+
+def _startup_config_loaded() -> AbstractContextManager[AsyncMock]:
+    """Stand in for the first config load, which `_run_runtime` performs before it builds the orchestrator."""
+    return patch("mindroom.orchestrator.load_startup_config", new=AsyncMock(return_value=Config()))
 
 
 def _mock_runtime_orchestrator() -> MagicMock:
@@ -554,6 +561,61 @@ async def test_a_runtime_that_loses_its_journal_stops() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serves_and_the_homeserver_answers(
+    tmp_path: Path,
+) -> None:
+    """The dashboard has the config while the homeserver is unreachable, and no request precedes that load."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    homeserver_waiting = asyncio.Event()
+    started_with: list[Config] = []
+    served_with: list[Config | None] = []
+
+    async def unreachable_homeserver(**_kwargs: object) -> None:
+        homeserver_waiting.set()
+        await asyncio.Event().wait()
+
+    real_start = _MultiAgentOrchestrator.start
+
+    async def recording_start(orchestrator: _MultiAgentOrchestrator, config: Config) -> None:
+        started_with.append(config)
+        await real_start(orchestrator, config)
+
+    async def serving_api(*args: object, **_kwargs: object) -> None:
+        # The first thing a real server does is serve, so the snapshot it sees now is what requests see.
+        served_with.append(api_config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config)
+        await homeserver_waiting.wait()
+        assert api_config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config is served_with[0]
+        shutdown_requested = args[6]
+        assert isinstance(shutdown_requested, asyncio.Event)
+        shutdown_requested.set()
+        await asyncio.Event().wait()
+
+    async def blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    with (
+        patch("mindroom.orchestrator.setup_logging"),
+        patch("mindroom.orchestrator.sync_env_to_credentials"),
+        patch("mindroom.orchestrator.retire_state_root_worker_mounts"),
+        patch("mindroom.orchestrator.wait_for_matrix_homeserver", side_effect=unreachable_homeserver),
+        patch.object(_MultiAgentOrchestrator, "start", recording_start),
+        patch("mindroom.orchestrator._run_api_server", side_effect=serving_api),
+        patch("mindroom.orchestrator._run_auxiliary_task_forever", new=blocked_auxiliary_task),
+        patch("mindroom.orchestrator._EMBEDDED_API_SHUTDOWN_GRACE_SECONDS", 0.01),
+    ):
+        await asyncio.wait_for(
+            main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=0),
+            timeout=10,
+        )
+
+    [startup_config] = started_with
+    assert served_with == [startup_config]
+    assert homeserver_waiting.is_set()
+
+
+@pytest.mark.asyncio
 async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_storage_converts(tmp_path: Path) -> None:
     """The first start after an upgrade converts before the API binds; probes answer meanwhile and stop when it ends.
 
@@ -583,7 +645,7 @@ async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_st
         patch("mindroom.orchestrator.sync_env_to_credentials"),
         patch("mindroom.orchestrator.retire_state_root_worker_mounts"),
         patch("mindroom.orchestrator.migrate_conversation_storage", side_effect=convert),
-        patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_NextStartupStepError),
+        patch("mindroom.orchestrator.load_startup_config", side_effect=_NextStartupStepError),
         pytest.raises(_NextStartupStepError),
     ):
         await main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=port)
@@ -662,7 +724,7 @@ class TestAgentBot(AgentBotTestBase):
         """A runtime that stopped because it lost its journal exits with a failure, so a supervisor restarts it."""
         reset_runtime_state()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.start = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+        mock_orchestrator.start = AsyncMock(side_effect=lambda _config: asyncio.Event().wait())
         mock_orchestrator.stop = AsyncMock()
         mock_orchestrator.running = False
         mock_orchestrator.event_journal_still_held = AsyncMock(return_value=False)
@@ -675,6 +737,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0),
             pytest.raises(EventJournalHoldLostError),
@@ -705,6 +768,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             pytest.raises(PermanentMatrixStartupError, match="boom"),
         ):
@@ -934,13 +998,13 @@ class TestAgentBot(AgentBotTestBase):
 
             async def serve(self) -> None:
                 [provider] = providers
-                # The API's lifespan loads the config when it serves; this fake server has none.
-                assert api_config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
                 committed = api_config_lifecycle.read_app_committed_runtime_config(api_main.app)[0]
                 read_while_serving.append((provider(), committed))
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
+        # `mindroom run` publishes its first config load before the API serves.
+        await config_lifecycle_module.load_startup_config(runtime_paths, api_enabled=True)
         with (
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
@@ -1403,7 +1467,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -1458,6 +1522,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_and_blocks),
             patch("mindroom.orchestrator.logger.warning", side_effect=_record_warning) as mock_warning,
@@ -1501,7 +1566,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             await start_blocker.wait()
 
         async def _api_requests_shutdown_then_finishes(
@@ -1549,6 +1614,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown_then_finishes),
         ):
@@ -1587,7 +1653,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator = _mock_runtime_orchestrator()
         mock_orchestrator.knowledge_refresh_scheduler = None
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             await start_released.wait()
 
         async def _stop() -> None:
@@ -1632,6 +1698,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_requests_shutdown),
         ):
@@ -1761,7 +1828,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.stop = AsyncMock()
         start_blocker = asyncio.Event()
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             await start_blocker.wait()
 
         mock_orchestrator.start = AsyncMock(side_effect=_start)
@@ -1777,6 +1844,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch("mindroom.orchestrator._run_api_server", side_effect=_api_fails),
             pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
@@ -1817,7 +1885,7 @@ class TestAgentBot(AgentBotTestBase):
             del should_restart
             await operation()
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             await asyncio.wait_for(config_watcher_ran.wait(), timeout=1)
             msg = "boom"
             raise PermanentMatrixStartupError(msg)
@@ -1828,6 +1896,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._watch_config_task", side_effect=_watch_config_task),
             patch("mindroom.orchestrator._watch_skills_task", new=AsyncMock()),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", side_effect=_run_auxiliary),
@@ -1857,7 +1926,7 @@ class TestAgentBot(AgentBotTestBase):
                 heartbeat_cancelled.set()
                 raise
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             await asyncio.wait_for(heartbeat_started.wait(), timeout=1)
             msg = "stop after heartbeat start"
             raise RuntimeError(msg)
@@ -1868,6 +1937,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
             patch("mindroom.orchestrator.run_provisioning_heartbeat", side_effect=_heartbeat),
             pytest.raises(RuntimeError, match="stop after heartbeat start"),
@@ -1918,6 +1988,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
             patch("mindroom.orchestrator.start_heap_tasks", side_effect=_start_heap_tasks),
             pytest.raises(RuntimeError, match="stop after auxiliary start"),
@@ -1953,6 +2024,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=run_auxiliary),
             patch("mindroom.orchestrator.run_provisioning_heartbeat", new=heartbeat),
             pytest.raises(ValueError, match=env_name),
@@ -1977,7 +2049,7 @@ class TestAgentBot(AgentBotTestBase):
             msg = "stale SSL_CERT_FILE"
             raise FileNotFoundError(msg)
 
-        async def _start() -> None:
+        async def _start(_config: Config) -> None:
             await asyncio.wait_for(failure_logged.wait(), timeout=1)
             assert not shutdown_worker_manager.called
             msg = "orchestrator failed"
@@ -1990,6 +2062,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging"),
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
             patch("mindroom.orchestrator.run_provisioning_heartbeat", side_effect=_heartbeat),
             patch("mindroom.orchestrator.shutdown_primary_worker_manager", new=shutdown_worker_manager),
@@ -2032,6 +2105,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.setup_logging", side_effect=_capture_logging),
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_capture_credentials_sync),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             pytest.raises(RuntimeError, match="stop after storage capture"),
         ):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(runtime_storage), api=False)
@@ -2083,6 +2157,7 @@ class TestAgentBot(AgentBotTestBase):
             ) as start_detector,
             patch("mindroom.orchestrator.sync_env_to_credentials", side_effect=_sync_credentials),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_construct_orchestrator),
+            _startup_config_loaded(),
             pytest.raises(RuntimeError, match="stop after setup"),
         ):
             await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
@@ -2154,6 +2229,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
                 "mindroom.orchestrator.shutdown_primary_worker_manager",
@@ -2216,6 +2292,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.sync_env_to_credentials"),
             patch("mindroom.orchestrator.reset_primary_worker_manager") as mock_reset_worker_manager,
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            _startup_config_loaded(),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
             patch(
                 "mindroom.orchestrator.shutdown_primary_worker_manager",
@@ -2914,10 +2991,8 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator initialization
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_initialize(
         self,
-        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test initializing the orchestrator with agents."""
@@ -2929,11 +3004,10 @@ class TestMultiAgentOrchestrator:
         }
         mock_config.teams = {}
         bind_mock_config_event_journal(mock_config)
-        mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            await orchestrator.initialize(mock_config)
 
             # Should have 3 bots: calculator, general, and router
             assert len(orchestrator.agent_bots) == 3
@@ -3001,7 +3075,6 @@ class TestMultiAgentOrchestrator:
             )
 
         with (
-            patch("mindroom.orchestrator.load_config", return_value=mock_config) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(
@@ -3040,12 +3113,10 @@ class TestMultiAgentOrchestrator:
                     process_env={},
                 ),
             )
-            await orchestrator.initialize()
+            await orchestrator.initialize(mock_config)
 
-        mock_load_config.assert_called_once()
         assert create_managed_bot.call_count == 2
         assert any(log["event"] == "calls_dependency_preload_failed" for log in logs) is (import_error is not None)
-        assert mock_load_config.call_args.args[0].config_path == config_path.resolve()
 
     @pytest.mark.asyncio
     async def test_initialize_does_not_activate_hook_runtime_before_user_account_succeeds(
@@ -3061,7 +3132,6 @@ class TestMultiAgentOrchestrator:
         new_hook_registry = HookRegistry.empty()
 
         with (
-            patch("mindroom.orchestrator.load_config", return_value=config),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
@@ -3073,7 +3143,7 @@ class TestMultiAgentOrchestrator:
             patch.object(_MultiAgentOrchestrator, "_create_managed_bot") as mock_create_managed_bot,
             pytest.raises(RuntimeError, match="boom"),
         ):
-            await orchestrator.initialize()
+            await orchestrator.initialize(config)
 
         assert orchestrator.config is None
         assert orchestrator.hook_registry is initial_hook_registry
@@ -3083,10 +3153,8 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator start
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_start(
         self,
-        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test starting all agent bots."""
@@ -3099,11 +3167,10 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         bind_mock_config_event_journal(mock_config)
-        mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()  # Need to initialize first
+            await orchestrator.initialize(mock_config)  # Need to initialize first
 
             # Mock start for all bots to avoid actual login/setup
             start_mocks = []
@@ -3696,7 +3763,7 @@ class TestMultiAgentOrchestrator:
         async def _wait_for_homeserver(*_args: object, **_kwargs: object) -> None:
             call_order.append("wait_for_homeserver")
 
-        async def _initialize() -> None:
+        async def _initialize(_config: Config) -> None:
             call_order.append("initialize")
             orchestrator.config = MagicMock(source_fingerprint=None)
             bot = MagicMock()
@@ -3713,7 +3780,7 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
-            await _run_orchestrator_start_until_ready(orchestrator)
+            await _run_orchestrator_start_until_ready(orchestrator, startup_config=Config())
 
         assert call_order[:2] == ["wait_for_homeserver", "initialize"]
 
@@ -5058,9 +5125,8 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {"router": router_bot}
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.load_plugins"),
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -5090,9 +5156,8 @@ class TestMultiAgentOrchestrator:
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: router_bot}
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.load_plugins"),
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -5156,6 +5221,7 @@ class TestMultiAgentOrchestrator:
                 storage_path=tmp_path,
                 process_env={},
             ),
+            api_enabled=False,
         )
         orchestrator.config = current_config
         plan = ConfigUpdatePlan(new_config=new_config, reply_authorization_changed=True)
@@ -5166,13 +5232,15 @@ class TestMultiAgentOrchestrator:
             generation_refreshes.append(new_config)
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config) as mock_load_config,
+            patch(
+                "mindroom.orchestration.config_lifecycle.load_config_attempt",
+                return_value=published_config_load(new_config).attempt,
+            ) as mock_load_config,
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 return_value=plan,
             ) as mock_build_plan,
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_support,
             patch.object(
                 type(orchestrator.script_runtime),
@@ -5222,13 +5290,12 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(new_config=new_config, reply_authorization_changed=True)
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 return_value=plan,
             ) as mock_plan,
-            patch.object(orchestrator._external_trigger_runtime, "sync_api_config_snapshot", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(config_lifecycle_module.logger, "warning") as mock_warning,
         ):
@@ -5260,7 +5327,7 @@ class TestMultiAgentOrchestrator:
         plan = ConfigUpdatePlan(new_config=new_config, mindroom_user_changed=True, reply_authorization_changed=True)
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
@@ -5321,7 +5388,7 @@ class TestMultiAgentOrchestrator:
         stop_entities_before_mcp_sync = AsyncMock(return_value={"general"})
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
@@ -5429,7 +5496,7 @@ class TestMultiAgentOrchestrator:
         set_plugin_skill_roots([])
         try:
             with (
-                patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+                patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
                 patch(
                     "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                     side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
@@ -5510,7 +5577,7 @@ class TestMultiAgentOrchestrator:
                 return set()
 
             with (
-                patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+                patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
                 patch(
                     "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                     side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
@@ -5606,7 +5673,7 @@ class TestMultiAgentOrchestrator:
         new_bot.ensure_rooms = AsyncMock(side_effect=AssertionError("ensure_rooms called on failed bot"))
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._get_changed_agents",
@@ -5700,7 +5767,7 @@ class TestMultiAgentOrchestrator:
         new_bot.ensure_rooms = AsyncMock(side_effect=AssertionError("ensure_rooms called on failed bot"))
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.load_plugins"),
             patch(
                 "mindroom.orchestration.config_updates._get_changed_agents",
@@ -5736,10 +5803,8 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator stop
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_stop(
         self,
-        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test stopping all agent bots."""
@@ -5752,11 +5817,10 @@ class TestMultiAgentOrchestrator:
         mock_config.teams = {}
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         bind_mock_config_event_journal(mock_config)
-        mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            await orchestrator.initialize(mock_config)
 
             # Mock the agent clients and ensure_user_account
             for bot in orchestrator.agent_bots.values():
@@ -5775,10 +5839,8 @@ class TestMultiAgentOrchestrator:
     @pytest.mark.asyncio
     @pytest.mark.requires_matrix  # Requires real Matrix server for orchestrator streaming
     @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-    @patch("mindroom.orchestrator.load_config")
     async def test_orchestrator_streaming_default_config(
         self,
-        mock_load_config: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test that orchestrator respects defaults.enable_streaming."""
@@ -5792,11 +5854,10 @@ class TestMultiAgentOrchestrator:
         mock_config.defaults.enable_streaming = False
         mock_config.get_all_configured_rooms.return_value = ["lobby"]
         bind_mock_config_event_journal(mock_config)
-        mock_load_config.return_value = mock_config
 
         with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
-            await orchestrator.initialize()
+            await orchestrator.initialize(mock_config)
 
             # All bots should have streaming disabled except teams (which never stream)
             for bot in orchestrator.agent_bots.values():
@@ -5821,7 +5882,7 @@ async def test_shutdown_must_stop_startup_before_releasing_resources(
         homeserver_wait_started.set()
         await homeserver_available.wait()
 
-    async def initialize() -> None:
+    async def initialize(_config: Config) -> None:
         # Production initialize acquires its journal and MCP manager at this seam.
         acquired_after_teardown.append(teardown_started)
         await asyncio.Event().wait()
@@ -5838,7 +5899,7 @@ async def test_shutdown_must_stop_startup_before_releasing_resources(
     monkeypatch.setattr(orchestrator_module, "wait_for_matrix_homeserver", wait_for_homeserver)
     monkeypatch.setattr(orchestrator, "initialize", initialize)
     monkeypatch.setattr(orchestrator, "stop", stop)
-    startup = asyncio.create_task(orchestrator.start())
+    startup = asyncio.create_task(orchestrator.start(Config()))
     await homeserver_wait_started.wait()
     finish_shutdown = orchestrator_module._finish_runtime_shutdown
     await finish_shutdown(

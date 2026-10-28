@@ -2,27 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_primary_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from tests.authorization_helpers import (
     make_test_external_trigger_runtime_coordinator,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
-    from mindroom.constants import RuntimePaths
-
-
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
 
 
 def _config() -> Config:
@@ -66,9 +56,9 @@ def _snapshot(
     )
 
 
-def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate(tmp_path: Path) -> None:
+def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate() -> None:
     """Coordinator binds router delivery with the authoritative snapshot readiness callback."""
-    coordinator = make_test_external_trigger_runtime_coordinator(runtime_paths=_runtime_paths(tmp_path))
+    coordinator = make_test_external_trigger_runtime_coordinator()
 
     router_bot = MagicMock()
     router_bot.agent_name = ROUTER_AGENT_NAME
@@ -88,9 +78,9 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target(tmp_path: Path) -> None:
+async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target() -> None:
     """Coordinator readiness comes from live Matrix joined-room state."""
-    coordinator = make_test_external_trigger_runtime_coordinator(runtime_paths=_runtime_paths(tmp_path))
+    coordinator = make_test_external_trigger_runtime_coordinator()
     router_client = object()
     target_client = object()
     router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=True)
@@ -111,9 +101,9 @@ async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_runtime_coordinator_is_ready_rejects_unjoined_room(tmp_path: Path) -> None:
+async def test_runtime_coordinator_is_ready_rejects_unjoined_room() -> None:
     """Coordinator rejects triggers when router or target is not joined to the snapshot room."""
-    coordinator = make_test_external_trigger_runtime_coordinator(runtime_paths=_runtime_paths(tmp_path))
+    coordinator = make_test_external_trigger_runtime_coordinator()
     router_client = object()
     target_client = object()
     router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=True)
@@ -145,7 +135,6 @@ async def test_runtime_coordinator_is_ready_rejects_unjoined_room(tmp_path: Path
     ],
 )
 async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
-    tmp_path: Path,
     snapshot: TriggerDeliverySnapshot,
     router_running: bool,
     router_client: object | None,
@@ -153,7 +142,7 @@ async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
     target_client: object | None,
 ) -> None:
     """Coordinator rejects stopped or client-less runtime participants."""
-    coordinator = make_test_external_trigger_runtime_coordinator(runtime_paths=_runtime_paths(tmp_path))
+    coordinator = make_test_external_trigger_runtime_coordinator()
     router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=router_running)
     target_bot = MagicMock(agent_name="code", client=target_client, running=target_running)
     bots = {ROUTER_AGENT_NAME: router_bot, "code": target_bot}
@@ -162,23 +151,3 @@ async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
         assert await coordinator._is_ready(snapshot, bots) is False
 
     mock_get_joined_rooms.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_runtime_coordinator_sync_api_config_snapshot_runs_for_policy_changes(tmp_path: Path) -> None:
-    """Coordinator publishes API snapshots even when no authored trigger records exist."""
-    config = _config()
-    coordinator = make_test_external_trigger_runtime_coordinator(runtime_paths=_runtime_paths(tmp_path))
-
-    with patch(
-        "mindroom.orchestration.external_trigger_runtime.asyncio.to_thread",
-        new=AsyncMock(return_value=True),
-    ) as mock_to_thread:
-        await coordinator.sync_api_config_snapshot(config)
-
-    mock_to_thread.assert_awaited_once_with(
-        api_main.config_lifecycle._publish_runtime_config_into_app,
-        config,
-        coordinator.runtime_paths,
-        api_main.app,
-    )

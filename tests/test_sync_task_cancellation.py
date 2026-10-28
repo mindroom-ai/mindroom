@@ -86,6 +86,8 @@ from tests.bot_helpers import make_test_agent_bot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from mindroom.config.load_attempt import PublishedConfigLoad
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
@@ -94,6 +96,7 @@ from tests.conftest import (
     install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
+    published_config_load,
     runtime_paths_for,
     test_runtime_paths,
     write_config_yaml,
@@ -2679,7 +2682,6 @@ async def test_stop_entities_prioritizes_quiesce_failure_after_cleanup_failures(
 async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
     """Test that MultiAgentOrchestrator properly tracks sync tasks."""
     with (
-        patch("mindroom.orchestrator.load_config") as mock_load_config,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
         patch("mindroom.orchestrator.sync_forever_with_restart"),
         patch("mindroom.orchestrator.ensure_all_rooms_exist") as mock_ensure_rooms,
@@ -2709,7 +2711,6 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
         config.mindroom_user = None
         config.personal_agent_instance.return_value = None
         config.get_all_configured_rooms.return_value = []
-        mock_load_config.return_value = config
 
         # Create orchestrator
         orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
@@ -2732,7 +2733,7 @@ async def test_orchestrator_tracks_sync_tasks(tmp_path: Path) -> None:
 
         assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
 
-        await orchestrator.initialize()
+        await orchestrator.initialize(config)
 
         # Manually simulate what start() does for sync tasks
         # (We can't actually run start() because it would block on gather())
@@ -2803,7 +2804,7 @@ async def test_start_runtime_waits_for_shutdown_after_initial_sync_generation_ex
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_completed_sync_task),
     ):
-        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        runtime_task = asyncio.create_task(orchestrator._start_runtime(orchestrator._require_config()))
         try:
             await asyncio.wait_for(sync_tasks_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert set(orchestrator._sync_tasks) == {"router", "general"}
@@ -2900,7 +2901,7 @@ async def test_start_runtime_publishes_after_router_sync_without_waiting_for_roo
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
-        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        runtime_task = asyncio.create_task(orchestrator._start_runtime(orchestrator._require_config()))
         try:
             await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             for started in sync_started_by_entity.values():
@@ -2996,10 +2997,10 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
         if entity_name == ROUTER_AGENT_NAME:
             router_sync_started.set()
 
-    async def blocked_config_load(*_args: object, **_kwargs: object) -> Config:
+    async def blocked_config_load(*_args: object, **_kwargs: object) -> PublishedConfigLoad:
         reload_started.set()
         await reload_can_finish.wait()
-        return orchestrator.config
+        return published_config_load(orchestrator._require_config())
 
     with (
         patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock()),
@@ -3016,7 +3017,7 @@ async def test_startup_membership_publication_serializes_config_reload(  # noqa:
         patch("mindroom.orchestration.config_lifecycle.asyncio.to_thread", side_effect=blocked_config_load),
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=runtime_ready.set),
     ):
-        runtime_task = asyncio.create_task(orchestrator._start_runtime())
+        runtime_task = asyncio.create_task(orchestrator._start_runtime(orchestrator._require_config()))
         reload_task: asyncio.Task[None] | None = None
         try:
             await asyncio.wait_for(setup_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -3096,7 +3097,7 @@ async def test_update_config_replays_cancelled_startup_maintenance_and_runs_appr
             replayed.append((bots, config))
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
             patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -3163,7 +3164,7 @@ async def test_config_reload_during_post_readiness_room_setup_replays_it_with_li
         orchestrator.agent_bots["general"] = new_bot
 
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config", return_value=new_config),
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
         patch("mindroom.orchestration.config_lifecycle.build_config_update_plan", return_value=plan),
         patch.object(orchestrator, "_stop_entities_before_mcp_sync", new=AsyncMock(return_value=set())),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
@@ -3218,7 +3219,6 @@ def test_running_startup_maintenance_bots_returns_router_first(tmp_path: Path) -
 async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> None:
     """Test that update_config properly cancels old sync tasks."""
     with (
-        patch("mindroom.orchestration.config_lifecycle.load_config") as mock_load_config,
         patch("mindroom.orchestration.config_updates._get_changed_agents") as mock_identify,
         patch("mindroom.orchestrator.stop_entities") as mock_stop_entities,
         patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
@@ -3272,7 +3272,7 @@ async def test_orchestrator_update_config_cancels_old_tasks(tmp_path: Path) -> N
         new_config.teams = {}
         new_config.mcp_servers = {}
         new_config.event_journal = MagicMock()
-        mock_load_config.return_value = new_config
+        orchestrator.config_reload.load_config = lambda: published_config_load(new_config)
 
         # Agent1 needs to be restarted
         mock_identify.return_value = {"agent1"}
@@ -3331,7 +3331,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path) -> None:
         patch.object(_MultiAgentOrchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
     ):
         # --- existing orchestrator with one agent running ---
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), api_enabled=False)
 
         old_config = Config(
             agents={
@@ -3434,7 +3434,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
     models = {"default": {"provider": "openai", "id": "test-model"}}
     old_config = Config(agents={"general": agent_config("Old"), "coach": agent_config("Old")}, models=models)
     new_config = Config(agents={"general": agent_config("New"), "coach": agent_config("New")}, models=models)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), api_enabled=False)
     orchestrator.config = old_config
     write_config_yaml(new_config, orchestrator.config_path)
 

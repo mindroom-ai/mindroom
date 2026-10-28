@@ -74,6 +74,7 @@ from mindroom.bot import AgentBot, TeamBot
 from mindroom.coalescing.batch import PendingEvent
 from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
+from mindroom.config.load_attempt import ConfigLoadResult, PublishedConfigLoad, _ConfigLoadAttempt
 from mindroom.config.main import Config, load_config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.conversation_resolver import DispatchContextResult, MessageContext
@@ -149,6 +150,7 @@ from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.orchestration.config_lifecycle import load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
@@ -195,6 +197,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
+    from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
@@ -2421,6 +2424,40 @@ def orchestrator_runtime_paths(
 def load_config_yaml(config_path: Path) -> Config:
     """Load a config YAML file through the production runtime-aware loader."""
     return load_config(resolve_runtime_paths(config_path=Path(config_path).expanduser().resolve()))
+
+
+def published_config_load(config: Config) -> PublishedConfigLoad:
+    """Return a successful load of ``config`` that no newer API commit superseded."""
+    return PublishedConfigLoad(
+        _ConfigLoadAttempt(
+            result=ConfigLoadResult(success=True, uses_includes=config.uses_includes),
+            payload=config.authored_model_dump(),
+            config=config,
+            source_fingerprint=config.source_fingerprint,
+            source_files=config.source_files,
+        ),
+    )
+
+
+async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -> Config:
+    """Load the orchestrator's config file the way `mindroom run` startup does, then initialize from that load."""
+    config = await load_startup_config(orchestrator.runtime_paths, api_enabled=orchestrator.api_enabled)
+    await orchestrator.initialize(config)
+    return config
+
+
+def failed_config_load(error: Exception) -> PublishedConfigLoad:
+    """Return a load that failed with ``error`` and that no newer API commit superseded."""
+    return PublishedConfigLoad(
+        _ConfigLoadAttempt(
+            result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
+            payload=None,
+            config=None,
+            source_fingerprint=None,
+            source_files=None,
+            error=error,
+        ),
+    )
 
 
 def write_config_yaml(config: Config, config_path: Path) -> None:

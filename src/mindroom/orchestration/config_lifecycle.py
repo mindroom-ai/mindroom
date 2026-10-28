@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.config.main import failed_config_source_fingerprint, load_config
+from mindroom.config.load_attempt import PublishedConfigLoad, load_config_attempt
+from mindroom.config.main import failed_config_source_fingerprint
 from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.config.yaml_includes import partial_source_files
 from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
@@ -81,6 +82,36 @@ class _ReplacementDrainState:
         return self.wait_started_at is not None and self.wait_seconds(now) >= force_after_seconds
 
 
+def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> PublishedConfigLoad:
+    """Load the config once, publishing it to the embedded dashboard API when one runs.
+
+    With the API embedded, this load is the dashboard's only one, so the runtime
+    and the dashboard always see the same validated config.
+    """
+    if not api_enabled:
+        return PublishedConfigLoad(load_config_attempt(runtime_paths))
+    from mindroom.api import main as api_main  # noqa: PLC0415
+
+    return api_main.config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+
+
+async def load_startup_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> Config:
+    """Bind the embedded API to this runtime and load the config startup applies.
+
+    The API serves only after this returns, so no request sees it without config,
+    and the dashboard keeps that config while the homeserver is unreachable.
+    A failed load fails startup.
+    """
+    if api_enabled:
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.initialize_api_app(api_main.app, runtime_paths)
+    # Config validation executes plugin modules and walks the filesystem;
+    # keep it off the event loop (#1260).
+    published = await asyncio.to_thread(load_published_config, runtime_paths, api_enabled=api_enabled)
+    return published.attempt.loaded_config()
+
+
 @dataclass
 class ConfigReloadLifecycle:
     """Own debounced config reloads and serialized replacement admission.
@@ -93,9 +124,9 @@ class ConfigReloadLifecycle:
 
     runtime_paths: RuntimePaths
     is_running: Callable[[], bool]
-    current_config: Callable[[], Config | None]
+    current_config: Callable[[], Config]
     agent_bots: Callable[[], Mapping[str, AgentBot | TeamBot]]
-    load_initial_config: Callable[[Config], Awaitable[bool]]
+    load_config: Callable[[], PublishedConfigLoad]
     apply_update_plan: Callable[[Config, ConfigUpdatePlan], Awaitable[bool]]
     response_admission_gate: ResponseAdmissionGate
     before_runtime_replacement: Callable[[], Awaitable[None]]
@@ -162,13 +193,16 @@ class ConfigReloadLifecycle:
         async with self._response_admission_apply_lock:
             # Config validation executes plugin modules and walks the filesystem;
             # keep it off the event loop (#1260). Admission stays open because
-            # nothing is published until loading and planning both succeed.
+            # the runtime adopts nothing until loading and planning both succeed;
+            # the embedded dashboard sees the load as soon as it finishes.
             async with self.config_update_lock:
-                new_config = await asyncio.to_thread(
-                    load_config,
-                    self.runtime_paths,
-                    tolerate_plugin_load_errors=True,
-                )
+                published = await asyncio.to_thread(self.load_config)
+            if published.superseded:
+                # A dashboard save or runtime swap committed during the load and
+                # already changed the files, so the watcher queues the reload
+                # that applies it; this stale read is never adopted.
+                return None
+            new_config = published.attempt.loaded_config()
             self.loaded_source_files = new_config.source_files
             self.status = ConfigReloadStatus(status="pending", fingerprint=new_config.source_fingerprint)
             runtime_config = self.current_config()
@@ -176,22 +210,6 @@ class ConfigReloadLifecycle:
                 self._fully_applied_config = runtime_config
             current_config = self._fully_applied_config
             self.failed_reload_source_files = None
-
-            if current_config is None:
-                updated = False
-
-                async def load_initial_config() -> None:
-                    nonlocal updated
-                    async with self.config_update_lock:
-                        updated = await self.load_initial_config(new_config)
-                        self.record_applied(new_config)
-
-                applied = await self._apply_after_response_drain(
-                    load_initial_config,
-                    operation_name="configuration reload",
-                    request_is_current=self._reload_publication_is_current,
-                )
-                return updated if applied else None
 
             if pending_event_journal_restart(new_config, self.runtime_paths):
                 # Adopted, not refused: the store was opened once at startup and
@@ -206,7 +224,7 @@ class ConfigReloadLifecycle:
 
             current_effective_config = current_config.runtime_model_dump()
             new_effective_config = new_config.runtime_model_dump()
-            runtime_effective_config = runtime_config.runtime_model_dump() if runtime_config is not None else None
+            runtime_effective_config = runtime_config.runtime_model_dump()
             if (
                 self._incomplete_config is None
                 and current_effective_config == new_effective_config == runtime_effective_config
@@ -215,11 +233,7 @@ class ConfigReloadLifecycle:
                 self.record_applied(new_config)
                 return False
             repair_config = self._incomplete_config
-            if (
-                repair_config is None
-                and runtime_config is not None
-                and runtime_effective_config != current_effective_config
-            ):
+            if repair_config is None and runtime_effective_config != current_effective_config:
                 repair_config = runtime_config
             requested_plan = None
             if repair_config is not None:

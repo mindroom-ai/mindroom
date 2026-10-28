@@ -21,7 +21,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
-from tests.conftest import install_model_providers, orchestrator_runtime_paths
+from tests.conftest import install_model_providers, orchestrator_runtime_paths, published_config_load
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
@@ -125,7 +125,11 @@ class TestDynamicConfigUpdate:
         persist_entity_accounts(updated_config, orchestrator.runtime_paths)
 
         # Mock the explicit runtime-bound config loader used by update_config().
-        with patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config):  # noqa: SIM117
+        with patch.object(  # noqa: SIM117
+            orchestrator.config_reload,
+            "load_config",
+            return_value=published_config_load(updated_config),
+        ):
             # Mock the bot creation and setup methods to avoid actual Matrix operations
             with (
                 patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot,
@@ -200,7 +204,7 @@ class TestDynamicConfigUpdate:
         }
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch("mindroom.orchestrator.load_plugins", return_value=[]),
             patch.object(
                 orchestrator,
@@ -321,7 +325,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -378,7 +382,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
         ):
             updated = await orchestrator.config_reload._update_config()
 
@@ -430,7 +434,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -481,7 +485,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -544,7 +548,7 @@ class TestDynamicConfigUpdate:
         }
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch.object(orchestrator, "_ensure_rooms_exist", new=AsyncMock(return_value={"lobby": room_id})),
             patch.object(orchestrator, "_ensure_root_space", new=AsyncMock()),
             patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
@@ -613,7 +617,7 @@ class TestDynamicConfigUpdate:
         }
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(
                 orchestrator,
@@ -679,7 +683,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch.object(orchestrator, "_ensure_user_account", new=AsyncMock()) as mock_ensure_user,
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()) as mock_setup,
         ):
@@ -731,7 +735,7 @@ class TestDynamicConfigUpdate:
         orchestrator.agent_bots[ROUTER_AGENT_NAME] = router_bot
 
         with (
-            patch("mindroom.orchestration.config_lifecycle.load_config", return_value=updated_config),
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(updated_config)),
             patch.object(
                 orchestrator,
                 "_ensure_user_account",

@@ -374,7 +374,7 @@ def _trigger_api_context(
         process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     _create_record(runtime_paths, config, _public_key_b64(private_key))
     api_main.unbind_external_trigger_runtime(api_main.app)
     ready_snapshots: list[TriggerDeliverySnapshot] = []
@@ -563,8 +563,8 @@ def test_trigger_invalidated_by_current_config_returns_404_before_replay_claim(
 ) -> None:
     """Stored triggers that no longer target configured rooms are hidden as not found."""
     runtime_paths = trigger_api.runtime_paths
-    config = _write_runtime_config(runtime_paths.config_path, research_rooms=[])
-    assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
+    _write_runtime_config(runtime_paths.config_path, research_rooms=[])
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
 
     response = _post_signed(trigger_api, nonce="stale-target")
 
@@ -839,11 +839,11 @@ def test_policy_caps_apply_at_request_time(
         process_env={},
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     _create_record(runtime_paths, initial_config, _public_key_b64(private_key))
 
-    lowered_config = _write_runtime_config(config_path, max_body_bytes=1024)
-    assert config_lifecycle._publish_runtime_config_into_app(lowered_config, runtime_paths, api_main.app)
+    _write_runtime_config(config_path, max_body_bytes=1024)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     ready_snapshots: list[TriggerDeliverySnapshot] = []
     _bind_runtime(ready_snapshots)
     monkeypatch.setattr("mindroom.api.external_triggers.is_external_trigger_owner_joined_target_room", _owner_joined)
@@ -868,8 +868,8 @@ def test_owner_permission_removed_blocks_delivery_before_replay_claim(
 ) -> None:
     """Current authorization is checked before replay state is touched."""
     runtime_paths = trigger_api.runtime_paths
-    config = _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
-    assert config_lifecycle._publish_runtime_config_into_app(config, runtime_paths, api_main.app)
+    _write_runtime_config(runtime_paths.config_path, owner_authorized=False)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     _bind_runtime(trigger_api.ready_snapshots)
 
     response = _post_signed(trigger_api)
@@ -894,7 +894,7 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
         process_env={},
     )
     api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     _create_record(runtime_paths, initial_config, _public_key_b64(private_key))
     gate = ResponseAdmissionGate()
     assert gate.close_if_idle()
@@ -931,8 +931,8 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
             )
             await asyncio.wait_for(wait_started.wait(), timeout=1)
 
-            replacement = _write_runtime_config(config_path, owner_authorized=False)
-            assert config_lifecycle._publish_runtime_config_into_app(replacement, runtime_paths, api_main.app)
+            _write_runtime_config(config_path, owner_authorized=False)
+            assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
             _bind_runtime(
                 ready_snapshots,
                 response_admission_gate=gate,
@@ -963,7 +963,7 @@ async def test_membership_authorized_trigger_waits_for_reload_snapshot(
     config, runtime_paths, memberships, membership_client = await _membership_authorized_runtime(tmp_path)
 
     api_main.initialize_api_app(api_main.app, runtime_paths)
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app) is True
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     _create_record(runtime_paths, config, _public_key_b64(private_key))
     gate = ResponseAdmissionGate()
     assert gate.close_if_idle()
@@ -1372,7 +1372,7 @@ def test_trigger_endpoint_requires_live_human_equivalent_membership(
     }
     runtime_paths = trigger_api.runtime_paths
     runtime_paths.config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
-    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     config, _ = config_lifecycle.read_app_committed_runtime_config(api_main.app)
     persist_entity_accounts(
         config,

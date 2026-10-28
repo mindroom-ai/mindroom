@@ -207,8 +207,12 @@ async def _run_orchestrator_start_until_ready(
     orchestrator: _MultiAgentOrchestrator,
     *,
     wait_for_startup_maintenance: bool = False,
+    startup_config: Config | None = None,
 ) -> None:
-    """Run start() until readiness, then explicitly shut the runtime down."""
+    """Run start() until readiness, then explicitly shut the runtime down.
+
+    ``startup_config`` stands in for the config startup loaded; it defaults to the orchestrator's current config.
+    """
     ready = asyncio.Event()
     start_sync_task = orchestrator._start_sync_task
 
@@ -225,7 +229,7 @@ async def _run_orchestrator_start_until_ready(
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
         patch.object(orchestrator, "_start_sync_task", side_effect=start_sync_task_and_publish_router_readiness),
     ):
-        runtime_task = asyncio.create_task(orchestrator.start())
+        runtime_task = asyncio.create_task(orchestrator.start(startup_config or orchestrator._require_config()))
         try:
             await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             if wait_for_startup_maintenance:
