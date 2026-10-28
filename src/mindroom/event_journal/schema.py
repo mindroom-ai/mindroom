@@ -697,9 +697,156 @@ _INDEXES = (
 )
 
 
+# Turn state as rows, agent-scoped like turn_records: "answered" must survive a
+# re-login. A turn is named by an immutable surrogate key for one ordered tuple
+# of physical sources; a different tuple is a different turn. Physical
+# membership (turn_sources) is exclusive per agent, while an alias may be
+# indexed by several turns at once, because an original and the router relay
+# that answers for it are both live turns.
+_TURN_ROW_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS turns (
+        agent_name TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        -- The last physical source. Unique because the outbox keys a turn's
+        -- deliveries by it.
+        anchor_event_id TEXT NOT NULL,
+        -- NULL only for content-free completion evidence an upgrade could not
+        -- place in a room; every runtime write names the room.
+        room_id TEXT,
+        completed BOOLEAN NOT NULL,
+        response_event_id TEXT,
+        -- The non-AI FINAL delivery this turn was handed to; a bound turn is
+        -- frozen until that delivery's acknowledgement completes it.
+        final_delivery_id TEXT,
+        response_owner TEXT,
+        requester_id TEXT,
+        history_scope_json TEXT,
+        conversation_target_json TEXT,
+        session_id TEXT,
+        command_execution_started BOOLEAN NOT NULL,
+        command_result_text TEXT,
+        command_result_extra_content_json TEXT,
+        updated_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (agent_name, turn_key),
+        UNIQUE (agent_name, anchor_event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS turn_sources (
+        agent_name TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        ordinal BIGINT NOT NULL,
+        prompt TEXT,
+        selected_rev_ts BIGINT,
+        selected_rev_id TEXT,
+        -- NULL means no proof of who sent this source, never "the requester".
+        sender TEXT,
+        timestamp_ms DOUBLE PRECISION,
+        speaker TEXT,
+        discovery_event_id TEXT,
+        prepared_voice_json TEXT,
+        visible_echo_event_id TEXT,
+        visible_echo_is_fallback BOOLEAN,
+        PRIMARY KEY (agent_name, event_id),
+        UNIQUE (agent_name, turn_key, ordinal),
+        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS turn_aliases (
+        agent_name TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (agent_name, turn_key, event_id),
+        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS turn_revisions (
+        -- Per turn: one physical edit is recorded by every turn that selected
+        -- or consumed it, each with its own response proof.
+        agent_name TEXT NOT NULL,
+        turn_key TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        timestamp_ms BIGINT NOT NULL,
+        response_event_id TEXT,
+        PRIMARY KEY (agent_name, turn_key, revision_id),
+        FOREIGN KEY (agent_name, turn_key) REFERENCES turns (agent_name, turn_key) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS event_redactions (
+        -- The one record that an event was redacted in a room. Ids only, kept
+        -- when the bot leaves, and scoped to the agent so a re-login under a
+        -- new Matrix ID keeps honoring it, as it keeps turn truth.
+        agent_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        PRIMARY KEY (agent_name, room_id, event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS legacy_summary_revisions (
+        -- Revisions a pre-v2026.9.43 compacted summary consumed through their
+        -- source; written only by upgrades and the pre-journal ledger import.
+        agent_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        PRIMARY KEY (agent_name, room_id, revision_id, source_event_id)
+    )
+    """,
+)
+
+_TURN_ROW_INDEXES = (
+    """
+    CREATE INDEX IF NOT EXISTS turns_session ON turns (agent_name, session_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turns_response ON turns (agent_name, response_event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turns_final_delivery ON turns (agent_name, final_delivery_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_sources_turn ON turn_sources (agent_name, turn_key)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_sources_selected_revision ON turn_sources (agent_name, selected_rev_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_sources_discovery ON turn_sources (agent_name, discovery_event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_sources_visible_echo ON turn_sources (agent_name, visible_echo_event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_aliases_event ON turn_aliases (agent_name, event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS turn_revisions_revision ON turn_revisions (agent_name, revision_id)
+    """,
+)
+
+
 def _expand_byte_order(sql: str, dialect: _SchemaDialect) -> str:
     """Spell the byte-order pin for one backend."""
     return sql.replace(_BYTE_ORDER_MARKER, dialect.order_by_bytes)
+
+
+def _render_statement(statement: str, dialect: _SchemaDialect) -> str:
+    return _expand_byte_order(statement, dialect).format(
+        receipt_order_column=dialect.receipt_order_column,
+        ordered_text=dialect.ordered_text,
+    )
+
+
+def turn_row_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
+    """Return the DDL of the turn-row tables, which their upgrade creates before the rest of the schema."""
+    return tuple(_render_statement(statement, dialect) for statement in (*_TURN_ROW_TABLES, *_TURN_ROW_INDEXES))
 
 
 def schema_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
@@ -712,12 +859,9 @@ def schema_statements(dialect: _SchemaDialect) -> tuple[str, ...]:
     whose default text collation is already byte order, so the mismatch shows up
     only on the backend that is not measured by a local query-plan test.
     """
-    return tuple(
-        _expand_byte_order(statement, dialect).format(
-            receipt_order_column=dialect.receipt_order_column,
-            ordered_text=dialect.ordered_text,
-        )
-        for statement in (*_TABLES, *_INDEXES)
+    return (
+        *(_render_statement(statement, dialect) for statement in (*_TABLES, *_INDEXES)),
+        *turn_row_statements(dialect),
     )
 
 
@@ -743,3 +887,15 @@ def render(sql: str, dialect: _SchemaDialect) -> str:
     if dialect.placeholder == "?":
         return sql
     return sql.replace("?", dialect.placeholder)
+
+
+__all__ = [
+    "OUTBOX_TABLE",
+    "PENDING_STATE",
+    "POSTGRES_DIALECT",
+    "SETTLED_STATE",
+    "SQLITE_DIALECT",
+    "render",
+    "schema_statements",
+    "turn_row_statements",
+]
