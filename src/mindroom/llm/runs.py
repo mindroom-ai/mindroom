@@ -50,11 +50,12 @@ class RunStatus(StrEnum):
 
 
 # LEGACY_COMPAT: Run rows stored with Agno's PENDING or REGENERATED status.
-# Legacy format: a stored run ``status`` of ``PENDING``, which Agno 3.0.9 gave a background run before it started, or
-# ``REGENERATED``, which its AgentOS gave a run replaced by a regenerated one and skipped in history.
-# Last legacy release: none; no MindRoom release wrote either, since MindRoom never started Agno background runs or
-# regenerations, and v2026.10.499 through v2026.10.627 modeled both only to read such a row. A stored one is
-# unversioned external input.
+# Legacy format: a stored run ``status`` of ``PENDING``, which Agno 3.0.9's ``Agent`` and ``Team`` gave a run started
+# with ``background=True`` until it ran, or ``REGENERATED``, which their ``continue_run(regenerate=True)`` gave the run
+# a regenerated one replaced, and which Agno's history skipped.
+# Last legacy release: none; no MindRoom release wrote either, since MindRoom never started an Agno run in the
+# background or continued one with ``regenerate=True``, and v2026.10.499 through v2026.10.627 modeled both only to read
+# such a row. A stored one is unversioned external input.
 # Handling: either status reads as ``ERROR``, a run that did not finish, which never replays as history and settles a
 # delegation as failed; every other status reads as stored.
 # Coverage: tests/llm/test_codecs.py::test_run_record_reads_every_status_agno_could_store,

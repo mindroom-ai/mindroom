@@ -25,8 +25,9 @@ A conflict in a read-only golden is resolved on its own, as data, since no comma
 
 `storage/`, `runs/`, `history/`, `codecs.json`, and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
 Tests read them as inputs: the storage conversion, the legacy codec tests, and the resumes of runs paused before the upgrade start from them.
-Two families still compare owned results with them: history selection (`history/`), which MindRoom keeps as Agno selected, and the knowledge rows, which an owned refresh must keep writing.
-A test of what MindRoom stores builds the typed records it expects itself (`tests/run_record_helpers.py`), and MindRoom's own stored schema is pinned in `tests/llm/test_stored_dicts.py`, so a deliberate change to stored data edits those tests and leaves these files alone.
+Three families still compare owned results with them on purpose: history selection (`history/`), which MindRoom keeps as Agno selected; the knowledge rows, which an owned refresh must keep writing; and the storage replay in `tests/session_storage/test_store_goldens.py`, whose usage ledger, session totals, and first-turn session rows must equal what Agno wrote to `storage/`, so an upgraded conversation's totals keep adding up.
+A deliberate change to the ledger or the session row replaces that replay's comparison with authored values.
+Every other test of what MindRoom stores builds the typed records it expects itself (`tests/run_record_helpers.py`), and MindRoom's own stored schema is pinned in `tests/llm/test_stored_dicts.py`, so a deliberate change to run records edits those tests and leaves these files alone.
 
 ## Provider wire goldens (`providers/`)
 
