@@ -330,8 +330,9 @@ def test_doctor_checks_each_ollama_server_through_the_client_its_models_send_wit
 def test_doctor_checks_each_key_the_models_on_one_ollama_server_send(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Models on one server with different keys are each checked; ones differing only in reply timeout once."""
+    """Models on one server with different keys are each checked and named; ones differing only in timeout once."""
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
     probed = _ollama_servers(monkeypatch)
     host = "https://ollama.example"
@@ -355,6 +356,9 @@ def test_doctor_checks_each_key_the_models_on_one_ollama_server_send(
         ("https://ollama.example/api/tags", "Bearer first-key"),
         ("https://ollama.example/api/tags", "Bearer second-key"),
     ]
+    output = capsys.readouterr().out
+    assert "models.first, models.again: ollama reachable (https://ollama.example)" in output
+    assert "models.second: ollama reachable (https://ollama.example)" in output
 
 
 def test_doctor_checks_an_ollama_server_with_the_key_the_dashboard_saved_for_its_model(
@@ -386,7 +390,7 @@ def test_doctor_fails_an_ollama_server_that_rejects_the_request(
     config = Config(models={"default": model}, router=RouterConfig(model="default"))
 
     assert _check_providers(config, runtime_paths) == (0, 1, 0)
-    assert "ollama unreachable: https://ollama.example (HTTP 401)" in capsys.readouterr().out
+    assert "models.default: ollama unreachable: https://ollama.example (HTTP 401)" in capsys.readouterr().out
     assert [request.extensions["timeout"]["read"] for request in sent] == [5]
 
 

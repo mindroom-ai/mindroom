@@ -474,9 +474,9 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
     """Check the server each Ollama model reaches through the client the runtime builds for it, once per client.
 
     The check sets its own timeout, so models whose other client options match, such as the same server and key,
-    share one check; models on one server with different keys are each checked.
+    share one check, reported under their names; models on one server with different keys are each checked.
     """
-    probes: list[Mapping[str, Any]] = []
+    probes: list[tuple[list[str], Mapping[str, Any]]] = []
     passed = failed = warnings = 0
     for name, model_config in config.models.items():
         if provider_route(model_config.provider) != "ollama":
@@ -484,10 +484,16 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
         options = _ollama_options(f"models.{name}", partial(_ollama_model_options, config, name, runtime_paths))
         if options is None:
             warnings += 1
-        elif (probe := {key: value for key, value in options.items() if key != "timeout"}) not in probes:
-            probes.append(probe)
-    for options in probes:
-        p, f, w = _check_ollama_server("ollama", options)
+            continue
+        probe = {key: value for key, value in options.items() if key != "timeout"}
+        names = next((names for names, other in probes if other == probe), None)
+        if names is None:
+            probes.append(([name], probe))
+        else:
+            names.append(name)
+    for names, options in probes:
+        subject = escape(", ".join(f"models.{name}" for name in names))
+        p, f, w = _check_ollama_server(f"{subject}: ollama", options)
         passed += p
         failed += f
         warnings += w
