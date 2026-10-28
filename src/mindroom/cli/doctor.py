@@ -593,6 +593,8 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         )
 
     llm_model = config.memory.llm.config.get("model", "default")
+    # The model is free-form config text, which may contain brackets Rich reads as markup.
+    subject = escape(f"Memory LLM ({llm_provider}/{llm_model})")
     env_key = env_key_for_provider(llm_provider)
     # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
     if configured_key := config.memory.llm.config.get("api_key"):
@@ -602,9 +604,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     else:
         api_key, key_name = None, "API key"
     if env_key and not api_key:
-        console.print(
-            f"[yellow]![/yellow] Memory LLM ({llm_provider}): {env_key} not set",
-        )
+        console.print(f"[yellow]![/yellow] {subject}: {env_key} not set")
         return 0, 0, 1
     # Any endpoint setting or variable skips the check, whichever key it is, and so does an OPENROUTER_API_KEY in the
     # process environment, which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of
@@ -616,15 +616,15 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         mem0_key = runtime_paths.process_env.get("OPENROUTER_API_KEY")
         if route in {"openai", "openrouter"} and mem0_key and not (route == "openrouter" and mem0_key == api_key):
             reasons.append("OPENROUTER_API_KEY")
-        if _report_key_not_checked("Memory LLM", llm_provider, key_name, reasons):
+        if _report_key_not_checked(subject, llm_provider, key_name, reasons):
             return 0, 0, 1
     valid, detail = _validate_provider_key(llm_provider, api_key or "")
     return _print_validation(
         valid,
         detail,
-        f"Memory LLM ({llm_provider}/{llm_model}): {key_name} valid",
-        f"Memory LLM ({llm_provider}/{llm_model}): {key_name} invalid",
-        f"Memory LLM ({llm_provider}/{llm_model}): could not validate {key_name}",
+        f"{subject}: {key_name} valid",
+        f"{subject}: {key_name} invalid",
+        f"{subject}: could not validate {key_name}",
     )
 
 

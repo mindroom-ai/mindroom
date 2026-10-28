@@ -872,7 +872,7 @@ def test_doctor_checks_the_environment_variable_when_the_credential_store_is_unr
             {"OPENROUTER_API_KEY": "or-key"},
             (0, 0, 1),
             [],
-            f"Memory LLM: {_DASHBOARD} not checked: OPENROUTER_API_KEY may send it elsewhere",
+            f"Memory LLM (openrouter/m): {_DASHBOARD} not checked: OPENROUTER_API_KEY may send it elsewhere",
         ),
     ],
 )
@@ -914,7 +914,7 @@ _OPENROUTER_KEY_CHECK = "https://openrouter.ai/api/v1/key"
             {},
             (0, 0, 1),
             [],
-            "Memory LLM: MINDROOM_CREDENTIAL_SEEDS_FILE not checked: OPENROUTER_API_KEY may send it elsewhere",
+            "Memory LLM (openrouter/m): MINDROOM_CREDENTIAL_SEEDS_FILE not checked: OPENROUTER_API_KEY may send it",
             id="seed-replaced-by-exported-variable",
         ),
         # The exported variable is the stored key, so Mem0 sends the key doctor checks.
@@ -1123,8 +1123,9 @@ def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_
     assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
     assert sent == []
     output = " ".join(capsys.readouterr().out.split())
+    subject = f"Memory LLM ({provider}/m)"
     assert (
-        f"Memory LLM: {key_name} not checked: {reason} may send it elsewhere or send another key in its place" in output
+        f"{subject}: {key_name} not checked: {reason} may send it elsewhere or send another key in its place" in output
     )
 
 
@@ -1164,6 +1165,20 @@ def test_memory_llm_key_is_checked_at_the_provider_s_own_api_without_endpoint_se
 
     assert _check_memory_llm(config, runtime_paths) == (1, 0, 0)
     assert sent == [sent_request]
+
+
+def test_memory_llm_lines_name_a_model_that_looks_like_markup_as_written(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every memory LLM key line names the provider and model, and a bracketed model reaches the output verbatim."""
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": "openai", "config": {"model": "[/m]"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, _runtime_with_env(tmp_path, {})) == (0, 0, 1)
+    assert "Memory LLM (openai/[/m]): OPENAI_API_KEY not set" in capsys.readouterr().out
 
 
 def test_memory_llm_of_a_provider_without_a_shared_key_is_not_probed(

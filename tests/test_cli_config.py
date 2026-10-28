@@ -4622,7 +4622,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+        assert "Memory LLM (openai/gpt-5.6-luna): OPENAI_API_KEY not set" in result.output
 
     def test_memory_llm_explicit_key_is_validated_without_env_key(
         self,
