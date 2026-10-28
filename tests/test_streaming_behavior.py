@@ -1970,7 +1970,10 @@ class TestStreamingBehavior:
         """A failed phase-boundary flush should preserve buffered chars so the marker can still surface."""
         mock_client = _make_matrix_client_mock()
         sent_bodies: list[str] = []
-        send_results = iter((False, True))
+        send_results = iter((False,))
+
+        async def deliver(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+            return DeliveredMatrixEvent(event_id="$final", content_sent=dict(content))
 
         streaming = StreamingResponse(
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -1984,7 +1987,7 @@ class TestStreamingBehavior:
             min_char_update_interval=0.0,
             max_idle=10.0,
             show_tool_calls=True,
-            **reply_hooks(),
+            **FakeReplyRecords(send=deliver).hooks(),
         )
         streaming.last_update = 100.0
         streaming.stream_started_at = 100.0
@@ -2008,13 +2011,15 @@ class TestStreamingBehavior:
 
         with patch("mindroom.streaming.time.time", side_effect=[100.0, 100.0, 100.1, 100.1, 100.1]):
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
-        await streaming.finalize(mock_client)
+        outcome = await streaming.finalize(mock_client)
 
-        assert streaming._send_or_edit_message.await_count == 2
+        assert streaming._send_or_edit_message.await_count == 1
         assert sent_bodies[0].startswith("x" * 40)
         assert "search_web" in sent_bodies[0]
-        assert sent_bodies[1].startswith("x" * 40)
-        assert "search_web" in sent_bodies[1]
+        # The terminal update the failed flush left owed still shows the marker.
+        assert outcome.rendered_body is not None
+        assert outcome.rendered_body.startswith("x" * 40)
+        assert "search_web" in outcome.rendered_body
 
     @pytest.mark.asyncio
     async def test_idle_does_not_fire_below_min_char_interval(self) -> None:

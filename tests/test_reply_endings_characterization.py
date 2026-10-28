@@ -103,7 +103,7 @@ _MODEL_ERROR = "[general] ⚠️ Error: model exploded"
 _MODEL_PROMPT = f'Current message:\n<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]></msg>'
 _BARE_PROMPT = f'<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]></msg>'
 _TEAM_HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
-_EDIT_INTERVAL = 0.001
+_EDIT_INTERVAL = 0.0
 _TEAM_MEMBERS = "**Writer**: Writer fact.\n\n**Checker**: Checker fact."
 
 
@@ -189,6 +189,8 @@ class _Hooks:
 
     fired: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
     suppress: bool = False
+    # Text the final transform appends to the answer.
+    transform_suffix: str = ""
 
     @property
     def names(self) -> list[str]:
@@ -213,6 +215,7 @@ def _hook_registry(hooks: _Hooks) -> HookRegistry:
     @hook(EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM)
     async def transform(ctx: FinalResponseTransformContext) -> None:
         hooks.fired.append(("transform", {"text": ctx.draft.response_text, "kind": ctx.draft.response_kind}))
+        ctx.draft.response_text += hooks.transform_suffix
 
     @hook(EVENT_MESSAGE_AFTER_RESPONSE)
     async def after(ctx: AfterResponseContext) -> None:
@@ -382,7 +385,8 @@ async def _turn(
             conversation_target=_target(),
         ),
     )
-    # Send a progress edit for any chunk that arrives once the edit interval has passed since the last one.
+    # Send a progress edit for every chunk: the throttle has no idle timer, so with any interval a chunk that lands
+    # just after an edit finished would wait for a later chunk that a blocked model never sends.
     progress = bot.config.defaults.streaming
     progress.update_interval = _EDIT_INTERVAL
     progress.min_update_interval = _EDIT_INTERVAL
@@ -458,12 +462,8 @@ async def _stop(turn: _Turn) -> bool:
 
 
 async def _past_edit_interval() -> None:
-    """Let the edit interval pass, so the next chunk is sent rather than coalesced into an edit that never comes.
-
-    The throttle is time-based and has no idle timer: a chunk that arrives
-    within the interval of the last edit waits for the next chunk.
-    """
-    await asyncio.sleep(_EDIT_INTERVAL * 10)
+    """Yield once, so the previous chunk's edit is under way before the next chunk arrives."""
+    await asyncio.sleep(0)
 
 
 def _streams_then_blocks(text: str, running: asyncio.Event) -> list[ScriptStep]:
@@ -561,6 +561,20 @@ async def test_a_completed_agent_reply(
     assert not is_interrupted_replay_run(run)
     assert run.content == "Looking.\n\nThe answer."
     assert not await turn.pending()
+
+
+async def test_a_transformed_streamed_reply_reports_the_text_the_room_shows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a final transform reshapes a streamed answer, after_response reports the reshaped text it delivered."""
+    turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("The answer.")]})
+    turn.hooks.transform_suffix = " (checked)"
+
+    assert await turn.runner.generate_response(_plain_request(_target())) == "$sent0"
+
+    assert turn.homeserver.bodies[-1] == "The answer. (checked)"
+    assert turn.hooks.payload("after")["text"] == "The answer. (checked)"
 
 
 @pytest.mark.usefixtures("echo_tool")
