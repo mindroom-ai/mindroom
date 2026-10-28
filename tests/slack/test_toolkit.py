@@ -77,7 +77,7 @@ class FakeSlack:
     def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeSlack:
         monkeypatch.setattr(
             slack_toolkit,
-            "_client_factory",
+            "slack_http_client",
             lambda: httpx.AsyncClient(transport=httpx.MockTransport(self._handle), follow_redirects=False),
         )
         return self
@@ -1236,7 +1236,7 @@ async def test_a_watch_turn_cannot_start_or_stop_a_watch(paths: RuntimePaths, ac
 
     refused = await _call_watch(tools, paths, hook_source="slack-watch/w-1", action=action, mentions=False)
 
-    assert refused["message"] == "Ask me in a new message to post to Slack"
+    assert refused["message"] == "Ask me in a new message to change your Slack watch"
     assert _stored_watches(paths) == (ALICE_WATCH,)
 
     status = await _call_watch(tools, paths, hook_source="slack-watch/w-1", action="status")

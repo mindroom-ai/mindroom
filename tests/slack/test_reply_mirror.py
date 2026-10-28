@@ -33,7 +33,7 @@ from mindroom.slack import identity as slack_identity
 from mindroom.slack import reply_mirror, turns
 from mindroom.slack.app import load_slack_app
 from mindroom.slack.delivery import deliver_slack_event
-from mindroom.slack.reply_mirror import mirror_reply_to_slack
+from mindroom.slack.reply_mirror import is_slack_project_turn, mirror_reply_to_slack
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -326,6 +326,16 @@ async def test_non_slack_turn_untouched(world: World, hook_source: str) -> None:
     assert world.slack.requests == []
 
 
+def test_only_a_trusted_hook_dispatch_naming_a_slack_thread_may_be_a_project_turn(world: World) -> None:
+    """The cheap check that runs before any task starts: what the turn itself says, with no lookup."""
+    assert is_slack_project_turn(world.envelope())
+    assert is_slack_project_turn(world.ingress_envelope())
+    assert not is_slack_project_turn(world.envelope(human=True))
+    assert not is_slack_project_turn(world.envelope(source_kind=MESSAGE_SOURCE_KIND))
+    assert not is_slack_project_turn(world.envelope(hook_source="slack-watch/0123456789abcdef"))
+    assert not is_slack_project_turn(replace(world.envelope(), hook_source=None))
+
+
 def _unreachable_slack() -> httpx.AsyncClient:
     def refuse(request: httpx.Request) -> httpx.Response:
         message = "no route"
@@ -402,6 +412,23 @@ async def test_emoji_reply_at_the_utf16_limit(world: World, emoji: int, kept: in
 
     (post,) = world.posts()
     assert post["text"] == "😀" * kept + ("" if kept == emoji else "…")
+
+
+@pytest.mark.parametrize(
+    ("reply", "posted"),
+    [
+        ("before \ud800 after", "before  after"),
+        ("\udc00" + "x" * (BLOCK_LIMIT + 10), "x" * (BLOCK_LIMIT - 2) + "…"),
+    ],
+    ids=["short", "cut"],
+)
+@pytest.mark.asyncio
+async def test_lone_surrogate_in_a_reply_is_dropped(world: World, reply: str, posted: str) -> None:
+    """A model's reply can hold half of a surrogate pair, which Slack cannot take; the rest of the reply is posted."""
+    await world.mirror(world.envelope(), reply)
+
+    (post,) = world.posts()
+    assert post["text"] == posted
 
 
 @pytest.mark.asyncio

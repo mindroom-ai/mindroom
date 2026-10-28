@@ -82,7 +82,7 @@ from mindroom.runtime_shutdown import (
     restart_reason_category_for,
 )
 from mindroom.slack.api import slack_http_client
-from mindroom.slack.reply_mirror import mirror_reply_to_slack
+from mindroom.slack.reply_mirror import is_slack_project_turn, mirror_reply_to_slack
 from mindroom.teams.formation import TeamOutcome, resolve_configured_team
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -678,13 +678,17 @@ class AgentBot:
                 response_hooks=ResponseHookService(
                     hook_context=self._hook_context_support,
                     # Reads the live config, which a reload replaces.
-                    reply_mirror=lambda envelope, response_text: mirror_reply_to_slack(
-                        envelope,
-                        response_text,
-                        config=self.config,
-                        runtime_paths=self.runtime_paths,
-                        credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
-                        client_factory=slack_http_client,
+                    reply_mirror=lambda envelope, response_text: (
+                        mirror_reply_to_slack(
+                            envelope,
+                            response_text,
+                            config=self.config,
+                            runtime_paths=self.runtime_paths,
+                            credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
+                            client_factory=slack_http_client,
+                        )
+                        if is_slack_project_turn(envelope)
+                        else None
                     ),
                 ),
                 outbox=self._journal_store.principal(self._journal_principal_id),

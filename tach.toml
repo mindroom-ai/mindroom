@@ -9781,6 +9781,7 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.slack.api",
     "mindroom.slack.app",
+    "mindroom.slack.turns",
     "mindroom.tool_system.events",
 ]
 visibility = ["mindroom.bot"]

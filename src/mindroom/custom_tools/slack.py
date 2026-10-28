@@ -34,6 +34,7 @@ from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQ
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.slack.api import (
+    SLACK_TS_RE,
     SLACK_UNREACHABLE,
     SlackApiError,
     neutralize_broadcasts,
@@ -84,7 +85,6 @@ _DOWNLOAD_HOST = "files.slack.com"
 _MAX_NAME_CHARACTERS = 150
 _UNSAFE_NAME_CHARACTERS = re.compile(r"[^A-Za-z0-9._ -]")
 _FILE_ID = re.compile(r"F[A-Z0-9]{8,}")
-_TS = re.compile(r"[0-9]{10}\.[0-9]{6}")
 _PAGE = re.compile(r"[0-9]{1,3}")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 # Slack answers these when the user token was revoked or its account deactivated; reconnecting fixes them.
@@ -98,7 +98,8 @@ _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
 _NOT_A_MESSAGE = "Use <conversation>:<ts> or a message link to react to a message"
 # A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
 _WATCH_SOURCE_PREFIX = "slack-watch/"
-_WATCH_TURN_REFUSAL = "Ask me in a new message to post to Slack"
+_WATCH_TURN_WRITE_REFUSAL = "Ask me in a new message to post to Slack"
+_WATCH_TURN_CHANGE_REFUSAL = "Ask me in a new message to change your Slack watch"
 _WATCH_ACTIONS = ("start", "stop", "status")
 _WATCH_NEEDS_APP_TOKEN = "The MindRoom Slack app needs an app-level token for watches"  # noqa: S105
 _WATCH_NEEDS_A_FILTER = "Watch mentions, direct messages, or both"
@@ -108,9 +109,6 @@ _REPLY_MIRRORED = (
     "Your final reply in a thread that started from a Slack message is posted to that Slack thread automatically, "
     "so do not call slack_post to answer it."
 )
-
-# Tests replace this to answer Slack through a mock transport.
-_client_factory: Callable[[], httpx.AsyncClient] = slack_http_client
 
 
 class _SlackRefusalError(Exception):
@@ -161,7 +159,7 @@ def _limit(value: object) -> int:
 
 
 def _optional_ts(value: str | None, field_name: str) -> str | None:
-    if value is not None and not _TS.fullmatch(value):
+    if value is not None and not SLACK_TS_RE.fullmatch(value):
         msg = f"{field_name} must be a Slack message ts such as 1714000000.000100"
         raise _SlackRefusalError(msg)
     return value
@@ -191,11 +189,11 @@ def _conversation_target(target: str) -> tuple[str, SlackTarget]:
     return parsed.channel_id, parsed
 
 
-def _refuse_in_watch_turn() -> None:
+def _refuse_in_watch_turn(refusal: str) -> None:
     """Refuse a Slack write or a watch change when a Slack watch started this turn; a call outside any turn passes."""
     context = get_tool_runtime_context()
     if context is not None and (context.hook_source or "").startswith(_WATCH_SOURCE_PREFIX):
-        raise _SlackRefusalError(_WATCH_TURN_REFUSAL)
+        raise _SlackRefusalError(refusal)
 
 
 def _watching_message(watch: SlackWatch) -> str:
@@ -408,8 +406,8 @@ class SlackTools(Toolkit):
         write = function in _WRITE_FUNCTIONS
         try:
             if write:
-                _refuse_in_watch_turn()
-            async with _client_factory() as client:
+                _refuse_in_watch_turn(_WATCH_TURN_WRITE_REFUSAL)
+            async with slack_http_client() as client:
                 fields = await operation(await self._session(client))
         except _SlackRefusalError as exc:
             return _error(str(exc))
@@ -749,7 +747,7 @@ class SlackTools(Toolkit):
             raise _SlackRefusalError(msg)
         if action != "status":
             # Slack text started this turn, so it must not change what is delivered to the owner.
-            _refuse_in_watch_turn()
+            _refuse_in_watch_turn(_WATCH_TURN_CHANGE_REFUSAL)
         context = get_tool_runtime_context()
         if context is None:
             raise _SlackRefusalError(_WATCH_NEEDS_A_CONVERSATION)

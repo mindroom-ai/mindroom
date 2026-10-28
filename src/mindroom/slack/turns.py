@@ -69,6 +69,16 @@ RETRYABLE_ERRORS = (
 )
 
 
+def slack_replay_store(control_state_root: Path) -> DeliveryReplayStore:
+    """Return the replay store of every Slack target, which also binds each Slack thread to its Matrix thread."""
+    return DeliveryReplayStore(control_state_root / "slack" / "replay")
+
+
+def project_scope(agent: str) -> str:
+    """Return the replay scope of a project agent's Slack turns."""
+    return f"slack:agent:{agent}"
+
+
 @dataclass(frozen=True)
 class SlackAttempt:
     """One delivery attempt of one Slack message, with everything its targets share."""
@@ -89,7 +99,7 @@ class SlackAttempt:
     @property
     def store(self) -> DeliveryReplayStore:
         """Return the replay store of every Slack target."""
-        return DeliveryReplayStore(self.control_state_root / "slack" / "replay")
+        return slack_replay_store(self.control_state_root)
 
     @property
     def permalink(self) -> str:
@@ -253,10 +263,7 @@ async def _send_slack_turn(
     fence = "~" * max([3, *(len(run) + 1 for run in _TILDE_RUN.findall(text))])
     latest_thread_event_id = None
     if thread_id is not None:
-        latest_thread_event_id = await bot._conversation_reader.latest_thread_event_id(
-            room_id=turn.room_id,
-            thread_id=thread_id,
-        )
+        latest_thread_event_id = await bot.latest_thread_event_id_if_needed(turn.room_id, thread_id)
     metadata: dict[str, Any] = {
         SOURCE_KIND_KEY: HOOK_DISPATCH_SOURCE_KIND,
         HOOK_SOURCE_KEY: turn.hook_source,

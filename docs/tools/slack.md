@@ -255,7 +255,7 @@ A watch delivers only while all of these hold, so someone else never reads a pri
 | `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
 | `paused: room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn that a watch started, `slack_post` and `slack_react` refuse with `Ask me in a new message to post to Slack`, and so do `slack_watch` start and stop.
+Security: Slack text comes from other people, so during a turn that a watch started, `slack_post` and `slack_react` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
 A new message from the owner in the same thread can post.
 Work that turn schedules or delegates still runs as the owner, so add a [`tool_approval`](../tool-approval.md) rule for `slack_post` and `slack_react` to keep Slack writes behind a person's approval.
 

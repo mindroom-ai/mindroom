@@ -414,7 +414,7 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
 
 def _after_response_service(
     tmp_path: Path,
-    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None]],
+    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None] | None],
     plugins: list[object] | None = None,
 ) -> ResponseHookService:
     """Return a response hook service with a reply mirror and, unless given plugins, no hooks."""
@@ -491,6 +491,24 @@ async def test_after_response_does_not_wait_for_the_reply_mirror(tmp_path: Path)
     release.set()
     assert await wait_for_background_tasks(5.0, owner=service.hook_context.runtime)
     assert finished == ["final reply"]
+
+
+@pytest.mark.asyncio
+async def test_after_response_starts_no_task_for_a_reply_the_mirror_declines(tmp_path: Path) -> None:
+    """A mirror that returns no coroutine, because the reply goes nowhere else, costs no background task."""
+    seen: list[str] = []
+
+    def declining_mirror(_envelope: MessageEnvelope, text: str) -> None:
+        seen.append(text)
+
+    service = _after_response_service(tmp_path, declining_mirror)
+
+    with capture_logs() as logs, patch("mindroom.delivery_gateway.create_background_task") as create_task:
+        await _emit_after_response(service, response_kind="ai")
+
+    assert seen == ["final reply"]
+    create_task.assert_not_called()
+    assert [entry for entry in logs if entry["log_level"] == "error"] == []
 
 
 @pytest.mark.asyncio

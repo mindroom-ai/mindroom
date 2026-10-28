@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _SLACK_TOOL_NAME = "slack"
+# Must match `SLACK_CHANNEL_ID_RE` in `mindroom.slack.api`, which config cannot import without the HTTP client.
 _CHANNEL_ID = re.compile(r"[CG][A-Z0-9]{8,}")
 
 

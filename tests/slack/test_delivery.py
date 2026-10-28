@@ -170,12 +170,10 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     )
     matrix = FakeMatrix()
     monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
-    reader = AsyncMock()
-    reader.latest_thread_event_id.return_value = "$latest"
     assistant_id = entity_identity_registry(config, paths).current_id("assistant").full_id
     bots = {
-        "launch": FakeBot(AsyncMock(), reader),
-        "assistant": FakeBot(room_state_client([ALICE, assistant_id]), reader),
+        "launch": FakeBot(AsyncMock(), AsyncMock(return_value="$latest")),
+        "assistant": FakeBot(room_state_client([ALICE, assistant_id]), AsyncMock(return_value="$latest")),
     }
     runtime = runtime_for(bots, AgentReplyMembershipIndex(), slack)
     return Harness(config, paths, slack, matrix, bots, runtime)
@@ -325,10 +323,7 @@ async def test_bound_reply_continues_same_thread(harness: Harness) -> None:
             f"{WORKSPACE_URL}archives/{CHANNEL}/p1700000100000200?thread_ts={ROOT_TS}&cid={CHANNEL}",
         )
     )
-    harness.bots["launch"]._conversation_reader.latest_thread_event_id.assert_awaited_with(
-        room_id=LAUNCH_ROOM,
-        thread_id="$sent1",
-    )
+    harness.bots["launch"].latest_thread_event_id_if_needed.assert_awaited_with(LAUNCH_ROOM, "$sent1")
 
 
 @pytest.mark.asyncio

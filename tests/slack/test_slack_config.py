@@ -7,9 +7,11 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import ValidationError
 
+from mindroom.config import slack as slack_config
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.slack import SlackAnsweringAgent, SlackConfig, has_personal_slack, slack_answering_agents
 from mindroom.constants import resolve_runtime_paths
+from mindroom.slack.api import SLACK_CHANNEL_ID_RE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -151,6 +153,11 @@ def test_channel_ids_must_look_like_slack_ids(channel: object) -> None:
     """Names, short IDs, direct-message IDs and padded values are not channel IDs."""
     with pytest.raises(ValidationError, match="Slack channel IDs look like C0123ABCD"):
         _config({"helper": _agent(channels=[channel])})
+
+
+def test_config_channel_ids_are_the_slack_clients() -> None:
+    """Config keeps its own copy of the channel ID pattern, which must stay the Slack client's."""
+    assert slack_config._CHANNEL_ID.pattern == SLACK_CHANNEL_ID_RE.pattern
 
 
 def test_empty_channels_is_rejected_instead_of_meaning_personal() -> None:

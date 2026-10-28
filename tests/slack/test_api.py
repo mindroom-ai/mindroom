@@ -66,10 +66,12 @@ def test_parse_targets(target: str, expected: SlackTarget) -> None:
         "https://example.slack.com/archives/C0123ABCD/p17126874336686",
         "https://example.slack.com/archives/C0123ABCD/p1712687433668649?thread_ts=oops",
         "https://example.slack.com/team/U0123ABCD",
+        "https://[example.slack.com/archives/C0123ABCD/p1712687433668649",
+        "C0123ABCD:\u0661\u0667\u0661\u0662\u0666\u0668\u0667\u0664\u0663\u0663.\u0666\u0666\u0668\u0666\u0664\u0669",
     ],
 )
 def test_parse_target_rejects_everything_else(target: str) -> None:
-    """Names, foreign hosts, plain HTTP, and malformed links are refused with one message."""
+    """Names, foreign hosts, plain HTTP, malformed links, and digits other than 0-9 are refused with one message."""
     with pytest.raises(ValueError, match="Use a Slack conversation ID") as excinfo:
         parse_slack_target(target)
     assert str(excinfo.value) == _REJECT_MESSAGE

@@ -370,9 +370,10 @@ class ResponseHookService:
     """Own response hook execution around final delivery."""
 
     hook_context: HookContextSupport
-    # Passes each final agent reply on to another surface. It runs in the background, so a slow surface never holds
-    # the response lock that `emit_after_response` runs under.
-    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None]] | None = None
+    # Passes each final agent reply on to another surface, or returns None when the reply goes nowhere else, so no
+    # task starts for it. It runs in the background, so a slow surface never holds the response lock that
+    # `emit_after_response` runs under.
+    reply_mirror: Callable[[MessageEnvelope, str], Coroutine[Any, Any, None] | None] | None = None
 
     async def _apply_before_response(
         self,
@@ -436,13 +437,15 @@ class ResponseHookService:
     ) -> None:
         if identity.response_kind == "ai" and self.reply_mirror is not None:
             try:
-                create_background_task(
-                    self.reply_mirror(identity.response_envelope, response_text),
-                    name="reply_mirror",
-                    owner=self.hook_context.runtime,
-                    # Outside the reply's span and context: the mirror is no part of the reply.
-                    context=Context(),
-                )
+                mirror = self.reply_mirror(identity.response_envelope, response_text)
+                if mirror is not None:
+                    create_background_task(
+                        mirror,
+                        name="reply_mirror",
+                        owner=self.hook_context.runtime,
+                        # Outside the reply's span and context: the mirror is no part of the reply.
+                        context=Context(),
+                    )
             except Exception:
                 self.hook_context.logger.exception("Reply mirror failed", correlation_id=identity.correlation_id)
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):

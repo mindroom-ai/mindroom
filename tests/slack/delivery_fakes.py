@@ -130,7 +130,7 @@ class FakeBot:
     """The parts of a running agent bot that Slack delivery uses."""
 
     client: nio.AsyncClient | AsyncMock
-    _conversation_reader: AsyncMock = field(default_factory=AsyncMock)
+    latest_thread_event_id_if_needed: AsyncMock = field(default_factory=AsyncMock)
     running: bool = True
     admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
 

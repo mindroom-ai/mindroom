@@ -26,6 +26,7 @@ from mindroom.slack.turns import (
     event_author,
     failure_reason,
     is_bound,
+    project_scope,
     refuse_while_closed,
     retry_later,
     retry_on_failure,
@@ -223,7 +224,7 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
     The author must map to a MindRoom account the agent answers; anyone else gets a notice only they see.
     """
     event = attempt.event
-    scope = f"slack:agent:{answering.agent}"
+    scope = project_scope(answering.agent)
     room_id = resolve_room_id(answering.room, attempt.runtime_paths)
     if not event.is_app_mention and not await is_bound(attempt, scope, thread_key, room_id):
         return "ignored"

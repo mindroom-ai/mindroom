@@ -13,12 +13,15 @@ import httpx
 _SLACK_API_BASE = "https://slack.com/api/"
 _TIMEOUT_SECONDS = 10.0
 _DEFAULT_RETRY_AFTER_SECONDS = 1
-_CONVERSATION_ID = r"[CGD][A-Z0-9]{8,}"
+# A public or private channel; a conversation is a channel or a direct message.
+SLACK_CHANNEL_ID_RE = re.compile(r"[CG][A-Z0-9]{8,}")
+# A message's `ts`, in ASCII digits only, which `\d` would not ensure.
+SLACK_TS_RE = re.compile(r"[0-9]{10}\.[0-9]{6}")
+_CONVERSATION_ID = rf"(?:{SLACK_CHANNEL_ID_RE.pattern}|D[A-Z0-9]{{8,}})"
 _CONVERSATION_RE = re.compile(_CONVERSATION_ID)
 _USER_RE = re.compile(r"[UW][A-Z0-9]{8,}")
-_TS_RE = re.compile(r"\d{10}\.\d{6}")
-_CONVERSATION_TS_RE = re.compile(rf"({_CONVERSATION_ID}):(\d{{10}}\.\d{{6}})")
-_PERMALINK_PATH_RE = re.compile(rf"/archives/({_CONVERSATION_ID})/p(\d{{10}})(\d{{6}})")
+_CONVERSATION_TS_RE = re.compile(rf"({_CONVERSATION_ID}):({SLACK_TS_RE.pattern})")
+_PERMALINK_PATH_RE = re.compile(rf"/archives/({_CONVERSATION_ID})/p([0-9]{{10}})([0-9]{{6}})")
 _INVALID_TARGET = "Use a Slack conversation ID, <conversation>:<ts>, a message link, or a user ID"
 SLACK_UNREACHABLE = "Slack could not be reached; try again"
 
@@ -93,7 +96,11 @@ async def slack_call(client: httpx.AsyncClient, method: str, token: str, **param
 
 
 def _parse_permalink(target: str) -> SlackTarget | None:
-    parts = urlsplit(target)
+    try:
+        parts = urlsplit(target)
+    except ValueError:
+        # Some malformed links make `urlsplit` raise, such as an unclosed `[` in the host.
+        return None
     host = parts.hostname or ""
     if parts.scheme != "https" or not host.endswith(".slack.com"):
         return None
@@ -102,7 +109,7 @@ def _parse_permalink(target: str) -> SlackTarget | None:
         return None
     channel_id, seconds, micros = match.groups()
     thread_ts = parse_qs(parts.query).get("thread_ts", [None])[0]
-    if thread_ts is not None and not _TS_RE.fullmatch(thread_ts):
+    if thread_ts is not None and not SLACK_TS_RE.fullmatch(thread_ts):
         return None
     return SlackTarget(channel_id, f"{seconds}.{micros}", thread_ts, None)
 

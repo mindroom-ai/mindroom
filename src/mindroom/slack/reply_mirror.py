@@ -16,11 +16,12 @@ from typing import TYPE_CHECKING
 import httpx
 
 from mindroom.config.slack import slack_answering_agents
-from mindroom.delivery_replay import DeliveryReplayStore, DeliveryReplayStoreError
+from mindroom.delivery_replay import DeliveryReplayStoreError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
-from mindroom.slack.api import SlackApiError, neutralize_broadcasts, slack_call
+from mindroom.slack.api import SLACK_CHANNEL_ID_RE, SlackApiError, neutralize_broadcasts, slack_call
 from mindroom.slack.app import load_slack_app, slack_bot_identity
+from mindroom.slack.turns import failure_reason, project_scope, slack_replay_store
 from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.turn_origin import SenderKind, TurnIntent
 
@@ -35,10 +36,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The hook source of a project turn, as delivery writes it: the channel, then the thread's root `ts`.
-_HOOK_SOURCE = re.compile(r"slack/([CG][A-Z0-9]{8,})/(\d+\.\d+)", re.ASCII)
+_HOOK_SOURCE = re.compile(rf"slack/({SLACK_CHANNEL_ID_RE.pattern})/(\d+\.\d+)", re.ASCII)
 # Slack's limit for one markdown block, counted in UTF-16 code units.
 _BLOCK_LIMIT = 12_000
 _ELLIPSIS = "…"
+
+
+def is_slack_project_turn(envelope: MessageEnvelope) -> bool:
+    """Return whether a turn may be a Slack project turn, from the turn alone, before anything is looked up."""
+    return _slack_thread(envelope) is not None
 
 
 def _slack_thread(envelope: MessageEnvelope) -> tuple[str, str] | None:
@@ -64,8 +70,9 @@ def _answers_here(envelope: MessageEnvelope, channel_id: str, config: Config, ru
     )
 
 
-def _utf16_length(text: str) -> int:
-    return len(text.encode("utf-16-le")) // 2
+def _utf16(text: str) -> bytes:
+    # A model's reply can hold half of a surrogate pair, which must not raise here.
+    return text.encode("utf-16-le", errors="surrogatepass")
 
 
 def _visible_text(response_text: str) -> str:
@@ -73,11 +80,12 @@ def _visible_text(response_text: str) -> str:
 
     The cut keeps whole characters: a character outside the basic plane takes two UTF-16 code units, and a cut between
     them drops the half.
+    A lone half of a surrogate pair, which Slack cannot take, is dropped too.
     """
-    text = neutralize_broadcasts(strip_visible_tool_markers(response_text).strip())
-    if _utf16_length(text) <= _BLOCK_LIMIT:
-        return text
-    kept = text.encode("utf-16-le")[: 2 * (_BLOCK_LIMIT - _utf16_length(_ELLIPSIS))]
+    units = _utf16(neutralize_broadcasts(strip_visible_tool_markers(response_text).strip()))
+    if len(units) <= 2 * _BLOCK_LIMIT:
+        return units.decode("utf-16-le", errors="ignore")
+    kept = units[: 2 * _BLOCK_LIMIT - len(_utf16(_ELLIPSIS))]
     return kept.decode("utf-16-le", errors="ignore") + _ELLIPSIS
 
 
@@ -110,8 +118,8 @@ async def mirror_reply_to_slack(
         async with client_factory() as client:
             identity = await slack_bot_identity(client, app)
             bound = await asyncio.to_thread(
-                DeliveryReplayStore(control_state_root / "slack" / "replay").bound_thread_root,
-                f"slack:agent:{envelope.agent_name}",
+                slack_replay_store(control_state_root).bound_thread_root,
+                project_scope(envelope.agent_name),
                 f"{identity.team_id}:{channel_id}:{root_ts}",
                 now=int(time.time()),
             )
@@ -128,5 +136,4 @@ async def mirror_reply_to_slack(
                 blocks=[{"type": "markdown", "text": text}],
             )
     except (SlackApiError, httpx.HTTPError, DeliveryReplayStoreError) as exc:
-        reason = exc.error if isinstance(exc, SlackApiError) else type(exc).__name__
-        logger.warning("Slack reply not mirrored", channel_id=channel_id, reason=reason)
+        logger.warning("Slack reply not mirrored", channel_id=channel_id, reason=failure_reason(exc))
