@@ -18,7 +18,7 @@ from mindroom import personal_agents
 from mindroom.config import generated_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, _generated_agent_data
-from mindroom.config.main import _DEFER_PROHIBITED_CONTROL_TOOLS, Config
+from mindroom.config.main import _DEFER_PROHIBITED_CONTROL_TOOLS, Config, ConfigRuntimeValidationError
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -444,11 +444,16 @@ def test_authored_dump_leaves_out_created_agents(tmp_path: Path) -> None:
     assert revalidated.agents == config.agents
 
 
-def test_an_edited_created_agent_stays_out_of_the_authored_dump(tmp_path: Path) -> None:
-    """An in-place edit never turns a created agent into an authored one that would shadow its roster entry."""
+@pytest.mark.parametrize("change", ["edit", "remove"])
+def test_saving_an_in_place_change_to_a_created_agent_is_refused(tmp_path: Path, change: str) -> None:
+    """A created agent lives only in the roster, so a config save that changed it in place would lose the change."""
     config = _load(tmp_path, created=[_created()])
-    config.agents["creator_research"].display_name = "Edited"
-    assert set(config.authored_model_dump()["agents"]) == {"creator"}
+    if change == "edit":
+        config.agents["creator_research"].display_name = "Edited"
+    else:
+        del config.agents["creator_research"]
+    with pytest.raises(ConfigRuntimeValidationError, match="its owners change it with update_agent"):
+        config.authored_model_dump()
 
 
 STRANGER = "@mallory:localhost"

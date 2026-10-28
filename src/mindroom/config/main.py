@@ -437,7 +437,7 @@ class Config(BaseModel):
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
-    _personal_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _generated_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
 
@@ -1271,11 +1271,10 @@ class Config(BaseModel):
                 logger.warning("generated_agents_invalid", error=str(exc))
             config._personal_agent_instances = expansion.instances
         config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
-        # authored_model_dump drops created agents always and personal agents while they match these dumps.
-        config._personal_agent_dumps = {
+        # authored_model_dump drops generated agents while they match these dumps.
+        config._generated_agent_dumps = {
             agent_name: config.agents[agent_name].model_dump(exclude_unset=True)
-            for agent_name, info in config._generated_agents.items()
-            if not info.created
+            for agent_name in config._generated_agents
         }
         config._personal_agents_added_agents_section = (
             bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
@@ -1321,9 +1320,13 @@ class Config(BaseModel):
         agents = payload.get("agents")
         if isinstance(agents, dict):
             for agent_name, info in self._generated_agents.items():
-                # A created agent lives only in the roster; an edited personal agent stays, so saving it collides.
-                if info.created or agents.get(agent_name) == self._personal_agent_dumps[agent_name]:
-                    agents.pop(agent_name, None)
+                if agents.get(agent_name) == self._generated_agent_dumps[agent_name]:
+                    agents.pop(agent_name)
+                elif info.created:
+                    # A created agent lives only in the roster, so saving a change made here would lose it.
+                    msg = f"agents.{agent_name} was created by another agent; its owners change it with update_agent"
+                    raise ConfigRuntimeValidationError(msg)
+                # An edited personal agent stays, so saving it collides with its roster entry.
             if not agents and self._personal_agents_added_agents_section:
                 payload.pop("agents")
         return payload
