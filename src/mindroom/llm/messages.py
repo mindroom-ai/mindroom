@@ -110,6 +110,17 @@ class Message:
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[Any] | None = None
     id: str = field(default_factory=_new_id)
+    # LEGACY_COMPAT: Messages stored with a compressed copy of their content.
+    # Legacy format: a stored message whose ``compressed_content`` holds a shortened copy of a tool result, in
+    # ``run_data`` messages, summary-row segments, and tool-job payloads; only Agno's ``compress_tool_results``
+    # wrote it.
+    # Last legacy release: v2026.10.498, the last release that ran ``compress_tool_results``; v2026.10.499 retired it,
+    # and no MindRoom writer has set the field since.
+    # Handling: a stored copy reads, and a rewritten row writes it back, so token estimates, summary input, and a
+    # replayed viewed-image notice read it in place of the content (``render_message_content``) as before the upgrade;
+    # a new message never has one, and no provider is sent it.
+    # Coverage: tests/llm/test_codecs.py::test_a_message_agno_stored_with_a_compressed_copy_keeps_it,
+    #   tests/test_history_request_messages.py::test_history_viewed_images_fit_the_aggregate_byte_cap
     compressed_content: str | None = None
     name: str | None = None
     tool_call_id: str | None = None

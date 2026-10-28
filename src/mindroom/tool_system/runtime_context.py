@@ -20,7 +20,6 @@ from mindroom.hooks import (
     emit,
     validate_event_name,
 )
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 
@@ -493,18 +492,12 @@ def _hook_context_base_kwargs(
     event_name: str,
     correlation_id: str,
 ) -> dict[str, Any]:
-    """Return the base fields of a hook context MindRoom emits from one tool runtime context.
-
-    ``emit`` gives each hook its own ``plugin_name``, ``settings``, and ``logger``, so those three are placeholders.
-    """
+    """Return the base fields of a hook context MindRoom emits from one tool runtime context."""
     bindings = resolve_tool_runtime_hook_bindings(context)
     return {
         "event_name": event_name,
-        "plugin_name": "",
-        "settings": {},
         "config": context.config,
         "runtime_paths": context.runtime_paths,
-        "logger": get_logger("mindroom.hooks").bind(event_name=event_name),
         "correlation_id": correlation_id,
         "message_sender": bindings.message_sender,
         "matrix_admin": bindings.matrix_admin,
