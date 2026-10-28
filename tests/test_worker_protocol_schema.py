@@ -18,12 +18,21 @@ _SCHEMA_DIGESTS = {6: "a0c3b906f1e6f4ceede7f0d26dc8b4a20b6c1387228db5f8052f68026
 
 
 def _without_prose(schema: object) -> object:
-    """Drop titles and descriptions, which docstring edits change without changing the wire."""
-    if isinstance(schema, dict):
-        return {key: _without_prose(value) for key, value in schema.items() if key not in {"title", "description"}}
+    """Drop the title and description keywords, which docstring edits change without changing the wire.
+
+    Keys under ``properties`` and ``$defs`` are field and model names, so a field named ``title`` stays.
+    """
     if isinstance(schema, list):
         return [_without_prose(value) for value in schema]
-    return schema
+    if not isinstance(schema, dict):
+        return schema
+    kept: dict[str, object] = {}
+    for key, value in schema.items():
+        if key in {"properties", "$defs"} and isinstance(value, dict):
+            kept[key] = {name: _without_prose(child) for name, child in value.items()}
+        elif key not in {"title", "description"}:
+            kept[key] = _without_prose(value)
+    return kept
 
 
 def _wire_schema_digest() -> str:
@@ -37,6 +46,19 @@ def _wire_schema_digest() -> str:
     }
     schemas = {name: _without_prose(model.model_json_schema()) for name, model in sorted(models.items())}
     return hashlib.sha256(json.dumps(schemas, sort_keys=True).encode()).hexdigest()
+
+
+def test_a_field_named_like_a_schema_keyword_still_changes_the_schema() -> None:
+    """Only the prose keywords are dropped, so adding a field called ``description`` is still a wire change."""
+
+    class Plain(BaseModel):
+        path: str
+
+    class WithDescription(BaseModel):
+        path: str
+        description: str | None = None
+
+    assert _without_prose(Plain.model_json_schema()) != _without_prose(WithDescription.model_json_schema())
 
 
 def test_the_wire_models_change_only_with_the_protocol_version() -> None:

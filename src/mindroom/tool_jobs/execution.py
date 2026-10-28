@@ -488,7 +488,7 @@ async def _run_job_call(
     """
     async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
         result = await run_tool_call(function, call.arguments, call.context, middleware=inner)
-    if result.status in {"failed", "declined", "denied"}:
+    if not result.succeeded:
         return None, result.failure_text
     return result.value, None
 

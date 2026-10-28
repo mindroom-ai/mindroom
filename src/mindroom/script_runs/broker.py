@@ -528,7 +528,7 @@ class ScriptToolBroker:
                 arguments=arguments,
             )
 
-            if result.status in {"failed", "declined", "denied"}:
+            if not result.succeeded:
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
                     "message": sanitize_failure_text(result.failure_text),

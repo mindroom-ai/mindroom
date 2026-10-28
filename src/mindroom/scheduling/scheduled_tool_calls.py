@@ -215,8 +215,7 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
         await record_scheduled_call_outcome(task_id, "failed")
         return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {result.failure_text}", is_error=True)
     # A call the policy refused, or one its tool answered as failed, fails this runner's own call with that outcome.
-    failed = result.status in {"failed", "declined", "denied"}
-    await record_scheduled_call_outcome(task_id, "failed" if failed else "completed")
+    await record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
     return result.value
 
 

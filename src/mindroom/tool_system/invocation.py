@@ -116,6 +116,14 @@ class CallResult:
     error: Exception | None = None
 
     @property
+    def succeeded(self) -> bool:
+        """Return whether the call ran to an answer of its own, an OAuth connection prompt included.
+
+        Every other status, including one added later, is a call that failed or was refused.
+        """
+        return self.status in {"ok", "connection_required"}
+
+    @property
     def failure_text(self) -> str:
         """Return the text a failed or refused call answers its caller with."""
         if self.error is not None:

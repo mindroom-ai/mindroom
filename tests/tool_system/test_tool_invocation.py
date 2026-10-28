@@ -616,7 +616,17 @@ async def test_a_call_the_policy_refuses_is_declined_or_denied_with_the_refusals
 
     assert result == CallResult(status, refusal)
     assert result.failure_text == refusal.content
+    assert result.succeeded is False
     assert ran == []
+
+
+@pytest.mark.parametrize(
+    ("status", "succeeded"),
+    [("ok", True), ("connection_required", True), ("failed", False), ("declined", False), ("denied", False)],
+)
+def test_only_answered_calls_succeed(status: str, succeeded: bool) -> None:
+    """Origins outside the model loop record a call as done only when it answered, an OAuth prompt included."""
+    assert CallResult(status).succeeded is succeeded
 
 
 @pytest.mark.asyncio
