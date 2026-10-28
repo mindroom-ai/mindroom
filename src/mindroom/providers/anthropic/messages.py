@@ -1,16 +1,16 @@
 """The Claude adapter over the Anthropic Messages API, on the direct API, Vertex AI, and Bedrock Mantle.
 
-One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request
-fetches its URL-backed media, then builds its SDK client and wire body off the event loop (Bedrock credential
-resolution and attachment encoding block), streams the reply through the SDK's message stream, and parses the
-finished message once. The only state an adapter keeps is the ambient Google credentials a Vertex route
+One frozen adapter serves all three routes; per-request state travels in ``ModelRequest``. Each request builds
+its SDK client and wire body off the event loop (Bedrock credential resolution and attachment encoding block),
+streams the reply through the SDK's message stream, and parses the finished message once; the pipeline already
+downloaded its URL media. The only state an adapter keeps is the ambient Google credentials a Vertex route
 discovers once.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anthropic
@@ -32,6 +32,7 @@ from anthropic.types.beta import (
     BetaToolUseBlock,
 )
 
+from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.sync import get_secret_from_env
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import (
@@ -74,7 +75,6 @@ from mindroom.providers.anthropic.wire import (
     checks_thinking_prefix,
     format_claude_messages,
     format_claude_tools,
-    inline_url_media,
     parse_claude_usage,
     stop_reason_of,
     supports_forced_tool_use,
@@ -85,7 +85,12 @@ from mindroom.providers.anthropic.wire import (
 from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn, turn_end
 from mindroom.providers.claude_wire_blocks import SERVER_TOOL_USE_BLOCK_TYPE, as_dict
 from mindroom.providers.credentials import model_api_key
-from mindroom.providers.errors import classify_provider_error, provider_failure
+from mindroom.providers.errors import (
+    classify_provider_error,
+    missing_api_key_error,
+    provider_failure,
+    retry_after_seconds,
+)
 from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -266,7 +271,6 @@ class ClaudeProvider:
         that stops early still settles what Anthropic bills.
         """
         timer = TurnTimer()
-        request = replace(request, messages=await inline_url_media(request.messages, self.http_client))
         prepared = await asyncio.to_thread(self._prepare, request)
         client, kwargs = prepared.client, prepared.kwargs
         try:
@@ -466,6 +470,7 @@ class ClaudeProvider:
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
             earlier_thinking=self._replays_earlier_thinking(params),
+            provider=self.identity.provider_name,
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
         if tools:
@@ -482,7 +487,7 @@ class ClaudeProvider:
         if output_tool:
             body = {**body, "tool_choice": {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}}
         return _PreparedRequest(
-            client=self._client(caller_retries=overrides.caller_retries),
+            client=self._client(),
             kwargs=body,
             # A strict tool goes through the beta endpoint even on Bedrock, which gets no beta header for it.
             beta=bool(body.get("betas")) or "context_management" in body or strict_tools,
@@ -495,12 +500,12 @@ class ClaudeProvider:
             return self.settings.default_headers
         return (self.settings.client_params or {}).get("default_headers")
 
-    def _client(self, *, caller_retries: bool) -> _AsyncClaudeClient:
+    def _client(self) -> _AsyncClaudeClient:
         """Build this request's SDK client over the shared HTTP client.
 
         The route's own credentials and endpoint come first and ``client_params`` may override any of them;
-        ``default_headers`` and the shared HTTP client then win over ``client_params``, and a caller that retries
-        the request itself turns the SDK's retries off over everything the model authored.
+        ``default_headers``, the shared HTTP client, and no SDK retries then win over ``client_params``, since the
+        request pipeline alone retries a failed request.
         """
         settings = self.settings
         kwargs = _route_client_kwargs(self.route, settings)
@@ -510,8 +515,7 @@ class ClaudeProvider:
         if (default_headers := self._authored_default_headers()) is not None:
             kwargs["default_headers"] = dict(default_headers)
         kwargs["http_client"] = self.http_client
-        if caller_retries:
-            kwargs["max_retries"] = 0
+        kwargs["max_retries"] = 0
         if self.route == "anthropic":
             return AsyncAnthropic(**kwargs)
         if self.route == "vertexai_claude":
@@ -542,6 +546,9 @@ _USAGE_EVENT_TYPES = frozenset({"message_start", "message_delta"})
 _PROVIDER_EVENT_TYPES = frozenset({"content_block_start", "content_block_delta", "content_block_stop"})
 # The HTTP status the SDK reports for an ``error`` event that arrives after the stream started.
 _COMMITTED_STREAM_STATUS = 200
+# How the SDK's ``TypeError`` begins when a direct-API client has no credential at all: no key or token in the config,
+# the dashboard, or the variables the SDK reads, and no other credential source it discovers.
+_NO_CREDENTIALS_ERROR = '"Could not resolve authentication method.'
 # The blocks the model writes itself; every other block is a server tool's call or result.
 _MODEL_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking", "tool_use"})
 
@@ -561,14 +568,22 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
     """Return the shared error for an SDK, transport, or Google token failure; any other exception propagates.
 
     The Vertex client mints its Google access token inside the request. An ``error`` event inside the stream arrives
-    with the stream's committed 200 status, so its error type classifies it.
+    with the stream's committed 200 status, so its error type classifies it. The SDK finds a client's credentials
+    only when it sends, so a client without any fails then, as the missing key it is.
     """
+    if isinstance(error, TypeError) and str(error).startswith(_NO_CREDENTIALS_ERROR):
+        return missing_api_key_error(PROVIDER_ENV_KEYS["anthropic"], provider=provider)
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
     if isinstance(error, anthropic.APIStatusError) and error.status_code == _COMMITTED_STREAM_STATUS:
         return classify_provider_error(error.message, provider=provider, error_type=_event_error_type(error.body))
     if isinstance(error, anthropic.APIStatusError):
-        return classify_provider_error(error.message, provider=provider, status_code=error.status_code)
+        return classify_provider_error(
+            error.message,
+            provider=provider,
+            status_code=error.status_code,
+            retry_after_seconds=retry_after_seconds(error.response.headers),
+        )
     if isinstance(error, anthropic.APIError):
         return ProviderError(str(error), provider=provider)
     raise error

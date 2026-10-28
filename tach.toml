@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors", "mindroom.providers.ollama.settings"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -2676,6 +2676,7 @@ depends_on = [
     "mindroom.agent_loop",
     "mindroom.constants",
     "mindroom.entity_resolution",
+    "mindroom.history.conversation_text",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
     "mindroom.history.request_messages",
@@ -2746,7 +2747,6 @@ depends_on = [
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
-    "mindroom.error_handling",
     "mindroom.history.conversation_text",
     "mindroom.history.replay",
     "mindroom.history.storage",
@@ -2838,6 +2838,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.claude_wire_blocks",
+    "mindroom.providers.media_files",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]
 
@@ -3461,6 +3462,7 @@ depends_on = [
     "mindroom.tool_jobs.notices",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.tool_schema",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.tool_system.events",
     "mindroom.tool_system.invocation",
@@ -3697,14 +3699,17 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.credentials.manager",
+    "mindroom.embeddings.errors",
     "mindroom.embeddings.factory",
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
     "mindroom.memory._mem0_usage",
+    # Deferred (function-level) import that loads the Ollama SDK only once Mem0's Ollama embedder fails.
+    "mindroom.providers.ollama.errors",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
-visibility = ["mindroom.memory._backend"]
+visibility = ["mindroom.cli.doctor", "mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -4966,6 +4971,7 @@ depends_on = [
     "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
+    "mindroom.embeddings.factory",
     "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.llm",
     "mindroom.matrix.client_session",
@@ -4977,10 +4983,15 @@ depends_on = [
     "mindroom.providers.key_checks",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
+    "mindroom.providers.ollama.settings",
     "mindroom.runtime_env_policy",
     "mindroom.startup_errors",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
+    # Deferred imports in the Ollama server checks, so the Ollama SDK, memory setup, and model registry load only when used.
+    "mindroom.memory.config",
+    "mindroom.providers.ollama.adapter",
+    "mindroom.providers.registry",
 ]
 
 [[modules]]
@@ -5419,11 +5430,13 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.providers.registry",
     "mindroom.tool_system.atlassian_connections",
+    "mindroom.tool_system.authoring",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.google_workspaces",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.registration",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = []
@@ -5606,9 +5619,19 @@ path = "mindroom.tool_system.agno_toolkits"
 depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
+    "mindroom.tool_system.authoring",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.tool_schema",
 ]
+
+[[modules]]
+path = "mindroom.tool_system.authoring"
+depends_on = ["mindroom.tool_system.invocation", "mindroom.tool_system.runtime_context"]
+
+[[modules]]
+path = "mindroom.tool_system.tool_schema"
+depends_on = []
 
 [[modules]]
 path = "mindroom.failure_text"
@@ -6134,6 +6157,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.media_files",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
     "mindroom.providers.prompt_cache_key",
@@ -6148,10 +6172,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.providers.pipeline"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.constants",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",
+    "mindroom.providers.model_http_client",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
 ]
@@ -6522,7 +6548,7 @@ expose = [
     "members.ResolvedExactTeamMembers",
     "members.TeamTurnModelSelection",
     "members.build_team_spec",
-    "members.materialize_exact_team_members",
+    "members.resolve_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
     "presentation.strip_team_display",
@@ -8051,10 +8077,12 @@ depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.history.summary_message",
     "mindroom.hooks.enrichment",
+    "mindroom.llm",
     "mindroom.prompt_message_tags",
     "mindroom.turn_origin",
 ]
 visibility = [
+    "mindroom.execution_preparation",
     "mindroom.history.compaction",
     "mindroom.knowledge_graph.episodes",
     "mindroom.memory.auto_flush",
@@ -8133,21 +8161,21 @@ path = "mindroom.providers.errors"
 depends_on = ["mindroom.llm", "mindroom.failure_text"]
 
 [[modules]]
-path = "mindroom.providers.remote_media"
-depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config"]
+path = "mindroom.providers.media_files"
+depends_on = ["mindroom.llm", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
+    "mindroom.constants",
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
-    "mindroom.providers.remote_media",
+    "mindroom.providers.media_files",
     "mindroom.providers.tool_policy",
 ]
 
@@ -8160,21 +8188,21 @@ path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.media_files",
     "mindroom.providers.ollama.errors",
     "mindroom.providers.ollama.settings",
-    "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
 
-# Importing this module loads the Ollama SDK, so only the two Ollama modules, each imported on first use, may import it.
+# Importing this module loads the Ollama SDK, so only the Ollama modules, each imported on first use, and Mem0's
+# memory build, which imports it once Mem0's own Ollama embedder fails, may import it.
 [[modules]]
 path = "mindroom.providers.ollama.errors"
 depends_on = ["mindroom.providers.errors"]
-visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.providers.ollama.adapter"]
+visibility = ["mindroom.embeddings.ollama_embedder", "mindroom.memory.config", "mindroom.providers.ollama.adapter"]
 
 [[modules]]
 path = "mindroom.providers.ollama.settings"
@@ -9471,6 +9499,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
     "mindroom.helper_usage",
+    "mindroom.history.types",
     "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.providers.registry",
@@ -9478,6 +9507,7 @@ depends_on = [
     "mindroom.skill_learning.transcript",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.tool_schema",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 

@@ -1027,7 +1027,7 @@ async def test_a_member_renamed_while_its_approval_waits_still_answers_the_call_
         start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     writer_member, checker_member = team.members
-    inspector = replace(checker_member, spec=replace(checker_member.spec, name="Inspector"))
+    inspector = replace(checker_member, name="Inspector")
 
     _, record = await collect(
         resume_team(

@@ -1,9 +1,11 @@
 """Bounded retries for transient provider failures, and the stream idle limit.
 
-SDK HTTP retries cannot recover errors delivered inside an established SSE stream, so a failed request
-is reissued here until the attempt committed: produced output the caller could have shown, or started a hosted
-tool that acts or costs, which a retry would run again. A stall is decided the same way. Earlier tool calls and
-their results stay in the conversation; only the failed request repeats.
+This stage retries a failed model request; MindRoom turns off the SDK clients' configurable retries, though google-genai
+still resends on its own in a few places it hardcodes, such as a Gemini file upload's transfer and a dropped connection.
+A failed request is reissued here until the attempt committed: produced output the caller could have shown, or started a
+hosted tool that acts or costs, which a retry would run again. A stall is decided the same way. Earlier tool calls and
+their results stay in the conversation; only the
+failed request repeats.
 
 The idle limit ends attempts whose provider sends no event for too long. Adapters report provider data
 without output as ``StreamProgress``, so long tool-call arguments or hosted-tool work keep an attempt alive.
@@ -34,10 +36,13 @@ __all__ = ["STREAM_STALLED", "retrying_stream"]
 logger = get_logger(__name__)
 
 STREAM_STALLED = "stream_stalled"
-# One initial attempt plus this many reissued requests. Provider overloads can outlive the SDK's short HTTP
-# retry window, especially as mid-stream SSE error events after the response already started with 200.
+# One initial attempt plus this many reissued requests, enough to outlast a short provider overload, which also
+# arrives as an SSE error event after the response already started with 200.
 _MAX_TRANSIENT_RETRIES = 4
 _RETRY_BASE_DELAY_SECONDS = 1.0
+# A provider's ``Retry-After`` hint up to this long replaces the backoff, as the SDKs honored it; a longer one is
+# treated as no hint, so one header cannot hold a reply for minutes.
+_MAX_RETRY_AFTER_SECONDS = 60.0
 # A silent attempt already waited out the idle limit, so one immediate fresh request is enough.
 _MAX_STALL_RETRIES = 1
 
@@ -92,7 +97,10 @@ def _reissue(error: ProviderError, *, request: ModelRequest, budget: _RetryBudge
         return Retry(request)
     if budget.transient >= _MAX_TRANSIENT_RETRIES:
         return None
-    delay = _retry_delay_seconds(budget.transient)
+    hint = error.retry_after_seconds
+    delay = (
+        hint if hint is not None and 0 < hint <= _MAX_RETRY_AFTER_SECONDS else _retry_delay_seconds(budget.transient)
+    )
     budget.transient += 1
     _log_retry(
         error,

@@ -17,8 +17,11 @@ from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 
 from mindroom.config.models import ModelConfig
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
+    MISSING_API_KEY,
+    AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
     ProviderError,
@@ -37,7 +40,7 @@ from mindroom.llm.provider import (
     UsageReported,
 )
 from mindroom.providers import credentials as provider_credentials
-from mindroom.providers import google_adc, remote_media, synthetic_adapter
+from mindroom.providers import google_adc, synthetic_adapter
 from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini import files as gemini_files
 from mindroom.providers.gemini import wire as gemini_wire
@@ -206,6 +209,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "project": "env-project",
         "location": "europe-west4",
         "credentials": credentials,
+        "http_options": {"retry_options": {"attempts": 1}},
     }
     assert loaded == [str((tmp_path / "adc.json").resolve())]
     authored = Credentials(token="authored-token")  # noqa: S106 - synthetic SDK credential
@@ -218,6 +222,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "project": "test-project",
         "location": "us-central1",
         "credentials": authored,
+        "http_options": {"retry_options": {"attempts": 1}},
     }
     assert len(loaded) == 1
 
@@ -379,20 +384,24 @@ def test_ollama_sends_the_runtime_env_key_unless_the_model_has_its_own(tmp_path:
     shared = build_ollama_provider(ModelConfig(**OLLAMA), runtime_paths)
     own = build_ollama_provider(ModelConfig(**OLLAMA, api_key="own-key"), runtime_paths)
 
-    assert shared._client_params()["headers"] == {"authorization": "Bearer env-key"}
-    assert own._client_params()["headers"] == {"authorization": "Bearer own-key"}
+    assert shared.client_options()["headers"] == {"authorization": "Bearer env-key"}
+    assert own.client_options()["headers"] == {"authorization": "Bearer own-key"}
 
 
 def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -> None:
     """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
     adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
 
-    assert adapter._client_params() == {"api_key": "test-key", "vertexai": False, "http_options": {"timeout": 12500}}
+    assert adapter._client_params() == {
+        "api_key": "test-key",
+        "vertexai": False,
+        "http_options": {"timeout": 12500, "retry_options": {"attempts": 1}},
+    }
 
 
 @pytest.mark.asyncio
-async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itself(tmp_path: Path) -> None:
-    """The SDK retries only as ``http_options.retry_options`` authors it, and a summary's request gets one attempt."""
+async def test_gemini_sends_one_attempt_whatever_retries_the_config_authors(tmp_path: Path) -> None:
+    """The request pipeline retries, so authored ``http_options.retry_options`` never multiply a request."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -413,7 +422,7 @@ async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itsel
             await anext(adapter.stream(_request(overrides=overrides)))
         attempts.append(len(sent))
 
-    assert attempts == [3, 1]
+    assert attempts == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -1152,10 +1161,8 @@ async def _stream_media(
     server: _MediaServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[StreamEvent]:
-    """Stream ``request`` with model, Files API, and remote media traffic answered by ``server``."""
+    """Stream ``request`` with model and Files API traffic answered by ``server``."""
     adapter = build_adapter(model_config, tmp_path, server)
-    transport = httpx.MockTransport(server)
-    monkeypatch.setattr(remote_media, "_http_client", lambda: httpx.AsyncClient(transport=transport))
     monkeypatch.setattr(gemini_files, "_PROCESSING_POLL_SECONDS", 0)
     return [event async for event in adapter.stream(request)]
 
@@ -1351,6 +1358,59 @@ async def test_gemini_upload_transport_failure_is_retryable(
 
 
 @pytest.mark.asyncio
+async def test_a_gemini_api_model_without_any_key_fails_as_a_missing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no key anywhere the SDK looks, the request fails unsent and the reply says how to connect one."""
+    for variable in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"):
+        monkeypatch.delenv(variable, raising=False)
+    config = ModelConfig(provider="google", id="gemini-3.8-flash")
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    with pytest.raises(AuthenticationFailed) as raised:
+        await anext(adapter.stream(_request()))
+
+    assert (raised.value.code, raised.value.provider) == (MISSING_API_KEY, "Google")
+    assert "Connect your AI provider" in get_user_friendly_error_message(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_file_lookup_sends_once_whatever_retries_the_config_authors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Files API lookup of a large attachment sends once, as generation does, whatever retries the config authors.
+
+    Only an upload's transfer keeps google-genai's own fixed retries, which no option turns off.
+    """
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(503, json={"error": {"code": 503, "message": "Overloaded", "status": "UNAVAILABLE"}})
+
+    http_options = {
+        "httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        "retry_options": {"attempts": 3, "initial_delay": 0.01, "max_delay": 0.01},
+    }
+    config = ModelConfig(**_config(GEMINI, client_params={"http_options": http_options}))
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    with pytest.raises(ProviderUnavailable):
+        await anext(adapter.stream(_request(message)))
+
+    assert [(request.method, request.url.path) for request in sent] == [
+        ("GET", f"/v1beta/{_upload_name('audio/ogg', b'OggS-voice')}"),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("failing", "status", "state", "error_type"),
     [("lookup", 500, "INTERNAL", ProviderUnavailable), ("upload", 429, "RESOURCE_EXHAUSTED", RateLimited)],
@@ -1426,36 +1486,6 @@ async def test_gemini_on_vertex_inlines_local_media_and_rejects_what_is_too_larg
 
 
 @pytest.mark.asyncio
-async def test_gemini_downloads_remote_images_audio_and_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remote images, audio, and files Gemini cannot fetch are downloaded and inlined; remote video is referenced."""
-    server = _MediaServer(
-        remote={
-            "https://media.test/generated": httpx.Response(200, content=PNG),
-            "https://media.test/speech": httpx.Response(200, content=b"RIFF-speech"),
-            "http://media.test/notes": httpx.Response(200, headers={"content-type": "text/plain"}, content=b"notes"),
-        },
-    )
-    message = Message(
-        role="user",
-        content="Use these",
-        images=[Image(url="https://media.test/generated")],
-        audio=[Audio(url="https://media.test/speech", format="wav")],
-        files=[File(url="http://media.test/notes")],
-        videos=[Video(url="https://media.test/clip.mp4")],
-    )
-
-    await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
-
-    assert _user_parts(server) == [
-        {"fileData": {"fileUri": "https://media.test/clip.mp4", "mimeType": "video/mp4"}},
-        {"text": "Use these"},
-        {"inlineData": {"data": base64.urlsafe_b64encode(PNG).decode(), "mimeType": "image/png"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"RIFF-speech").decode(), "mimeType": "audio/wav"}},
-        {"inlineData": {"data": base64.urlsafe_b64encode(b"notes").decode(), "mimeType": "text/plain"}},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_gemini_references_an_https_file_of_known_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An HTTPS file with a declared type, such as a tool returns, goes out as a URI that Gemini fetches itself."""
     url = "https://media.test/report.pdf"
@@ -1524,37 +1554,6 @@ async def test_gemini_local_audio_of_unknown_type_is_sent_as_mp3(tmp_path: Path)
     )
 
     assert request["body"]["contents"][0]["parts"][1]["inlineData"]["mime_type"] == "audio/mp3"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["missing_file", "unreachable_url", "oversized_url"])
-async def test_gemini_media_it_cannot_send_is_an_invalid_request(
-    source: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Media that cannot be read or downloaded raises before the model request instead of being dropped silently."""
-    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 128)
-    images = {
-        "missing_file": Image(filepath=str(tmp_path / "missing.png")),
-        "unreachable_url": Image(url="https://media.test/gone"),
-        "oversized_url": Image(url="https://media.test/huge"),
-    }
-    server = _MediaServer(
-        remote={
-            "https://media.test/gone": httpx.Response(404),
-            "https://media.test/huge": httpx.Response(200, content=b"0" * 256),
-        },
-    )
-    message = Message(role="user", content="Look", images=[images[source]])
-
-    with pytest.raises(InvalidRequest) as raised:
-        await _stream_media(GEMINI, _request(message), tmp_path, server, monkeypatch)
-
-    # The media fallback strips media and retries only for a non-retryable error with no exempt code.
-    assert not raised.value.retryable
-    assert raised.value.code is None
-    assert server.model_requests() == []
 
 
 @pytest.mark.asyncio
@@ -1816,45 +1815,6 @@ async def test_ollama_reads_local_images(tmp_path: Path) -> None:
     )
 
     assert request["body"]["messages"][0]["images"] == [base64.b64encode(PNG).decode()]
-
-
-@pytest.mark.asyncio
-async def test_ollama_downloads_remote_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Images a tool returned as URLs are downloaded and sent as base64."""
-    server = _MediaServer(remote={"https://media.test/generated": httpx.Response(200, content=PNG)})
-    message = Message(role="user", content="Look", images=[Image(url="https://media.test/generated")])
-
-    await _stream_media(OLLAMA, _request(message), tmp_path, server, monkeypatch)
-
-    body = normalized_request(server.model_requests()[-1])["body"]
-    assert body["messages"][-1]["images"] == [base64.b64encode(PNG).decode()]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["missing_file", "unreachable_url"])
-async def test_ollama_images_it_cannot_read_are_an_invalid_request(
-    source: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An image that cannot be read or downloaded raises before the chat request instead of being dropped."""
-    images = {
-        "missing_file": Image(filepath=str(tmp_path / "missing.png")),
-        "unreachable_url": Image(url="https://media.test/gone"),
-    }
-    server = _MediaServer(remote={"https://media.test/gone": httpx.Response(404)})
-
-    with pytest.raises(InvalidRequest) as raised:
-        await _stream_media(
-            OLLAMA,
-            _request(Message(role="user", content="Look", images=[images[source]])),
-            tmp_path,
-            server,
-            monkeypatch,
-        )
-
-    assert not raised.value.retryable
-    assert server.model_requests() == []
 
 
 @pytest.mark.asyncio

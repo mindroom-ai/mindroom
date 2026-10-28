@@ -129,6 +129,34 @@ def run_agent(
     )
 
 
+async def fail_unbuilt_run(
+    ctx: RunContext,
+    run_input: Sequence[Message],
+    *,
+    agent_id: str,
+    agent_display_name: str,
+    error: Exception,
+    persist: Persist[RunRecord] | None,
+) -> RunRecord:
+    """End the run of an agent that could not be built, such as a team member, as ``ERROR`` and return its record.
+
+    The run reached no model, so its record names none, stores ``run_input`` alone, and has no content; otherwise it
+    ends as a run that fails does, ``error``'s text with credentials redacted as its ``error``, stored before this
+    returns.
+    """
+    record = RunRecord(
+        run_id=ctx.run_id,
+        session_id=ctx.session_id,
+        parent_run_id=ctx.parent_run_id,
+        user_id=ctx.user_id,
+        metrics=RunMetrics(),
+        agent_id=agent_id,
+        agent_display_name=agent_display_name,
+    )
+    await _store_interrupted(record, run_input, time.monotonic(), persist, error=error)
+    return record
+
+
 def resume_agent(
     spec: AgentSpec,
     paused: RunRecord,
@@ -441,6 +469,7 @@ __all__ = [
     "check_approved_tools_offered",
     "decide_requirements",
     "drive_run",
+    "fail_unbuilt_run",
     "own_model_messages",
     "plan_resume",
     "resume_agent",

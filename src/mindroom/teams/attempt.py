@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.teams.members import ResolvedExactTeamMembers
     from mindroom.teams.presentation import TeamStreamPresentation
     from mindroom.teams.runtime import TeamRunEvent
+    from mindroom.teams.spec import TeamSpec
 
 
 def team_tool_executions(record: TeamRunRecord) -> list[ToolExecution]:
@@ -56,10 +57,14 @@ def _unshown_handover(run: AnyRunRecord, *, streamed: bool) -> str | None:
 
 @dataclass
 class TeamAttempt:
-    """One attempt of a team turn or resumed run: its members, its document, and what the run produced so far."""
+    """One attempt of a team turn or resumed run: its members, its document, and what the run produced so far.
+
+    ``team`` is the team the attempt runs, whose built members own the calls a pause waits on (``TeamSpec.tool_owners``).
+    """
 
     run_id: str
     members: ResolvedExactTeamMembers
+    team: TeamSpec
     presentation: TeamStreamPresentation
     team_name: str
     runtime_model_name: str

@@ -12,6 +12,7 @@ from ollama import AsyncClient, Client
 
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, embedder_request_error
 from mindroom.providers.ollama.errors import provider_error
+from mindroom.providers.ollama.settings import ollama_client_options
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -45,17 +46,14 @@ class OllamaEmbedder:
         """Return false: each request carries one text."""
         return False
 
-    def _headers(self) -> dict[str, str] | None:
-        return {"authorization": f"Bearer {self.api_key}"} if self.api_key else None
-
     def _sync_client(self) -> Client:
         if self.client is None:
-            self.client = Client(host=self.host, headers=self._headers())
+            self.client = Client(**ollama_client_options(self.host, self.api_key))
         return self.client
 
     def _async_client(self) -> AsyncClient:
         if self.async_client is None:
-            self.async_client = AsyncClient(host=self.host, headers=self._headers())
+            self.async_client = AsyncClient(**ollama_client_options(self.host, self.api_key))
         return self.async_client
 
     def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:

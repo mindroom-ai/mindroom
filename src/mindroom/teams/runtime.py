@@ -21,6 +21,7 @@ from mindroom.agent_loop.run import (
     check_approved_tools_offered,
     decide_requirements,
     drive_run,
+    fail_unbuilt_run,
     plan_resume,
     resume_planned,
     resumed_record,
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import RunMetrics
     from mindroom.teams.delegate_tools import MemberRunner
-    from mindroom.teams.spec import TeamMember, TeamSpec
+    from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
 
 logger = get_logger(__name__)
 
@@ -120,8 +121,10 @@ def continue_team(
 
     ``messages`` is the leader's resume request, built from ``paused`` as ``build_resume_request`` builds it, and
     ``context`` returns the context of the run with a given id, which the resume calls with ``paused``'s.
-    Every call the team waits for must be covered exactly, as ``resume_agent`` requires, and every decision must
-    name a waiting call, else ``ValueError`` here before anything runs.
+    Every member whose paused run the resume continues must be built (``TeamMember.ensure_built``): its run in this
+    team built it, or a saved approval's resume builds it first. Every call the team waits for must be covered
+    exactly, as ``resume_agent`` requires, and every decision must name a waiting call, else ``ValueError`` here
+    before anything runs.
     A member whose resumed run ends answers the delegation call that waited on it (``answer_delegation``), even while
     another member still waits, so the leader reads every member's result once none waits; a member that pauses
     again keeps the team paused, with its new requirements on the team run, and the leader sends no request.
@@ -145,7 +148,7 @@ def continue_team(
 
     async def entry(members: _MemberRuns) -> None:
         for plan in plans:
-            resumed = await members.resume(plan.member, plan.paused, plan.plan)
+            resumed = await members.resume(plan)
             if resumed.status is RunStatus.paused:
                 propagate_member_pause(record, plan.member, resumed)
             else:
@@ -232,6 +235,7 @@ class TeamDecisions:
 @dataclass(frozen=True, slots=True)
 class _MemberResume:
     member: TeamMember
+    build: MemberBuild
     paused: RunRecord
     plan: ResumePlan
 
@@ -241,7 +245,7 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
 
     The paused member runs are the ones the team run's requirements name.
     """
-    members = {member.spec.id: member for member in spec.members}
+    members = {member.id: member for member in spec.members}
     embedded = {member.run_id: member for member in paused.member_responses}
     by_run: dict[tuple[str, str], list[RunRequirement]] = {}
     for requirement in paused.requirements or ():
@@ -264,6 +268,8 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
         if member_record is None:
             msg = f"Paused team run {paused.run_id!r} no longer holds member run {run_id!r}"
             raise ValueError(msg)
+        build = member.built
+        assert build is not None, f"paused member {member_id!r} of team run {paused.run_id!r} resumes unbuilt"
         decided = decisions.take(member_id, {requirement.tool_execution.tool_call_id for requirement in group})
         # The member resumes from its own record with its requirements naming the member and its run, as the team
         # run's copies do, so the member row its resume stores names them too.
@@ -274,13 +280,13 @@ def _plan_member_resumes(spec: TeamSpec, paused: TeamRunRecord, decisions: TeamD
             ],
         )
         plan = plan_resume(
-            member.spec,
+            build.spec,
             named,
             approved=decided.approved,
             denied=decided.denied,
             external_results=decided.external_results,
         )
-        plans.append(_MemberResume(member, named, plan))
+        plans.append(_MemberResume(member, build, named, plan))
     return plans
 
 
@@ -334,31 +340,53 @@ class _MemberRuns:
     async def run(self, member: TeamMember, task: str) -> RunRecord:
         """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input.
 
-        The member's tools read the team run's metadata, which only the team's record stores.
+        The member's first run builds it (``TeamMember.ensure_built``). A member that cannot be built ends the run as
+        failed with why (``fail_unbuilt_run``), so the leader reads the reason as it reads a failed run's, and the team
+        run goes on. The member's tools read the team run's metadata, which only the team's record stores.
         """
         ctx = self._member_context(str(uuid4()))
+        run_input = [Message(role="user", content=task)]
+        try:
+            build = await member.ensure_built()
+        except Exception as error:
+            logger.warning(
+                "team_member_build_failed",
+                team_id=self.record.team_id,
+                member_id=member.id,
+                run_id=ctx.run_id,
+                exc_info=True,
+            )
+            return await fail_unbuilt_run(
+                ctx,
+                run_input,
+                agent_id=member.id,
+                agent_display_name=member.name,
+                error=error,
+                persist=self._persist,
+            )
         stream = run_agent(
-            member.spec,
-            [Message(role="user", content=task)],
+            build.spec,
+            run_input,
             ctx=ctx,
-            hooks=member.hooks(ctx.run_id),
+            hooks=build.hooks(ctx.run_id),
             persist=self._persist,
-            request_template=member.request_template,
+            request_template=build.request_template,
         )
         return await self._finish(member, ctx.run_id, stream)
 
-    async def resume(self, member: TeamMember, paused: RunRecord, plan: ResumePlan) -> RunRecord:
-        """Resume ``member``'s paused run, under that run's hooks, from its stored messages, which hold no history."""
+    async def resume(self, planned: _MemberResume) -> RunRecord:
+        """Resume a member's paused run, under that run's hooks, from its stored messages, which hold no history."""
+        build, paused = planned.build, planned.paused
         stream = resume_planned(
-            member.spec,
-            plan,
+            build.spec,
+            planned.plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             context=self._member_context,
-            hooks=member.hooks(paused.run_id),
+            hooks=build.hooks(paused.run_id),
             persist=self._persist,
-            request_template=member.request_template,
+            request_template=build.request_template,
         )
-        return await self._finish(member, paused.run_id, stream)
+        return await self._finish(planned.member, paused.run_id, stream)
 
     def _member_context(self, run_id: str) -> RunContext:
         """Return a member run's context: the team run's, so its tools share the team's state, under its own run id."""
@@ -385,12 +413,12 @@ class _MemberRuns:
             async with closing_async_stream(stream):
                 async for event in stream:
                     if not isinstance(event, RunFinished):
-                        self.emit(MemberEvent(member.spec.id, member.spec.name, run_id, event))
+                        self.emit(MemberEvent(member.id, member.name, run_id, event))
         except Exception as error:
             logger.warning(
                 "team_member_run_failed",
                 team_id=self.record.team_id,
-                member_id=member.spec.id,
+                member_id=member.id,
                 run_id=run_id,
                 error=str(error),
             )

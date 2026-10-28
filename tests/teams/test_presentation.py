@@ -14,7 +14,6 @@ from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecor
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
 from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.members import ResolvedExactTeamMembers
 from mindroom.teams.presentation import (
     TeamStreamPresentation,
     apply_team_event,
@@ -24,6 +23,7 @@ from mindroom.teams.presentation import (
     url_safe_member_id,
 )
 from mindroom.teams.runtime import MemberEvent
+from tests.teams.squad import resolved_members, scripted, team_spec
 
 
 def _presentation(*, show_tool_calls: bool = False) -> TeamStreamPresentation:
@@ -160,7 +160,8 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
     presentation = TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False)
     attempt = TeamAttempt(
         run_id="team-run",
-        members=ResolvedExactTeamMembers(["checker"], [], ["Checker"], []),
+        members=resolved_members({"checker": "Checker"}),
+        team=team_spec("squad", "Squad", scripted("leader-model"), "You lead the squad.", ()),
         presentation=presentation,
         team_name="squad",
         runtime_model_name="default",

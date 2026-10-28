@@ -752,11 +752,7 @@ def _memory_conversation(
         return None
     entity = config.resolve_entity(ctx.entity_label)
     settings = entity.history_settings
-    if (
-        entity.memory_backend != "file"
-        or not settings.replays_whole_history
-        or not (settings.has_authored_compaction_config and settings.compaction_config.enabled)
-    ):
+    if entity.memory_backend != "file" or not settings.replays_whole_history or not settings.automatic_compaction:
         return None
     session = scope_context.session
     compaction = compaction_marker(session, scope_context.scope) if session is not None else (None, None)

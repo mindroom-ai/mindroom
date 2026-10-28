@@ -8,9 +8,12 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import openai
 import pytest
 from pydantic import BaseModel
@@ -42,6 +45,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.native_compaction import native_compaction_route
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
@@ -49,12 +53,14 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
-from tests.providers.golden_support import PacedBytes, encoded_response
+from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
     openai_family_adapter,
     provider_runtime,
     unsigned_jwt,
+    write_cli_logins,
 )
 
 if TYPE_CHECKING:
@@ -631,20 +637,19 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_config", "reply", "text_part"),
+    ("model_config", "reply"),
     [
-        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")), "text"),
-        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()), "input_text"),
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed())),
     ],
     ids=["chat", "responses"],
 )
-async def test_attachments_deleted_since_their_turn_are_left_out(
+async def test_attachments_deleted_since_their_turn_are_sent_as_the_media_note(
     tmp_path: Path,
     model_config: dict[str, Any],
     reply: dict[str, Any],
-    text_part: str,
 ) -> None:
-    """History whose attachment files were cleaned up still replays: its text is sent and each missing file logged."""
+    """A turn whose attachment files were cleaned up still runs: its text is sent with the media fallback's note."""
     gone = tmp_path / "cleaned-up"
     photo, report = gone / "att_photo.png", gone / "att_report.pdf"
     earlier = Message(
@@ -660,8 +665,8 @@ async def test_attachments_deleted_since_their_turn_are_left_out(
 
     body = built.body()
     sent = body["messages"][0] if "messages" in body else body["input"][0]
-    assert sent["content"] == [{"type": text_part, "text": "Compare these."}]
-    assert [log["path"] for log in logs if log["event"] == "Model input file not found"] == [str(photo), str(report)]
+    assert sent["content"] == f"Compare these.\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+    assert [log["path"] for log in logs if log["event"] == "media_file_unreadable"] == [str(photo)]
 
 
 # --- Errors ---------------------------------------------------------------------------------------------------
@@ -686,16 +691,94 @@ async def test_http_errors_map_to_typed_provider_errors(
     retryable: bool,
 ) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _json_reply(body, status=status))
-    # A caller that retries the request itself turns the SDK's retries off, so the adapter's own error arrives at once.
-    request = ModelRequest(messages=[_user()], overrides=RequestOverrides(caller_retries=True))
 
     with pytest.raises(ProviderError) as info:
-        await _turn(built, request)
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert type(info.value) is error_type
     assert (info.value.status_code, info.value.retryable, info.value.provider) == (status, retryable, "OpenAI Chat")
     assert str(info.value) == body["error"]["message"]
-    assert len(built.requests) == 1
+    assert len(built.requests) == 1, "the SDK client never retries; the pipeline alone does"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_date_reaches_the_pipeline_as_the_seconds_until_it(tmp_path: Path) -> None:
+    """A custom endpoint that answers a 429 with an HTTP-date ``Retry-After`` is waited out as the SDK waited it out."""
+    retry_at = datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=30)
+    reply = _json_reply({"error": {"message": "slow down"}}, status=429)
+    reply["headers"]["retry-after"] = format_datetime(retry_at, usegmt=True)
+    config = {"provider": "llama_cpp", "id": "qwen", "extra_kwargs": {"base_url": "https://llm.example/v1"}}
+    built = _Built(tmp_path, config, reply)
+
+    with pytest.raises(RateLimited) as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert info.value.retry_after_seconds is not None
+    assert 25.0 < info.value.retry_after_seconds <= 30.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [520, 522, 524])
+async def test_a_cdn_origin_failure_in_front_of_a_custom_endpoint_is_retried(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """A Cloudflare origin failure is a server error the request pipeline retries, as the SDK did before it."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    replies = [
+        _json_reply({"error": {"message": "A timeout occurred"}}, status=status),
+        _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    config = {"provider": "llama_cpp", "id": "qwen", "extra_kwargs": {"base_url": "https://llm.example/v1"}}
+    provider = pipeline_provider(openai_family_adapter(config, tmp_path, respond))
+
+    turn = await complete(provider, ModelRequest(messages=[_user()]))
+
+    assert (turn.content, len(sent)) == ("ok", 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "header", "value", "seconds"),
+    [
+        (_OPENAI_CHAT, "retry-after", "2", 2.0),
+        (
+            {
+                "provider": "azure",
+                "id": "gpt-6-astra",
+                "api_key": "test-key",
+                "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"},
+            },
+            "retry-after-ms",
+            "30000",
+            30.0,
+        ),
+    ],
+    ids=["openai-seconds", "azure-milliseconds"],
+)
+async def test_a_retry_after_header_rides_on_the_typed_error(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    header: str,
+    value: str,
+    seconds: float,
+) -> None:
+    """The provider's ``Retry-After`` hint, Azure's ``retry-after-ms`` too, reaches the pipeline, which waits it out."""
+    reply = _json_reply({"error": {"message": "slow down"}}, status=429)
+    reply["headers"][header] = value
+    built = _Built(tmp_path, model_config, reply)
+
+    with pytest.raises(RateLimited) as info:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+    assert (info.value.retry_after_seconds, len(built.requests)) == (seconds, 1)
 
 
 @pytest.mark.asyncio
@@ -716,7 +799,7 @@ async def test_mid_stream_error_events_are_retryable_when_transient(
 ) -> None:
     """An error event inside a committed stream is retried for the shared rate-limit and transient statuses."""
     reply = _chat_reply({"data": {"error": error}})
-    built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
 
     with pytest.raises(ProviderError) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
@@ -754,7 +837,7 @@ async def test_a_stream_error_event_reads_as_the_status_its_code_names(
 ) -> None:
     """A stream's error event reads as the HTTP status its code names does: 429 rate-limited, 529 and 503 unavailable."""
     reply = _chat_reply({"data": {"error": error}})
-    built = _Built(tmp_path, {**_OPENAI_CHAT, "extra_kwargs": {"max_retries": 0}}, reply)
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
 
     with pytest.raises(ProviderError) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
@@ -776,7 +859,7 @@ async def test_a_context_window_error_inside_a_stream_is_typed(tmp_path: Path) -
     with pytest.raises(ContextWindowExceeded, match="maximum context length") as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.code, info.value.retryable) == ("context_length_exceeded", False)
+    assert (info.value.provider_code, info.value.retryable) == ("context_length_exceeded", False)
 
 
 @pytest.mark.asyncio
@@ -817,6 +900,108 @@ def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
 
     assert type(error) is ProviderUnavailable
     assert (str(error), error.status_code, error.retryable) == (page, 502, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "variable", "reply", "authorization"),
+    [
+        (
+            {"provider": "codex", "id": "gpt-6.1-sol"},
+            "CODEX_HOME",
+            _responses_reply(*_text_events("ok"), _completed()),
+            "Bearer eyJ",
+        ),
+        (
+            {"provider": "kimi", "id": "k3"},
+            "KIMI_CODE_HOME",
+            _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+            "Bearer parity-kimi-token",
+        ),
+    ],
+    ids=["codex", "kimi"],
+)
+@pytest.mark.parametrize("authored", [False, True], ids=["env-file", "authored-wins"])
+async def test_a_cli_login_home_set_in_the_env_file_is_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_config: dict[str, Any],
+    variable: str,
+    reply: dict[str, Any],
+    authorization: str,
+    *,
+    authored: bool,
+) -> None:
+    """``CODEX_HOME`` and ``KIMI_CODE_HOME`` in the ``.env`` beside the config locate the CLI's saved login.
+
+    A home the model authors wins, and the user's own home holds no login, so neither test can find one there.
+    """
+    monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    homes = {"CODEX_HOME": ("<codex_home>", "codex_home"), "KIMI_CODE_HOME": ("<kimi_home>", "kimi_home")}
+    placeholder, setting = homes[variable]
+    login_home = write_cli_logins(tmp_path)[placeholder]
+    if authored:
+        model_config = {**model_config, "extra_kwargs": {setting: login_home}}
+    env_home = tmp_path / "no-login" if authored else login_home
+    (tmp_path / ".env").write_text(f"{variable}={env_home}\n", encoding="utf-8")
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(reply)
+
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
+    runtime = provider_runtime(paths, http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)))
+
+    await complete(build_provider(ModelConfig(**model_config), runtime), ModelRequest(messages=[_user()]))
+
+    assert sent[0].headers["authorization"].startswith(authorization)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "variable", "placeholder"),
+    [
+        ({"provider": "openai", "id": "gpt-4.1"}, "OPENAI_API_KEY", "your-openai-key-here"),
+        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, "OPENROUTER_API_KEY", "your-openrouter-key-here"),
+        (
+            {
+                "provider": "azure",
+                "id": "gpt-6-astra",
+                "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"},
+            },
+            "AZURE_OPENAI_API_KEY",
+            "your-azure-openai-key-here",
+        ),
+    ],
+    ids=["openai", "openrouter", "azure"],
+)
+async def test_a_starter_placeholder_key_is_a_missing_key(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    variable: str,
+    placeholder: str,
+) -> None:
+    """An unedited starter ``.env`` value is no key, so the reply says how to connect one instead of sending it."""
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(401, json={"error": {"message": "Incorrect API key provided"}})
+
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={variable: placeholder},
+    )
+    runtime = provider_runtime(paths, http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)))
+    adapter = build_provider(ModelConfig(**model_config), runtime)
+
+    with pytest.raises(AuthenticationFailed) as info:
+        await complete(adapter, ModelRequest(messages=[_user()]))
+
+    assert (info.value.code, sent) == ("missing_api_key", [])
 
 
 @pytest.mark.asyncio
@@ -923,7 +1108,7 @@ async def test_responses_error_event_is_classified_by_its_code(tmp_path: Path) -
     with pytest.raises(ProviderUnavailable) as info:
         await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
-    assert (info.value.status_code, info.value.code, str(info.value)) == (None, "server_error", "boom")
+    assert (info.value.status_code, info.value.provider_code, str(info.value)) == (None, "server_error", "boom")
     assert info.value.provider == "OpenAI Responses"
 
 
@@ -960,7 +1145,7 @@ async def test_responses_stream_without_completion_fails(
 ) -> None:
     """An early end is retried like a dropped connection only while nothing reached the caller."""
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, _responses_reply(*events))
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*events))
 
     with pytest.raises(ProviderUnavailable, match="without completing the turn"):
         await _turn(built, ModelRequest(messages=[_user()]))
@@ -1041,7 +1226,7 @@ async def test_responses_failure_is_final_once_a_hosted_tool_started(
     """
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     reply = {**_responses_reply(*events), "drop_connection": drop_connection}
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"max_retries": 0}}, reply)
+    built = _Built(tmp_path, _OPENAI_RESPONSES, reply)
 
     with pytest.raises(ProviderUnavailable):
         await _turn(built, ModelRequest(messages=[_user()]))
@@ -1616,7 +1801,7 @@ async def test_configured_groq_host_keeps_the_sdk_path(tmp_path: Path) -> None:
 
 
 def _client_options(prefix: str) -> dict[str, Any]:
-    return {"timeout": 30, "max_retries": 0, "default_headers": {"X-Origin": prefix}, "organization": f"org-{prefix}"}
+    return {"timeout": 30, "default_headers": {"X-Origin": prefix}, "organization": f"org-{prefix}"}
 
 
 _CONFIGURED_CLIENT = {"base_url": "http://configured.test/v1", **_client_options("configured")}
@@ -1706,13 +1891,13 @@ async def test_a_client_params_key_needs_no_shared_key(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_azure_model_sends_with_its_configured_timeout_and_retries(tmp_path: Path) -> None:
-    """``timeout`` and ``max_retries`` set in ``extra_kwargs`` reach the Azure client, as on the other routes."""
+async def test_an_azure_model_sends_once_with_its_configured_timeout(tmp_path: Path) -> None:
+    """``timeout`` set in ``extra_kwargs`` reaches the Azure client, which never retries, as on the other routes."""
     model_config = {
         "provider": "azure",
         "id": "gpt-6-astra",
         "api_key": "test-key",
-        "extra_kwargs": {**_AZURE_CLIENT, "timeout": 30, "max_retries": 0},
+        "extra_kwargs": {**_AZURE_CLIENT, "timeout": 30, "client_params": {"max_retries": 2}},
     }
     built = _Built(tmp_path, model_config, _json_reply({"error": {"message": "down"}}, status=500))
 

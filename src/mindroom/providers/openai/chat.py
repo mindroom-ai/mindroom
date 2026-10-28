@@ -84,6 +84,7 @@ class ChatAdapter:
             structured_output=self.capabilities.structured_output,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
+            provider=self.identity.provider_name,
         )
         if self.wire.route != "openrouter":
             return kwargs
@@ -104,7 +105,7 @@ class ChatAdapter:
         kwargs = await asyncio.to_thread(self._request_kwargs, request)
         accumulator = ChatStream(self.wire)
         try:
-            client = await self.clients.client(request.overrides)
+            client = await self.clients.client()
             sdk_stream = await client.chat.completions.create(**kwargs)
             # The SDK's chunks end alike at the ``[DONE]`` sentinel and where the body just ends, but the SDK
             # stops decoding at the sentinel, so a body decoded to its end never sent one.

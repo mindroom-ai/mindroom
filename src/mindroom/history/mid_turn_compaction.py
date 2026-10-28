@@ -390,7 +390,7 @@ def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
         history_settings=compaction.history_settings,
     )
     plan = inputs.execution_plan
-    if not (plan.authored_compaction_enabled and plan.text_compaction_available) or plan.replay_window_tokens is None:
+    if not (plan.automatic_compaction and plan.text_compaction_available) or plan.replay_window_tokens is None:
         return None
     model_window = compaction.config.get_model_context_window(compaction.model_name)
     native = state.request_template.native_compaction

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embeddings.errors import embedder_request_error, openai_embedder_error
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
@@ -24,6 +25,7 @@ from mindroom.timing import timed
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mem0 import AsyncMemory
@@ -31,6 +33,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder, EmbeddingPurpose
+    from mindroom.embeddings.errors import EmbedderRequestError
+    from mindroom.llm.errors import ProviderError
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
@@ -83,6 +87,46 @@ class _Mem0StrictOpenAIEmbedder:
             raise
 
 
+def _ollama_failure(error: Exception) -> ProviderError | None:
+    """Return the typed provider error of an Ollama SDK or transport failure, as MindRoom's Ollama embedder maps it."""
+    from mindroom.providers.ollama.errors import provider_error  # noqa: PLC0415 - loads the Ollama SDK
+
+    return provider_error(error, provider="ollama")
+
+
+def _ollama_embedder_error(error: Exception) -> EmbedderRequestError:
+    """Return the typed embedder error of a failure of Mem0's own Ollama embedder."""
+    return embedder_request_error(error, _ollama_failure(error))
+
+
+@dataclass(frozen=True)
+class _Mem0ClassifiedEmbedder:
+    """Raise the failures of an embedder Mem0 builds itself as the typed embedder errors MindRoom's embedders raise.
+
+    ``classify`` returns the typed error of one failure of the embedder's SDK; the wrapper sends what Mem0's embedder
+    sends, so stored memories keep matching their searches.
+    """
+
+    embedder: Any
+    classify: Callable[[Exception], EmbedderRequestError]
+
+    def embed(self, text: str, memory_action: Literal["add", "search", "update"] | None = None) -> list[float]:
+        try:
+            return self.embedder.embed(text, memory_action)
+        except Exception as exc:
+            raise self.classify(exc) from exc
+
+    def embed_batch(
+        self,
+        texts: list[str],
+        memory_action: Literal["add", "search", "update"] | None = "add",
+    ) -> list[list[float]]:
+        try:
+            return self.embedder.embed_batch(texts, memory_action)
+        except Exception as exc:
+            raise self.classify(exc) from exc
+
+
 def _memory_collection_name(config: Config) -> str:
     """Return a stable Chroma collection name for the active embedder settings."""
     embedder = config.memory.embedder
@@ -101,6 +145,19 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
+def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the server an Ollama memory LLM reaches, the default one included, as Mem0 is configured.
+
+    The saved Ollama host wins over ``memory.llm.config.host``. An ``ollama`` memory LLM without ``host`` reaches its
+    ``ollama_base_url``, and without that the Ollama SDK's own default (None).
+    """
+    memory_llm = config.memory.llm
+    if memory_llm is not None and "host" not in memory_llm.config:
+        return memory_llm.config.get("ollama_base_url")
+    configured = None if memory_llm is None else memory_llm.config["host"]
+    return get_ollama_host(runtime_paths=runtime_paths) or configured or OLLAMA_HOST_DEFAULT
+
+
 def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Build the Mem0 LLM config from ``memory.llm``, defaulting to local Ollama."""
     memory_llm = config.memory.llm
@@ -110,7 +167,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
             "provider": "ollama",
             "config": {
                 "model": MEMORY_OLLAMA_LLM,
-                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
+                "ollama_base_url": mem0_ollama_host(config, runtime_paths),
                 "temperature": 0.1,
                 "top_p": 1,
             },
@@ -121,9 +178,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
     # Copy config but handle provider-specific field names
     for key, value in memory_llm.config.items():
         if key == "host" and llm_provider == "ollama":
-            llm_provider_config["ollama_base_url"] = (
-                get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
-            )
+            llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
         elif key != "host":  # Skip host for other fields
             llm_provider_config[key] = value
 
@@ -243,7 +298,14 @@ async def create_memory_instance(
         with _STORE_BUILD_LOCKS.setdefault(store_path, threading.Lock()), optional_dependency_environment():
             from mem0 import AsyncMemory  # noqa: PLC0415
 
-            return AsyncMemory.from_config(config_dict)
+            try:
+                return AsyncMemory.from_config(config_dict)
+            except Exception as exc:
+                # Mem0's Ollama embedder asks the server for its model while the memory is built, the only request
+                # building it sends, so an Ollama failure here is the embedder's.
+                if config_dict["embedder"]["provider"] != "ollama" or (failure := _ollama_failure(exc)) is None:
+                    raise
+                raise embedder_request_error(exc, failure) from exc
 
     memory = await asyncio.to_thread(build_memory)
     memory_llm = config.memory.llm
@@ -267,6 +329,11 @@ async def create_memory_instance(
 
         strict_embedder = create_configured_embedder(config, runtime_paths)
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
+    else:
+        # Every other embedder is Mem0's own, so its failures are classified here, where they leave it.
+        # The embedders only Mem0 provides mostly use the OpenAI SDK.
+        classify = _ollama_embedder_error if config.memory.embedder.provider == "ollama" else openai_embedder_error
+        cast("Any", memory).embedding_model = _Mem0ClassifiedEmbedder(memory.embedding_model, classify)
 
     logger.info("created_memory_instance", path=store_path)
     return memory

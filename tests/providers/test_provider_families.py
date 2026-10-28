@@ -20,7 +20,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.types import HistoryScope
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
-from mindroom.llm.media import Audio, Image, Video
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.media_inputs import MediaInputs
@@ -349,17 +349,6 @@ async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and
 # --- The composed pipeline --------------------------------------------------------------------------------------
 
 
-def _without_sdk_retries(spec: Family) -> Family:
-    """Return ``spec`` with the SDK's own HTTP retries authored off, so the pipeline alone reissues a request.
-
-    The Gemini and Ollama SDKs retry only when a config authors it.
-    """
-    if spec.config["provider"] in {"google", "ollama"}:
-        return spec
-    extra_kwargs = {**spec.config.get("extra_kwargs", {}), "client_params": {"max_retries": 0}}
-    return replace(spec, config={**spec.config, "extra_kwargs": extra_kwargs})
-
-
 def _error_reply(family: str) -> httpx.Response:
     gemini = {"error": {"code": 503, "message": _OVERLOADED, "status": "UNAVAILABLE"}}
     bodies = {
@@ -390,7 +379,7 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
     the tool list and the request is reissued after the transient failure, with the request log recording every
     attempt.
     """
-    spec = _without_sdk_retries(FAMILIES[family])
+    spec = FAMILIES[family]
     wire = Wire(_error_reply(family), spec.reply())
     log_dir = tmp_path / "logs"
     provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
@@ -425,6 +414,32 @@ async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(fam
         "cache_write_tokens": 0,
     }
     assert turn.usage.tokens.input_tokens == 40
+
+
+def _unreadable_media(kind: str, root: Path) -> dict[str, Any]:
+    path = str(root / f"gone-{kind}")
+    media = {"image": Image(filepath=path), "file": File(filepath=path), "audio": Audio(filepath=path, format="wav")}
+    return {{"image": "images", "file": "files", "audio": "audio"}[kind]: [media[kind]]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_notes_an_attachment_file_it_cannot_read(family: str, kind: str, tmp_path: Path) -> None:
+    """An attachment whose file is gone reaches the model as the media fallback's note on every route.
+
+    A route that takes the kind fails to read the file and is retried without media; one that omits the kind
+    replaces it up front. Either way the model reads the same note and the provider gets one request.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content="Look", **_unreadable_media(kind, tmp_path))
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    assert spec.user_text(wire.body()) == f"Look\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
 
 
 @pytest.mark.asyncio
