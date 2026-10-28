@@ -258,9 +258,10 @@ def _has_malformed_id(call: object) -> bool:
 # LEGACY_COMPAT: Stored call ids that are not non-empty text.
 # Legacy format: a stored message whose ``tool_call_id``, or the ``id`` of a call in its ``tool_calls``, is empty or not
 # a string.
-# Last legacy release: no tagged native writer: every MindRoom writer stores a call id as non-empty text or none. Such
-# ids are unversioned external input, since worker code could write the Agno-era run data the storage v2 conversion
-# read.
+# Last legacy release: for an empty id, v2026.4.35, the last release on Agno 2.4.7, whose Chat stream parser stored the
+# first delta's id unchecked; v2026.4.36 moved to Agno 2.5.13, which gives a call with an empty id a uuid4 one, and the
+# owned writers from v2026.10.499 store non-empty text. An id that is not text has no known writer: it is unversioned
+# external input, since worker code could write the Agno-era run data the storage v2 conversion read.
 # Handling: the row decodes with that id as None and a ``stored_tool_call_id_dropped`` log line naming the message, so
 # the load never fails, every wire reads a call id as text or None, and the message's other ids and calls read as
 # stored.

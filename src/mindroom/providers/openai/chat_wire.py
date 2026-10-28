@@ -148,7 +148,7 @@ def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: 
 
 
 def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
-    """Return the request's messages: the system prompt as one, as ``developer`` on OpenAI, and foreign call ids fitted."""
+    """Return the request's messages: the system prompt joined, as ``developer`` on OpenAI, and foreign ids fitted."""
     system_role = "developer" if wire.route == "openai" else "system"
     canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
     return [_chat_message(message, wire, system_role, provider) for message in canonical]

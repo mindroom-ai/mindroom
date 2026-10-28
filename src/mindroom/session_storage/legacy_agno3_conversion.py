@@ -407,8 +407,9 @@ def _has_row(connection: sqlite3.Connection, names: AgnoTableNames, run_id: str)
 # logged by id; the backup keeps both. Worker code can write the run data, so a row whose run id is not text is left out
 # too, with what a paused team row embeds, as is an embedded or folded member whose run id is not text; a position that
 # is not a number goes last, as SQLite sorted it; a member's creation time that is not whole seconds a datetime holds
-# becomes its team run row's or its fold's; and each message and tool keeps its call ids only as text or none
-# (`_use_text_call_ids`).
+# becomes its team run row's or its fold's; and each message keeps only its tool calls that are objects, their ids and
+# its result id read as non-empty text or none (`Message.from_dict`), and each tool keeps its call id only as text or
+# none (`_use_object_calls_and_text_tool_ids`).
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_runs_convert_in_load_order_with_their_row_ids,
 # ::test_members_of_members_join_their_team_run, ::test_a_paused_team_runs_embedded_members_become_its_member_rows,
 # ::test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary,
@@ -581,8 +582,8 @@ def _write_run(
     run: _Run,
     seq: int,
 ) -> None:
-    # The repair reads call ids, so it runs on messages whose ids are text or None.
-    _use_text_call_ids(run.record.messages, run.record.tools or ())
+    # The repair reads the calls and their ids, so it runs on messages whose calls are objects with text or None ids.
+    _use_object_calls_and_text_tool_ids(run.record.messages, run.record.tools or ())
     run.record.messages = repair_legacy_tool_calls(run.record.messages)
     data = run.record.to_dict()
     kind = run_kind(run.record)
@@ -694,7 +695,7 @@ def _convert_segment(
         return
     decoded = (_decoded(Message.from_dict, message) for message in row.segment_list("messages"))
     folded = [message for message in decoded if message is not None]
-    _use_text_call_ids(folded)
+    _use_object_calls_and_text_tool_ids(folded)
     named = {call.get("id") for message in folded for call in message.tool_calls or ()}
     named |= {message.tool_call_id for message in folded}
     messages = [message.to_dict() for message in folded]
@@ -714,11 +715,11 @@ def _convert_segment(
     flag_folded(connection, names, session_id, run_id, messages, member_ids, row.id)
 
 
-def _use_text_call_ids(messages: Iterable[Message], tools: Iterable[ToolExecution] = ()) -> None:
+def _use_object_calls_and_text_tool_ids(messages: Iterable[Message], tools: Iterable[ToolExecution] = ()) -> None:
     """Keep the decoded messages' tool calls only as objects and the tools' call ids only as text or None.
 
-    Worker code can write run data, so every reader can then hash and compare the ids; decoding a message already
-    keeps its own call ids as text or None (``Message.from_dict``).
+    Worker code can write run data, so this is what lets every reader iterate the calls and hash and compare the ids;
+    decoding a message already reads its own call ids as non-empty text or None (``Message.from_dict``).
     """
     for message in messages:
         calls = message.tool_calls if isinstance(message.tool_calls, list) else []

@@ -43,7 +43,8 @@ def chat_call_id(server_id: object) -> str:
     """Return ``server_id`` when it fits the Chat rule, else a new id that does, for a Chat turn to store its call under.
 
     Chat requests rewrite every id outside the rule, so a call stored under the server's id would reach the model under
-    another one, and an approval receipt naming the stored id would name no call the model sees. The new id is ``call_`` and a uuid4's 32 hex digits, which fits the rule's 40 characters.
+    another one, and an approval receipt naming the stored id would name no call the model sees. The new id is
+    ``call_`` and a uuid4's 32 hex digits, which fits the rule's 40 characters.
     """
     if isinstance(server_id, str) and _fits(server_id, _RULES["chat"]):
         return server_id
@@ -57,7 +58,7 @@ def _foreign_ids(messages: Sequence[Message], rule: _IdRule) -> tuple[dict[str, 
     counter = 0
     for call in (call for message in messages if message.role == "assistant" for call in message.tool_calls or ()):
         old_id = call.get("id")
-        if not old_id or not isinstance(old_id, str) or old_id in id_map:
+        if not old_id or old_id in id_map:
             continue
         if _fits(old_id, rule):
             continue
