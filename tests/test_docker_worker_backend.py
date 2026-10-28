@@ -23,6 +23,7 @@ import yaml
 from structlog.testing import capture_logs
 
 from mindroom.config.main import load_config
+from mindroom.config.personal_agents import CreatedAgentEntry, GeneratedAgentEdits, PersonalAgentRoster
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import (
     RuntimePaths,
@@ -32,7 +33,7 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
 )
-from mindroom.personal_agents import _append_personal_agent_roster_entry
+from mindroom.personal_agents import _append_personal_agent_roster_entry, _write_personal_agent_roster
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -709,6 +710,47 @@ def test_docker_worker_projection_includes_personal_agents(
     projected = yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))
     assert projected["agents"]["mind_alice_smith"]["display_name"] == "Alice's Mind"
     assert "personal_agents" not in projected
+
+
+def test_docker_worker_projection_includes_created_agents_and_edits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Created agents and owners' edits reach Docker workers through the applied config, scoped per worker."""
+    paths = test_runtime_paths(tmp_path)
+    helper = {"display_name": "Helper", "model": "default", "tools": ["shell"], "worker_scope": "shared"}
+    config_data = PERSONAL_AGENTS_BASE | {"agents": {"helper": helper | {"created_agents_per_owner": 1}}}
+    created = CreatedAgentEntry(
+        agent_name="helper_research",
+        creator="helper",
+        owner="@alice:example.org",
+        edits=GeneratedAgentEdits(display_name="Research"),
+    )
+    edited = personal_agent_entry(edits={"display_name": "Scout"})
+    _write_personal_agent_roster(paths, PersonalAgentRoster(entries=[edited], created=[created]))
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=yaml.safe_dump(config_data),
+        runtime_paths=paths,
+        storage_path=paths.storage_root,
+    )
+    launch = _launch(backend._runtime_paths)
+
+    def projected_agents(worker_key: str | None) -> dict[str, dict[str, object]]:
+        state = local_worker_state_paths_for_root(tmp_path / "workers" / str(worker_key))
+        projection = backend._projection_manager._projected_config(
+            state,
+            launch=launch,
+            worker_key=worker_key,
+            materialize=True,
+        )
+        return yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))["agents"]
+
+    agents = projected_agents(None)
+    assert agents["helper_research"]["display_name"] == "Research"
+    assert agents["mind_alice_smith"]["display_name"] == "Scout"
+    assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
 
 
 def _backend(

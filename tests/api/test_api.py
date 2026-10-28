@@ -1528,6 +1528,21 @@ def test_get_personal_agents_lists_active_pending_and_removed_template_entries(
     ]
 
 
+def test_the_dashboard_list_shows_an_edited_personal_name(test_client: TestClient, temp_config_file: Path) -> None:
+    """An owner's display name edit replaces the template's name in the listing."""
+    runtime_paths = main._app_runtime_paths(main.app)
+    _append_personal_agent_roster_entry(runtime_paths, personal_agent_entry(edits={"display_name": "Scout"}))
+    config_data = yaml.safe_load(temp_config_file.read_text())
+    config_data["personal_agents"] = {"mind": {"agent": {"display_name": "{user_display_name}'s Mind"}}}
+    temp_config_file.write_text(yaml.dump(config_data))
+    assert config_lifecycle.load_config_into_app(runtime_paths, main.app)
+
+    response = test_client.get("/api/config/personal-agents")
+
+    assert response.status_code == 200
+    assert [agent["display_name"] for agent in response.json()] == ["Scout"]
+
+
 def test_create_agent(test_client: TestClient, sample_agent_data: dict[str, Any], temp_config_file: Path) -> None:
     """Test creating a new agent."""
     # Load config first

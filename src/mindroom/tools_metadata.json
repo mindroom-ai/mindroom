@@ -1570,6 +1570,35 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "development",
+      "config_fields": [],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [],
+      "description": "Create agents for the people asking, and let owners change or delete the agents generated for them",
+      "display_name": "Agent Manager",
+      "docs_url": "https://docs.mindroom.chat/tools/agent-orchestration/#agent_manager",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "agent_settings",
+        "create_agent",
+        "update_agent",
+        "delete_agent"
+      ],
+      "helper_text": null,
+      "icon": "Settings",
+      "icon_color": "text-teal-500",
+      "name": "agent_manager",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
       "config_fields": [
         {
           "authored_override": true,

@@ -816,6 +816,14 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
         )
 
+    if tool_name == "agent_manager":
+        from mindroom.custom_tools.agent_manager import AgentManagerTools  # noqa: PLC0415
+
+        can_create = agent_config.created_agents_per_owner > 0
+        info = config.generated_agent(agent_name)
+        generated, created = info is not None, info is not None and info.created
+        return wrap_direct(AgentManagerTools(agent_name, can_create=can_create, generated=generated, created=created))
+
     if tool_name == "skill_manage":
         from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
 

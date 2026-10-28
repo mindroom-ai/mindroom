@@ -43,6 +43,7 @@ from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProf
 from mindroom.config.egress_broker import EgressBrokerConfig
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
+from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
@@ -75,7 +76,7 @@ from mindroom.config.personal_agents import (
     PersonalAgentInstance,
     PersonalAgentTemplateConfig,
     expand_personal_agents,
-    read_personal_agent_roster,
+    read_personal_agent_roster_file,
 )
 from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -130,11 +131,20 @@ if TYPE_CHECKING:
     from collections.abc import Collection
 
     from mindroom.agent_policy import ResolvedAgentPolicy
+    from mindroom.config.personal_agents import PersonalAgentRoster
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
-    {"delegate", "dynamic_tools", "external_trigger_manager", "invite_router", "self_config", "skill_manage"},
+    {
+        "agent_manager",
+        "delegate",
+        "dynamic_tools",
+        "external_trigger_manager",
+        "invite_router",
+        "self_config",
+        "skill_manage",
+    },
 )
 _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "shell",
@@ -427,7 +437,8 @@ class Config(BaseModel):
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
-    _personal_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _generated_agent_dumps: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _generated_agents: dict[str, GeneratedAgentInfo] = PrivateAttr(default_factory=dict)
     _personal_agents_added_agents_section: bool = PrivateAttr(default=False)
 
     egress_broker: EgressBrokerConfig = Field(
@@ -1206,10 +1217,16 @@ class Config(BaseModel):
         runtime_paths: RuntimePaths,
         *,
         tolerate_plugin_load_errors: bool = False,
+        roster: PersonalAgentRoster | None = None,
     ) -> Config:
-        """Validate config data against one explicit runtime context, adding the agents of the personal agent roster."""
+        """Validate config data against one explicit runtime context, adding the agents of the personal agent roster.
+
+        A candidate `roster` replaces the stored one, and generated agents it makes invalid raise instead of being left out.
+        """
+        candidate = roster is not None
         try:
-            expansion = expand_personal_agents(data, read_personal_agent_roster(runtime_paths))
+            roster = read_personal_agent_roster_file(runtime_paths) if roster is None else roster
+            expansion = expand_personal_agents(data, roster.entries)
         except ValueError as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         config = cls._validate_runtime_data(
@@ -1238,12 +1255,29 @@ class Config(BaseModel):
             )
             raise ConfigRuntimeValidationError(msg)
         config._personal_agent_instances = expansion.instances
-        # An edited generated agent stays in the authored dump, so saving the edit fails as a collision.
-        config._personal_agent_dumps = {
-            agent_name: config.agents[agent_name].model_dump(exclude_unset=True) for agent_name in expansion.instances
+        # Pass two builds every generated agent from pass one, so a creator's own edits never change what it grants.
+        generated_data, generated = expand_generated_agents(config, cast("dict[str, Any]", expansion.data), roster)
+        if generated_data is not None:
+            try:
+                config = cls._validate_runtime_data(
+                    generated_data,
+                    runtime_paths,
+                    tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+                )
+            except (ValidationError, ConfigRuntimeValidationError) as exc:
+                if candidate:
+                    raise
+                # Edits and created agents wait for a fix; the owners keep their agents and loading never breaks.
+                logger.warning("generated_agents_invalid", error=str(exc))
+            config._personal_agent_instances = expansion.instances
+        config._generated_agents = {name: info for name, info in generated.items() if name in config.agents}
+        # authored_model_dump drops generated agents while they match these dumps.
+        config._generated_agent_dumps = {
+            agent_name: config.agents[agent_name].model_dump(exclude_unset=True)
+            for agent_name in config._generated_agents
         }
         config._personal_agents_added_agents_section = (
-            bool(expansion.instances) and isinstance(data, dict) and "agents" not in data
+            bool(config._generated_agents) and isinstance(data, dict) and "agents" not in data
         )
         return config
 
@@ -1281,13 +1315,18 @@ class Config(BaseModel):
         return config
 
     def authored_model_dump(self) -> dict[str, Any]:
-        """Serialize authored config, without the unedited agents generated from personal_agents templates."""
+        """Serialize authored config, without the personal and created agents the roster generates."""
         payload = self.runtime_model_dump()
         agents = payload.get("agents")
         if isinstance(agents, dict):
-            for agent_name, generated in self._personal_agent_dumps.items():
-                if agents.get(agent_name) == generated:
-                    del agents[agent_name]
+            for agent_name, info in self._generated_agents.items():
+                if agents.get(agent_name) == self._generated_agent_dumps[agent_name]:
+                    agents.pop(agent_name)
+                elif info.created:
+                    # A created agent lives only in the roster, so saving a change made here would lose it.
+                    msg = f"agents.{agent_name} was created by another agent; its owners change it with update_agent"
+                    raise ConfigRuntimeValidationError(msg)
+                # An edited personal agent stays, so saving it collides with its roster entry.
             if not agents and self._personal_agents_added_agents_section:
                 payload.pop("agents")
         return payload
@@ -1339,6 +1378,16 @@ class Config(BaseModel):
     def personal_agent_instance(self, agent_name: str) -> PersonalAgentInstance | None:
         """Return the template and owner of one generated agent, or None for an authored agent."""
         return self._personal_agent_instances.get(agent_name)
+
+    def generated_agent(self, agent_name: str) -> GeneratedAgentInfo | None:
+        """Return whether one personal or created agent was created and its allowed tools, or None for an authored one."""
+        return self._generated_agents.get(agent_name)
+
+    def tool_ceiling(self, agent_name: str) -> tuple[str, ...]:
+        """Return the tools this agent's edits, or the agents it creates, may choose from; pass one's if generated."""
+        if (info := self._generated_agents.get(agent_name)) is not None:
+            return info.allowed_tools
+        return tuple(entry.name for entry in self._get_agent_authored_tool_configs(agent_name))
 
     def personal_agent_name(self, template: str, user_id: str) -> str | None:
         """Return the agent generated from one template for one user, or None before that user is onboarded."""

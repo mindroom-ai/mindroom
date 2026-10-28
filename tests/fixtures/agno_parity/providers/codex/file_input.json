@@ -42,6 +42,21 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Pack a light rain jacket and comfortable shoes.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ],
         "mindroom_response_stored": false,
         "response_id": "resp_parity"
       },

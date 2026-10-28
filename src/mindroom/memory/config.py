@@ -145,6 +145,19 @@ def _memory_collection_name(config: Config) -> str:
     return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
 
 
+def mem0_ollama_host(config: Config, runtime_paths: RuntimePaths) -> str | None:
+    """Return the server an Ollama memory LLM reaches, the default one included, as Mem0 is configured.
+
+    The saved Ollama host wins over ``memory.llm.config.host``. An ``ollama`` memory LLM without ``host`` reaches its
+    ``ollama_base_url``, and without that the Ollama SDK's own default (None).
+    """
+    memory_llm = config.memory.llm
+    if memory_llm is not None and "host" not in memory_llm.config:
+        return memory_llm.config.get("ollama_base_url")
+    configured = None if memory_llm is None else memory_llm.config["host"]
+    return get_ollama_host(runtime_paths=runtime_paths) or configured or OLLAMA_HOST_DEFAULT
+
+
 def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Build the Mem0 LLM config from ``memory.llm``, defaulting to local Ollama."""
     memory_llm = config.memory.llm
@@ -154,7 +167,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
             "provider": "ollama",
             "config": {
                 "model": MEMORY_OLLAMA_LLM,
-                "ollama_base_url": get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT,
+                "ollama_base_url": mem0_ollama_host(config, runtime_paths),
                 "temperature": 0.1,
                 "top_p": 1,
             },
@@ -165,9 +178,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
     # Copy config but handle provider-specific field names
     for key, value in memory_llm.config.items():
         if key == "host" and llm_provider == "ollama":
-            llm_provider_config["ollama_base_url"] = (
-                get_ollama_host(runtime_paths=runtime_paths) or value or OLLAMA_HOST_DEFAULT
-            )
+            llm_provider_config["ollama_base_url"] = mem0_ollama_host(config, runtime_paths)
         elif key != "host":  # Skip host for other fields
             llm_provider_config[key] = value
 

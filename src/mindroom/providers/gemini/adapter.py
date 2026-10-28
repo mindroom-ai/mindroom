@@ -80,7 +80,7 @@ class GeminiProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.
 
-        Media uploads and downloads happen first, so their SDK and transport errors are normalized too.
+        Media uploads happen first, so their SDK and transport errors are normalized too.
         """
         timer = TurnTimer()
         reply = GeminiReply()
@@ -268,6 +268,8 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
         identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
         capabilities=Capabilities(
             structured_output="native",
+            # Gemini fetches Cloud Storage and HTTPS files and video links itself.
+            url_media=frozenset({"file", "video"}),
             provider_default_sampling=model_config.id.casefold().endswith(
                 GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
             ),
