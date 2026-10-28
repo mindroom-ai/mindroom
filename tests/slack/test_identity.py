@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.config.slack import SlackConfig
 from mindroom.slack import identity
 from mindroom.slack.api import SlackApiError
-from mindroom.slack.identity import SlackAuthor, slack_author, slack_channel_name
+from mindroom.slack.identity import SlackAuthor, project_channel_refusal, slack_author, slack_channel
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -31,10 +31,10 @@ _CONFIG = SlackConfig(email_domain="example.com", matrix_user_id_template="@{loc
 @pytest.fixture(autouse=True)
 def _empty_author_cache() -> Iterator[None]:
     identity._PROFILES.clear()
-    identity._CHANNEL_NAMES.clear()
+    identity._CHANNELS.clear()
     yield
     identity._PROFILES.clear()
-    identity._CHANNEL_NAMES.clear()
+    identity._CHANNELS.clear()
 
 
 @pytest.fixture
@@ -339,17 +339,18 @@ async def test_other_slack_errors_propagate_and_are_not_cached(
     assert (await _author(slack, paths)).matrix_id == "@ada:example.org"
 
 
-async def _channel_name(slack: _FakeSlack, **kwargs: Any) -> str:  # noqa: ANN401
+async def _channel(slack: _FakeSlack, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
     async with slack.client() as client:
-        return await slack_channel_name(client, _BOT_TOKEN, _TEAM, _CHANNEL_ID, **kwargs)
+        return await slack_channel(client, _BOT_TOKEN, _TEAM, _CHANNEL_ID, **kwargs)
 
 
 @pytest.mark.asyncio
-async def test_channel_name_comes_from_conversations_info_with_the_bot_token() -> None:
-    """The name is the one `conversations.info` gives for the channel, asked with the bot token."""
-    slack = _FakeSlack({"ok": True, "channel": {"id": _CHANNEL_ID, "name": "launch-eng"}})
+async def test_channel_comes_from_conversations_info_with_the_bot_token() -> None:
+    """The channel is what `conversations.info` shows for it, asked with the bot token."""
+    info = {"id": _CHANNEL_ID, "name": "launch-eng", "is_member": True}
+    slack = _FakeSlack({"ok": True, "channel": info})
 
-    assert await _channel_name(slack) == "launch-eng"
+    assert await _channel(slack) == info
     (request,) = slack.requests
     assert request.url.path == "/api/conversations.info"
     assert request.headers["Authorization"] == f"Bearer {_BOT_TOKEN}"
@@ -357,46 +358,78 @@ async def test_channel_name_comes_from_conversations_info_with_the_bot_token() -
 
 
 @pytest.mark.asyncio
-async def test_channel_name_cache_expires_after_ten_minutes() -> None:
-    """A name is used until 600 seconds old, then looked up again; another channel is another lookup."""
+async def test_channel_cache_expires_after_ten_minutes() -> None:
+    """A lookup is reused until 600 seconds old, then made again; another channel is another lookup."""
     slack = _FakeSlack({"ok": True, "channel": {"name": "launch-eng"}})
     clock = [1000.0]
 
     def now() -> float:
         return clock[0]
 
-    await _channel_name(slack, now=now)
+    await _channel(slack, now=now)
     clock[0] += 599
-    await _channel_name(slack, now=now)
+    await _channel(slack, now=now)
     assert len(slack.requests) == 1
 
     clock[0] += 1
-    await _channel_name(slack, now=now)
+    await _channel(slack, now=now)
     assert len(slack.requests) == 2
 
     async with slack.client() as client:
-        await slack_channel_name(client, _BOT_TOKEN, _TEAM, "C0456EFGH", now=now)
+        await slack_channel(client, _BOT_TOKEN, _TEAM, "C0456EFGH", now=now)
     assert len(slack.requests) == 3
 
 
-@pytest.mark.parametrize(
-    ("body", "error"),
-    [
-        ({"ok": False, "error": "channel_not_found"}, "channel_not_found"),
-        ({"ok": False, "error": "missing_scope"}, "missing_scope"),
-        ({"ok": True}, "invalid_response"),
-        ({"ok": True, "channel": {"name": ""}}, "invalid_response"),
-        ({"ok": True, "channel": {"name": 7}}, "invalid_response"),
-    ],
-)
 @pytest.mark.asyncio
-async def test_channel_name_failures_raise_and_are_not_cached(body: dict[str, Any], error: str) -> None:
-    """A failed or nameless `conversations.info` raises `SlackApiError`, so the caller decides and the next call asks again."""
-    slack = _FakeSlack(body)
+async def test_a_decision_looks_the_channel_up_afresh_for_later_names() -> None:
+    """`max_age=0` always asks Slack, since the app may have left; its answer then serves names for ten minutes."""
+    slack = _FakeSlack({"ok": True, "channel": {"name": "launch-eng", "is_member": True}})
+    clock = [1000.0]
+
+    def now() -> float:
+        return clock[0]
+
+    await _channel(slack, now=now)
+    slack.body = {"ok": True, "channel": {"name": "launch-eng", "is_member": False}}
+    clock[0] += 1
+    assert (await _channel(slack, max_age=0, now=now))["is_member"] is False
+    clock[0] += 599
+    assert (await _channel(slack, now=now))["is_member"] is False
+    assert len(slack.requests) == 2
+
+
+@pytest.mark.parametrize("body", [{"ok": False, "error": "channel_not_found"}, {"ok": True}])
+@pytest.mark.asyncio
+async def test_a_channel_the_bot_cannot_see_is_empty(body: dict[str, Any]) -> None:
+    """Slack shows the bot nothing of a private channel it is not in, which is no failure."""
+    assert await _channel(_FakeSlack(body)) == {}
+
+
+@pytest.mark.parametrize("error", ["missing_scope", "invalid_auth"])
+@pytest.mark.asyncio
+async def test_channel_failures_raise_and_are_not_cached(error: str) -> None:
+    """A failed `conversations.info` raises `SlackApiError`, so the caller decides and the next call asks again."""
+    slack = _FakeSlack({"ok": False, "error": error})
 
     with pytest.raises(SlackApiError, match=error):
-        await _channel_name(slack)
+        await _channel(slack)
 
-    assert not identity._CHANNEL_NAMES
+    assert not identity._CHANNELS
     slack.body = {"ok": True, "channel": {"name": "launch-eng"}}
-    assert await _channel_name(slack) == "launch-eng"
+    assert await _channel(slack) == {"name": "launch-eng"}
+
+
+@pytest.mark.parametrize(
+    ("info", "refusal"),
+    [
+        ({"is_member": True}, None),
+        ({"is_member": False}, f"Invite the MindRoom app to <#{_CHANNEL_ID}>"),
+        ({}, f"Invite the MindRoom app to <#{_CHANNEL_ID}>"),
+        ({"is_member": True, "is_mpim": True}, "Not one of this agent's Slack channels"),
+        ({"is_member": True, "is_im": True}, "Not one of this agent's Slack channels"),
+    ],
+    ids=["member", "not-a-member", "not-visible", "group-dm", "dm"],
+)
+def test_project_channel_needs_membership_and_no_direct_message(info: dict[str, Any], refusal: str | None) -> None:
+    """A project agent acts only in a channel the app is a member of, and never in a direct message."""
+    assert project_channel_refusal(_CHANNEL_ID, info) == refusal

@@ -89,6 +89,8 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 PROJECT_SCOPE = "slack:agent:launch"
+# A channel no agent answers, where only watches receive messages.
+OTHER_CHANNEL = "C0456EFGH"
 PERMALINK = f"{WORKSPACE_URL}archives/{CHANNEL}/p1700000000000100"
 
 
@@ -149,11 +151,11 @@ class Harness:
 def _empty_slack_caches() -> Iterator[None]:
     slack_app._IDENTITIES.clear()
     slack_identity._PROFILES.clear()
-    slack_identity._CHANNEL_NAMES.clear()
+    slack_identity._CHANNELS.clear()
     yield
     slack_app._IDENTITIES.clear()
     slack_identity._PROFILES.clear()
-    slack_identity._CHANNEL_NAMES.clear()
+    slack_identity._CHANNELS.clear()
 
 
 @pytest.fixture
@@ -164,7 +166,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     slack = FakeSlack(
         answers={
             "auth.test": AUTH_TEST,
-            "conversations.info": {"ok": True, "channel": {"id": CHANNEL, "name": CHANNEL_NAME}},
+            "conversations.info": {"ok": True, "channel": {"id": CHANNEL, "name": CHANNEL_NAME, "is_member": True}},
             "apps.event.authorizations.list": {
                 "ok": True,
                 "authorizations": [{"user_id": SLACK_IDS["alice"], "team_id": "T0123ABCD", "is_bot": False}],
@@ -336,14 +338,61 @@ async def test_bound_reply_continues_same_thread(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_channel_name_is_looked_up_once_per_channel(harness: Harness) -> None:
+async def test_every_wake_checks_the_channel_once(harness: Harness) -> None:
+    """Each wake asks Slack whether the app is still in the channel, and that one answer also names the channel."""
     assert await harness.deliver(event_payload()) == "delivered"
     assert await harness.deliver(event_payload(author="carol", ts=REPLY_TS), now=NOW + 60) == "delivered"
 
     assert len(harness.matrix.sent) == 2
     for _, content in harness.matrix.sent:
         assert f" in #{CHANNEL_NAME}: " in content["body"].split("\n")[0]
-    assert harness.slack.calls("conversations.info") == [{"channel": CHANNEL}]
+    assert harness.slack.calls("conversations.info") == [{"channel": CHANNEL}] * 2
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"ok": True, "channel": {"id": CHANNEL, "name": CHANNEL_NAME, "is_member": False}},
+        {"ok": False, "error": "channel_not_found"},
+    ],
+    ids=["public-channel", "private-channel"],
+)
+@pytest.mark.asyncio
+async def test_bound_reply_is_not_delivered_after_the_app_left(
+    harness: Harness,
+    answer: dict[str, Any],
+) -> None:
+    """Slack keeps sending a thread's replies through people's own subscriptions after the app leaves the channel."""
+    assert await harness.deliver(event_payload()) == "delivered"
+    harness.slack.answers["conversations.info"] = answer
+    reply = event_payload("message", author="carol", text="and the docs?", ts=REPLY_TS, thread_ts=ROOT_TS)
+
+    assert await harness.deliver(reply, now=NOW + 60) == "ignored"
+    await harness.settle()
+
+    assert len(harness.matrix.sent) == 1
+    assert harness.slack.calls("chat.postEphemeral") == []
+    assert len(harness.slack.calls("reactions.add")) == 1
+
+
+@pytest.mark.asyncio
+async def test_listed_group_direct_message_is_refused(harness: Harness) -> None:
+    """A group direct message, which an older Slack named like a private channel, is never a project channel."""
+    group_dm = "G0123ABCD"
+    data = config_data()
+    data["agents"]["launch"]["tools"] = [{"slack": {"channels": [CHANNEL, group_dm], "room": "launch"}}]  # type: ignore[index]
+    harness.config = bind_runtime_paths(Config.model_validate(data), harness.paths)
+    harness.slack.answers["conversations.info"] = {
+        "ok": True,
+        "channel": {"id": group_dm, "name": "mpdm-ada--carol-1", "is_member": True, "is_mpim": True},
+    }
+
+    assert await harness.deliver(event_payload(channel=group_dm)) == "ignored"
+    await harness.settle()
+
+    assert harness.matrix.sent == []
+    assert harness.slack.calls("chat.postEphemeral") == []
+    assert harness.slack.calls("reactions.add") == []
 
 
 async def _slack_timeout(_request: httpx.Request) -> dict[str, Any]:
@@ -366,23 +415,23 @@ async def test_failed_channel_name_lookup_names_the_channel_by_id_and_still_deli
     harness: Harness,
     answer: Any,  # noqa: ANN401
 ) -> None:
-    """A display lookup that fails shows `#<ID>`, without Slack's angle brackets, and costs no delivery or retry."""
+    """A watch's channel name is only for display: a failed lookup shows `#<ID>`, without Slack's angle brackets."""
+    alice_watch(harness.paths)
+    connect_alice(harness.paths)
     harness.slack.answers["conversations.info"] = answer
+    mention = event_payload("message", author="dana", text=f"<@{SLACK_IDS['alice']}> look?", channel=OTHER_CHANNEL)
 
-    assert await harness.deliver(event_payload()) == "delivered"
-    harness.slack.answers["conversations.info"] = {"ok": True, "channel": {"name": CHANNEL_NAME}}
-    assert await harness.deliver(event_payload(author="carol", ts=REPLY_TS), now=NOW + 60) == "delivered"
+    assert await harness.deliver(mention) == "delivered"
 
-    first, second = (content["body"].split("\n")[0] for _, content in harness.matrix.sent)
-    assert first == f"{harness.agent_id('launch')} Slack message from Ada in #{CHANNEL}: {PERMALINK}"
-    assert " in #launch-eng: " in second, "a failed lookup is not remembered"
+    ((_, content),) = harness.matrix.sent
+    assert f" in #{OTHER_CHANNEL}: {WORKSPACE_URL}archives/{OTHER_CHANNEL}/" in content["body"].split("\n")[0]
 
 
 @pytest.mark.asyncio
 async def test_channel_and_bot_names_cannot_add_markup(harness: Harness) -> None:
     """Names Slack answers are escaped like the author's: they add no link, image, pill or HTML to the message."""
     channel_name, bot_name = _CRAFTED_NAMES[2], _CRAFTED_NAMES[3]
-    harness.slack.answers["conversations.info"] = {"ok": True, "channel": {"name": channel_name}}
+    harness.slack.answers["conversations.info"] = {"ok": True, "channel": {"name": channel_name, "is_member": True}}
     harness.slack.answers["auth.test"] = {**AUTH_TEST, "user": bot_name}
 
     assert await harness.deliver(event_payload()) == "delivered"
@@ -584,6 +633,19 @@ async def test_failing_identity_lookup_answers_retry(harness: Harness, answer: A
 
     assert await harness.deliver(event_payload()) == "retry"
     assert harness.matrix.sent == []
+
+
+@_PASSING_FAILURES
+@pytest.mark.asyncio
+async def test_failed_membership_lookup_retries(harness: Harness, answer: Any) -> None:  # noqa: ANN401
+    """Whether the app is still in the channel decides a wake, so a lookup that may pass later is retried."""
+    harness.slack.answers["conversations.info"] = answer
+
+    assert await harness.deliver(event_payload()) == "retry"
+    await harness.settle()
+
+    assert harness.matrix.sent == []
+    assert harness.slack.calls("reactions.add") == []
 
 
 @_FINAL_ERRORS
@@ -835,6 +897,8 @@ async def test_watch_mention_in_a_channel_and_its_replies(harness: Harness) -> N
     assert f" Slack mention for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in content["body"]
     assert f" Slack thread reply for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in follow_up["body"]
     assert follow_up["m.relates_to"]["event_id"] == "$sent1"
+    # A watch names the channel only for display, so one lookup serves both.
+    assert harness.slack.calls("conversations.info") == [{"channel": "C0456EFGH"}]
 
 
 @pytest.mark.asyncio

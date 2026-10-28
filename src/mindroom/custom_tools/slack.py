@@ -43,6 +43,7 @@ from mindroom.slack.api import (
 )
 from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, SlackAppCredentials, load_slack_app, slack_bot_identity
 from mindroom.slack.files import MAX_FILE_BYTES, SlackFileError, fetch_file, save_download, share_file
+from mindroom.slack.identity import NOT_PROJECT_CHANNEL, project_channel_refusal, slack_channel_info
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.render import (
     json_object,
@@ -91,7 +92,6 @@ _PAGE = re.compile(r"[0-9]{1,3}")
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 # Slack answers these when the user token was revoked or its account deactivated; reconnecting fixes them.
 _AUTH_ERRORS = frozenset({"account_inactive", "invalid_auth", "not_authed", "token_expired", "token_revoked"})
-_NOT_PROJECT_CHANNEL = "Not one of this agent's Slack channels"
 _FILE_NOT_IN_PROJECT = "This file is not in one of this agent's Slack channels"
 _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connection"
 _PERSONAL_DMS_ONLY = "Direct messages need a personal Slack connection"
@@ -240,18 +240,6 @@ def _watching_message(watch: SlackWatch) -> str:
     return message
 
 
-def _project_channel_refusal(channel_id: str, info: Mapping[str, Any]) -> str | None:
-    """Return why a project agent may not use a listed conversation, or None for a channel the app is a member of.
-
-    Only `is_member` proves membership: the bot can read a public channel's info without being in it.
-    """
-    if info.get("is_im") or info.get("is_mpim"):
-        return _NOT_PROJECT_CHANNEL
-    if info.get("is_member") is not True:
-        return f"Invite the MindRoom app to <#{channel_id}>"
-    return None
-
-
 def _name_matches(query: str, *names: object) -> bool:
     needle = query.strip().casefold()
     return not needle or any(isinstance(name, str) and needle in name.casefold() for name in names)
@@ -300,16 +288,6 @@ async def _scan(
         if cursor is None or len(found) > limit:
             break
     return found[:limit], cursor is None and len(found) <= limit
-
-
-async def _channel_info(session: _Session, channel_id: str) -> dict[str, Any]:
-    """Return what Slack shows of one conversation, or nothing for one the token cannot see."""
-    try:
-        return json_object(await session.call("conversations.info", channel=channel_id), "channel")
-    except SlackApiError as exc:
-        if exc.error == "channel_not_found":
-            return {}
-        raise
 
 
 @dataclass
@@ -543,8 +521,9 @@ class SlackTools(Toolkit):
         if self.project_channels is None:
             return
         if channel_id not in self.project_channels:
-            raise _SlackRefusalError(_NOT_PROJECT_CHANNEL)
-        refusal = _project_channel_refusal(channel_id, await _channel_info(session, channel_id))
+            raise _SlackRefusalError(NOT_PROJECT_CHANNEL)
+        info = await slack_channel_info(session.client, session.token, channel_id)
+        refusal = project_channel_refusal(channel_id, info)
         if refusal is not None:
             raise _SlackRefusalError(refusal)
 
@@ -581,7 +560,7 @@ class SlackTools(Toolkit):
     async def _project_conversations(self, session: _Session, query: str, limit: int) -> dict[str, object]:
         listed = []
         for channel_id in sorted(self.project_channels or ()):
-            info = await _channel_info(session, channel_id)
+            info = await slack_channel_info(session.client, session.token, channel_id)
             if not (info.get("is_im") or info.get("is_mpim")) and _name_matches(query, info.get("name")):
                 listed.append(
                     {**render_conversation({"id": channel_id, **info}), "is_member": info.get("is_member") is True},
@@ -704,8 +683,8 @@ class SlackTools(Toolkit):
             for index, channel_id in enumerate(sorted(self.project_channels)):
                 if index < start:
                     continue
-                info = await _channel_info(session, channel_id)
-                if _project_channel_refusal(channel_id, info) is None:
+                info = await slack_channel_info(session.client, session.token, channel_id)
+                if project_channel_refusal(channel_id, info) is None:
                     joined.append((_resume_at(index, None), {**info, "id": channel_id}))
             return joined, None
         listed: list[tuple[str, dict[str, Any]]] = []

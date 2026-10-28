@@ -1,4 +1,4 @@
-"""Map a Slack author to a MindRoom (Matrix) account by the email on their Slack profile, and name Slack channels."""
+"""Map a Slack author to a MindRoom (Matrix) account by the email on their Slack profile, and look up Slack channels."""
 
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ _UNKNOWN_USER_ERRORS = frozenset({"user_not_found", "user_not_visible"})
 _NOT_A_MEMBER_FLAGS = ("deleted", "is_bot", "is_app_user", "is_restricted", "is_ultra_restricted")
 # Oldest first: an entry is re-inserted when it is looked up again after it expired.
 _PROFILES: dict[tuple[str, str], tuple[float, _Profile]] = {}
-_CHANNEL_NAMES: dict[tuple[str, str], tuple[float, str]] = {}
+_CHANNELS: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+NOT_PROJECT_CHANNEL = "Not one of this agent's Slack channels"
 
 
 @dataclass(frozen=True)
@@ -74,13 +75,28 @@ async def _fetch_profile(client: httpx.AsyncClient, bot_token: str, team_id: str
     return _profile(user, team_id)
 
 
-async def _fetch_channel_name(client: httpx.AsyncClient, bot_token: str, channel_id: str) -> str:
-    body = await slack_call(client, "conversations.info", bot_token, channel=channel_id)
-    name = json_object(body, "channel").get("name")
-    if not isinstance(name, str) or not name:
-        error = "invalid_response"
-        raise SlackApiError(error)
-    return name
+async def slack_channel_info(client: httpx.AsyncClient, token: str, channel_id: str) -> dict[str, Any]:
+    """Return what `conversations.info` shows a token of one conversation, or nothing for one it cannot see."""
+    try:
+        body = await slack_call(client, "conversations.info", token, channel=channel_id)
+    except SlackApiError as exc:
+        if exc.error == "channel_not_found":
+            return {}
+        raise
+    return json_object(body, "channel")
+
+
+def project_channel_refusal(channel_id: str, info: Mapping[str, Any]) -> str | None:
+    """Return why a project agent may not use a listed conversation, or None for a channel the app is a member of.
+
+    `info` is what `slack_channel_info` shows the bot token.
+    Only `is_member` proves membership: the bot can read a public channel's info without being in it.
+    """
+    if info.get("is_im") or info.get("is_mpim"):
+        return NOT_PROJECT_CHANNEL
+    if info.get("is_member") is not True:
+        return f"Invite the MindRoom app to <#{channel_id}>"
+    return None
 
 
 async def _cached[T](
@@ -88,11 +104,13 @@ async def _cached[T](
     key: tuple[str, str],
     now: Callable[[], float],
     fetch: Callable[[], Awaitable[T]],
+    *,
+    max_age: float = _CACHE_TTL_SECONDS,
 ) -> T:
-    """Return a cached lookup that is under ten minutes old, else fetch it; a failed fetch caches nothing."""
+    """Return a cached lookup that is under `max_age` seconds old, else fetch it; a failed fetch caches nothing."""
     looked_up_at = now()
     cached = cache.get(key)
-    if cached is not None and looked_up_at - cached[0] < _CACHE_TTL_SECONDS:
+    if cached is not None and looked_up_at - cached[0] < max_age:
         return cached[1]
     value = await fetch()
     cache.pop(key, None)
@@ -141,22 +159,26 @@ async def slack_author(
     return SlackAuthor(slack_user_id, profile.display_name, _matrix_id(profile.email, config, runtime_paths))
 
 
-async def slack_channel_name(
+async def slack_channel(
     client: httpx.AsyncClient,
     bot_token: str,
     team_id: str,
     channel_id: str,
     *,
+    max_age: float = _CACHE_TTL_SECONDS,
     now: Callable[[], float] = time.monotonic,
-) -> str:
-    """Look up a channel's name with `conversations.info`, cached for ten minutes per team and channel.
+) -> dict[str, Any]:
+    """Return what `slack_channel_info` shows the bot of a conversation, reusing a lookup under `max_age` seconds old.
 
+    A name for display may be ten minutes old, the default; whether the app may act in a channel is decided only with
+    `max_age=0`, a fresh lookup, since the app may have left it meanwhile.
     `team_id` must be the bot token's own team, as for `slack_author`.
-    Any Slack error, or an answer without a name, raises `SlackApiError` and is not cached.
+    Any Slack error raises `SlackApiError` and is not cached.
     """
     return await _cached(
-        _CHANNEL_NAMES,
+        _CHANNELS,
         (team_id, channel_id),
         now,
-        lambda: _fetch_channel_name(client, bot_token, channel_id),
+        lambda: slack_channel_info(client, bot_token, channel_id),
+        max_age=max_age,
     )

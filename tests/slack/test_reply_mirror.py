@@ -186,11 +186,11 @@ class World:
 def _empty_slack_caches() -> Iterator[None]:
     slack_app._IDENTITIES.clear()
     slack_identity._PROFILES.clear()
-    slack_identity._CHANNEL_NAMES.clear()
+    slack_identity._CHANNELS.clear()
     yield
     slack_app._IDENTITIES.clear()
     slack_identity._PROFILES.clear()
-    slack_identity._CHANNEL_NAMES.clear()
+    slack_identity._CHANNELS.clear()
 
 
 async def _start_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str) -> World:

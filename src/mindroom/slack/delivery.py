@@ -18,6 +18,7 @@ from mindroom.response_admission import admitted_response_decision
 from mindroom.slack.api import SlackApiError, slack_call, slack_http_client
 from mindroom.slack.app import load_slack_app, slack_bot_identity
 from mindroom.slack.events import parse_message_event, project_thread_key, project_wake_agent
+from mindroom.slack.identity import project_channel_refusal
 from mindroom.slack.turns import (
     DELIVERY_ERRORS,
     SlackAttempt,
@@ -26,6 +27,7 @@ from mindroom.slack.turns import (
     conversation_label,
     delivery_failed,
     event_author,
+    event_channel,
     failure_reason,
     is_bound,
     project_scope,
@@ -220,6 +222,8 @@ async def _deliver_to_project(attempt: SlackAttempt, answering: tuple[SlackAnswe
 async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAgent, thread_key: str) -> DeliveryResult:
     """Post an app mention, or a reply in a thread the agent answers, as a turn of the author's MindRoom account.
 
+    The app must still be a member of the channel, which must not be a direct message; otherwise nothing is posted
+    and nobody is told.
     The author must map to a MindRoom account the agent answers; anyone else gets a notice only they see.
     """
     event = attempt.event
@@ -230,7 +234,12 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
     running = running_bot(attempt.runtime, answering.agent)
     if running is None:
         return retry_later(event, "the answering agent is not running")
+    # Slack keeps sending a bound thread's replies through people's own subscriptions after the app leaves.
+    refusal = project_channel_refusal(event.channel_id, await event_channel(attempt))
+    if refusal is not None:
+        return skipped(event, refusal)
     author = await event_author(attempt)
+    # The fresh lookup above serves the name too.
     conversation = await conversation_label(attempt)
     bot, client = running
     requester = author.matrix_id

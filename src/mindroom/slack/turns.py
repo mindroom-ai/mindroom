@@ -29,7 +29,7 @@ from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.slack.api import SlackApiError, slack_permalink
-from mindroom.slack.identity import slack_author, slack_channel_name
+from mindroom.slack.identity import slack_author, slack_channel
 from mindroom.slack.render import slack_plain_text
 
 if TYPE_CHECKING:
@@ -137,20 +137,26 @@ async def event_author(attempt: SlackAttempt) -> SlackAuthor:
     )
 
 
+async def event_channel(attempt: SlackAttempt) -> dict[str, Any]:
+    """Look up the event's channel afresh with the bot token, to decide whether the app may act there."""
+    return await slack_channel(
+        attempt.client,
+        attempt.app.bot_token,
+        attempt.identity.team_id,
+        attempt.event.channel_id,
+        max_age=0,
+    )
+
+
 async def conversation_label(attempt: SlackAttempt) -> str:
-    """Name the event's channel for a turn header as `#name`.
+    """Name the event's channel for a turn header as `#name`, from a lookup up to ten minutes old.
 
     A channel whose name Slack cannot give is named by its ID: the name is only for display,
     so its lookup must never fail or retry a delivery.
     """
     event = attempt.event
     try:
-        name = await slack_channel_name(
-            attempt.client,
-            attempt.app.bot_token,
-            attempt.identity.team_id,
-            event.channel_id,
-        )
+        info = await slack_channel(attempt.client, attempt.app.bot_token, attempt.identity.team_id, event.channel_id)
     except (SlackApiError, httpx.HTTPError) as exc:
         logger.warning(
             "Slack channel name lookup failed",
@@ -158,8 +164,9 @@ async def conversation_label(attempt: SlackAttempt) -> str:
             channel_id=event.channel_id,
             reason=failure_reason(exc),
         )
-        name = event.channel_id
-    return f"#{name}"
+        info = {}
+    name = info.get("name")
+    return f"#{name}" if isinstance(name, str) and name else f"#{event.channel_id}"
 
 
 def running_bot(runtime: SlackRuntime, agent: str) -> tuple[_Bot, nio.AsyncClient] | None:

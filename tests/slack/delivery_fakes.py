@@ -73,7 +73,8 @@ class FakeSlack:
     """Answer Slack Web API methods by name, recording every request.
 
     An answer may be a coroutine, which may answer a whole HTTP response.
-    `users.info` answers from `users` unless `answers` has an entry for it.
+    `users.info` answers from `users`, and `conversations.info` that the app is in the channel, unless `answers` has an
+    entry for them.
     """
 
     answers: dict[str, Answer] = field(default_factory=dict)
@@ -89,6 +90,9 @@ class FakeSlack:
                 200,
                 json={"ok": True, "user": user} if user else {"ok": False, "error": "user_not_found"},
             )
+        if method == "conversations.info" and method not in self.answers:
+            channel = {"id": form(request)["channel"], "is_member": True}
+            return httpx.Response(200, json={"ok": True, "channel": channel})
         answer = self.answers.get(method, {"ok": True})
         body = answer if isinstance(answer, dict) else await answer(request)
         return body if isinstance(body, httpx.Response) else httpx.Response(200, json=body)

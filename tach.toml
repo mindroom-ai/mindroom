@@ -9754,6 +9754,7 @@ depends_on = [
     "mindroom.slack.api",
     "mindroom.slack.app",
     "mindroom.slack.events",
+    "mindroom.slack.identity",
     "mindroom.slack.turns",
     "mindroom.slack.watch_delivery",
 ]
@@ -9829,6 +9830,7 @@ depends_on = [
     "mindroom.slack.api",
     "mindroom.slack.app",
     "mindroom.slack.files",
+    "mindroom.slack.identity",
     "mindroom.slack.oauth",
     "mindroom.slack.render",
     "mindroom.slack.watches",
