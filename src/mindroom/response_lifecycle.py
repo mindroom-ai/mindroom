@@ -729,11 +729,19 @@ class ResponseLifecycle:
 
         A run paused for approval has not finished, so nothing applies. An owed answer's run finished, so its run's
         effects apply unless the process is stopping; effects and hooks that need a delivered completed answer skip.
+        The outbox owns the answer by then, so an effect that fails or is cancelled must not settle it again.
         """
         if post_response_outcome.run_succeeded and not self.deps.process_shutdown_requested():
             if callable(post_response_deps):
                 post_response_deps = cast("Callable[[], PostResponseEffectsDeps]", post_response_deps)()
-            await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps)
+            try:
+                await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps)
+            except asyncio.CancelledError:
+                if self.deps.process_shutdown_requested():
+                    raise
+                self.deps.logger.warning("Post-response effects cancelled for an answer the outbox owes")
+            except Exception:
+                self.deps.logger.exception("Post-response effects failed for an answer the outbox owes")
         if self.pipeline_timing is not None:
             self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
 

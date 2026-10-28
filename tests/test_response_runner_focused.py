@@ -6299,9 +6299,9 @@ _SUSPENDED = FinalDeliveryOutcome(terminal_status="suspended", event_id="$respon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("delivery_outcome", "run_succeeded", "process_shutdown_requested", "applies_effects"),
+    ("delivery_outcome", "run_succeeded", "process_shutdown_requested", "applies_effects", "effects_error"),
     [
-        (_completed_outcome(), True, False, True),
+        (_completed_outcome(), True, False, True, None),
         (
             FinalDeliveryOutcome(
                 terminal_status="cancelled",
@@ -6312,6 +6312,7 @@ _SUSPENDED = FinalDeliveryOutcome(terminal_status="suspended", event_id="$respon
             False,
             False,
             True,
+            None,
         ),
         (
             FinalDeliveryOutcome(
@@ -6323,10 +6324,13 @@ _SUSPENDED = FinalDeliveryOutcome(terminal_status="suspended", event_id="$respon
             False,
             False,
             True,
+            None,
         ),
-        (_SUSPENDED, False, False, False),
-        (_SUSPENDED, True, False, True),
-        (_SUSPENDED, True, True, False),
+        (_SUSPENDED, False, False, False, None),
+        (_SUSPENDED, True, False, True, None),
+        (_SUSPENDED, True, True, False, None),
+        (_SUSPENDED, True, False, True, asyncio.CancelledError),
+        (_SUSPENDED, True, False, True, RuntimeError),
     ],
     ids=[
         "completed",
@@ -6335,6 +6339,8 @@ _SUSPENDED = FinalDeliveryOutcome(terminal_status="suspended", event_id="$respon
         "approval_pause",
         "owed_answer",
         "owed_answer_during_process_shutdown",
+        "owed_answer_whose_effects_are_cancelled",
+        "owed_answer_whose_effects_fail",
     ],
 )
 async def test_response_settlement_finalizes_and_transfers_ownership_once(
@@ -6344,10 +6350,12 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
     run_succeeded: bool,
     process_shutdown_requested: bool,
     applies_effects: bool,
+    effects_error: type[BaseException] | None,
 ) -> None:
     """Each outcome finalizes once and only a durable pause transfers source ownership.
 
-    A suspended reply applies its run's effects only when its run finished, as an owed answer's did.
+    A suspended reply applies its run's effects only when its run finished, as an owed answer's did, and an effect
+    that fails or is cancelled leaves the answer to the outbox.
     """
     hands_off = delivery_outcome.terminal_status == "suspended"
     bot = _bot(tmp_path)
@@ -6357,7 +6365,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         source_handoff=asyncio.Event(),
     )
     progress = response_runner._DeliveryProgress()
-    post_effects = AsyncMock()
+    post_effects = AsyncMock(side_effect=effects_error)
     build_post_outcome = MagicMock(return_value=ResponseOutcome(run_succeeded=run_succeeded))
 
     async def generate(_message_id: str | None) -> None:

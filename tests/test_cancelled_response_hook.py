@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1122,3 +1123,26 @@ async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finis
     assert post_effects.await_count == applied
     after_response.assert_not_awaited()
     cancelled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_process(tmp_path: Path) -> None:
+    """Process shutdown owns cancellation, so a shutdown that lands during an owed answer's effects still stops it."""
+    _, response_hooks = _response_hook_service(tmp_path, HookRegistry.from_plugins([]))
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-owed-shutdown")
+    stopping: list[bool] = []
+    lifecycle.deps = replace(lifecycle.deps, process_shutdown_requested=lambda: bool(stopping))
+
+    async def shut_down(*_args: object) -> None:
+        stopping.append(True)
+        raise asyncio.CancelledError
+
+    with (
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(side_effect=shut_down)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await lifecycle.finalize(
+            FinalDeliveryOutcome(terminal_status="suspended", event_id=None),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        )

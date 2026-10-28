@@ -32,6 +32,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 - Approval-resumed replies keep `message:before_response`, because they are delivered whole once the approved run finishes; only a stream that finishes successfully runs `message:final_response_transform`.
 - An ordinary answer whose final write is recorded but not yet acknowledged reports `suspended`, and its run-only effects (finished notification, memory, skill review) apply at once, because its run finished and nothing applies them when the outbox later delivers it.
   Effects and hooks that need a delivered completed answer (`message:after_response`, buttons, thread summary) still skip it; an approval's owed final keeps running everything after acknowledgement, so it reports its run unfinished until then.
+  A failed or cancelled effect is only logged there, because the outbox owns the answer by then and settling it again would fire `message:cancelled` and release its sources for an answer still on its way.
 
 ## Rejected alternatives
 
