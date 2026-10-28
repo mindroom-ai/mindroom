@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CliLoginError",
     "classify_provider_error",
-    "is_context_window_error",
     "missing_api_key_error",
     "provider_failure",
     "retry_after_seconds",
@@ -78,6 +77,11 @@ _CREDENTIAL_WORDING = re.compile(
     r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
 )
 
+# How OpenAI words the 429 of a request larger than the account's tokens-per-minute limit, which it sends with the
+# ``rate_limit_exceeded`` code: "Request too large for gpt-4o in organization org-... on tokens per min (TPM): Limit
+# 30000, Requested 50000." Waiting never lets such a request through; only a smaller one passes.
+_REQUEST_TOO_LARGE = "request too large"
+
 # Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
 # OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
 # and llama.cpp's "the request exceeds the available context size". A bare ``max_tokens`` is too broad to count.
@@ -92,7 +96,7 @@ _CONTEXT_WINDOW_MARKERS = (
     "too many tokens",
     "payload too large",
     "content_too_large",
-    "request too large",
+    _REQUEST_TOO_LARGE,
     "input too long",
     "prompt is too long",
     "prompt too long",
@@ -112,12 +116,9 @@ class CliLoginError(ValueError):
         self.status_code = status_code
 
 
-def is_context_window_error(message: str, *, code: str | None = None) -> bool:
-    """Return whether an error's code or wording says the request does not fit the context window."""
-    if code == "context_length_exceeded":
-        return True
-    lowered = message.casefold()
-    return any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
+def _is_context_window_error(lowered: str, *, code: str | None) -> bool:
+    """Return whether an error's code or lowercased wording says the request does not fit the context window."""
+    return code == "context_length_exceeded" or any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
 
 
 def classify_provider_error(  # noqa: PLR0911 - one return per rule
@@ -136,7 +137,8 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
-    1. A 429 status or a rate-limit name is ``RateLimited``.
+    1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
+       the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``: only a smaller request passes.
     2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
     3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
     4. Wording or a code that names the context window, on a client error or an event without a status, is
@@ -162,12 +164,12 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         )
 
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
-        return typed(RateLimited)
+        return typed(ContextWindowExceeded if _REQUEST_TOO_LARGE in lowered else RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
         return typed(AuthenticationFailed)
-    if client_side and is_context_window_error(message, code=code):
+    if client_side and _is_context_window_error(lowered, code=code):
         return typed(ContextWindowExceeded)
     if names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered:
         return typed(ProviderUnavailable)

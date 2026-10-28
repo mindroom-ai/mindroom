@@ -658,6 +658,21 @@ _OPENAI_HTTP_CASES = [
         RATE_LIMITED,
         _PIPELINE,
     ),
+    # A request larger than the account's tokens-per-minute limit fails every time; only a smaller one passes.
+    _Case(
+        "http_429_request_too_large",
+        _openai_status(
+            429,
+            "Request too large for gpt-6-astra in organization org-test on tokens per min (TPM): Limit 30000, "
+            "Requested 50000. The input or output tokens must be reduced in order to run successfully. "
+            "Visit https://platform.openai.com/account/rate-limits to learn more.",
+            "tokens",
+            "rate_limit_exceeded",
+        ),
+        ContextWindowExceeded,
+        CONTEXT_WINDOW,
+        1,
+    ),
     _Case(
         "http_500",
         _openai_status(500, "The server had an error while processing your request.", "server_error"),

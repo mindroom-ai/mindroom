@@ -23,19 +23,25 @@ from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import ModelIdentity, ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.usage import MessageMetrics
 from mindroom.providers.assistant_turn import TurnTimer, stamp_finished_turn
-from mindroom.providers.errors import (
-    classify_provider_error,
-    is_context_window_error,
-    provider_failure,
-    retry_after_seconds,
-)
+from mindroom.providers.errors import classify_provider_error, provider_failure, retry_after_seconds
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+
+# OpenAI's 429 for a request larger than the account's tokens-per-minute limit.
+_REQUEST_TOO_LARGE = (
+    "Request too large for gpt-6-astra in organization org-test on tokens per min (TPM): Limit 30000, "
+    "Requested 50000. The input or output tokens must be reduced in order to run successfully."
+)
 
 
 @pytest.mark.parametrize(
     ("status", "message", "code", "expected", "retryable"),
     [
         (429, "slow down", None, RateLimited, True),
+        # A request above the account's tokens-per-minute limit fails every time; only a smaller one passes.
+        (429, _REQUEST_TOO_LARGE, "rate_limit_exceeded", ContextWindowExceeded, False),
+        # Other context-window wording on a 429 is still a rate limit, such as Bedrock's throttle.
+        (429, "Too many tokens, please wait before trying again.", None, RateLimited, True),
+        (429, "Rate limit reached for gpt-6-astra on tokens per min (TPM).", "rate_limit_exceeded", RateLimited, True),
         (529, "Overloaded", None, ProviderUnavailable, True),
         (503, "overloaded_error: the model is busy", None, ProviderUnavailable, True),
         (400, "The input token count exceeds the maximum number of tokens allowed", None, ContextWindowExceeded, False),
@@ -119,6 +125,7 @@ def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
     [
         ("Slow down", None, "rate_limit_error", RateLimited),
         ("Slow down", "rate_limit_exceeded", None, RateLimited),
+        (_REQUEST_TOO_LARGE, "rate_limit_exceeded", None, ContextWindowExceeded),
         ("Rate limit exceeded: free-models-per-min", "429", None, RateLimited),
         ("Slow down", "529", None, ProviderUnavailable),
         ("An error occurred.", "server_error", None, ProviderUnavailable),
@@ -158,15 +165,25 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
     assert (error.status_code, error.code, error.provider_code) == (None, None, code)
 
 
-def test_context_window_detection_reads_the_code_and_the_wording() -> None:
+@pytest.mark.parametrize(
+    ("message", "code", "expected"),
+    [
+        ("x", "context_length_exceeded", ContextWindowExceeded),
+        ("Request too large for gpt-6-astra", None, ContextWindowExceeded),
+        ("This request would exceed the context window", None, ContextWindowExceeded),
+        ("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000", None, ContextWindowExceeded),
+        ("the request exceeds the available context size, try increasing it", None, ContextWindowExceeded),
+        ("max_tokens must be positive", None, InvalidRequest),
+        ("The context size of a slot must be a positive number", None, InvalidRequest),
+    ],
+)
+def test_context_window_detection_reads_the_code_and_the_wording(
+    message: str,
+    code: str | None,
+    expected: type[ProviderError],
+) -> None:
     """The shared markers cover the wording every provider uses for an input that does not fit."""
-    assert is_context_window_error("x", code="context_length_exceeded")
-    assert is_context_window_error("Request too large for gpt-6-astra")
-    assert is_context_window_error("This request would exceed the context window")
-    assert is_context_window_error("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000")
-    assert is_context_window_error("the request exceeds the available context size, try increasing it")
-    assert not is_context_window_error("max_tokens must be positive")
-    assert not is_context_window_error("The context size of a slot must be a positive number")
+    assert type(classify_provider_error(message, provider="Test", status_code=400, code=code)) is expected
 
 
 def test_transport_failures_are_retryable_connection_errors() -> None:

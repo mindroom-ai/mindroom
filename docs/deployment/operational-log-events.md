@@ -282,7 +282,7 @@ These `error_type` values are stable; any other value is the class name of an un
 - `RateLimited`: the provider throttled the request, after any retries that were safe.
 - `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after any retries that were safe.
 - `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
-- `ContextWindowExceeded`: the conversation no longer fits the model's context window.
+- `ContextWindowExceeded`: the conversation no longer fits the model's context window, or one request is larger than the account's tokens-per-minute limit.
 - `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
