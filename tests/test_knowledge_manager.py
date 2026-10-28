@@ -57,6 +57,7 @@ from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.credentials.sync import get_embedder_api_key
 from mindroom.embeddings import embedder_health
 from mindroom.embeddings.batching import RefreshEmbedder
+from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.candidate_checkpoint import load_candidate_checkpoint
@@ -5404,10 +5405,11 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     assert checkpoint.status == "failed"
 
 
-def _embedder_rejection_error() -> UnprocessableEntityError:
+def _embedder_rejection_error() -> EmbedderRequestError:
+    """Return what the embedder raises for a rejected input: the SDK error classified at its boundary."""
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(422, request=request, json={"error": {"message": "Input could not be embedded"}})
-    return UnprocessableEntityError("Error code: 422", response=response, body=None)
+    return openai_embedder_error(UnprocessableEntityError("Error code: 422", response=response, body=None))
 
 
 @pytest.mark.asyncio

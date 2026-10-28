@@ -146,7 +146,7 @@ class ResponsesAdapter:
             conversation_digest=conversation_digest(request.messages),
         )
         try:
-            client = await self.clients.client(request.overrides)
+            client = await self.clients.client()
             events = self._streamed(client, kwargs, accumulator, timer)
             async with closing_async_stream(events):
                 async for event in events:

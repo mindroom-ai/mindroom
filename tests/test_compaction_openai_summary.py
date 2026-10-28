@@ -164,13 +164,8 @@ async def test_summary_accepts_explicit_completion_at_usage_cap(route: _Route, t
 
 
 @pytest.mark.parametrize("route", ["chat", "responses"])
-@pytest.mark.parametrize("retry_source", ["max_retries", "client_params"])
-async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors(
-    route: _Route,
-    retry_source: str,
-    tmp_path: Path,
-) -> None:
-    """SDK retry settings the model authors cannot multiply a summary attempt."""
+async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors(route: _Route, tmp_path: Path) -> None:
+    """SDK retries authored in ``client_params`` cannot multiply a summary attempt."""
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -181,10 +176,9 @@ async def test_summary_makes_one_http_attempt_whatever_retries_the_model_authors
             json={"error": {"message": "Unavailable", "type": "server_error", "code": "unavailable"}},
         )
 
-    authored = {"max_retries": 2} if retry_source == "max_retries" else {"client_params": {"max_retries": 2}}
     with pytest.raises(ProviderError):
         await generate_compaction_summary(
-            model=_model(route, tmp_path, respond, **authored),
+            model=_model(route, tmp_path, respond, client_params={"max_retries": 2}),
             summary_input="Conversation",
             summary_prompt="Summarize",
             timeout_seconds=10,
@@ -224,7 +218,7 @@ async def test_openrouter_claude_summary_writes_no_prompt_cache(tmp_path: Path) 
     config = ModelConfig(
         provider="openrouter",
         id="anthropic/claude-sonnet-5",
-        extra_kwargs={"api_key": "test-key", "cache_system_prompt": True, "max_retries": 2},
+        extra_kwargs={"api_key": "test-key", "cache_system_prompt": True},
     )
     runtime = provider_runtime(
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={}),

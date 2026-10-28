@@ -12,6 +12,7 @@ from dataclasses import fields
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.config.legacy_fields import retired_model_setting
 from mindroom.redaction import redact_sensitive_data
 
 if TYPE_CHECKING:
@@ -49,8 +50,16 @@ def reject_unsupported_extra_kwargs(
     *,
     provider: str,
 ) -> None:
-    """Raise ``ValueError`` naming the ``extra_kwargs`` keys outside ``allowed`` and listing the accepted ones."""
-    if unknown := sorted((extra_kwargs or {}).keys() - set(allowed)):
+    """Raise ``ValueError`` naming the ``extra_kwargs`` keys outside ``allowed`` and listing the accepted ones.
+
+    A retired setting gets the reason it went instead of the accepted list.
+    """
+    unknown = sorted((extra_kwargs or {}).keys() - set(allowed))
+    if (retired := retired_model_setting(unknown)) is not None:
+        key, guidance = retired
+        msg = f"Unsupported extra_kwargs for provider {provider!r}: {key} was removed; {guidance}."
+        raise ValueError(msg)
+    if unknown:
         msg = (
             f"Unsupported extra_kwargs for provider {provider!r}: {', '.join(unknown)}; remove or correct them. "
             f"Accepted keys: {', '.join(sorted(allowed))}"
