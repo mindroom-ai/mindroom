@@ -31,6 +31,8 @@ def test_worker_health_accepts_matching_protocol() -> None:
         {"status": "ok", "mindroom_version": "2026.9.324", "worker_protocol": 1},
         # Workers from releases before plugin environment removals would hand commands variables a plugin removed.
         {"status": "ok", "mindroom_version": "2026.10.580", "worker_protocol": 3},
+        # Workers from releases before plugin PATH directories would run a configured program in a wrapper's place.
+        {"status": "ok", "mindroom_version": "2026.10.612", "worker_protocol": 4},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": True},
         {"status": "ok", "mindroom_version": "2026.8.1", "worker_protocol": 1.0},
     ],

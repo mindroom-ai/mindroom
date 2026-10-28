@@ -176,16 +176,20 @@ async def test_a_streamed_answer_that_fails_after_showing_content_reports_it(tmp
             yield chunk
             await asyncio.sleep(0.01)
 
+    stream_reply = runner.generate_streaming_ai_response
+
+    async def fail_after_streaming(*args: object, **kwargs: object) -> object:
+        await stream_reply(*args, **kwargs)
+        msg = "failed after streaming"
+        raise RuntimeError(msg)
+
     with (
         patch_response_runner_module(
             stream_agent_response=stream,
             should_use_streaming=AsyncMock(return_value=True),
             typing_indicator=_noop_typing,
         ),
-        patch(
-            "mindroom.response_lifecycle.ResponseLifecycle.emit_session_started",
-            new=AsyncMock(side_effect=RuntimeError("session hook failed")),
-        ),
+        patch.object(runner, "generate_streaming_ai_response", new=fail_after_streaming),
     ):
         event_id = await runner.generate_response(_plain_request(_target()))
 

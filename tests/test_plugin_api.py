@@ -205,7 +205,8 @@ _SIGNATURES = {
         f"{_TOOL_HOOK})"
     ),
     "ToolEnvironmentContext": (
-        f"(function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, {_HOOK})"
+        f"(function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, declined, decline_reason, "
+        f"{_HOOK})"
     ),
     "ToolRuntimeContext": (
         "(agent_name, target, requester_id, client, config, runtime_paths, conversation_reader, relations, "

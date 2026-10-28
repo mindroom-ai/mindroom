@@ -9,12 +9,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
-from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_jobs.control import pending_human_messages_context
-from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -23,16 +21,12 @@ if TYPE_CHECKING:
 
     from mindroom.delivery_gateway import ResponseHookService, ResponseIdentity
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
-    from mindroom.session_storage.store import ConversationStore
-    from mindroom.session_storage.types import SessionKind
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _LockedResponseResult = TypeVar("_LockedResponseResult")
 
@@ -600,30 +594,12 @@ class ResponseLifecycleCoordinator:
 
 
 @dataclass(frozen=True)
-class SessionStartedWatch:
-    """Pre-computed session:started eligibility and emission arguments."""
-
-    should_watch: bool
-    tool_context: ToolRuntimeContext | None
-    scope: HistoryScope
-    session_id: str
-    room_id: str
-    thread_id: str | None
-    correlation_id: str
-    create_storage: Callable[[], ConversationStore]
-
-
-@dataclass(frozen=True)
 class ResponseLifecycleDeps:
     """Dependencies owned by the response lifecycle boundary."""
 
     response_hooks: ResponseHookService
     logger: BoundLogger
     process_shutdown_requested: Callable[[], bool]
-
-
-def _session_exists(create_storage: Callable[[], ConversationStore], session_id: str, kind: SessionKind) -> bool:
-    return create_storage().has_session(session_id, kind)
 
 
 def _response_outcome_label(final_delivery_outcome: FinalDeliveryOutcome | None) -> str:
@@ -680,101 +656,6 @@ class ResponseLifecycle:
             failure_reason=str(error),
             error_type=error.__class__.__name__,
         )
-
-    async def _session_started_watch_is_needed(
-        self,
-        *,
-        tool_context: ToolRuntimeContext | None,
-        session_id: str,
-        scope: HistoryScope,
-        create_storage: Callable[[], ConversationStore],
-    ) -> bool:
-        if tool_context is None or not tool_context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
-            return False
-        try:
-            return not await asyncio.to_thread(_session_exists, create_storage, session_id, scope.kind)
-        except Exception as error:
-            self.deps.logger.exception(
-                "Failed to probe session storage for session:started eligibility",
-                session_id=session_id,
-                session_type=scope.kind,
-                failure_reason=str(error),
-            )
-            return False
-
-    async def setup_session_watch(
-        self,
-        *,
-        tool_context: ToolRuntimeContext | None,
-        session_id: str,
-        scope: HistoryScope,
-        room_id: str,
-        thread_id: str | None,
-        create_storage: Callable[[], ConversationStore],
-    ) -> SessionStartedWatch:
-        """Pre-compute session:started eligibility for one response path."""
-        return SessionStartedWatch(
-            should_watch=await self._session_started_watch_is_needed(
-                tool_context=tool_context,
-                session_id=session_id,
-                scope=scope,
-                create_storage=create_storage,
-            ),
-            tool_context=tool_context,
-            scope=scope,
-            session_id=session_id,
-            room_id=room_id,
-            thread_id=thread_id,
-            correlation_id=self.identity.correlation_id,
-            create_storage=create_storage,
-        )
-
-    async def _maybe_emit_session_started(self, watch: SessionStartedWatch) -> None:
-        if watch.tool_context is None or not watch.should_watch:
-            return
-        if not await asyncio.to_thread(_session_exists, watch.create_storage, watch.session_id, watch.scope.kind):
-            return
-
-        bindings = resolve_tool_runtime_hook_bindings(watch.tool_context)
-        context = SessionHookContext(
-            event_name=EVENT_SESSION_STARTED,
-            plugin_name="",
-            settings={},
-            config=watch.tool_context.config,
-            runtime_paths=watch.tool_context.runtime_paths,
-            logger=self.deps.logger.bind(event_name=EVENT_SESSION_STARTED, session_id=watch.session_id),
-            correlation_id=watch.correlation_id,
-            message_sender=bindings.message_sender,
-            matrix_admin=bindings.matrix_admin,
-            room_state_querier=bindings.room_state_querier,
-            room_state_putter=bindings.room_state_putter,
-            agent_name=watch.scope.scope_id if watch.scope.kind == "team" else watch.tool_context.agent_name,
-            scope=watch.scope,
-            session_id=watch.session_id,
-            room_id=watch.room_id,
-            thread_id=watch.thread_id,
-            _hook_registry_state=watch.tool_context.hook_registry_state,
-        )
-        await emit(watch.tool_context.hook_registry, EVENT_SESSION_STARTED, context)
-
-    async def emit_session_started(self, watch: SessionStartedWatch) -> None:
-        """Emit session:started without aborting delivery on ordinary failures."""
-        if self.deps.process_shutdown_requested():
-            return
-        try:
-            await self._maybe_emit_session_started(watch)
-            if self.deps.process_shutdown_requested():
-                return
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            self.deps.logger.exception(
-                "Failed to emit session:started",
-                session_id=watch.session_id,
-                room_id=watch.room_id,
-                thread_id=watch.thread_id,
-                failure_reason=str(error),
-            )
 
     async def finalize(
         self,

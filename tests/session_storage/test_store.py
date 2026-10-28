@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
@@ -27,6 +28,7 @@ from mindroom.session_storage.store import (
     persist_to,
     runs_without,
     store_fold,
+    watch_session_row,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from tests.conftest import seed_session_row, seed_session_state, stored_session_state
@@ -901,20 +903,17 @@ def test_load_covers_runs_by_their_own_scopes_latest_summary_and_replays_the_own
 
 
 def test_load_returns_none_for_a_missing_session_or_one_of_another_kind(store: ConversationStore) -> None:
-    """An agent load never returns a team session; ``has_session`` agrees."""
+    """An agent load never returns a team session."""
     _save(store, _team_run("t1"), session=_team())
 
     assert store.load_session("s1", "agent") is None
     assert store.load_session("missing", "team") is None
     assert _loaded_ids(store, "team") == ["t1"]
-    assert (store.has_session("s1", "agent"), store.has_session("s1", "team")) == (False, True)
-    assert not store.has_session("missing", "team")
 
 
 def test_a_new_database_reads_as_empty(store: ConversationStore) -> None:
     """A database opened before anything was written to it reads as empty instead of failing."""
     assert store.load_session("s1", "agent") is None
-    assert not store.has_session("s1", "agent")
     assert store.read_session_metadata("s1") is None
     assert store.list_runs("s1") == []
     assert store.get_run("r1") is None
@@ -1531,6 +1530,85 @@ def test_every_writer_of_a_session_row_stores_absent_metadata_as_json_null(
     writes[create]()
 
     assert _query(store, "SELECT metadata, typeof(metadata) FROM code_sessions") == [("null", "text")]
+
+
+_ROW_WRITERS = ["save_run", "save_interrupted_record", "update_metadata", "save_independent_usage"]
+
+
+def _write_row(store: ConversationStore, session: ConversationSession, writer: str) -> None:
+    """Make one write of ``writer`` kind into ``session``, which creates its row when it has none."""
+    if writer == "save_run":
+        store.save_run(session, _run("r1"), record_usage=False)
+    elif writer == "save_interrupted_record":
+        store.save_interrupted_record(session, _run("r1", RunStatus.error))
+    elif writer == "update_metadata":
+        store.update_metadata(session, lambda _metadata: {"k": "v"})
+    else:
+        store.save_independent_usage(
+            session_id=session.session_id,
+            usage_id="u1",
+            kind="compaction_summary",
+            requester_id=None,
+            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            initial_session=session,
+        )
+
+
+@pytest.mark.parametrize("writer", _ROW_WRITERS)
+def test_a_write_that_creates_the_session_row_reports_it(store: ConversationStore, writer: str) -> None:
+    """Each write that inserts a session's row tells the block watching that session, once it commits."""
+    with watch_session_row(HistoryScope(kind="agent", scope_id="code"), "s1") as watch:
+        _write_row(store, _session(), writer)
+
+    assert watch.created
+
+
+@pytest.mark.parametrize("writer", _ROW_WRITERS)
+def test_a_write_to_an_existing_row_reports_nothing(store: ConversationStore, writer: str) -> None:
+    """A write into a row that another write created first leaves the watch alone."""
+    seed_session_row(store, _session())
+
+    with watch_session_row(HistoryScope(kind="agent", scope_id="code"), "s1") as watch:
+        _write_row(store, _session(), writer)
+
+    assert not watch.created
+
+
+def test_a_creating_write_that_rolls_back_reports_nothing(store: ConversationStore) -> None:
+    """A write whose transaction fails after inserting the row leaves no row and reports none."""
+    _execute(
+        store,
+        "CREATE TRIGGER fail_usage BEFORE INSERT ON code_sessions_usage BEGIN SELECT RAISE(ABORT, 'usage refused'); END",
+    )
+
+    with (
+        watch_session_row(HistoryScope(kind="agent", scope_id="code"), "s1") as watch,
+        pytest.raises(sqlite3.IntegrityError, match="usage refused"),
+    ):
+        _write_row(store, _session(), "save_independent_usage")
+
+    assert not watch.created
+    assert _query(store, "SELECT session_id FROM code_sessions") == []
+
+
+def test_a_created_row_of_another_session_or_scope_reports_nothing(store: ConversationStore) -> None:
+    """Only the watched session's row in the watched scope counts, not a row of the same id another scope owns."""
+    with watch_session_row(HistoryScope(kind="agent", scope_id="code"), "s1") as watch:
+        _write_row(store, _session("s2"), "save_run")
+        _write_row(store, _session(owner="other"), "update_metadata")
+
+    assert not watch.created
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_save_in_the_lane_reports_the_row_it_created(store: ConversationStore) -> None:
+    """A run's terminal save runs on the database's lane, and still reports to the block that awaited it."""
+    session = _session()
+
+    with watch_session_row(HistoryScope(kind="agent", scope_id="code"), "s1") as watch:
+        await persist_to(store, session)(_run("r1"))
+
+    assert watch.created
 
 
 def test_clearing_metadata_stores_it_as_json_null(store: ConversationStore) -> None:
