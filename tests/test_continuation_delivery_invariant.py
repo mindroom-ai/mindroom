@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import (
         DeliveryAcknowledgement,
+        FinalAnswerEnqueue,
         MatrixDelivery,
         MatrixDeliveryView,
         PermanentDeliveryFailure,
@@ -121,7 +122,6 @@ class _WatchedOutbox:
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
@@ -135,7 +135,33 @@ class _WatchedOutbox:
             payload=payload,
             result=result,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and its handoff, noting the stage on the timeline first."""
+        self.timeline.append(f"enqueue:{DeliveryStage.FINAL.value}")
+        return await self.inner.enqueue_final_answer(
+            delivery_id=delivery_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            turn_key=turn_key,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
             permanent_failure_reason=permanent_failure_reason,
         )
 

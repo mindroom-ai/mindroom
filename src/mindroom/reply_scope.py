@@ -27,7 +27,6 @@ from mindroom.event_journal.replies import (
     ApprovalEnded,
     Decide,
     ReplyCreation,
-    TurnCompleted,
     WakeApproval,
 )
 from mindroom.logging_config import get_logger
@@ -66,7 +65,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.matrix_delivery import ReplyRowEnqueuer
     from mindroom.event_journal.replies import PostCommitEffect
-    from mindroom.turn_record import TurnRecord
 
 
 @dataclass
@@ -275,8 +273,6 @@ class ReplyRuntime:
     entity_name: str
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Tells the turn ledger about a turn a reply's settlement already recorded answered.
-    complete_turn: Callable[[TurnRecord], Awaitable[object]]
     # Keeps a pending approval's conversation busy, for the approvals a start finds.
     hold_conversation: Callable[[ApprovalContinuation], None]
     # Releases the conversation the ended approval held, and settles what its reply owes.
@@ -300,9 +296,7 @@ class ReplyRuntime:
         """
         try:
             for effect in effects:
-                if isinstance(effect, TurnCompleted):
-                    await self.complete_turn(effect.record)
-                elif isinstance(effect, WakeApproval):
+                if isinstance(effect, WakeApproval):
                     await self._wake_fenced_approval(effect.approval_id)
         finally:
             for effect in effects:

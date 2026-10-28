@@ -129,16 +129,22 @@ Repair cannot recover payloads that settlement already cleared.
 
 A voice message's batching scope and its echo thread are distinct: a root audio message can join the room's batch while its echo starts a thread rooted at it, and the final coalesced reply target follows the current dispatch policy.
 
-## Handled-Turn Ledger
+## Turn State
 
-- One runtime process owns each agent's ledger and its semantic ordering, so nothing defines cross-process precedence; a second runtime against the same event journal refuses to start.
-- Retention keeps replayable incomplete turns, every group an unsettled journal row references, and every turn record carrying a redaction tombstone, because history cleanup derives from those tombstones once a departure dropped the journal's tombstone or for history older than the journal.
+- One runtime process owns each agent's turn state and its semantic ordering, so nothing defines cross-process precedence; a second runtime against the same event journal refuses to start.
+- Every turn fact is a row with one writer, read by query, so there is no in-memory copy to publish or reconcile; what a sibling store of the same agent (a hot replacement, a re-login rebuild) could not see is an in-flight turn, and the claim registry every store of the agent shares covers that.
+- A turn is one immutable ordered tuple of physical sources; a different tuple is a new turn that absorbs the unfinished owners of its sources, while an alias only indexes, so an original and the relay answering it stay two live turns.
+- A write refused because an answered or delivery-bound turn owns a source writes nothing and hands each source back to the journal once the claim releases, so a conflicting source settles as handled at precheck and an unrelated one in the same batch is answered.
+- A non-AI FINAL binds its turn in the transaction that makes the row durable and settles the turn's sources there, so a reshape before the acknowledgement cannot redirect which turn the acknowledgement completes.
+- Retention keeps replayable incomplete turns and every turn an unsettled journal row references; redactions are kept apart from turns, so a turn that once read a deleted message ages out like any other.
 
 ## Redaction
 
 The user-visible history behavior is on [Conversation history](../configuration/history.md#compacted-history-and-redaction).
 
-- Nothing durable records that history cleanup is owed: every response derives it from the tombstones, so a crash between tombstone and cleanup, or a redacted event no turn owns, needs no recovery path.
+- A redaction is recorded once per agent, in the transaction that admits it, and applied there to every Matrix login of that agent and to the agent's turns; it is kept when the bot leaves the room, because an earlier login the agent returns to, or a rejoin the server does not replay the redaction to, would otherwise show the deleted text again.
+- Deleting the human message a router relayed deletes the relay that answers for it: the routed reply ends, and its approval wait with it, exactly as for a directly sent message, because reply discovery matches exact logical ids and the redacted alias is resolved to its sources first.
+- Nothing durable records that history cleanup is owed: every response derives it from the recorded redactions, so a crash between redaction and cleanup, or a redacted event no turn owns, needs no recovery path.
 - Approval creation and source-redaction admission serialize, so an approval cannot acquire a source that a deletion already settled.
 - Redacted replay can stay in local session storage until its history scope next serves a response, because cleanup runs only then.
   Approval continuations, manual compaction, and voice-call turns do not run the check either.

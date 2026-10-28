@@ -44,7 +44,6 @@ from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.turn_record import SourceEventMetadata
 from tests.conftest import live_turn_claim, make_ingress_facts, make_pending_event, turn_claim_is_live
 
 if TYPE_CHECKING:
@@ -215,12 +214,10 @@ def test_coalesced_agent_replies_keep_their_author_while_running_as_their_human(
     # The persisted record keeps both identities: the human owns each source, the agent stays its speaker.
     record = turn.handled_turn
     assert record.source_event_metadata is not None
-    persisted = {
-        event_id: SourceEventMetadata._from_raw(metadata._to_record())
-        for event_id, metadata in record.source_event_metadata.items()
-    }
-    assert all(record.requester_id_for_source(event_id) == "@owner:localhost" for event_id in persisted)
-    assert all(metadata is not None and metadata.speaker == agent for metadata in persisted.values())
+    assert all(
+        record.requester_id_for_source(event_id) == "@owner:localhost" for event_id in record.source_event_metadata
+    )
+    assert all(metadata.speaker == agent for metadata in record.source_event_metadata.values())
 
 
 def test_prepared_turn_carries_structured_flag_and_metadata() -> None:

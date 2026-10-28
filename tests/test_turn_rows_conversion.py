@@ -1,7 +1,8 @@
 """Stored turn records and redaction tombstones convert into turn rows once, as the schema upgrade runs.
 
-The upgrade is not registered in the backends yet; ``registered_upgrade`` adds it to the schema transaction exactly
-where its one line per backend will go, after the other upgrades and before the schema statements.
+``Journal.legacy`` opens a database as an earlier release would leave it: the conversion skipped and the old tables
+created, so a test can seed them; ``Journal.upgraded`` opens it as this release does, converting in the schema
+transaction.
 """
 
 from __future__ import annotations
@@ -28,9 +29,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal.legacy_turn_rows import (
     import_legacy_ledger_file,
     legacy_summary_sources,
-    upgrade_turn_records_to_rows,
 )
-from mindroom.event_journal.schema import POSTGRES_DIALECT, SQLITE_DIALECT, schema_statements
 from mindroom.turn_record import PreparedVoiceSource, SourceVisibleEcho, TurnRecord
 from tests.conftest import postgres_journal_schema_url
 from tests.test_event_journal_store import admit
@@ -53,36 +52,33 @@ CONTROL = "other@@other:example.org"
 VOICE = PreparedVoiceSource.from_content("transcript", {"msgtype": "m.text", "body": "transcript"})
 
 
+# The tables earlier releases wrote turn state and redactions into, as they created them.
+_LEGACY_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS turn_records (
+        agent_name TEXT NOT NULL,
+        index_event_id TEXT NOT NULL,
+        anchor_event_id TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        PRIMARY KEY (agent_name, index_event_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS redaction_tombstones (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        redacted_event_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, redacted_event_id)
+    )
+    """,
+)
+
+
 @contextmanager
-def registered_upgrade(*, postgres: bool) -> Iterator[None]:
-    """Run the conversion in the schema transaction, after every other upgrade, as its registration will."""
+def without_conversion(*, postgres: bool) -> Iterator[None]:
+    """Open as an earlier release: the conversion does not run in the schema transaction."""
     module = postgres_backend if postgres else sqlite_backend
-    original = module.upgrade_continuation_identity
-    dialect = POSTGRES_DIALECT if postgres else SQLITE_DIALECT
-
-    def upgrade(
-        transaction: Transaction,
-        existing_tables: frozenset[str],
-        continuation_columns: frozenset[str],
-    ) -> None:
-        original(transaction, existing_tables, continuation_columns)
-        outbox_columns = frozenset(
-            str(row["column_name"] if postgres else row["name"])
-            for row in transaction.fetchall(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'matrix_delivery_outbox'"
-                if postgres
-                else "PRAGMA table_info(matrix_delivery_outbox)",
-            )
-        )
-        upgrade_turn_records_to_rows(
-            transaction,
-            existing_tables,
-            outbox_columns,
-            schema_ddl=schema_statements(dialect),
-        )
-
-    with patch.object(module, "upgrade_continuation_identity", upgrade):
+    with patch.object(module, "upgrade_turn_records_to_rows", lambda *_args, **_kwargs: None):
         yield
 
 
@@ -94,16 +90,22 @@ class Journal:
     postgres: bool
     opened: list[EventJournalStore]
 
-    def legacy(self) -> EventJournalStore:
-        """Open the database as an earlier release, without the conversion."""
-        store = self.connect()
+    async def legacy(self) -> EventJournalStore:
+        """Open the database as an earlier release, without the conversion and with its old tables."""
+        with without_conversion(postgres=self.postgres):
+            store = self.connect()
         self.opened.append(store)
+
+        def create(transaction: Transaction) -> None:
+            for statement in _LEGACY_TABLES:
+                transaction.execute(statement)
+
+        await store.backend.write(create)
         return store
 
     def upgraded(self) -> EventJournalStore:
-        """Open the database with the conversion in its schema transaction."""
-        with registered_upgrade(postgres=self.postgres):
-            store = self.connect()
+        """Open the database as this release does, converting in its schema transaction."""
+        store = self.connect()
         self.opened.append(store)
         return store
 
@@ -185,16 +187,24 @@ async def turn_json(store: EventJournalStore, event_id: str) -> dict[str, Any] |
     return record_json(await read(store, turn_rows.get_turn_record, event_id))
 
 
-async def legacy_tables(store: EventJournalStore) -> list[tuple[object, ...]]:
-    """Return how many rows the old turn_records table still holds."""
-    rows = await store.backend.read(
-        lambda transaction: transaction.fetchall("SELECT COUNT(*) AS count FROM turn_records"),
-    )
-    return [tuple(row.values()) if isinstance(row, dict) else tuple(row) for row in rows]
+async def legacy_tables(store: EventJournalStore) -> int | None:
+    """Return how many rows the old turn_records table still holds, or None once the conversion dropped it."""
+    try:
+        row = await store.backend.read(
+            lambda transaction: transaction.fetchone("SELECT COUNT(*) AS count FROM turn_records"),
+        )
+    except (sqlite3.OperationalError, psycopg.errors.UndefinedTable):
+        return None
+    assert row is not None
+    return int(row["count"])
 
 
 # The oracle's legacy inputs: after conversion, every observable the turn store showed on opening them holds again
 # but for the intended differences, each named below and asserted as the new behavior.
+
+
+# A revision's redaction and its legacy summary provenance live in their own tables, not in its row.
+_ROW_FREE_REPLAY_FACTS = frozenset({"redacted", "legacy_summary_provenance"})
 
 
 def _converted_view(recorded: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -224,7 +234,7 @@ def _converted_view(recorded: Mapping[str, Any] | None) -> dict[str, Any] | None
     }
     if "replay" in view:
         view["replay"] = {
-            revision_id: {**replay, "redacted": False, "legacy_summary_provenance": False}
+            revision_id: {key: value for key, value in replay.items() if key not in _ROW_FREE_REPLAY_FACTS}
             for revision_id, replay in view["replay"].items()
         }
     if "metadata" not in view:
@@ -384,7 +394,7 @@ async def _redacted_history(store: EventJournalStore, room_id: str, ids: Sequenc
 
 async def _seed_fixture(journal: Journal, name: str, tmp_path: Path) -> Path | None:
     fixture = FIXTURES[name]
-    store = journal.legacy()
+    store = await journal.legacy()
     await seed_rows(store, fixture.rows)
 
     def tombstones(transaction: Transaction) -> None:
@@ -415,7 +425,7 @@ async def test_every_oracle_legacy_input_converts_to_its_recorded_observables(
     ledger = await _seed_fixture(journal, name, tmp_path)
     store = journal.upgraded()
     if ledger is not None:
-        await import_legacy_ledger_file(store.backend, path=ledger, agent_name=AGENT)
+        await import_legacy_ledger_file(store.turn_records(AGENT), path=ledger)
     golden = json.loads((GOLDENS / "legacy" / f"{name}.json").read_text(encoding="utf-8"))
     recorded = _initial_state(name)
     expected: dict[str, dict[str, Any]] = {
@@ -439,7 +449,7 @@ async def test_every_oracle_legacy_input_converts_to_its_recorded_observables(
 
     for observable in actual:
         assert actual[observable] == expected.get(observable, {}), observable
-    assert await legacy_tables(store) == [(0,)]
+    assert await legacy_tables(store) is None
     if ledger is not None:
         assert not ledger.exists()
 
@@ -465,7 +475,7 @@ async def test_the_summary_provenance_and_redactions_of_every_blob_move_to_their
 
 async def test_room_less_records_keep_only_their_completion(journal: Journal) -> None:
     """Without a provable room a completed record keeps its answered proof and nothing else; a pending one goes."""
-    store = journal.legacy()
+    store = await journal.legacy()
     await admit(store.principal(PRINCIPAL), "$placed", room_id=ROOM)
     rows = [
         *every_index(blob(["$done"], response="$r", room=None, source_event_prompts={"$done": "text"})),
@@ -491,7 +501,7 @@ async def test_room_less_records_keep_only_their_completion(journal: Journal) ->
 
 async def test_rows_own_their_turn_and_alias_only_survivors_stay_answered(journal: Journal, tmp_path: Path) -> None:
     """A completed group left with only an alias row keeps that alias answered beside any owner of its source."""
-    store = journal.legacy()
+    store = await journal.legacy()
     beside_unfinished = blob(["$m1"], response="$r-old", discovery_event_ids=["$a1"])
     beside_completed = blob(["$m2"], response="$r-old2", discovery_event_ids=["$a2"])
     await seed_rows(
@@ -509,7 +519,7 @@ async def test_rows_own_their_turn_and_alias_only_survivors_stay_answered(journa
     upgraded = journal.upgraded()
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"schema_version": 1, "records": {"$a1": beside_unfinished, "$a2": beside_completed}}))
-    assert await import_legacy_ledger_file(upgraded.backend, path=ledger, agent_name=AGENT) == 0
+    assert await import_legacy_ledger_file(upgraded.turn_records(AGENT), path=ledger) == 0
     await upgraded.close()
     journal.opened.remove(upgraded)
     reopened = journal.upgraded()
@@ -529,7 +539,7 @@ async def test_rows_own_their_turn_and_alias_only_survivors_stay_answered(journa
 
 async def test_a_declared_source_without_a_row_is_answered_by_its_blob(journal: Journal) -> None:
     """A declared source without a row is answered by its blob."""
-    store = journal.legacy()
+    store = await journal.legacy()
     await seed_rows(
         store,
         [
@@ -569,7 +579,7 @@ async def test_an_interrupted_import_into_a_populated_store_keeps_its_owners(jou
     ledger = tmp_path / "ledger.json"
     for _attempt in range(2):
         ledger.write_text(json.dumps({"schema_version": 1, "records": ledger_records}))
-        await import_legacy_ledger_file(store.backend, path=ledger, agent_name=AGENT)
+        await import_legacy_ledger_file(store.turn_records(AGENT), path=ledger)
 
     kept = await read(store, turn_rows.get_turn_record, "$m1")
     assert kept.turn_key == current.record.turn_key
@@ -589,7 +599,7 @@ async def test_an_unversioned_ledger_imports_nothing(journal: Journal, tmp_path:
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"$m1": blob(["$m1"], response="$r1")}))
 
-    assert await import_legacy_ledger_file(store.backend, path=ledger, agent_name=AGENT) == 0
+    assert await import_legacy_ledger_file(store.turn_records(AGENT), path=ledger) == 0
 
     assert ledger.with_suffix(".json.imported").exists()
     assert await read(store, turn_rows.get_turn_record, "$m1") is None
@@ -597,7 +607,7 @@ async def test_an_unversioned_ledger_imports_nothing(journal: Journal, tmp_path:
 
 async def test_a_legacy_echo_reaches_every_source_and_is_not_an_answer(journal: Journal) -> None:
     """A router's [text, voice] record keeps its echo findable from the voice source; an echo is never a response."""
-    store = journal.legacy()
+    store = await journal.legacy()
     await seed_rows(
         store,
         [
@@ -633,7 +643,7 @@ async def test_a_legacy_echo_reaches_every_source_and_is_not_an_answer(journal: 
 
 async def test_attribution_is_fixed_before_membership_changes(journal: Journal) -> None:
     """A coalesced record whose sibling row went elsewhere stays unattributed; a real one-source record does not."""
-    store = journal.legacy()
+    store = await journal.legacy()
     await seed_rows(
         store,
         [
@@ -654,7 +664,7 @@ async def test_attribution_is_fixed_before_membership_changes(journal: Journal) 
 
 async def test_an_outstanding_final_delivery_completes_its_turn_after_upgrade(journal: Journal) -> None:
     """A FINAL whose send failed survives the upgrade, and its recovered acknowledgement completes the turn."""
-    store = journal.legacy()
+    store = await journal.legacy()
     principal = store.principal(PRINCIPAL)
     for delivery_id in ("$bound", "$elsewhere"):
         await principal.enqueue_matrix_delivery(
@@ -704,7 +714,7 @@ async def test_an_outstanding_final_delivery_completes_its_turn_after_upgrade(jo
 
 async def test_journal_tombstones_apply_to_every_login_of_their_agent(journal: Journal) -> None:
     """A deletion one login saw scrubs every login of its agent and its turns, and no other agent's rows."""
-    store = journal.legacy()
+    store = await journal.legacy()
     for principal_id in (PRINCIPAL, EARLIER_LOGIN, CONTROL):
         await admit(store.principal(principal_id), "$m", room_id=ROOM)
     await seed_rows(store, every_index(blob(["$m"], completed=False, source_event_prompts={"$m": "secret"})))
@@ -745,7 +755,7 @@ async def test_journal_tombstones_apply_to_every_login_of_their_agent(journal: J
 
 async def test_a_failed_conversion_rolls_back_and_the_next_open_converts(journal: Journal) -> None:
     """A failed conversion rolls back and the next open converts."""
-    store = journal.legacy()
+    store = await journal.legacy()
     await seed_rows(store, every_index(blob(["$m"], response="$r")))
     await store.close()
     journal.opened.remove(store)
@@ -756,14 +766,14 @@ async def test_a_failed_conversion_rolls_back_and_the_next_open_converts(journal
     ):
         journal.upgraded()
 
-    untouched = journal.legacy()
-    assert await legacy_tables(untouched) == [(1,)]
+    untouched = await journal.legacy()
+    assert await legacy_tables(untouched) == 1
     assert await read(untouched, turn_rows.get_turn_record, "$m") is None
     await untouched.close()
     journal.opened.remove(untouched)
     converted = journal.upgraded()
     assert (await read(converted, turn_rows.get_turn_record, "$m")).response_event_id == "$r"
-    assert await legacy_tables(converted) == [(0,)]
+    assert await legacy_tables(converted) is None
     await converted.close()
     journal.opened.remove(converted)
     reopened = journal.upgraded()
@@ -806,13 +816,12 @@ async def test_a_released_journal_without_reply_tables_converts(
         def connect() -> EventJournalStore:
             return EventJournalStore.open_postgres(url)
 
-    with registered_upgrade(postgres=backend == "postgres"):
-        store = connect()
+    store = connect()
     try:
         found = await read(store, turn_rows.get_turn_record, "$m")
         assert found is not None
         assert found.source_event_prompts is None
         assert await read(store, turn_rows.redacted_events, ROOM, ["$m"]) == {"$m"}
-        assert await legacy_tables(store) == [(0,)]
+        assert await legacy_tables(store) is None
     finally:
         await store.close()

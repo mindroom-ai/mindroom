@@ -9,13 +9,12 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from mindroom.history.types import HistoryScope
-from mindroom.legacy_revision_replay import preserve_summary_provenance
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import CommandResultContent, freeze_command_result_content
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Collection, Sequence
 
 
 @dataclass(frozen=True)
@@ -102,17 +101,6 @@ class SourceEventMetadata:
         """Normalize the timestamp once for every physical representation."""
         object.__setattr__(self, "timestamp_ms", normalize_timestamp_ms(self.timestamp_ms))
 
-    def _to_record(self) -> dict[str, object]:
-        """Return a JSON-safe representation for durable metadata."""
-        record: dict[str, object] = {"sender": self.sender}
-        if self.timestamp_ms is not None:
-            record["timestamp_ms"] = self.timestamp_ms
-        if self.discovery_event_id is not None:
-            record["discovery_event_id"] = self.discovery_event_id
-        if self.speaker is not None:
-            record["speaker"] = self.speaker
-        return record
-
     @classmethod
     def _from_raw(cls, raw_metadata: object) -> SourceEventMetadata | None:
         """Build source metadata from a persisted JSON-like value."""
@@ -151,84 +139,10 @@ class RevisionSnapshotChangedError(RuntimeError):
 class RevisionReplay:
     """Physical edit provenance, independent of source completion and selection."""
 
-    # Field order is also the row layout `_RevisionReplayRows` stores; change `_revision_replay_map` with it.
     source_event_id: str
     timestamp_ms: int
-    redacted: bool = False
+    # The response that consumed this revision, once one did.
     response_event_id: str | None = None
-    legacy_summary_provenance: bool = False
-
-    def to_record(self) -> dict[str, object]:
-        """Serialize ledger-owned provenance."""
-        return {
-            "source_event_id": self.source_event_id,
-            "timestamp_ms": self.timestamp_ms,
-            "redacted": self.redacted,
-            "response_event_id": self.response_event_id,
-            "legacy_summary_provenance": self.legacy_summary_provenance,
-        }
-
-
-type _RevisionReplayRow = tuple[str, int, bool, str | None, bool]
-
-
-class _RevisionReplayRows(Mapping[str, RevisionReplay]):
-    """Read-only replay provenance stored as one plain tuple per edit.
-
-    The handled-turn ledger keeps every record in memory for the life of the
-    process, and a record can carry dozens of edits. One frozen dataclass per
-    edit would give every full garbage collection that many more objects to
-    walk. The collector stops tracking tuples and dicts that hold only strings,
-    ints, bools, and None, so this map costs it one object however many edits it
-    holds; ``RevisionReplay`` values are rebuilt on access.
-    """
-
-    __slots__ = ("_rows",)
-
-    def __init__(self, rows: dict[str, _RevisionReplayRow]) -> None:
-        self._rows = rows
-
-    def __getitem__(self, event_id: str) -> RevisionReplay:
-        return RevisionReplay(*self._rows[event_id])
-
-    def __contains__(self, event_id: object) -> bool:
-        return event_id in self._rows
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._rows)
-
-    def __len__(self) -> int:
-        return len(self._rows)
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({dict(self)!r})"
-
-
-def _revision_replay_map(raw: Mapping[str, object] | None) -> Mapping[str, RevisionReplay]:
-    """Freeze validated ledger provenance."""
-    rows: dict[str, _RevisionReplayRow] = {}
-    for event_id, value in (raw or {}).items():
-        if isinstance(value, RevisionReplay):
-            rows[event_id] = (
-                value.source_event_id,
-                value.timestamp_ms,
-                value.redacted,
-                value.response_event_id,
-                value.legacy_summary_provenance,
-            )
-        elif isinstance(value, Mapping):
-            value = typing.cast("Mapping[str, object]", value)
-            source = value.get("source_event_id")
-            timestamp = value.get("timestamp_ms")
-            if isinstance(source, str) and isinstance(timestamp, int) and not isinstance(timestamp, bool):
-                rows[event_id] = (
-                    source,
-                    timestamp,
-                    value.get("redacted") is True,
-                    canonical_optional_string(value.get("response_event_id")),
-                    value.get("legacy_summary_provenance") is True,
-                )
-    return _RevisionReplayRows(rows)
 
 
 @dataclass(frozen=True)
@@ -237,22 +151,11 @@ class _CanonicalSourceState:
 
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...]
-    redacted_source_event_ids: tuple[str, ...]
     anchor_event_id: str | None
     source_event_prompts: Mapping[str, str] | None
     source_event_revisions: Mapping[str, SourceEventRevision] | None
-    suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None
     prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None
-
-
-@dataclass(frozen=True)
-class _CanonicalDeliveryState:
-    """Canonical response and visible-echo linkage."""
-
-    response_event_id: str | None
-    visible_echo_event_id: str | None
-    visible_echo_is_fallback: bool | None
 
 
 @dataclass(frozen=True)
@@ -279,16 +182,12 @@ class TurnRecord:
 
     source_event_ids: tuple[str, ...]
     discovery_event_ids: tuple[str, ...] = ()
-    redacted_source_event_ids: tuple[str, ...] = ()
     anchor_event_id: str | None = None
     response_event_id: str | None = None
     completed: bool = True
-    visible_echo_event_id: str | None = None
-    visible_echo_is_fallback: bool | None = None
     source_event_prompts: Mapping[str, str] | None = None
     source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     revision_replay: Mapping[str, RevisionReplay] | None = None
-    suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
     prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None = None
     response_owner: str | None = None
@@ -298,9 +197,9 @@ class TurnRecord:
     command_result_extra_content: CommandResultContent | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
-    timestamp: float = 0.0
     # The immutable identity of the stored turn this value was read from, if any.
     turn_key: str | None = None
+    # The echo published for each voice source, a publication fact apart from the turn's answer.
     visible_echoes: Mapping[str, SourceVisibleEcho] | None = None
 
     @classmethod
@@ -309,16 +208,12 @@ class TurnRecord:
         source_event_ids: Sequence[str],
         *,
         discovery_event_ids: Sequence[str] = (),
-        redacted_source_event_ids: Sequence[str] = (),
         anchor_event_id: str | None = None,
         response_event_id: str | None = None,
         completed: bool = True,
-        visible_echo_event_id: str | None = None,
-        visible_echo_is_fallback: bool | None = None,
         source_event_prompts: Mapping[str, str] | None = None,
         source_event_revisions: Mapping[str, object] | None = None,
-        revision_replay: Mapping[str, object] | None = None,
-        suppressed_source_event_revisions: Mapping[str, object] | None = None,
+        revision_replay: Mapping[str, RevisionReplay] | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
         prepared_voice_sources: Mapping[str, object] | None = None,
         response_owner: str | None = None,
@@ -328,7 +223,6 @@ class TurnRecord:
         command_result_extra_content: CommandResultContent | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
-        timestamp: float = 0.0,
         turn_key: str | None = None,
         visible_echoes: Mapping[str, SourceVisibleEcho] | None = None,
     ) -> TurnRecord:
@@ -336,18 +230,11 @@ class TurnRecord:
         source = _canonical_source_state(
             source_event_ids,
             discovery_event_ids=discovery_event_ids,
-            redacted_source_event_ids=redacted_source_event_ids,
             anchor_event_id=anchor_event_id,
             source_event_prompts=source_event_prompts,
             source_event_revisions=source_event_revisions,
-            suppressed_source_event_revisions=suppressed_source_event_revisions,
             source_event_metadata=source_event_metadata,
             prepared_voice_sources=prepared_voice_sources if not completed else None,
-        )
-        delivery = _canonical_delivery_state(
-            response_event_id,
-            visible_echo_event_id,
-            visible_echo_is_fallback,
         )
         command = _canonical_command_state(command_execution_started, command_result_text)
         context = _canonical_context_state(
@@ -359,16 +246,12 @@ class TurnRecord:
         return cls(
             source_event_ids=source.source_event_ids,
             discovery_event_ids=source.discovery_event_ids,
-            redacted_source_event_ids=source.redacted_source_event_ids,
             anchor_event_id=source.anchor_event_id,
-            response_event_id=delivery.response_event_id,
+            response_event_id=canonical_optional_string(response_event_id),
             completed=completed,
-            visible_echo_event_id=delivery.visible_echo_event_id,
-            visible_echo_is_fallback=delivery.visible_echo_is_fallback,
             source_event_prompts=source.source_event_prompts,
             source_event_revisions=source.source_event_revisions,
-            revision_replay=_revision_replay_map(revision_replay) or None,
-            suppressed_source_event_revisions=source.suppressed_source_event_revisions,
+            revision_replay=_revision_replay_map(revision_replay),
             source_event_metadata=source.source_event_metadata,
             prepared_voice_sources=source.prepared_voice_sources,
             response_owner=context.response_owner,
@@ -382,7 +265,6 @@ class TurnRecord:
             ),
             history_scope=context.history_scope,
             conversation_target=context.conversation_target,
-            timestamp=_canonical_timestamp(timestamp),
             turn_key=canonical_optional_string(turn_key),
             visible_echoes=_canonical_visible_echoes(source.source_event_ids, visible_echoes),
         )
@@ -421,19 +303,17 @@ class TurnRecord:
         metadata = self.source_event_metadata.get(self.prompt_source_event_id(event_id))
         return metadata.sender if metadata is not None else None
 
-    def replay_sources_all_from_requester(self, requester_user_id: str) -> bool:
-        """Return whether every replayable source is proven to belong to one requester."""
-        replay_source_event_ids = self.replay_source_event_ids
-        return bool(replay_source_event_ids) and all(
-            self.requester_id_for_source(source_event_id) == requester_user_id
-            for source_event_id in replay_source_event_ids
+    def sources_all_from_requester(
+        self,
+        requester_user_id: str,
+        *,
+        deleted: Collection[str] = (),
+    ) -> bool:
+        """Return whether every source not ``deleted`` is proven to belong to one requester."""
+        sources = [source_event_id for source_event_id in self.source_event_ids if source_event_id not in deleted]
+        return bool(sources) and all(
+            self.requester_id_for_source(source_event_id) == requester_user_id for source_event_id in sources
         )
-
-    @property
-    def replay_source_event_ids(self) -> tuple[str, ...]:
-        """Return source IDs whose content remains eligible for replay or regeneration."""
-        redacted_event_ids = {self.prompt_source_event_id(event_id) for event_id in self.redacted_source_event_ids}
-        return tuple(event_id for event_id in self.source_event_ids if event_id not in redacted_event_ids)
 
 
 class _TurnRecordChanges(typing.TypedDict, total=False):
@@ -441,16 +321,12 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
 
     source_event_ids: Sequence[str]
     discovery_event_ids: Sequence[str]
-    redacted_source_event_ids: Sequence[str]
     anchor_event_id: str | None
     response_event_id: str | None
     completed: bool
-    visible_echo_event_id: str | None
-    visible_echo_is_fallback: bool | None
     source_event_prompts: Mapping[str, str] | None
     source_event_revisions: Mapping[str, object] | None
-    revision_replay: Mapping[str, object] | None
-    suppressed_source_event_revisions: Mapping[str, object] | None
+    revision_replay: Mapping[str, RevisionReplay] | None
     source_event_metadata: Mapping[str, object] | None
     prepared_voice_sources: Mapping[str, object] | None
     response_owner: str | None
@@ -460,7 +336,6 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     command_result_extra_content: CommandResultContent | None
     history_scope: HistoryScope | None
     conversation_target: MessageTarget | None
-    timestamp: float
     turn_key: str | None
     visible_echoes: Mapping[str, SourceVisibleEcho] | None
 
@@ -474,16 +349,12 @@ def canonicalize_turn_record(
     return TurnRecord.create(
         candidate.source_event_ids,
         discovery_event_ids=candidate.discovery_event_ids,
-        redacted_source_event_ids=candidate.redacted_source_event_ids,
         anchor_event_id=candidate.anchor_event_id,
         response_event_id=candidate.response_event_id,
         completed=candidate.completed,
-        visible_echo_event_id=candidate.visible_echo_event_id,
-        visible_echo_is_fallback=candidate.visible_echo_is_fallback,
         source_event_prompts=candidate.source_event_prompts,
         source_event_revisions=candidate.source_event_revisions,
         revision_replay=candidate.revision_replay,
-        suppressed_source_event_revisions=candidate.suppressed_source_event_revisions,
         source_event_metadata=candidate.source_event_metadata,
         prepared_voice_sources=candidate.prepared_voice_sources,
         response_owner=candidate.response_owner,
@@ -493,21 +364,24 @@ def canonicalize_turn_record(
         command_result_extra_content=candidate.command_result_extra_content,
         history_scope=candidate.history_scope,
         conversation_target=candidate.conversation_target,
-        timestamp=candidate.timestamp,
         turn_key=candidate.turn_key,
         visible_echoes=candidate.visible_echoes,
     )
+
+
+def _revision_replay_map(raw: Mapping[str, RevisionReplay] | None) -> Mapping[str, RevisionReplay] | None:
+    """Freeze edit provenance."""
+    replay = {event_id: value for event_id, value in (raw or {}).items() if isinstance(value, RevisionReplay)}
+    return MappingProxyType(replay) if replay else None
 
 
 def _canonical_source_state(
     source_event_ids: Sequence[object],
     *,
     discovery_event_ids: Sequence[object],
-    redacted_source_event_ids: Sequence[object],
     anchor_event_id: object,
     source_event_prompts: Mapping[str, str] | None,
     source_event_revisions: Mapping[str, object] | None,
-    suppressed_source_event_revisions: Mapping[str, object] | None,
     source_event_metadata: Mapping[str, object] | None,
     prepared_voice_sources: Mapping[str, object] | None,
 ) -> _CanonicalSourceState:
@@ -517,71 +391,27 @@ def _canonical_source_state(
     canonical_discovery = tuple(
         event_id for event_id in canonical_source_event_ids(discovery_event_ids) if event_id not in source_ids
     )
-    indexed_ids = {*canonical_sources, *canonical_discovery}
-    canonical_redactions = tuple(
-        event_id for event_id in canonical_source_event_ids(redacted_source_event_ids) if event_id in indexed_ids
-    )
-    redacted_ids = set(canonical_redactions)
     canonical_anchor = canonical_optional_string(anchor_event_id)
     if canonical_anchor is None and canonical_sources:
         canonical_anchor = canonical_sources[-1]
-    canonical_metadata = _immutable_source_event_metadata(
-        canonical_sources,
-        source_event_metadata,
-        excluded_event_ids=redacted_ids,
-    )
-    redacted_prompt_sources = {
-        _prompt_source_event_id(canonical_sources, canonical_metadata, event_id) for event_id in canonical_redactions
-    }
     return _CanonicalSourceState(
         source_event_ids=canonical_sources,
         discovery_event_ids=canonical_discovery,
-        redacted_source_event_ids=canonical_redactions,
         anchor_event_id=canonical_anchor,
-        source_event_prompts=_immutable_prompt_map(
-            canonical_sources,
-            source_event_prompts,
-            excluded_event_ids=redacted_prompt_sources,
-        ),
+        source_event_prompts=_immutable_prompt_map(canonical_sources, source_event_prompts),
         source_event_revisions=_immutable_source_event_revisions(
             (*canonical_sources, *canonical_discovery),
             source_event_revisions,
-            excluded_event_ids=redacted_ids,
         ),
-        suppressed_source_event_revisions=_immutable_source_event_revisions(
-            (*canonical_sources, *canonical_discovery),
-            suppressed_source_event_revisions,
-            excluded_event_ids=redacted_ids,
-        ),
-        source_event_metadata=canonical_metadata,
+        source_event_metadata=_immutable_source_event_metadata(canonical_sources, source_event_metadata),
         prepared_voice_sources=MappingProxyType(
             {
                 event_id: prepared
                 for event_id, raw in (prepared_voice_sources or {}).items()
-                if event_id in source_ids
-                and event_id not in redacted_prompt_sources
-                and (prepared := PreparedVoiceSource._from_raw(raw)) is not None
+                if event_id in source_ids and (prepared := PreparedVoiceSource._from_raw(raw)) is not None
             },
         )
         or None,
-    )
-
-
-def _canonical_delivery_state(
-    response_event_id: object,
-    visible_echo_event_id: object,
-    visible_echo_is_fallback: object,
-) -> _CanonicalDeliveryState:
-    """Return canonical response and visible-echo linkage."""
-    canonical_echo_id = canonical_optional_string(visible_echo_event_id)
-    return _CanonicalDeliveryState(
-        response_event_id=canonical_optional_string(response_event_id),
-        visible_echo_event_id=canonical_echo_id,
-        visible_echo_is_fallback=(
-            visible_echo_is_fallback
-            if isinstance(visible_echo_is_fallback, bool) and canonical_echo_id is not None
-            else None
-        ),
     )
 
 
@@ -619,11 +449,6 @@ def _canonical_context_state(
     )
 
 
-def _canonical_timestamp(timestamp: object) -> float:
-    """Return a canonical floating-point turn timestamp."""
-    return float(timestamp) if isinstance(timestamp, int | float) and not isinstance(timestamp, bool) else 0.0
-
-
 def _prompt_source_event_id(
     source_event_ids: tuple[str, ...],
     source_event_metadata: Mapping[str, SourceEventMetadata] | None,
@@ -658,8 +483,6 @@ def canonical_optional_string(value: object) -> str | None:
 def _immutable_prompt_map(
     source_event_ids: tuple[str, ...],
     source_event_prompts: Mapping[str, str] | None,
-    *,
-    excluded_event_ids: set[str],
 ) -> Mapping[str, str] | None:
     """Freeze prompt entries that belong to the canonical source identity."""
     if not source_event_prompts:
@@ -667,7 +490,6 @@ def _immutable_prompt_map(
     prompt_map = {
         event_id: prompt
         for event_id in source_event_ids
-        if event_id not in excluded_event_ids
         if isinstance((prompt := source_event_prompts.get(event_id)), str)
     }
     return MappingProxyType(prompt_map) if prompt_map else None
@@ -676,16 +498,13 @@ def _immutable_prompt_map(
 def _immutable_source_event_revisions(
     indexed_event_ids: tuple[str, ...],
     source_event_revisions: Mapping[str, object] | None,
-    *,
-    excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventRevision] | None:
-    """Normalize and freeze edit revisions belonging to canonical live sources."""
+    """Normalize and freeze edit revisions belonging to canonical sources and aliases."""
     if not source_event_revisions:
         return None
     revisions = {
         event_id: (raw_revision[0], raw_revision[1])
         for event_id in indexed_event_ids
-        if event_id not in excluded_event_ids
         if isinstance((raw_revision := source_event_revisions.get(event_id)), tuple | list)
         and len(raw_revision) == 2
         and isinstance(raw_revision[0], int)
@@ -699,16 +518,12 @@ def _immutable_source_event_revisions(
 def _immutable_source_event_metadata(
     source_event_ids: tuple[str, ...],
     source_event_metadata: Mapping[str, object] | None,
-    *,
-    excluded_event_ids: set[str],
 ) -> Mapping[str, SourceEventMetadata] | None:
     """Normalize and freeze source metadata belonging to the canonical identity."""
     if source_event_metadata is None:
         return None
     metadata: dict[str, SourceEventMetadata] = {}
     for event_id in source_event_ids:
-        if event_id in excluded_event_ids:
-            continue
         raw_metadata = source_event_metadata.get(event_id)
         normalized = (
             raw_metadata
@@ -718,151 +533,3 @@ def _immutable_source_event_metadata(
         if normalized is not None:
             metadata[event_id] = normalized
     return MappingProxyType(metadata)
-
-
-def same_turn_identity(first: TurnRecord, second: TurnRecord) -> bool:
-    """Return whether two records identify the same canonical source turn."""
-    return first.source_event_ids == second.source_event_ids and first.anchor_event_id == second.anchor_event_id
-
-
-def merge_edit_facts(ledger: TurnRecord, recovery: TurnRecord) -> tuple[dict[str, str], dict[str, SourceEventRevision]]:
-    """Merge source prompts and revisions by canonical Matrix revision."""
-    recovery = sanitize_revision_replay(recovery, authority=ledger)
-    prompts = dict(ledger.source_event_prompts or {})
-    prompts.update(recovery.source_event_prompts or {})
-    revisions = {
-        event_id: revision
-        for event_id, revision in (recovery.source_event_revisions or {}).items()
-        if recovery.prompt_source_event_id(event_id) in (recovery.source_event_prompts or {})
-    }
-    ledger_prompts = ledger.source_event_prompts or {}
-    for event_id, revision in (ledger.source_event_revisions or {}).items():
-        prompt_event_id = ledger.prompt_source_event_id(event_id)
-        if revision >= revisions.get(event_id, revision) and prompt_event_id in ledger_prompts:
-            revisions[event_id] = revision
-            prompts[prompt_event_id] = ledger_prompts[prompt_event_id]
-    return prompts, revisions
-
-
-def completed_response_record(
-    record: TurnRecord,
-    response_event_id: str,
-    *,
-    consumed_revisions: tuple[SourceEventRevision, ...] | None = None,
-) -> TurnRecord:
-    """Attribute only this generated snapshot's selected revisions to its answer."""
-    selected = (
-        tuple((record.source_event_revisions or {}).values()) if consumed_revisions is None else consumed_revisions
-    )
-    record = sanitize_revision_replay(record)
-    replay = dict(record.revision_replay or {})
-    for _, revision_id in selected:
-        revision = replay.get(revision_id)
-        if revision is not None:
-            replay[revision_id] = replace(revision, response_event_id=response_event_id)
-    return canonicalize_turn_record(
-        record,
-        response_event_id=response_event_id,
-        completed=True,
-        revision_replay=replay,
-    )
-
-
-def merge_committed_response(
-    current: TurnRecord | None,
-    committed: TurnRecord,
-    *,
-    tombstoned_event_ids: typing.Collection[str] = (),
-) -> TurnRecord | None:
-    """Join delivered proof with current authority without inventing consumed revisions."""
-    if current is None:
-        return sanitize_revision_replay(committed, tombstoned_event_ids=tombstoned_event_ids)
-    if not same_turn_identity(current, committed) or any(
-        before is not None and after is not None and before != after
-        for before, after in (
-            (current.response_owner, committed.response_owner),
-            (current.requester_id, committed.requester_id),
-            (current.conversation_target, committed.conversation_target),
-            (current.history_scope, committed.history_scope),
-        )
-    ):
-        return None
-    proofs = {
-        event_id: revision.response_event_id
-        for event_id, revision in (committed.revision_replay or {}).items()
-        if revision.response_event_id is not None
-    }
-    committed = sanitize_revision_replay(
-        committed,
-        authority=current,
-        tombstoned_event_ids=tombstoned_event_ids,
-    )
-    replay = dict(committed.revision_replay or {})
-    for event_id, response_event_id in proofs.items():
-        replay[event_id] = replace(
-            replay[event_id],
-            response_event_id=replay[event_id].response_event_id or response_event_id,
-        )
-    prompts, revisions = merge_edit_facts(current, committed)
-    return sanitize_revision_replay(
-        canonicalize_turn_record(
-            current,
-            response_event_id=current.response_event_id or committed.response_event_id,
-            completed=True,
-            source_event_prompts=prompts,
-            source_event_revisions=revisions,
-            revision_replay=replay,
-            timestamp=max(current.timestamp, committed.timestamp),
-        ),
-        tombstoned_event_ids=tombstoned_event_ids,
-    )
-
-
-def sanitize_revision_replay(  # noqa: C901
-    candidate: TurnRecord,
-    *,
-    authority: TurnRecord | None = None,
-    tombstoned_event_ids: typing.Collection[str] = (),
-) -> TurnRecord:
-    """Join monotonic invalidation before removing any candidate provenance.
-
-    A revision tombstone is final: no future request may consume that physical
-    revision, and no later record can clear it.
-    """
-    replay = dict(candidate.revision_replay or {})
-    for source, (timestamp, revision_id) in (candidate.source_event_revisions or {}).items():
-        prompt_source = candidate.prompt_source_event_id(source)
-        if revision_id != prompt_source:
-            replay.setdefault(revision_id, RevisionReplay(prompt_source, timestamp))
-    for event_id, old in (authority.revision_replay or {}).items() if authority else ():
-        new = replay.get(event_id)
-        if new is None or (old.redacted and not new.redacted):
-            replay[event_id] = old
-        elif old.redacted and new.redacted:
-            replay[event_id] = replace(old, response_event_id=old.response_event_id or new.response_event_id)
-        elif old.response_event_id is not None and new.response_event_id is None:
-            replay[event_id] = replace(new, response_event_id=old.response_event_id)
-        replay[event_id] = preserve_summary_provenance(replay[event_id], old)
-    for event_id in tombstoned_event_ids:
-        value = replay.get(event_id)
-        if value is not None and not value.redacted:
-            replay[event_id] = replace(value, redacted=True)
-    prompts = dict(candidate.source_event_prompts or {})
-    revisions = dict(candidate.source_event_revisions or {})
-    invalid_sources = {value.source_event_id for value in replay.values() if value.redacted}
-    for source in invalid_sources:
-        selected = next(
-            (revision for key, revision in revisions.items() if candidate.prompt_source_event_id(key) == source),
-            None,
-        )
-        if selected is None or (selected[1] in replay and replay[selected[1]].redacted):
-            prompts.pop(source, None)
-            revisions = {
-                key: revision for key, revision in revisions.items() if candidate.prompt_source_event_id(key) != source
-            }
-    return canonicalize_turn_record(
-        candidate,
-        revision_replay=replay or None,
-        source_event_prompts=prompts or None,
-        source_event_revisions=revisions or None,
-    )

@@ -55,7 +55,7 @@ from tests.turn_dispatch_helpers import prepared_turn_recorder
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-    from mindroom.handled_turns import TurnRecord
+    from mindroom.turn_record import TurnRecord
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
@@ -734,7 +734,7 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
 
     generate_response_mock.assert_called_once()
     assert generate_response_mock.call_args.kwargs["prompt"].startswith("canonical voice transcript")
-    assert bot._turn_store.visible_echo_for_source(voice_event.event_id) is None
+    assert await bot._turn_store.visible_echo_for_source(voice_event.event_id) is None
 
 
 @pytest.mark.asyncio
@@ -1457,7 +1457,7 @@ async def test_trusted_router_visible_voice_echo_is_display_only(mock_home_bot: 
         await drain_coalescing(bot)
 
     mock_dispatch.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$echo")
+    assert not await bot._turn_store.is_handled(room.room_id, "$echo")
 
 
 @pytest.mark.asyncio
@@ -1495,7 +1495,7 @@ async def test_forged_visible_voice_echo_marker_still_dispatches(mock_home_bot: 
         await drain_coalescing(bot)
 
     mock_dispatch.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$forged-echo")
+    assert not await bot._turn_store.is_handled(room.room_id, "$forged-echo")
 
 
 @pytest.mark.asyncio

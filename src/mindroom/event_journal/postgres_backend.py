@@ -21,6 +21,7 @@ from .legacy_schema import (
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
+from .legacy_turn_rows import upgrade_turn_records_to_rows
 from .offloading import ThreadOffload, settled
 from .schema import OUTBOX_TABLE, POSTGRES_DIALECT, render, schema_statements
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
@@ -185,6 +186,12 @@ class PostgresBackend:
             )
             continuation_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
             upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
+            upgrade_turn_records_to_rows(
+                _PostgresTransaction(cursor),
+                existing_tables,
+                outbox_columns,
+                schema_ddl=schema_statements(POSTGRES_DIALECT),
+            )
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()

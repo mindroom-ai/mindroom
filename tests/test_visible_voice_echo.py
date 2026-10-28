@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
@@ -17,9 +17,10 @@ from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import TurnRecord
+from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.turn_record import SourceVisibleEcho
 from mindroom.voice.visible_voice_echo import (
     VisibleVoiceEchoDeps,
     VisibleVoiceEchoLifecycle,
@@ -66,19 +67,19 @@ class _EchoTurnStore:
 
     visible_event_ids: dict[str, str] = field(default_factory=dict)
 
-    def visible_echo_for_source(self, source_event_id: str) -> str | None:
+    async def visible_echo_for_source(self, source_event_id: str) -> str | None:
         return self.visible_event_ids.get(source_event_id)
 
-    async def load(self, source_event_id: str) -> TurnRecord | None:
+    async def read(self, operation: object, source_event_id: str) -> SourceVisibleEcho | None:
+        """Answer the router's own turn rows, as ``TurnRecordStore.read`` of ``turn_rows.visible_echo`` does."""
+        assert operation is turn_rows.visible_echo
         event_id = self.visible_event_ids.get(source_event_id)
-        if event_id is None:
-            return None
-        return replace(TurnRecord.create([source_event_id], completed=False), visible_echo_event_id=event_id)
+        return None if event_id is None else SourceVisibleEcho(event_id)
 
-    async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
+    async def record_visible_echo(self, room_id: str, source_event_id: str, echo_event_id: str) -> None:  # noqa: ARG002
         self.visible_event_ids[source_event_id] = echo_event_id
 
-    def finalized_visible_echo(self, source_event_id: str) -> None:  # noqa: ARG002
+    async def finalized_visible_echo(self, source_event_id: str) -> None:  # noqa: ARG002
         return None
 
     async def record_finalized_visible_echo(
@@ -285,7 +286,7 @@ async def test_recovery_adopts_untracked_marked_echo_before_sending(tmp_path: Pa
     send_text.assert_not_awaited()
     edit_text.assert_awaited_once()
     assert edit_text.await_args.args[0].event_id == "$orphaned-echo"
-    assert harness.router.deps.turn_store.visible_echo_for_source(source_event_id) == "$orphaned-echo"
+    assert await harness.router.deps.turn_store.visible_echo_for_source(source_event_id) == "$orphaned-echo"
     response_filter = find_echo.await_args.kwargs["response_source_filter"]
     assert response_filter({"content": {VISIBLE_ROUTER_VOICE_ECHO_KEY: True}})
     assert not response_filter({"content": {}})
@@ -307,7 +308,7 @@ async def test_responder_skips_barrier_when_visible_echo_is_disabled(
     """A disabled echo must not add ordering delay or require a journal lookup."""
     harness = _echo_harness(tmp_path)
     harness.config.voice.visible_router_echo = False
-    monkeypatch.setattr(_EchoTurnStore, "load", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
+    monkeypatch.setattr(_EchoTurnStore, "read", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
 
     assert await _await_responder(harness, "$voice-disabled") is True
 
@@ -469,7 +470,7 @@ async def test_failed_edit_of_durable_placeholder_still_releases_responders(
     """A preexisting echo remains published when replay cannot finalize its text."""
     harness = _echo_harness(tmp_path)
     source_event_id = "$voice-edit-failed"
-    await harness.router.deps.turn_store.record_visible_echo(source_event_id, "$existing-echo")
+    await harness.router.deps.turn_store.record_visible_echo(_ROOM_ID, source_event_id, "$existing-echo")
     edit = AsyncMock(side_effect=RuntimeError("Edit unavailable")) if edit_raises else AsyncMock(return_value=False)
     monkeypatch.setattr(harness.gateway, "edit_text", edit)
     handle = harness.router.start(_request(source_event_id))

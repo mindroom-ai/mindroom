@@ -28,7 +28,6 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks.sender import send_hook_message
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
@@ -36,6 +35,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_policy import TurnPolicy
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_turn_policy_deps
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
@@ -371,7 +371,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         orchestrator=None,
     )
     turn_store = MagicMock()
-    turn_store.is_handled.return_value = False
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
     validator = IngressValidator(
         IngressValidatorDeps(
@@ -417,7 +417,10 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
     internal_facts = validator.classify(internal_event)
     assert internal_facts.lane_requester_id == secret_id
     assert await validator.precheck_event(room, internal_event, internal_facts)
-    turn_store.record_turn.assert_awaited_once_with(TurnRecord.create([unauthorized_event.event_id]))
+    turn_store.record_turn.assert_awaited_once_with(
+        TurnRecord.create([unauthorized_event.event_id]),
+        room_id=room.room_id,
+    )
 
 
 @pytest.mark.asyncio

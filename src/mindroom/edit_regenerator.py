@@ -20,6 +20,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_store import SourcePreparation
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.event_journal import PrincipalStore
-    from mindroom.handled_turns import SourceEventRevision, TurnRecord
     from mindroom.hooks import MessageEnvelope
     from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.ingress_facts import IngressFacts
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
+    from mindroom.turn_record import SourceEventRevision, TurnRecord
     from mindroom.turn_store import TurnStore
 
 
@@ -83,11 +84,14 @@ class EditRegeneratorDeps:
 
 @dataclass(frozen=True)
 class _EditedSource:
-    """The message an edit changed, the edit's revision, and the answer it regenerates."""
+    """The message an edit changed, the edit's revision and text, the answer it regenerates, and its live sources."""
 
     source_event_id: str
     revision: SourceEventRevision
     reply_event_id: str | None
+    content: str
+    # The turn's sources nobody deleted when the regeneration was built.
+    live_source_event_ids: tuple[str, ...]
 
 
 def _not_regenerable(reply: Reply | None) -> str | None:
@@ -199,14 +203,15 @@ class EditRegenerator:
             return None
         if turn_record.requester_id_for_source(original_event_id) != requester_user_id:
             return None
+        deleted = await self.deps.turn_store.deleted_sources(turn_record)
         # Regeneration replays every source under the editor's identity, so a
         # record mixing senders would run their messages as the editor.
-        if not turn_record.replay_sources_all_from_requester(requester_user_id):
+        if not turn_record.sources_all_from_requester(requester_user_id, deleted=deleted):
             return None
         # A requester owns replies an entity wrote for them without having written them.
         if any(metadata.speaker is not None for metadata in (turn_record.source_event_metadata or {}).values()):
             return None
-        if original_event_id in turn_record.redacted_source_event_ids:
+        if turn_record.prompt_source_event_id(original_event_id) in deleted:
             return None
         reply = await self.deps.store.replies.for_sources(turn_record.source_event_ids)
         reason = _not_regenerable(reply) or (
@@ -222,11 +227,11 @@ class EditRegenerator:
         watermark = turn_record.revision_watermark(original_event_id)
         if watermark is not None and revision < watermark:
             return None
-        registered = await self.deps.turn_store.register_edit_revision(original_event_id, revision)
-        if registered is None:
-            return None
-        replay = (registered.revision_replay or {}).get(revision[1])
-        if replay is not None and replay.redacted:
+        registered = await self.deps.turn_store.register_edit_revision(turn_record, original_event_id, revision)
+        if registered is None or await self.deps.turn_store.redacted_event_ids(
+            turn_record.conversation_target.room_id,
+            (revision[1],),
+        ):
             return None
         edited_content, _ = await extract_visible_edit_body(
             event.source,
@@ -263,7 +268,8 @@ class EditRegenerator:
             },
             source_event_revisions={**(registered.source_event_revisions or {}), original_event_id: revision},
         )
-        prompt, structured = self._prompt(room, record, edited_content)
+        live_sources = tuple(source for source in record.source_event_ids if source not in deleted)
+        prompt, structured = self._prompt(room, record, live_sources, edited_content)
         if prompt is None:
             # A sibling's text is no longer known: nothing regenerates from a partial turn.
             return None
@@ -276,23 +282,29 @@ class EditRegenerator:
             record,
             context,
             envelope,
-            _EditedSource(original_event_id, revision, reply.event_id),
+            _EditedSource(original_event_id, revision, reply.event_id, edited_content, live_sources),
             prompt,
             structured=structured,
         )
         return self._regenerate(request)
 
-    def _prompt(self, room: nio.MatrixRoom, record: TurnRecord, edited_content: str) -> tuple[str | None, bool]:
-        """Return the prompt the edited turn runs with, and whether it is structured."""
+    def _prompt(
+        self,
+        room: nio.MatrixRoom,
+        record: TurnRecord,
+        live_sources: tuple[str, ...],
+        edited_content: str,
+    ) -> tuple[str | None, bool]:
+        """Return the prompt the edited turn runs with from its sources nobody deleted, and whether it is structured."""
         if not record.is_coalesced:
             return edited_content, False
         prompt_map = dict(record.source_event_prompts or {})
-        parts = [prompt_map.get(source_event_id) for source_event_id in record.replay_source_event_ids]
+        parts = [prompt_map.get(source_event_id) for source_event_id in live_sources]
         if any(part is None for part in parts):
             return None, False
         if record.source_event_metadata is not None:
             tagged = tagged_coalesced_prompt(
-                list(record.replay_source_event_ids),
+                list(live_sources),
                 prompt_map,
                 dict(record.source_event_metadata),
                 timestamp_formatter=self.deps.timestamp_formatter,
@@ -316,18 +328,25 @@ class EditRegenerator:
         requester_id = envelope.requester_id
         revision = edited.revision
 
-        async def prepare_snapshot(history: Sequence[ResolvedVisibleMessage]) -> bool:
-            return await self.deps.turn_store.prepare_edit_snapshot(
+        async def prepare_snapshot(history: Sequence[ResolvedVisibleMessage]) -> SourcePreparation:
+            stale = await self.deps.turn_store.prepare_edit_snapshot(
                 record=record,
+                live_source_event_ids=edited.live_source_event_ids,
                 driving_revision_id=revision[1],
                 consumed_revision_ids=tuple(message.latest_event_id for message in history),
                 thread_history=history,
             )
+            return SourcePreparation(invalid=record.source_event_ids) if stale else SourcePreparation()
 
         async def commit_edit() -> None:
             # The claimed reply answers the edited text from now on, so the turn holds it and the history run
             # this edit replaces may go.
-            await self.deps.turn_store.record_edit(record)
+            await self.deps.turn_store.record_edit(
+                record,
+                edited_event_id=edited.source_event_id,
+                prompt=edited.content,
+                revision=revision,
+            )
             await self.deps.turn_store.remove_stale_runs_for_edit(turn_record=record, requester_user_id=requester_id)
 
         return ResponseRequest(

@@ -21,7 +21,7 @@ Matrix sync callback
        -> response_runner.py -> ai.py / teams/envelope.py        (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared blocking/streaming turn drivers)
        -> streaming.py + delivery_gateway.py                     (progressive edits, Matrix send)
-       -> turn_store.py / handled_turns.py                       (durable dedup so restarts don't double-reply)
+       -> turn_store.py / event_journal/turn_rows.py             (durable dedup so restarts don't double-reply)
 ```
 
 ## Modules
@@ -74,7 +74,7 @@ Matrix sync callback
 | `edit_regenerator.py` | Decides which message edits regenerate a reply and hands each to a regeneration off the room's event lane |
 | `event_journal/replies.py` | `ReplyStore`: reply rules applied inside journal transactions, with their in-transaction effects |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
-| `event_journal/turn_rows.py` | Turn state as rows, agent-scoped: lookups, narrow writes, the one reshape that forms a new source tuple, the redaction eligibility guard, delivery binding, and retention (the runtime still reads `turn_records` until it moves over) |
+| `event_journal/turn_rows.py` | Turn state as rows, agent-scoped: lookups, narrow writes, the one reshape that forms a new source tuple, the agent's redaction record and the eligibility guard every write checks, delivery binding, and retention |
 | `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs, journal redaction tombstones, and the pre-journal JSON ledger into turn rows |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
@@ -83,8 +83,7 @@ Matrix sync callback
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | Records a Stop reaction on the reply it stops |
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
-| `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
-| `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
+| `turn_store.py` | One agent's turn state for the runtime: awaited reads and writes over `event_journal/turn_rows.py`, the in-process claim registry, and locked source and edit-snapshot preparation |
 | `response_runner.py` | Response lifecycle execution (locking, streaming vs non-streaming, cancellation, detached inbox responses, shutdown drains) |
 | `response_turn.py` | Shared blocking/streaming response-turn drivers behind the agent and team envelopes (attempt loop, model-switch continuation, empty-run retry, interrupt recording), and the run metadata and request-log context a turn binds around its model requests and stream pulls |
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |

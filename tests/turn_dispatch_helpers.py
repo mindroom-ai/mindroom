@@ -14,9 +14,9 @@ from mindroom.dispatch_handoff import (
     PreparedIngress,
     payload_metadata_from_source,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.event_info import EventInfo
 from mindroom.turn_controller import _PrecheckedEvent
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
 from tests.conftest import make_ingress_facts
 

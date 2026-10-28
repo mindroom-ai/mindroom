@@ -43,6 +43,7 @@ from .models import (
     DepartureSource,
     EventClass,
     EventKind,
+    FinalAnswerEnqueue,
     HydrationCoverage,
     HydrationPolicy,
     InboundEvent,
@@ -77,8 +78,9 @@ from .scheduled_approvals import (
     ScheduledCallRefusal,
     scheduled_call_run_id,
 )
-from .store import EventJournalStore, PrincipalStore, ToolJobStore, TurnRecordStore
+from .store import EventJournalStore, PrincipalStore, ToolJobStore
 from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
+from .turn_rows import TurnRecordStore
 from .views import (
     AdmissionView,
     ApprovalDeliveryView,
@@ -119,6 +121,7 @@ __all__ = [
     "EventClass",
     "EventJournalStore",
     "EventKind",
+    "FinalAnswerEnqueue",
     "HistoryRecoveryOutcome",
     "HistoryRecoveryRecordView",
     "HistoryRecoveryState",

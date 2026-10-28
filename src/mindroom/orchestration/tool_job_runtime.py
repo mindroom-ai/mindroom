@@ -17,6 +17,7 @@ from mindroom.delegation.lifecycle import active_delegation_edges, caller_grants
 from mindroom.delegation.recovery import interrupt_stopped_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals, settle_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed
@@ -395,8 +396,7 @@ class ToolJobRuntimeCoordinator:
             # The turn that started the job may still need its outcome to recover.
             key = (entity, source)
             if key not in finished:
-                record = await journal.turn_records(entity).load(source)
-                if record is not None and record.completed:
+                if await journal.turn_records(entity).read(turn_rows.is_answered, source):
                     finished[key] = True
                 # A turn that ended unanswered, as when its request was deleted, finished once its source settled.
                 elif (bot := self.bot_provider(entity)) is not None:

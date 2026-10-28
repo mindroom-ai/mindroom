@@ -11,9 +11,9 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -129,6 +129,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     assert bot.client.room_send.call_count == 2  # thinking + final
     await bot._turn_store.record_turn(
         TurnRecord.create(["$original123"], response_event_id="$response123"),
+        room_id=room.room_id,
     )
 
     # Reset mock

@@ -49,7 +49,6 @@ from mindroom.event_journal.replies import (
     edit_delivery_id,
 )
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord, TurnRecordCodec
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -483,6 +482,8 @@ class SendTextRequest:  # noqa: D101
     # command confirmation -- and takes the direct path, because a synthetic
     # turn ID would put a row in the outbox that recovery cannot reason about.
     delivery_turn_id: str | None = None
+    # The stored turn the producer recorded this answer for; its FINAL binds that turn and settles its sources.
+    delivery_turn_key: str | None = None
     delivery_result: dict[str, object] | None = None
     # Set when this send is a durable write of an agent or team reply.
     reply_write: ReplyWrite | None = None
@@ -595,18 +596,6 @@ class DeliveryGatewayDeps:
     # gateway is built before login, and a re-login replaces it. ``None`` means
     # no login has completed, which the outbox reads as "device unknown".
     sending_device_id: Callable[[], str | None] = lambda: None
-    # The terminal turn record a FINAL acknowledgement should commit with it,
-    # asked for only once the event ID exists. Returning ``None`` means there
-    # is nothing to bind -- no record for the turn, or one that already knows
-    # its response event. Without this the acknowledgement and the record are
-    # two commits, and a crash between them leaves a delivered answer whose
-    # record cannot be edited.
-    terminal_turn_for: Callable[[str, str], TurnRecord | None] | None = None
-    # Told after an acknowledgement bound its row, so the record that commit
-    # wrote is re-asserted through the ledger's own write ordering. Skipping
-    # that leaves the row open to a mutation that derived before the commit and
-    # lands after it, which erases the event the answer is stored under.
-    terminal_turn_committed: Callable[[TurnRecord], Awaitable[None]] | None = None
     # Runs what committed reply transitions left for after their commit:
     # cancelling a span a Stop reached, waking an approval source.
     reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
@@ -926,7 +915,6 @@ class DeliveryGateway:
             resolve_delivered=self._delivered_under_a_previous_device,
             handoff=handoff,
             terminal_turn_for=self._terminal_turn_write,
-            terminal_turn_committed=self._publish_terminal_turn,
             process_shutdown_requested=current_task_is_process_shutdown,
             delivery_locks=self._delivery_turn_locks,
             reply_row_resolved=self.deps.reply_row_resolved,
@@ -942,32 +930,19 @@ class DeliveryGateway:
 
         return self._response_delivery(send, handoff=None)
 
-    async def _publish_terminal_turn(self, committed: TerminalTurnWrite) -> None:
-        """Publish the transaction's exact proof through the ledger's conflict owner."""
-        if self.deps.terminal_turn_committed is None:
-            return
-        record = TurnRecordCodec._from_ledger_record(committed.index_event_ids[0], json.loads(committed.record_json))
-        if record is not None:
-            await self.deps.terminal_turn_committed(record)
-
     def _terminal_turn_write(self, delivery: MatrixDelivery, event_id: str) -> TerminalTurnWrite | None:
-        """Turn the terminal record for one delivered answer into a journal row.
+        """Name the turn a delivered non-AI FINAL answer completes in its acknowledgement's transaction.
 
-        The turn store produces the record and stops at its own boundary; this
-        layer already owns the journal's types, so the conversion belongs here
-        rather than reaching across. A reply's row commits nothing here: the
-        reply's records record its turn answered when they settle its sources.
+        It is the turn the answer was bound to when its row became durable. A
+        reply's row completes nothing here: the reply's records record its turn
+        answered when they settle its sources.
         """
-        if delivery.reply_id is not None or self.deps.terminal_turn_for is None:
-            return None
-        record = self.deps.terminal_turn_for(delivery.delivery_id, event_id)
-        if record is None or record.anchor_event_id is None:
+        if delivery.reply_id is not None:
             return None
         return TerminalTurnWrite(
             agent_name=self.deps.agent_name,
-            index_event_ids=record.indexed_event_ids,
-            anchor_event_id=record.anchor_event_id,
-            record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
+            delivery_id=delivery.delivery_id,
+            response_event_id=event_id,
         )
 
     async def _delivered_under_a_previous_device(self, claimed: MatrixDelivery) -> str | None:
@@ -1128,6 +1103,7 @@ class DeliveryGateway:
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
                 ),
+                turn_key=request.delivery_turn_key,
             )
         except _DeliveryRefusedError:
             return None

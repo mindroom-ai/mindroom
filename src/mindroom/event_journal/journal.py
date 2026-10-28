@@ -16,7 +16,6 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
@@ -49,7 +48,7 @@ from .models import (
     RoomMembershipPosition,
     SemanticConsumer,
 )
-from .projection import ProjectedEvent, is_tombstoned, project, scrub_redacted_projection, tombstoned_event_ids
+from .projection import ProjectedEvent, is_tombstoned, project, scrub_redacted_projection
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
@@ -628,7 +627,6 @@ def _advance_membership_epoch(
         "conversation_hydration",
         "visible_messages",
         "unresolved_edits",
-        "redaction_tombstones",
         "room_history_recovery",
     ):
         transaction.execute(
@@ -848,28 +846,64 @@ def _project_admitted_event(
     receipt_order: int,
     membership_epoch: int,
 ) -> None:
-    """Project readable content and retire any source its redaction tombstones."""
-    tombstoned_event_id = project(
+    """Project readable content, apply a redaction to the agent, and retire a source that arrived already redacted."""
+    project_with_redactions(
+        transaction,
+        principal_id,
+        projected,
+        receipt_order=receipt_order,
+        membership_epoch=membership_epoch,
+        settle_redacted_arrival=True,
+    )
+
+
+def project_with_redactions(
+    transaction: Transaction,
+    principal_id: str,
+    projected: ProjectedEvent,
+    *,
+    receipt_order: int,
+    membership_epoch: int,
+    settle_redacted_arrival: bool,
+) -> None:
+    """Project one event and apply the redaction authority it reports, in this transaction.
+
+    A redaction is recorded once for the principal's agent and applied to every
+    login of it. An event that arrives already redacted ends the replies that
+    lost their last source to it, and with ``settle_redacted_arrival`` its own
+    pending row retires, as admission does for the event it just admitted.
+    """
+    redacted_event_id = project(
         transaction,
         principal_id,
         projected,
         receipt_order=receipt_order,
         membership_epoch=membership_epoch,
     )
-    if tombstoned_event_id is not None:
+    if redacted_event_id is None:
+        return
+    if projected.redacts_event_id is not None:
+        redact_for_agent(
+            transaction,
+            turn_rows.agent_of_principal(principal_id),
+            room_id=projected.room_id,
+            event_id=redacted_event_id,
+            receipt_order=receipt_order,
+        )
+        return
+    if settle_redacted_arrival:
         _settle_tombstoned_turn_source(
             transaction,
             principal_id,
             room_id=projected.room_id,
-            event_id=tombstoned_event_id,
+            event_id=redacted_event_id,
         )
-        replies.end_replies_of_deleted_source(
-            transaction,
-            principal_id,
-            room_id=projected.room_id,
-            event_id=tombstoned_event_id,
-            redacted=partial(tombstoned_event_ids, transaction, principal_id, projected.room_id),
-        )
+    replies.end_replies_of_deleted_source(
+        transaction,
+        principal_id,
+        room_id=projected.room_id,
+        event_id=redacted_event_id,
+    )
 
 
 def redact_for_agent(
@@ -892,7 +926,6 @@ def redact_for_agent(
     deletion fact shares no content.
     """
     turn_rows.record_redaction(transaction, agent_name, room_id=room_id, event_id=event_id)
-    redacted = partial(turn_rows.redacted_events, transaction, agent_name, room_id)
     for principal_id in _principals_of_agent(transaction, agent_name, room_id=room_id):
         scrub_redacted_projection(
             transaction,
@@ -907,7 +940,6 @@ def redact_for_agent(
             principal_id,
             room_id=room_id,
             event_id=event_id,
-            redacted=redacted,
         )
 
 
@@ -1253,12 +1285,10 @@ def source_has_redaction_handoff(
     principal_id: str,
     event_id: str,
     captured: TurnRecord,
-    current: TurnRecord | None,
-    redaction_target: Callable[[JournalEvent], str | None],
 ) -> bool:
-    """Prove the source's redaction is durably tombstoned in the ledger or still owed by its callback.
+    """Prove the settled source was redacted in its own room, which is the turn's redaction authority.
 
-    Session history needs no handoff: each response removes history derived from tombstoned events.
+    Session history needs no handoff: each response removes history derived from redacted events.
     """
     source = transaction.fetchone(
         "SELECT room_id FROM journal_events WHERE principal_id = ? AND event_id = ? AND state = 'settled'",
@@ -1266,29 +1296,7 @@ def source_has_redaction_handoff(
     )
     if source is None or not is_tombstoned(transaction, principal_id, source["room_id"], event_id):
         return False
-    if captured.conversation_target is not None and captured.conversation_target.room_id != source["room_id"]:
-        return False
-    if current is not None and event_id in current.redacted_source_event_ids:
-        return current.conversation_target is None or current.conversation_target.room_id == source["room_id"]
-    return _has_pending_redaction(transaction, principal_id, source["room_id"], event_id, redaction_target)
-
-
-def _has_pending_redaction(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    event_id: str,
-    redaction_target: Callable[[JournalEvent], str | None],
-) -> bool:
-    """Read callback ownership and decode it within the source's recovery transaction."""
-    callbacks = transaction.fetchall(
-        f"""
-        SELECT {_JOURNAL_COLUMNS} FROM journal_events
-        WHERE principal_id = ? AND room_id = ? AND state = 'pending' AND kind = ?
-        """,  # noqa: S608 - fixed columns, bound values
-        (principal_id, room_id, EventKind.REDACTION.value),
-    )
-    return any(redaction_target(callback) == event_id for callback in _decode_rows(callbacks))
+    return captured.conversation_target is None or captured.conversation_target.room_id == source["room_id"]
 
 
 def sources_settled_by_departure(

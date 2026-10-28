@@ -27,7 +27,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader, ThreadReadMode
@@ -37,6 +36,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )

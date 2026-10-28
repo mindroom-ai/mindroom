@@ -20,12 +20,11 @@ from mindroom.delivery_gateway import SendTextRequest
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, content_owns_per_fire_thread_root
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.routing import suggest_responder_for_message
 from mindroom.turn_origin import original_sender_for_router_handoff
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -350,9 +349,6 @@ async def execute_router_relay(
         extra_content=routed_extra_content or None,
     )
     source_turn = handled_turn or TurnRecord.create([event.event_id])
-    visible_echo_event_id = deps.turn_store.finalized_visible_echo_for_sources(
-        source_turn.source_event_ids,
-    )
     (
         tracked_handled_turn,
         recovered_response_event_id,
@@ -360,7 +356,8 @@ async def execute_router_relay(
         source_turn,
         requester_id=requester_user_id,
         target=resolved_target,
-        excluded_event_ids=(visible_echo_event_id,) if visible_echo_event_id is not None else (),
+        # The router's own voice echoes are publication, never the relay this turn still owes.
+        excluded_event_ids=await deps.turn_store.finalized_visible_echoes(source_turn.source_event_ids),
     )
     if tracked_handled_turn is None:
         return

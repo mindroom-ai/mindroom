@@ -21,7 +21,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, tracking_dir
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -29,6 +28,7 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,

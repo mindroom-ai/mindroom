@@ -25,7 +25,6 @@ from mindroom.dispatch_source import (
     source_kind_from_content,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.handled_turns import TurnRecord
 from mindroom.ingress_facts import IngressFacts
 from mindroom.matrix.event_info import EventInfo, reply_to_event_id_from_content
 from mindroom.requester_identity import (
@@ -34,6 +33,7 @@ from mindroom.requester_identity import (
     resolve_human_requester_alias,
 )
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
+from mindroom.turn_record import TurnRecord
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -231,12 +231,12 @@ class IngressValidator:
         ):
             return False
 
-        if not is_edit and self.deps.turn_store.is_handled(event.event_id):
+        if not is_edit and await self.deps.turn_store.is_handled(room.room_id, event.event_id):
             return False
 
         # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
         if not await self._can_reply_once_router_catches_up(facts.run_requester_id, room):
-            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]))
+            await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
             return False
 
         return True

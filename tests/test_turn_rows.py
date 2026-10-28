@@ -548,15 +548,7 @@ class TestCompletion:
         elif path == "responded":
             await write(store, turn_rows.record_responded_turn, turn(["$v"], response="$r"), room_id=ROOM)
         elif path == "settle":
-            await store.backend.write(
-                lambda transaction: turn_rows.settle_turn(
-                    transaction,
-                    f"{AGENT}@@bot:example.org",
-                    AGENT,
-                    pending=("$v",),
-                    logical=("$v",),
-                ),
-            )
+            await write(store, turn_rows.complete_turn_of, ("$v",))
         else:
             await write(store, turn_rows.bind_final_delivery, delivery_id="$v", room_id=ROOM, turn_key=stored.turn_key)
             await write(store, turn_rows.complete_bound_delivery, delivery_id="$v", response_event_id="$ack")

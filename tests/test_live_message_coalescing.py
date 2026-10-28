@@ -70,7 +70,6 @@ from mindroom.event_journal import (
     JournalEvent,
     PendingTurnView,
 )
-from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
@@ -97,6 +96,7 @@ from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, _DispatchPlan
+from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -104,6 +104,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     dispatch_context_result,
+    drain_coalescing,
     install_generate_response_mock,
     install_send_response_mock,
     make_ingress_facts,
@@ -656,7 +657,7 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
         plan_turn.assert_awaited_once()
     else:
         plan_turn.assert_not_awaited()
-    assert not bot._turn_store.is_handled(event.event_id)
+    assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
     assert not await dispatcher.store.is_pending(event.event_id)
 
 
@@ -1450,14 +1451,12 @@ async def test_command_executes_immediately_while_text_batch_debounces(tmp_path:
         await bot._turn_controller.handle_text_event(room, first)
         await bot._turn_controller.handle_text_event(room, command)
 
-        assert calls == [("!help", ["$m2"])]
+        # Ordinary text flushes on its own drain task, so the two may dispatch in either order.
+        assert ("!help", ["$m2"]) in calls
 
         await bot._coalescing_gate.drain_all()
 
-    assert calls == [
-        ("!help", ["$m2"]),
-        ("tell me more", ["$m1"]),
-    ]
+    assert sorted(calls) == [("!help", ["$m2"]), ("tell me more", ["$m1"])]
 
 
 @pytest.mark.asyncio
@@ -4764,11 +4763,11 @@ async def test_turn_store_marks_all_batch_event_ids(tmp_path: Path) -> None:
             source_kind="message",
             requester_user_id="@user:localhost",
         )
-        await _wait_for(lambda: bot._turn_store.is_handled("$m1"))
+        await drain_coalescing(bot)
 
-    assert bot._turn_store.is_handled("$m1")
-    assert bot._turn_store.is_handled("$m2")
-    turn_record = bot._turn_store.get_turn_record("$m1")
+    assert await bot._turn_store.is_handled(room.room_id, "$m1")
+    assert await bot._turn_store.is_handled(room.room_id, "$m2")
+    turn_record = await bot._turn_store.get_turn_record("$m1")
     assert turn_record is not None
     assert turn_record.source_event_ids == ("$m1", "$m2")
     assert turn_record.anchor_event_id == "$m2"
@@ -4910,10 +4909,10 @@ async def test_backlog_replay_skips_older_message_when_newer_exists(tmp_path: Pa
 
     # Older message should be skipped — resolve_dispatch_action never called
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
-_SourceOwnership = Literal["single", "mixed", "absent", "partial", "redacted"]
+_SourceOwnership = Literal["single", "mixed", "absent", "partial"]
 
 
 def _coalesced_ownership_record(ownership: _SourceOwnership) -> TurnRecord:
@@ -4921,7 +4920,7 @@ def _coalesced_ownership_record(ownership: _SourceOwnership) -> TurnRecord:
 
     ``absent`` models a record written before ``source_event_metadata`` existed, which still
     decodes because the ledger schema version never changed. ``partial`` models a map missing one
-    source's entry, and ``redacted`` models the map normalization prunes for a redacted source.
+    source's entry.
     """
     if ownership == "absent":
         record = TurnRecord.create(["$alice", "$bob"])
@@ -4934,15 +4933,12 @@ def _coalesced_ownership_record(ownership: _SourceOwnership) -> TurnRecord:
     bob_metadata = SourceEventMetadata(sender="@bob:localhost", timestamp_ms=2000)
     record = TurnRecord.create(
         ["$alice", "$bob"],
-        redacted_source_event_ids=["$alice"] if ownership == "redacted" else [],
         source_event_metadata=(
             {"$bob": bob_metadata} if ownership == "partial" else {"$alice": alice_metadata, "$bob": bob_metadata}
         ),
     )
     assert record.source_event_metadata is not None
-    assert set(record.source_event_metadata) == (
-        {"$bob"} if ownership in {"partial", "redacted"} else {"$alice", "$bob"}
-    )
+    assert set(record.source_event_metadata) == ({"$bob"} if ownership == "partial" else {"$alice", "$bob"})
     return record
 
 
@@ -5009,7 +5005,7 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         _set_context_histories(dispatch, [newer_bob_message])
     pending_turns = _watch_pending_turns(bot)
     handled_turn = _coalesced_ownership_record(ownership)
-    superseded = ownership in {"single", "redacted"}
+    superseded = ownership == "single"
 
     plan_calls: list[PreparedDispatch] = []
 
@@ -5051,8 +5047,8 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
         assert pending_turns.calls == [(room.room_id, "$thread", 2000, "$bob")]
     else:
         assert pending_turns.calls == []
-    assert not bot._turn_store.is_handled("$alice")
-    assert not bot._turn_store.is_handled("$bob")
+    assert not await bot._turn_store.is_handled(room.room_id, "$alice")
+    assert not await bot._turn_store.is_handled(room.room_id, "$bob")
 
 
 @pytest.mark.asyncio
@@ -5126,79 +5122,8 @@ async def test_backlog_replay_fails_closed_when_physical_source_collides_with_al
         )
 
     plan_turn.assert_awaited_once()
-    assert not bot._turn_store.is_handled(relay_event_id)
-    assert not bot._turn_store.is_handled(human_event_id)
-
-
-@pytest.mark.asyncio
-async def test_backlog_replay_fails_closed_after_legacy_coalesced_projection(tmp_path: Path) -> None:
-    """Projecting a legacy coalesced redaction marker must not invent singleton ownership."""
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    conflicting_event_id = "$already-owned"
-    retained_event_id = "$retained"
-    await bot._turn_store.record_turn(
-        TurnRecord.create([conflicting_event_id], response_event_id="$existing-response"),
-    )
-    projected = await bot._turn_store.record_pending_turn(
-        TurnRecord.create(
-            [conflicting_event_id, retained_event_id],
-            redacted_source_event_ids=[conflicting_event_id],
-            requester_id="@bob:localhost",
-            completed=False,
-        ),
-    )
-    assert projected is not None
-    assert projected.source_event_ids == (retained_event_id,)
-    assert projected.source_event_metadata == {}
-
-    primary_event = PreparedIngress(
-        sender="@bob:localhost",
-        event_id=retained_event_id,
-        body="retained",
-        source={"content": {"msgtype": "m.text", "body": "retained"}},
-        server_timestamp=1000,
-    )
-    dispatch = _prepared_dispatch(
-        event_id=retained_event_id,
-        requester_user_id="@bob:localhost",
-        body="retained",
-        thread_id="$thread",
-    )
-    _set_context_histories(
-        dispatch,
-        [
-            ResolvedVisibleMessage(
-                sender="@bob:localhost",
-                body="newer bob",
-                timestamp=3000,
-                event_id="$newer-bob",
-                content={"body": "newer bob"},
-                thread_id="$thread",
-                latest_event_id="$newer-bob",
-            ),
-        ],
-    )
-    plan_turn = AsyncMock(return_value=_DispatchPlan(kind="ignore"))
-
-    with (
-        patch.object(
-            bot._turn_controller,
-            "_prepare_dispatch",
-            new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
-        ),
-        patch.object(bot._turn_policy, "plan_turn", new=plan_turn),
-    ):
-        await dispatch_test_turn(
-            bot._turn_controller,
-            room,
-            primary_event,
-            "@bob:localhost",
-            handled_turn=projected,
-        )
-
-    plan_turn.assert_awaited_once()
-    assert not bot._turn_store.is_handled(retained_event_id)
+    assert not await bot._turn_store.is_handled(room.room_id, relay_event_id)
+    assert not await bot._turn_store.is_handled(room.room_id, human_event_id)
 
 
 @pytest.mark.asyncio
@@ -5259,7 +5184,7 @@ async def test_backlog_replay_degraded_thread_history_uses_pending_journal_event
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 @pytest.mark.asyncio
@@ -5320,7 +5245,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_equal_timestamp_pe
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 @pytest.mark.asyncio
@@ -5376,10 +5301,11 @@ async def test_backlog_replay_degraded_thread_history_counts_trusted_voice_comma
         await dispatch_test_turn(bot._turn_controller, room, older_event, "@user:localhost")
 
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
-def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
+@pytest.mark.asyncio
+async def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
     """Replay suppression is gated by turn-origin policy, not just sender/timestamp matching."""
     older_event = PreparedIngress(
         sender="@mindroom_general:localhost",
@@ -5398,20 +5324,21 @@ def test_replay_guard_does_not_supersede_non_interactive_origin_turns() -> None:
         latest_event_id="$managed-newer",
     )
 
-    should_skip = has_newer_unresponded_in_thread(
+    should_skip = await has_newer_unresponded_in_thread(
         older_event,
         "@mindroom_general:localhost",
         [newer_msg],
         may_be_superseded_by_newer_requester_turn=False,
         classify=lambda sender, _source: make_ingress_facts(sender, sender_entity_name="general"),
-        is_handled=lambda _event_id: False,
+        is_handled=AsyncMock(return_value=frozenset()),
         logger=MagicMock(),
     )
 
     assert not should_skip
 
 
-def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
+@pytest.mark.asyncio
+async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
     """Visible router voice echoes must not suppress the canonical voice turn in full history."""
     older_event = PreparedIngress(
         sender="@user:localhost",
@@ -5436,7 +5363,7 @@ def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
         latest_event_id="$visible_echo",
     )
 
-    should_skip = has_newer_unresponded_in_thread(
+    should_skip = await has_newer_unresponded_in_thread(
         older_event,
         "@user:localhost",
         [visible_echo],
@@ -5449,14 +5376,15 @@ def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> None:
             original_sender_is_human=True,
             sender_entity_name="router",
         ),
-        is_handled=lambda _event_id: False,
+        is_handled=AsyncMock(return_value=frozenset()),
         logger=MagicMock(),
     )
 
     assert not should_skip
 
 
-def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
+@pytest.mark.asyncio
+async def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
     """Only router voice echoes are display-only; other trusted relay turns still suppress older turns."""
     older_event = PreparedIngress(
         sender="@user:localhost",
@@ -5481,7 +5409,7 @@ def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> No
         latest_event_id="$helper_relay",
     )
 
-    should_skip = has_newer_unresponded_in_thread(
+    should_skip = await has_newer_unresponded_in_thread(
         older_event,
         "@user:localhost",
         [marked_helper_relay],
@@ -5494,7 +5422,7 @@ def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> No
             original_sender_is_human=True,
             sender_entity_name="helper",
         ),
-        is_handled=lambda _event_id: False,
+        is_handled=AsyncMock(return_value=frozenset()),
         logger=MagicMock(),
     )
 
@@ -5560,7 +5488,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$voice")
+    assert not await bot._turn_store.is_handled(room.room_id, "$voice")
 
 
 @pytest.mark.asyncio
@@ -5622,7 +5550,7 @@ async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$voice")
+    assert not await bot._turn_store.is_handled(room.room_id, "$voice")
 
 
 @pytest.mark.asyncio
@@ -5688,7 +5616,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_plain_reply_outsid
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 @pytest.mark.asyncio
@@ -5750,7 +5678,7 @@ async def test_backlog_replay_degraded_thread_history_ignores_edit_events(tmp_pa
 
     history_guard.assert_not_called()
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 @pytest.mark.asyncio
@@ -5799,7 +5727,7 @@ async def test_backlog_replay_degraded_thread_history_fails_open_without_positiv
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
     assert any(
         log.get("event") == "Thread replay guard degraded; proceeding without negative newer-message proof"
         for log in captured_logs
@@ -5874,7 +5802,7 @@ async def test_backlog_replay_degraded_thread_history_only_counts_unsettled_jour
 
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$m1")]
     assert action_mock.await_count == (1 if settled else 0)
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 @pytest.mark.asyncio
@@ -5905,7 +5833,7 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
     dispatch.context.thread_history = [hydrated_msg]
     dispatch.context.replay_guard_history = []
 
-    newer_mock = MagicMock(return_value=False)
+    newer_mock = AsyncMock(return_value=False)
     with (
         patch.object(
             bot._turn_controller,
@@ -5925,9 +5853,9 @@ async def test_media_dispatch_uses_replay_snapshot_instead_of_mutated_planning_h
         )
 
     newer_mock.assert_called_once()
-    assert list(newer_mock.call_args.args[2]) == []
+    assert list(newer_mock.call_args.args[3]) == []
     action_mock.assert_awaited_once()
-    assert not bot._turn_store.is_handled("$img1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$img1")
 
 
 @pytest.mark.asyncio
@@ -5966,7 +5894,7 @@ async def test_thread_history_guard_does_not_interfere_with_normal_dispatch(tmp_
         await dispatch_test_turn(bot._turn_controller, room, event, "@user:localhost")
 
     # Dispatch proceeded to completion
-    assert bot._turn_store.is_handled("$m1")
+    assert await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 # ---------------------------------------------------------------------------
@@ -6504,7 +6432,7 @@ async def test_coalesced_user_batch_suppressed_by_thread_guard(tmp_path: Path) -
 
     # Coalesced user batch MUST be suppressed — not an automation event
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 @pytest.mark.asyncio
@@ -6552,7 +6480,7 @@ async def test_coalesced_media_batch_suppressed_by_replay_snapshot(tmp_path: Pat
 
     # Media-backed coalesced user batch MUST still be suppressed.
     action_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$img1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$img1")
 
 
 @pytest.mark.asyncio

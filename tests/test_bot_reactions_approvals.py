@@ -42,7 +42,6 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
@@ -57,6 +56,7 @@ from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_record import TurnRecord
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -2266,7 +2266,7 @@ class TestAgentBot(AgentBotTestBase):
         handle_text_event.assert_not_awaited()
         assert await restarted._journal_dispatcher.store.pending() == ()
         # The card answered it: no message older than it is skipped as superseded by it.
-        assert restarted._turn_store.is_handled(event.event_id)
+        assert await restarted._turn_store.is_handled(room.room_id, event.event_id)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -2347,7 +2347,6 @@ class TestAgentBot(AgentBotTestBase):
         assert unexpected_hooks == []
         assert await restarted._journal_dispatcher.store.pending() == ()
 
-    @pytest.mark.ledger_loads_from_disk
     @pytest.mark.asyncio
     async def test_interrupted_stop_reaction_replay_cannot_become_hook_input(
         self,

@@ -31,7 +31,6 @@ from mindroom.reply_presentation import (
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.turn_store import TurnStore
 from tests.conftest import (
     initialize_approval_store_for_test,
     patch_response_runner_module,
@@ -175,14 +174,13 @@ async def test_a_finished_approval_records_its_turn_answered(tmp_path: Path) -> 
     """Finishing the continuation settles the turn's sources through the reply path, which records the turn answered."""
     async with _approval_bot(tmp_path, requires_human=False) as bot:
         await _pending_turn(bot)
-        with patch.object(TurnStore, "terminal_turn_record", return_value=None):
-            await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
+        await _respond(bot, resume=AsyncMock(return_value=CompletedApprovalRun("Approved answer.", {})))
 
         assert await bot.journal_principal().approval_continuation_for_source("$event") is None
-        record = bot._turn_store.get_turn_record("$event")
+        record = await bot._turn_store.get_turn_record("$event")
         assert record is not None
         assert record.completed
-        assert bot._turn_store.is_handled("$event")
+        assert await bot._turn_store.is_handled(_target().room_id, "$event")
 
 
 async def test_a_pause_waiting_for_a_human_leaves_the_reply_paused(tmp_path: Path) -> None:

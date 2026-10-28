@@ -56,7 +56,6 @@ import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.approval.manager as approval_manager_module
 import mindroom.bot  # noqa: F401
 import mindroom.custom_tools.todo as todo_tool_module
-import mindroom.handled_turns as handled_turns_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -93,6 +92,7 @@ from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
     EventKind,
+    FinalAnswerEnqueue,
     InboundEvent,
     JournalEvent,
     MatrixDelivery,
@@ -104,13 +104,13 @@ from mindroom.event_journal import (
     RelationView,
     TerminalTurnWrite,
     VisibleMessage,
+    turn_rows,
 )
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -173,7 +173,6 @@ from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
-from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnClaim, TurnStore, _ClaimRegistry, _reset_turn_claim_registries
 from mindroom.usage.storage import quote_identifier
 from mindroom.user_stop_reconciliation import UserStopReconciler
@@ -1670,7 +1669,6 @@ class FakeOutbox:
         result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, leaving an already-attempted row's payload alone.
@@ -1686,14 +1684,7 @@ class FakeOutbox:
         to go out under the frozen transaction rather than strand whatever it
         may already have made visible.
 
-        The handed-over sources are kept rather than dropped, because they are
-        a durable effect of this call in production and a double that swallowed
-        them would let a lost handoff pass unnoticed. There is no journal here
-        to settle them in; whether the settlement really shares this
-        transaction is pinned against the real backends.
         """
-        if settle_source_event_ids:
-            self.handed_over.append(settle_source_event_ids)
         membership_epoch = await self.membership_epoch(room_id)
         existing_owner = next(
             (
@@ -1839,6 +1830,43 @@ class FakeOutbox:
         self.rows[key] = replace(row, retired=True)
         return None
 
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and hand over its delivery's own source.
+
+        There is no turn store here to bind, so only the delivery id is handed
+        over and kept, because the handoff is a durable effect of this call in
+        production and a double that swallowed it would let a lost handoff pass
+        unnoticed; what a bound turn settles is pinned against the real backends.
+        """
+        del turn_key
+        transaction_id = await self.enqueue_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.FINAL,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+        if transaction_id is None:
+            return None
+        self.handed_over.append((delivery_id,))
+        return FinalAnswerEnqueue(transaction_id=transaction_id, settled_event_ids=(delivery_id,))
+
     async def acknowledge_matrix_delivery(
         self,
         *,
@@ -1868,7 +1896,7 @@ class FakeOutbox:
         )
         self.acknowledged_terminal_turns.append((delivery_id, terminal_turn))
         self.acknowledged_projections.append(delivered_projections)
-        return DeliveryAcknowledgement(settled_event_id=event_id, terminal_turn=terminal_turn)
+        return DeliveryAcknowledgement(settled_event_id=event_id)
 
     async def unacknowledged_matrix_deliveries(
         self,
@@ -1978,7 +2006,6 @@ class DiesAfterAcknowledgement:
         result: Mapping[str, object] | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record delivery intent."""
@@ -1991,7 +2018,32 @@ class DiesAfterAcknowledgement:
             result=result,
             event_type=event_type,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and its handoff."""
+        return await self.inner.enqueue_final_answer(
+            delivery_id=delivery_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            turn_key=turn_key,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
             permanent_failure_reason=permanent_failure_reason,
         )
 
@@ -2100,10 +2152,7 @@ class DiesAfterAcknowledgement:
 # rather than a bare lambda so a reader can see that the handoff was
 # deliberately stubbed here, not forgotten. Tests that care what the handoff
 # settles use a real journal store instead.
-ignore_final_delivery_handoff = TurnHandoff(
-    sources_for_turn=lambda _turn_id: (),
-    released=lambda _event_ids: None,
-)
+ignore_final_delivery_handoff = TurnHandoff(released=lambda _event_ids: None)
 
 
 async def ignore_delivered_projection(
@@ -3050,9 +3099,7 @@ async def record_turn_answered(bot: RuntimeBot, request: ResponseRequest) -> Non
     """Settle a faked response's sources and record its turn answered, as a real reply's records do."""
     await bot._journal_dispatcher.store.settle_many(request.sources.pending_event_ids)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    record = turn_store.get_turn_record(request.sources.logical_source_event_ids[0])
-    if record is not None:
-        await turn_store.publish_completed_turn(canonicalize_turn_record(record, completed=True))
+    await turn_store.deps.turn_records.write(turn_rows.complete_turn_of, request.sources.logical_source_event_ids)
 
 
 def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock) -> None:
@@ -3593,54 +3640,11 @@ def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, 
     _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
 
 
-_LEDGER_LOADING_TEST_MODULES = frozenset(
-    {
-        "test_handled_turns.py",
-        "test_turn_store.py",
-        "test_user_stop_convergence.py",
-    },
-)
-
-
 @pytest.fixture(autouse=True)
-def _reset_handled_turn_ledger_state(
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> Generator[None, None, None]:
-    """Give every test a cold handled-turn map, pre-warmed where startup is skipped.
-
-    The map is process-global and ``load`` fills it once per process. Left over
-    from a previous test it would satisfy that check, so a ledger opened onto a
-    fresh database would answer from the previous test's records and never read
-    its own.
-
-    Production warms the ledger during startup and every read refuses until it
-    has. Most tests build a bot and drive its callbacks directly without ever
-    reaching startup, and their database is empty, so starting the map loaded
-    is exactly the state warming it would produce.
-
-    A test whose database is *not* empty must opt out, with the
-    ``ledger_loads_from_disk`` marker or by living in one of the modules
-    below, and warm for real -- pre-warming would leave it answering from an
-    empty map while the rows it cares about sit unread.
-    """
-    _reset_handled_turn_ledger_runtime()
+def _reset_turn_claims() -> Generator[None, None, None]:
+    """Give every test an empty claim registry: it is process-global, shared by every turn store of an agent."""
     _reset_turn_claim_registries()
-    loads_from_disk = (
-        request.node.path.name in _LEDGER_LOADING_TEST_MODULES
-        or request.node.get_closest_marker("ledger_loads_from_disk") is not None
-    )
-    if not loads_from_disk:
-        shared_ledger_state = handled_turns_module._shared_ledger_state
-
-        def pre_warmed_ledger_state(*state_key: str) -> handled_turns_module._LedgerState:
-            state = shared_ledger_state(*state_key)
-            state.loaded = True
-            return state
-
-        monkeypatch.setattr(handled_turns_module, "_shared_ledger_state", pre_warmed_ledger_state)
     yield
-    _reset_handled_turn_ledger_runtime()
     _reset_turn_claim_registries()
 
 

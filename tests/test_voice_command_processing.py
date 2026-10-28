@@ -30,7 +30,6 @@ from mindroom.constants import (
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.inbound_turn_normalizer import _VoiceNormalizationResult
 from mindroom.llm.media import Audio
@@ -38,6 +37,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.turn_policy import _DispatchPlan
+from mindroom.turn_record import TurnRecord
 from mindroom.voice.handler import prepare_voice_message
 from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
 from tests.access_schema_support import with_current_room_member_access
@@ -211,7 +211,7 @@ async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_pa
         rooms=["!test:localhost"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
 
@@ -264,7 +264,7 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
 
@@ -315,7 +315,7 @@ async def test_router_processes_own_sidecar_relay_commands_using_original_sender
         rooms=["!test:localhost"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -394,7 +394,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -479,7 +479,7 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
@@ -546,7 +546,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -584,9 +584,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 
     bot.client.download.assert_not_awaited()
     mock_schedule.assert_not_awaited()
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create([event.event_id]),
-    )
+    turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)
 
 
 @pytest.mark.asyncio
@@ -752,7 +750,7 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -808,7 +806,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_pending_turn = AsyncMock(wraps=turn_store.record_pending_turn)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
@@ -860,7 +858,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     assert turn_store.record_pending_turn.call_args.args[0] == expected_record
     # The reply's records record the turn answered; nothing else writes it terminal.
     turn_store.record_turn.assert_not_called()
-    persisted_record = turn_store.get_turn_record("$voice_event")
+    persisted_record = await turn_store.get_turn_record("$voice_event")
     assert persisted_record is not None
     assert persisted_record.completed is True
 
@@ -888,7 +886,7 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
@@ -944,7 +942,7 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
             rooms=["!test:example.com"],
         )
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = MagicMock(return_value=False)
+        turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
         replace_turn_controller_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
@@ -1202,7 +1200,7 @@ async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) ->
         mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
         await bot._turn_controller.handle_media_event(room, event)
         await drain_coalescing(bot)
-        assert not bot._turn_store.is_handled(event.event_id)
+        assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
 
         bot._delivery_gateway.edit_text.return_value = True
         await bot._turn_controller.handle_media_event(room, event)
@@ -1210,8 +1208,8 @@ async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) ->
 
     bot._delivery_gateway.send_text.assert_awaited_once()
     assert bot._delivery_gateway.edit_text.await_count == 2
-    assert bot._turn_store.is_handled(event.event_id)
-    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert await bot._turn_store.is_handled(room.room_id, event.event_id)
+    assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1224,7 +1222,7 @@ async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_p
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    await bot._turn_store.record_visible_echo(room.room_id, event.event_id, "$voice_echo")
     await bot._turn_store.record_finalized_visible_echo(
         event.event_id,
         "$voice_echo",
@@ -1271,7 +1269,7 @@ async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_
         reply_to_event_id=event.event_id,
         event_source=event.source,
     )
-    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
+    await bot._turn_store.record_visible_echo(room.room_id, event.event_id, "$voice_echo")
     await bot._turn_store.record_finalized_visible_echo(
         event.event_id,
         "$voice_echo",
@@ -1375,7 +1373,7 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
         f"{VOICE_PREFIX}[Attached voice message]",
         f"{VOICE_PREFIX}summarize this audio",
     ]
-    finalized = bot._turn_store.finalized_visible_echo(event.event_id)
+    finalized = await bot._turn_store.finalized_visible_echo(event.event_id)
     assert finalized is not None
     assert finalized.is_fallback is False
 
@@ -1539,8 +1537,8 @@ async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path)
     bot._delivery_gateway.edit_text.assert_awaited_once()
     assert mock_download_audio.await_count == 1
     assert mock_voice.await_count == 1
-    assert bot._turn_store.is_handled(event.event_id)
-    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert await bot._turn_store.is_handled(room.room_id, event.event_id)
+    turn_record = await bot._turn_store.get_turn_record(event.event_id)
     assert turn_record is not None
     assert turn_record.response_event_id == "$voice_echo"
 
@@ -1563,8 +1561,8 @@ async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) ->
     bot._delivery_gateway.send_text.assert_not_called()
     mock_download_audio.assert_not_awaited()
     mock_voice.assert_not_awaited()
-    assert bot._turn_store.is_handled(event.event_id)
-    turn_record = bot._turn_store.get_turn_record(event.event_id)
+    assert await bot._turn_store.is_handled(room.room_id, event.event_id)
+    turn_record = await bot._turn_store.get_turn_record(event.event_id)
     assert turn_record is not None
     assert turn_record.response_event_id is None
 
@@ -1615,7 +1613,7 @@ async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> 
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
     }
-    finalized_echo = bot._turn_store.finalized_visible_echo(event.event_id)
+    finalized_echo = await bot._turn_store.finalized_visible_echo(event.event_id)
     assert finalized_echo is not None
     assert finalized_echo.event_id == "$voice_echo"
     assert finalized_echo.is_fallback is False
@@ -1676,8 +1674,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-        assert not bot._turn_store.is_handled(event.event_id)
-        assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+        assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
+        assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
@@ -1689,12 +1687,11 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(
         "@home could you help with this?",
     ]
     bot._delivery_gateway.edit_text.assert_awaited_once()
-    assert bot._turn_store.is_handled(event.event_id)
-    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert await bot._turn_store.is_handled(room.room_id, event.event_id)
+    assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_after_restart(
     tmp_path: Path,
 ) -> None:
@@ -1721,8 +1718,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-    assert not bot._turn_store.is_handled(event.event_id)
-    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert not await bot._turn_store.is_handled(room.room_id, event.event_id)
+    assert await bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
     restarted_bot, restarted_room, restarted_event = _make_visible_router_echo_scenario(
         tmp_path,
@@ -1751,8 +1748,8 @@ async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_
 
     response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
     assert response_texts == ["@home could you help with this?"]
-    assert restarted_bot._turn_store.is_handled(event.event_id)
-    assert restarted_bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
+    assert await restarted_bot._turn_store.is_handled(room.room_id, event.event_id)
+    assert await restarted_bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1784,8 +1781,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
+    turn_store.is_handled = AsyncMock(return_value=False)
+    turn_store.record_responded_turn = AsyncMock(wraps=turn_store.record_responded_turn)
     bot.logger = MagicMock()
     replace_turn_controller_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
@@ -1824,8 +1821,8 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
     }
-    turn_store.record_turn.assert_called_once()
-    record = turn_store.get_turn_record("$voice_event")
+    turn_store.record_responded_turn.assert_called_once()
+    record = await turn_store.get_turn_record("$voice_event")
     assert record is not None
     assert record.completed is True
     assert record.response_event_id == "$response"
@@ -1873,7 +1870,7 @@ async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absen
             rooms=["!test:example.com"],
         )
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = MagicMock(return_value=False)
+        turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
         replace_turn_controller_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
@@ -1950,7 +1947,7 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
             rooms=["!test:example.com"],
         )
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = MagicMock(return_value=False)
+        turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
         replace_turn_controller_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()

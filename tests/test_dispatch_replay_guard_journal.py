@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
@@ -156,7 +157,7 @@ async def _guard(
         may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
         pending_turns=pending_turns,  # type: ignore[arg-type]
         classify=lambda sender, source: _classify(sender, source, requester_for=requester_for),
-        is_handled=lambda event_id: event_id in handled_event_ids,
+        is_handled=AsyncMock(side_effect=lambda event_ids: frozenset(event_ids) & frozenset(handled_event_ids)),
         logger=structlog.get_logger("test"),
         # ``Any`` only to satisfy the structlog stub's bound-logger type.
     )  # type: ignore[no-any-return]
@@ -195,13 +196,13 @@ async def test_history_and_journal_share_requester_turn_eligibility(
         thread_id=THREAD,
         latest_event_id=NEWER,
     )
-    from_history = has_newer_unresponded_in_thread(
+    from_history = await has_newer_unresponded_in_thread(
         _older_turn(),
         ALICE,
         [visible],
         may_be_superseded_by_newer_requester_turn=True,
         classify=_classify,
-        is_handled=lambda _event_id: handled,
+        is_handled=AsyncMock(side_effect=lambda event_ids: frozenset(event_ids) if handled else frozenset()),
         logger=structlog.get_logger("test"),
     )
     from_journal = await _guard(

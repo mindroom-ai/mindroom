@@ -18,7 +18,6 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.event_info import EventInfo
@@ -52,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.response_runner import ResponseRequest
 
-pytestmark = [pytest.mark.ledger_loads_from_disk, pytest.mark.usefixtures("enforce_turn_authorization")]
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
 def _dispatcher(
@@ -159,7 +158,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     await asyncio.gather(*harness.regenerations, return_exceptions=True)
 
     assert await principal.is_pending(EDIT_EVENT_ID)
-    interrupted = store.get_turn_record(ORIGINAL_EVENT_ID)
+    interrupted = await store.get_turn_record(ORIGINAL_EVENT_ID)
     assert interrupted is not None
     # The turn took the edit when its regeneration claimed the reply.
     assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
@@ -173,9 +172,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     recovered = _dispatcher(principal, callback, source_has_live_owner=regenerating)
     assert await recovered.drain_once() == 1
     await asyncio.gather(*harness.regenerations)
-    _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name=AGENT_NAME)
-    recovered_record = reopened.get_turn_record(ORIGINAL_EVENT_ID)
+    recovered_record = await reopened.get_turn_record(ORIGINAL_EVENT_ID)
     assert recovered_record is not None
     assert recovered_record.completed
     assert recovered_record.response_event_id == NEW_RESPONSE_EVENT_ID

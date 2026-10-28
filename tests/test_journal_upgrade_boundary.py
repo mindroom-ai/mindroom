@@ -24,6 +24,7 @@ from mindroom.event_journal import (
     IngestionRecordDisposition,
     postgres_backend,
     sqlite_backend,
+    turn_rows,
 )
 from tests.conftest import postgres_journal_schema_url
 from tests.test_event_journal_store import admit, message
@@ -124,7 +125,8 @@ async def test_released_journal_upgrades_and_preserves_new_work(legacy_database:
         history = await store.backend.read(lambda tx: tx.fetchone("SELECT content_json FROM visible_messages"))
         assert history is not None
         assert "Old request" in history["content_json"]
-        assert await store.backend.read(lambda tx: tx.fetchone("SELECT record_json FROM turn_records")) is not None
+        # The released turn record survives as the turn rows that prove its source answered.
+        assert await store.turn_records("bot").read(turn_rows.is_answered, "$completed")
         consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
         stream = uuid4()
         await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)

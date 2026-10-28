@@ -227,7 +227,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
-    from mindroom.turn_store import TurnClaim
+    from mindroom.turn_store import SourcePreparation, TurnClaim
 
     from .response_admission import ResponseAdmissionGate
 
@@ -653,12 +653,18 @@ class ResponseRequest:
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
-    prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, bool]] | None = None
+    # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
+    prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
+        None
+    )
     # Runs once the turn claimed its reply, before the response is prepared: an edit prunes the history it
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
     # Settles the turn's sources when they became terminal before any reply existed to settle them.
     on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
+    # When only some sources became terminal before any reply existed: settles those and hands the
+    # rest back to the journal, to answer as their own turn once this request lets them go.
+    on_sources_invalidated: Callable[[SourcePreparation], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
     # Records and settles a turn that ended before any reply span existed to settle it.
     on_no_response_handled: Callable[[], Awaitable[None]] | None = None
@@ -4010,43 +4016,53 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
     ) -> ResponseRequest | None:
-        """Apply the owner gate to this exact request history, before and after refresh."""
+        """Apply the owner gate to this exact request history, before and after refresh.
+
+        A source deleted or answered elsewhere while the request waited ends it.
+        When others survive and no reply exists yet, only the terminal ones
+        settle and the rest answer as their own turn; once a reply exists, its
+        sources stay together and the whole request ends.
+        """
         preparation = (
             await run_coroutine_until_complete(request.prepare_source_turn(request.thread_history))
             if request.prepare_source_turn is not None
-            else False
+            else None
         )
+        if preparation is None or not preparation.invalid:
+            return request
         handle = current_span()
-        if preparation:
-            self.deps.logger.info(
-                "response_suppressed_for_terminal_source",
-                source_event_id=request.response_envelope.source_event_id,
+        self.deps.logger.info(
+            "response_suppressed_for_terminal_source",
+            source_event_id=request.response_envelope.source_event_id,
+            surviving_source_count=len(preparation.surviving),
+        )
+        source_deleted = await self._sources_deleted(request, resolved_target)
+        if handle is not None and not handle.exited:
+            await self.deps.delivery_gateway.end_reply_span(
+                handle,
+                terminal_source_decision(source_deleted=source_deleted),
             )
-            source_deleted = await self._sources_deleted(request, resolved_target)
-            if handle is not None and not handle.exited:
-                await self.deps.delivery_gateway.end_reply_span(
-                    handle,
-                    terminal_source_decision(source_deleted=source_deleted),
-                )
-            elif (
-                # Before the claim, the reply an earlier attempt left ends through its records.
-                not await self.deps.delivery_gateway.settle_unclaimed_reply(
-                    (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
-                    source_deleted=source_deleted,
-                )
-                and request.on_source_turn_suppressed is not None
-            ):
-                # No reply exists to settle them.
+        elif not await self.deps.delivery_gateway.settle_unclaimed_reply(
+            # Before the claim, the reply an earlier attempt left ends through its records.
+            (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
+            source_deleted=source_deleted,
+        ):
+            # No reply exists to settle them.
+            if preparation.surviving and request.on_sources_invalidated is not None:
+                await request.on_sources_invalidated(preparation)
+            elif request.on_source_turn_suppressed is not None:
                 await request.on_source_turn_suppressed()
-            return None
-        return request
+        return None
 
     async def _sources_deleted(self, request: ResponseRequest, target: MessageTarget) -> bool:
-        """Return whether deletion made the request's sources terminal: all of them, or the edit driving it."""
+        """Return whether deletion made the request's sources terminal: all of them, or the edit driving it.
+
+        A source answering for a relayed message is deleted with that message.
+        """
         driving = request.response_envelope.source_event_id
         logical = request.sources.logical_source_event_ids
-        redacted = await self.deps.replies.store.redacted_event_ids(target.room_id, (driving, *logical))
-        return redacted.issuperset(logical) or (driving not in logical and driving in redacted)
+        deleted = await self.deps.replies.store.deleted_event_ids(target.room_id, (driving, *logical))
+        return deleted.issuperset(logical) or (driving not in logical and driving in deleted)
 
     async def _prepare_admitted_locked_turn(
         self,

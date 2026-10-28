@@ -26,8 +26,8 @@ from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.desktop.identity import DesktopIdentityError, controller_identity_for_live_bot
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
 from mindroom.event_journal.matrix_delivery import TurnHandoff
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
@@ -46,7 +46,6 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.hooks.ingress import IngressHookRunner
-from mindroom.legacy_handled_turns import legacy_responses_file_path
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
@@ -56,7 +55,6 @@ from mindroom.matrix.health import (
     mark_matrix_sync_loop_started,
     mark_matrix_sync_success,
 )
-from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -85,6 +83,7 @@ from mindroom.teams.formation import TeamOutcome, resolve_configured_team
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+from mindroom.turn_record import TurnRecord
 
 from . import constants
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -661,7 +660,6 @@ class AgentBot:
             generation=self._approval_runtime_generation,
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
-            complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
             hold_conversation=lambda continuation: self._response_runner.hold_for_approval(continuation),
             approval_ended=lambda ended: self._approval_ended(ended),
         )
@@ -678,8 +676,6 @@ class AgentBot:
                 ),
                 outbox=principal,
                 turn_handoff=TurnHandoff(
-                    # Resolved late: the turn store is built after the gateway.
-                    sources_for_turn=lambda turn_id: self._turn_store.delivered_source_ids(turn_id),
                     # Resolved late: the dispatcher is built after the gateway.
                     released=lambda event_ids: self._journal_dispatcher.release_delivered_turn_sources(event_ids),
                 ),
@@ -687,12 +683,6 @@ class AgentBot:
                 # before the bot has logged in, and a re-login replaces the
                 # device that the frozen transaction IDs belong to.
                 sending_device_id=lambda: self._sending_device_id,
-                # Deferred for the same reason as the device: the turn store is
-                # built after this gateway. Consulted only once a FINAL send has
-                # produced an event ID, so the acknowledgement can carry the
-                # record that needs to know it.
-                terminal_turn_for=lambda turn_id, event_id: self._turn_store.terminal_turn_record(turn_id, event_id),
-                terminal_turn_committed=lambda record: self._turn_store.publish_completed_turn(record),
                 reply_effects=self._reply_runtime.run_effects,
                 reply_row_resolved=self._reply_row_resolved,
             ),
@@ -712,17 +702,11 @@ class AgentBot:
             TurnStoreDeps(
                 agent_name=self.agent_name,
                 turn_records=self._journal_store.turn_records(self.agent_name),
-                redacted_event_ids=principal.redacted_event_ids,
-                relations=principal,
                 legacy_responses_file=legacy_responses_file_path(self.storage_path, self.agent_name),
                 state_writer=self._conversation_state_writer,
                 resolver=self._conversation_resolver,
                 tool_runtime=self._tool_runtime_support,
-                response_recovery_state=partial(
-                    principal.response_recovery_state,
-                    agent_name=self.agent_name,
-                    redaction_target=replayable_redaction_target,
-                ),
+                response_recovery_state=partial(principal.response_recovery_state, agent_name=self.agent_name),
                 # Resolved late: the dispatcher is built after the turn store.
                 retry_dispatch_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(
                     room_id,
@@ -2558,7 +2542,7 @@ class AgentBot:
             )
             if approval_reply_claimed or approval_reply_handled:
                 # Its card answers it, so a message that waited for the approval is not skipped as older than it.
-                await self._turn_store.record_turn(TurnRecord.create([event.event_id]))
+                await self._turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
             return await self._turn_controller.handle_text_event(
                 room,
@@ -2570,17 +2554,16 @@ class AgentBot:
             if early_ticket is not None:
                 early_ticket.close()
 
-    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:
-        """Tombstone the redacted source so no replay reruns the turn it started.
+    async def _on_redaction(self, room: nio.MatrixRoom, event: nio.Event) -> None:  # noqa: ARG002
+        """Run what the redaction's admission left for the bot.
 
-        The projection learns about the redaction through journal admission and
-        ends the replies that lost every source with it, so this owes only the
-        durable tombstone and those replies' effects: their running spans stop
-        and what they showed is redacted. Raising leaves the callback
+        Admission recorded the redaction for the agent, removed its text, and
+        ended the replies that lost every source with it, all in one
+        transaction, so this owes only those replies' effects: their running
+        spans stop and what they showed is redacted. Raising leaves the callback
         unaccepted and the source available for sync to redeliver.
         """
         assert isinstance(event, nio.RedactionEvent)
-        await self._turn_store.mark_source_redacted(event.redacts, room_id=room.room_id)
         self._replies_ended(await self._reply_runtime.deletions_ended())
 
     async def _on_reaction(self, room: nio.MatrixRoom, event: nio.ReactionEvent) -> TurnDispatchOutcome:

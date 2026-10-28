@@ -10,12 +10,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.handled_turns import TurnRecord
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
 from tests.journal_membership_helpers import admit_room_membership
-from tests.test_turn_store import _store
+from tests.test_turn_store import _in_room, _store
 
 if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore
@@ -48,7 +48,7 @@ async def test_departure_during_generation_allows_orderly_shutdown(
     sources = ("$first", "$second")
     for source_id in sources:
         await principal.admit(_source(source_id))
-    turn = TurnRecord.create(sources)
+    turn = _in_room(TurnRecord.create(sources), ROOM)
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
     runner = ResponseRunner(deps=MagicMock())
@@ -96,7 +96,7 @@ async def test_departure_proof_rejects_unexplained_or_inexact_sources(
     principal = journal_store.principal("agent@alice")
     await admit_room_membership(principal, ROOM, "join")
     await principal.admit(_source("$source"))
-    turn = TurnRecord.create(["$source"])
+    turn = _in_room(TurnRecord.create(["$source"]), ROOM)
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
     await principal.settle("$source")

@@ -6,6 +6,7 @@ import asyncio
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
@@ -58,7 +59,6 @@ from mindroom.dispatch_source import (
     source_kind_bypasses_coalescing,
 )
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
@@ -111,7 +111,7 @@ from mindroom.timing import (
 )
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from mindroom.voice.readiness import VoiceReadiness
 
 if TYPE_CHECKING:
@@ -136,7 +136,7 @@ if TYPE_CHECKING:
     from mindroom.response_runner import ResponseRunner
     from mindroom.teams.spec import TeamMode
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
-    from mindroom.turn_store import TurnStore
+    from mindroom.turn_store import SourcePreparation, TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
     from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
@@ -345,8 +345,9 @@ class TurnController:
                 return None
         return _PrecheckedEvent(event=event, facts=facts)
 
-    def _has_newer_unresponded_in_thread(
+    async def _has_newer_unresponded_in_thread(
         self,
+        room_id: str,
         event: PreparedIngress,
         requester_user_id: str,
         thread_history: Sequence[ResolvedVisibleMessage],
@@ -354,13 +355,13 @@ class TurnController:
         may_be_superseded_by_newer_requester_turn: bool,
     ) -> bool:
         """Return True when a newer unresponded message from the same requester exists."""
-        return has_newer_unresponded_in_thread(
+        return await has_newer_unresponded_in_thread(
             event,
             requester_user_id,
             thread_history,
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             classify=self.deps.ingress.classify_source,
-            is_handled=self.deps.turn_store.is_handled,
+            is_handled=partial(self.deps.turn_store.handled_among, room_id),
             logger=self.deps.logger,
         )
 
@@ -382,7 +383,7 @@ class TurnController:
             may_be_superseded_by_newer_requester_turn=may_be_superseded_by_newer_requester_turn,
             pending_turns=self.deps.pending_turns,
             classify=self.deps.ingress.classify_source,
-            is_handled=self.deps.turn_store.is_handled,
+            is_handled=partial(self.deps.turn_store.handled_among, room_id),
             logger=self.deps.logger,
         )
 
@@ -1025,7 +1026,7 @@ class TurnController:
             event=event,
             payload_metadata=payload_metadata,
         )
-        if am_i_mentioned or not handled_turn.replay_sources_all_from_requester(requester_user_id):
+        if am_i_mentioned or not handled_turn.sources_all_from_requester(requester_user_id):
             return False
         coalescing_key = ingress_metadata.coalescing_key if ingress_metadata is not None else None
         target = self.deps.resolver.build_message_target(
@@ -1230,7 +1231,7 @@ class TurnController:
         if (
             blocks_unmentioned_managed_sender
             and not context.am_i_mentioned
-            and handled_turn.replay_sources_all_from_requester(requester_user_id)
+            and handled_turn.sources_all_from_requester(requester_user_id)
         ):
             self.deps.logger.debug(
                 "ignore_unmentioned_agent_event",
@@ -1500,7 +1501,7 @@ class TurnController:
         response_target: MessageTarget,
     ) -> bool:
         """Execute one authorized selection while replacement admission remains reserved."""
-        if await self._interactive_selection_is_durably_terminal(source_event_id):
+        if await self._interactive_selection_is_durably_terminal(room.room_id, source_event_id):
             return False
         thread_history = (
             await self.deps.resolver.fetch_thread_history(
@@ -1522,11 +1523,8 @@ class TurnController:
             conversation_target=response_target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(selection_handled_turn)
-        if pending_turn is None:
-            await self._require_durable_interactive_selection(source_event_id)
-            return False
-        if pending_turn.completed or pending_turn.redacted_source_event_ids:
-            await self._require_durable_interactive_selection(source_event_id)
+        if pending_turn is None or await self.deps.turn_store.deleted_sources(pending_turn):
+            await self._require_durable_interactive_selection(room.room_id, source_event_id)
             return False
         selection_handled_turn = pending_turn
         # This acknowledgement is the placeholder the selection's answer then
@@ -1572,7 +1570,7 @@ class TurnController:
                 existing_event_id=ack_event_id,
             )
             if response_event_id is not None:
-                await self._require_durable_interactive_selection(source_event_id)
+                await self._require_durable_interactive_selection(room.room_id, source_event_id)
                 return False
             raise self._interactive_selection_retry_error(source_event_id) from error
         selection_attachment_ids = tuple(selection_payload.attachment_ids or ())
@@ -1617,24 +1615,23 @@ class TurnController:
         )
         if source_handoff.is_set():
             return True
-        await self._require_durable_interactive_selection(source_event_id)
+        await self._require_durable_interactive_selection(room.room_id, source_event_id)
         return False
 
-    async def _interactive_selection_is_durably_terminal(
-        self,
-        source_event_id: str,
-    ) -> bool:
-        """Return whether the exact selection source is durably terminal."""
-        return self.deps.turn_store.is_handled(
+    async def _interactive_selection_is_durably_terminal(self, room_id: str, source_event_id: str) -> bool:
+        """Return whether the exact selection source is durably terminal.
+
+        Two facts on purpose: the turn's rows are the agent's, the journal row
+        this login's, and either can say yes without the other.
+        """
+        return await self.deps.turn_store.is_handled(
+            room_id,
             source_event_id,
         ) or await self.deps.dispatch_source_is_terminal(source_event_id)
 
-    async def _require_durable_interactive_selection(
-        self,
-        source_event_id: str,
-    ) -> None:
+    async def _require_durable_interactive_selection(self, room_id: str, source_event_id: str) -> None:
         """Fail retryably until one selection source reaches durable terminal truth."""
-        if await self._interactive_selection_is_durably_terminal(source_event_id):
+        if await self._interactive_selection_is_durably_terminal(room_id, source_event_id):
             return
         raise self._interactive_selection_retry_error(source_event_id)
 
@@ -1672,19 +1669,23 @@ class TurnController:
             scheduled_prompt=scheduled_prompt,
         )
 
-    def _router_handled_turn_outcome(
+    async def _router_handled_turn_outcome(
         self,
+        room_id: str,
         handled_turn: TurnRecord,
     ) -> TurnRecord | None:
-        """Return the terminal handled-turn outcome for one ignored router turn."""
-        visible_router_echo_event_id = self.deps.turn_store.finalized_visible_echo_for_sources(
-            handled_turn.source_event_ids,
-        )
-        if visible_router_echo_event_id is None:
+        """Return the turn an ignored router turn records answered: by the visible echo it published, if any.
+
+        The router takes its echo as its answer here deliberately; publishing an
+        echo never records one by itself.
+        """
+        echoes = await self.deps.turn_store.finalized_visible_echoes(handled_turn.source_event_ids)
+        if not echoes:
             return None
-        if all(self.deps.turn_store.is_handled(source_event_id) for source_event_id in handled_turn.source_event_ids):
+        handled = await self.deps.turn_store.handled_among(room_id, handled_turn.source_event_ids)
+        if handled.issuperset(handled_turn.source_event_ids):
             return None
-        return canonicalize_turn_record(handled_turn, response_event_id=visible_router_echo_event_id)
+        return canonicalize_turn_record(handled_turn, response_event_id=echoes[0])
 
     async def _finalize_dispatch_failure(
         self,
@@ -1721,6 +1722,7 @@ class TurnController:
         if response_event_id is not None:
             await self.deps.turn_store.record_responded_turn(
                 canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
+                room_id=target.room_id,
             )
         return response_event_id
 
@@ -1826,6 +1828,11 @@ class TurnController:
             async def settle_redacted_sources() -> None:
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
 
+            async def answer_surviving_sources(preparation: SourcePreparation) -> None:
+                # The rest answer as their own turn once the response task lets their claim go.
+                await self.deps.settle_dispatch_sources(preparation.invalid)
+                self.deps.turn_store.retry_when_claim_releases(dispatch.target.room_id, preparation.surviving)
+
             async def record_no_response() -> None:
                 await self.deps.turn_store.record_turn(handled_turn)
                 await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
@@ -1863,6 +1870,7 @@ class TurnController:
                         thread_history=history,
                     ),
                     on_source_turn_suppressed=settle_redacted_sources,
+                    on_sources_invalidated=answer_surviving_sources,
                     on_no_response_handled=record_no_response,
                 )
                 # The reply's records settle the sources and record the turn answered.
@@ -2176,7 +2184,7 @@ class TurnController:
             visible_echo=self.deps.visible_voice_echo,
             logger=self.deps.logger,
         )
-        prepared = readiness.prepared_source(event.event_id)
+        prepared = await readiness.prepared_source(event.event_id)
         try:
             coalescing_thread_id = (
                 prepared.coalescing_thread_id

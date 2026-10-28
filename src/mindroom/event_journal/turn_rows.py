@@ -45,12 +45,11 @@ from mindroom.turn_record import (
     TurnRecord,
 )
 
-from . import journal
-
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Sequence
+    from typing import Concatenate
 
-    from .backend import Row, Transaction
+    from .backend import Backend, Row, Transaction
 
 # Bound the parameters of one IN list well below either backend's limit.
 _CHUNK = 500
@@ -359,7 +358,6 @@ def _assemble(rows: _Rows) -> TurnRecord:
             if turn.conversation_target_json is None
             else MessageTarget.from_metadata(json.loads(turn.conversation_target_json))
         ),
-        timestamp=turn.updated_at,
         turn_key=turn.turn_key,
         visible_echoes={
             source.event_id: SourceVisibleEcho(source.visible_echo_event_id, source.visible_echo_is_fallback)
@@ -427,6 +425,53 @@ def deleted_sources(transaction: Transaction, agent_name: str, turn_key: str) ->
     if rows is None:
         return frozenset()
     return _deleted_among(transaction, agent_name, rows.turn.room_id, rows.sources)
+
+
+def deleted_events(
+    transaction: Transaction,
+    agent_name: str,
+    room_id: str,
+    event_ids: Iterable[str],
+) -> frozenset[str]:
+    """Return which of these events are deleted in ``room_id``: redacted, or a source whose discovery alias is.
+
+    A reply names its logical sources, and deleting the human message a router
+    relayed deletes the relay that answers for it, as deleting a directly sent
+    message does.
+    """
+    ids = tuple(dict.fromkeys(event_ids))
+    redacted = redacted_events(transaction, agent_name, room_id, ids)
+    aliased = {
+        str(row["event_id"]): (str(row["discovery_event_id"]), str(row["turn_key"]))
+        for row in _fetch_in(
+            transaction,
+            "SELECT s.event_id AS event_id, s.discovery_event_id AS discovery_event_id, s.turn_key AS turn_key "
+            "FROM turn_sources s JOIN turns t ON t.agent_name = s.agent_name AND t.turn_key = s.turn_key "
+            "WHERE s.agent_name = ? AND t.room_id = ? AND s.discovery_event_id IS NOT NULL AND s.event_id IN ({in})",
+            (agent_name, room_id),
+            (event_id for event_id in ids if event_id not in redacted),
+        )
+    }
+    aliases = {alias for alias, _turn_key in aliased.values()}
+    redacted_aliases = redacted_events(transaction, agent_name, room_id, aliases)
+    physical = _physical_owners(transaction, agent_name, redacted_aliases)
+    return redacted | {
+        event_id
+        for event_id, (alias, turn_key) in aliased.items()
+        if alias in redacted_aliases and physical.get(alias) != turn_key
+    }
+
+
+def sources_deleted_by(transaction: Transaction, agent_name: str, room_id: str, event_id: str) -> tuple[str, ...]:
+    """Return the sources in ``room_id`` a redaction of ``event_id`` deletes through their discovery alias."""
+    owner = _physical_owners(transaction, agent_name, (event_id,)).get(event_id)
+    rows = transaction.fetchall(
+        "SELECT s.event_id AS event_id, s.turn_key AS turn_key FROM turn_sources s JOIN turns t "
+        "ON t.agent_name = s.agent_name AND t.turn_key = s.turn_key "
+        "WHERE s.agent_name = ? AND t.room_id = ? AND s.discovery_event_id = ? ORDER BY s.event_id/*bytes*/",
+        (agent_name, room_id, event_id),
+    )
+    return tuple(str(row["event_id"]) for row in rows if str(row["turn_key"]) != owner)
 
 
 # Turn reads.
@@ -1277,7 +1322,14 @@ def _apply_payload(
             source.prepared_voice_json = json.dumps(voice.to_record(), sort_keys=True)
 
 
-def insert_turn(transaction: Transaction, agent_name: str, record: TurnRecord, *, room_id: str | None) -> str:
+def insert_turn(
+    transaction: Transaction,
+    agent_name: str,
+    record: TurnRecord,
+    *,
+    room_id: str | None,
+    updated_at: float,
+) -> str:
     """Store one turn none of whose sources has a turn yet, as an upgrade converts a stored record; return its key.
 
     Attribution is exactly what the record's source map proves, and payload
@@ -1297,7 +1349,7 @@ def insert_turn(transaction: Transaction, agent_name: str, record: TurnRecord, *
         sources[-1],
         room_id,
         completed=record.completed,
-        updated_at=record.timestamp or time.time(),
+        updated_at=updated_at,
         response_event_id=record.response_event_id,
         response_owner=record.response_owner,
         requester_id=record.requester_id,
@@ -1501,19 +1553,6 @@ def complete_turn_of(
     return _record(transaction, agent_name, key)
 
 
-def settle_turn(
-    transaction: Transaction,
-    principal_id: str,
-    agent_name: str,
-    *,
-    pending: tuple[str, ...],
-    logical: tuple[str, ...],
-) -> TurnRecord | None:
-    """Settle the sources an AI reply answers and record their turn answered, in one transaction."""
-    journal.settle_many(transaction, principal_id, pending)
-    return complete_turn_of(transaction, agent_name, logical)
-
-
 # Redactions.
 
 
@@ -1571,6 +1610,45 @@ def scrub_redacted_event(transaction: Transaction, agent_name: str, *, room_id: 
         """,  # noqa: S608 - a fixed subquery
         (agent_name, agent_name, room_id, event_id),
     )
+
+
+# The runtime's view.
+
+
+@dataclass(frozen=True, slots=True)
+class TurnRecordStore:
+    """One agent's turn rows, each call one transaction on the journal's database.
+
+    Agent-scoped rather than principal-scoped: a turn answered stays answered
+    across a re-login, and a bot that lost that would answer every outstanding
+    message a second time.
+    """
+
+    backend: Backend
+    agent_name: str
+
+    @property
+    def state_key(self) -> str:
+        """Identify the database these rows live in, so in-process state is shared exactly per database."""
+        return f"{id(self.backend):x}"
+
+    async def read[**P, T](
+        self,
+        operation: Callable[Concatenate[Transaction, str, P], T],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
+        """Run one statement function of this module for this agent in a read snapshot."""
+        return await self.backend.read(lambda transaction: operation(transaction, self.agent_name, *args, **kwargs))
+
+    async def write[**P, T](
+        self,
+        operation: Callable[Concatenate[Transaction, str, P], T],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
+        """Run one statement function of this module for this agent on the writer, ordered after every queued write."""
+        return await self.backend.write(lambda transaction: operation(transaction, self.agent_name, *args, **kwargs))
 
 
 # Retention.
@@ -1708,10 +1786,12 @@ __all__ = [
     "ReshapeResult",
     "RetentionResult",
     "RevisionRegistration",
+    "TurnRecordStore",
     "agent_of_principal",
     "bind_final_delivery",
     "complete_bound_delivery",
     "complete_turn_of",
+    "deleted_events",
     "deleted_sources",
     "get_turn_record",
     "handled_among",
@@ -1734,7 +1814,7 @@ __all__ = [
     "redacted_events",
     "retain",
     "scrub_redacted_event",
-    "settle_turn",
+    "sources_deleted_by",
     "turn_for_response_event",
     "turns_for_session",
     "visible_echo",

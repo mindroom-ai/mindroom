@@ -78,10 +78,10 @@ class VoiceReadiness:
     visible_echo: VisibleVoiceEchoLifecycle
     logger: structlog.stdlib.BoundLogger
 
-    def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
+    async def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
         """Read the checkpoint before the controller resolves the conversation target."""
         try:
-            return self.turn_store.prepared_voice_for_source(source_event_id)
+            return await self.turn_store.prepared_voice_for_source(source_event_id)
         except Exception as exc:
             self.logger.exception("Prepared voice checkpoint read failed", event_id=source_event_id)
             raise IngressRetryError from exc
@@ -106,7 +106,7 @@ class VoiceReadiness:
             ),
         )
         try:
-            checkpoint = self.prepared_source(event.event_id)
+            checkpoint = await self.prepared_source(event.event_id)
             if checkpoint is not None:
                 prepared_event = PreparedIngress(
                     sender=event.sender,
@@ -125,6 +125,7 @@ class VoiceReadiness:
                 if dispatch_timing is not None:
                     dispatch_timing.mark("ingress_normalize_ready")
                 checkpoint = await self.turn_store.record_prepared_voice(
+                    room.room_id,
                     event.event_id,
                     PreparedVoiceSource.from_content(
                         prepared_event.body,

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 
+from . import turn_rows
 from .identity import encode_thread_id
 from .interactive_questions import record_projected_prompt
 from .membership_state import claim_membership_epoch
@@ -133,58 +134,9 @@ def is_tombstoned(
     room_id: str,
     event_id: str,
 ) -> bool:
-    """Return whether one event was already redacted."""
-    row = transaction.fetchone(
-        """
-        SELECT 1 AS present FROM redaction_tombstones
-        WHERE principal_id = ? AND room_id = ? AND redacted_event_id = ?
-        """,
-        (principal_id, room_id, event_id),
-    )
-    return row is not None
-
-
-def tombstoned_event_ids(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    event_ids: tuple[str, ...],
-) -> frozenset[str]:
-    """Find exact physical tombstones among one bounded batch of recorded context."""
-    if not event_ids:
-        return frozenset()
-    placeholders = ", ".join("?" for _ in event_ids)
-    rows = transaction.fetchall(
-        f"""
-        SELECT redacted_event_id FROM redaction_tombstones
-        WHERE principal_id = ? AND room_id = ? AND redacted_event_id IN ({placeholders})
-        """,  # noqa: S608 - generated placeholders, bound values
-        (principal_id, room_id, *event_ids),
-    )
-    return frozenset(str(row["redacted_event_id"]) for row in rows)
-
-
-def _record_tombstone(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-    redacted_event_id: str,
-) -> None:
-    """Remember a redaction before projecting it.
-
-    Recorded first so that an original or edit arriving later — a real ordering
-    on a server that backfills — cannot resurrect content the sender deleted.
-
-    The row is the whole fact. Every reader asks only whether one event is
-    tombstoned, so when the redaction was received is not part of the answer.
-    """
-    transaction.execute(
-        """
-        INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id)
-        VALUES (?, ?, ?)
-        ON CONFLICT (principal_id, room_id, redacted_event_id) DO NOTHING
-        """,
-        (principal_id, room_id, redacted_event_id),
+    """Return whether one event was redacted in ``room_id``, as any Matrix login of this principal's agent saw it."""
+    return bool(
+        turn_rows.redacted_events(transaction, turn_rows.agent_of_principal(principal_id), room_id, (event_id,)),
     )
 
 
@@ -196,11 +148,13 @@ def project(
     receipt_order: int,
     membership_epoch: int,
 ) -> str | None:
-    """Fold one event and report tombstone authority to admission.
+    """Fold one event and report redaction authority to admission.
 
-    A redaction returns its target ID.
-    A newly admitted event with a preexisting tombstone returns its own ID.
-    Every other projection returns ``None``.
+    A redaction returns its target ID and changes nothing here: the caller
+    records it once for the agent and applies it to every login of the agent
+    (``journal.redact_for_agent``), in this transaction. A newly admitted
+    event that was already redacted returns its own ID. Every other projection
+    returns ``None``.
     """
     if not event_belongs_to_membership(
         transaction,
@@ -214,12 +168,6 @@ def project(
     ):
         return None
     if event.redacts_event_id is not None:
-        _project_redaction(
-            transaction,
-            principal_id,
-            event,
-            receipt_order=receipt_order,
-        )
         return event.redacts_event_id
     if is_tombstoned(transaction, principal_id, event.room_id, event.event_id):
         return event.event_id
@@ -555,27 +503,6 @@ def _install_revision(
             room_id,
             logical_event_id,
         ),
-    )
-
-
-def _project_redaction(
-    transaction: Transaction,
-    principal_id: str,
-    event: ProjectedEvent,
-    *,
-    receipt_order: int,
-) -> None:
-    """Apply a redaction to whatever the target turns out to be."""
-    target = event.redacts_event_id
-    if target is None:
-        return
-    _record_tombstone(transaction, principal_id, event.room_id, target)
-    scrub_redacted_projection(
-        transaction,
-        principal_id,
-        room_id=event.room_id,
-        event_id=target,
-        receipt_order=receipt_order,
     )
 
 

@@ -25,11 +25,11 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.voice import handler as voice_handler
 from tests.bot_helpers import dispatch_reaction_durably
@@ -458,7 +458,7 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
     assert request.target.room_id == room.room_id
     assert "command" in request.response_text.lower()
     dispatch_mock.assert_not_awaited()
-    assert bot._turn_store.is_handled("$cmd")
+    assert await bot._turn_store.is_handled(room.room_id, "$cmd")
 
 
 @pytest.mark.asyncio
@@ -539,7 +539,7 @@ async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_
     send_text_mock.assert_not_awaited()
     dispatch_mock.assert_not_awaited()
     settle_ignored.assert_awaited_once_with(("$cmd",))
-    assert not bot._turn_store.is_handled("$cmd")
+    assert not await bot._turn_store.is_handled(room.room_id, "$cmd")
 
 
 @pytest.mark.asyncio
@@ -561,7 +561,7 @@ async def test_unresolvable_non_command_text_still_rejects_ingress(tmp_path: Pat
         await bot._turn_controller.handle_text_event(room, event)
 
     dispatch_mock.assert_not_awaited()
-    assert not bot._turn_store.is_handled("$m1")
+    assert not await bot._turn_store.is_handled(room.room_id, "$m1")
 
 
 def _unplaceable_event(event_id: str, msgtype: str, *, server_timestamp: int) -> nio.Event:
@@ -682,7 +682,7 @@ async def test_transient_relation_lookup_failure_keeps_the_event_pending(
         await dispatcher.drain_once()
 
     assert [pending.event_id for pending in await dispatcher.store.pending(room_id=room.room_id)] == ["$message"]
-    assert not bot._turn_store.is_handled("$message")
+    assert not await bot._turn_store.is_handled(room.room_id, "$message")
     dispatch_mock.assert_not_awaited()
 
 
@@ -1090,7 +1090,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         await _wait_for(lambda: "$b1" in generated)
         assert not release_first_response.is_set()
         assert bot._coalescing_gate.lanes.all_settled()
-        assert not bot._turn_store.is_handled("$e1")
+        assert not await bot._turn_store.is_handled(room.room_id, "$e1")
 
         release_first_response.set()
         await bot._coalescing_gate.drain_all()

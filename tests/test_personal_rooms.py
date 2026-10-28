@@ -26,7 +26,6 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KI
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.file_locks import async_exclusive_file_lock
-from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, send_message_result
 from mindroom.matrix.personal_room_store import (
@@ -51,6 +50,7 @@ from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import agent_state_root_path
+from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts

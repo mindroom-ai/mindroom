@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
-from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 
@@ -30,7 +30,6 @@ from mindroom.dispatch_source import (
 )
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -47,6 +46,7 @@ from mindroom.response_runner import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+from mindroom.turn_record import SourceEventMetadata, TurnRecord, canonicalize_turn_record
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -66,7 +66,7 @@ from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.coalescing.gate import ReadyPendingEvent
@@ -284,39 +284,41 @@ def _turn_store(bot: AgentBot | TeamBot) -> TurnStore:
     return unwrap_extracted_collaborator(bot._turn_store)
 
 
-def _set_turn_store_tracker(bot: AgentBot | TeamBot, tracker: MagicMock) -> MagicMock:
-    """Swap the private handled-turn ledger behind one turn store for test assertions."""
-    stored_records: dict[str, TurnRecord] = {}
-    tracker.get_turn_record.return_value = None
-    # Records written through the tracker read back unless a test pins the read.
-    tracker.get_turn_record.side_effect = lambda event_id: stored_records.get(event_id, DEFAULT)
-    tracker.has_responded.return_value = False
+def _stored_facts(record: TurnRecord) -> TurnRecord:
+    """Return a turn's facts as a test writes them: without its storage identity or materialized attribution.
 
-    async def update_handled_turn(
-        lookup_event_ids: Sequence[str],
-        update: Callable[[Mapping[str, TurnRecord]], TurnRecord],
-    ) -> TurnRecord:
-        existing_records = {
-            source_event_id: turn_record
-            for source_event_id in lookup_event_ids
-            if isinstance(
-                (turn_record := tracker.get_turn_record(source_event_id)),
-                TurnRecord,
-            )
-            or isinstance((turn_record := stored_records.get(source_event_id)), TurnRecord)
-        }
-        turn_record = update(existing_records)
-        for source_event_id in turn_record.indexed_event_ids:
-            stored_records[source_event_id] = turn_record
-        if turn_record.completed:
-            tracker.record_handled_turn(turn_record)
-        else:
-            tracker.record_pending_turn(turn_record)
-        return turn_record
+    The store names every one-source turn's sender (its requester when the write
+    named none) and always reads back a sender map; a test's expected turn
+    usually names neither.
+    """
+    metadata = record.source_event_metadata
+    sources = record.source_event_ids
+    inferred = len(sources) == 1 and metadata == {sources[0]: SourceEventMetadata(record.requester_id or "")}
+    return canonicalize_turn_record(
+        record,
+        turn_key=None,
+        source_event_metadata=None if metadata == {} or inferred else metadata,
+    )
 
-    tracker.update_handled_turn.side_effect = update_handled_turn
-    _turn_store(bot)._ledger = tracker
-    return tracker
+
+async def assert_turn_answered(bot: AgentBot | TeamBot, expected: TurnRecord) -> None:
+    """Assert the bot's turn store holds ``expected`` answered, as its terminal write recorded it."""
+    stored = await _turn_store(bot).get_turn_record(expected.source_event_ids[0])
+    assert stored is not None, f"no turn recorded for {expected.source_event_ids}"
+    assert stored.completed, f"turn {stored.source_event_ids} is not answered"
+    assert _stored_facts(stored) == _stored_facts(expected)
+
+
+async def assert_no_turn_answered(bot: AgentBot | TeamBot) -> None:
+    """Assert the bot's agent has recorded no turn answered."""
+    store = _turn_store(bot)
+    rows = await store.deps.turn_records.read(
+        lambda transaction, agent_name: transaction.fetchall(
+            "SELECT turn_key FROM turns WHERE agent_name = ? AND completed",
+            (agent_name,),
+        ),
+    )
+    assert not rows, "a turn was recorded answered"
 
 
 def _set_knowledge_for_agent(bot: AgentBot, knowledge_for_agent: MagicMock) -> MagicMock:

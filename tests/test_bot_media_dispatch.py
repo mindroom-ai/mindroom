@@ -24,7 +24,6 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
@@ -41,6 +40,7 @@ from mindroom.teams.formation import TeamResolution
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _IngressAdmissionOutcome, _media_source_kind, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -56,9 +56,10 @@ from tests.bot_helpers import (
     _replace_turn_policy_deps,
     _room_file_event,
     _room_image_event,
-    _set_turn_store_tracker,
     _visible_message,
     _wrap_extracted_collaborators,
+    assert_no_turn_answered,
+    assert_turn_answered,
     make_mock_agent_user,
     make_test_agent_bot,
 )
@@ -114,10 +115,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -204,9 +201,7 @@ class TestAgentBot(AgentBotTestBase):
                 reply_to_event_id="$img_event",
             ).with_thread_root("$img_event"),
         )
-        tracker.record_handled_turn.assert_called_once_with(
-            expected_handled_turn,
-        )
+        await assert_turn_answered(bot, expected_handled_turn)
 
     @pytest.mark.asyncio
     async def test_media_dispatch_resolves_thread_key_before_enqueue(
@@ -476,11 +471,13 @@ class TestAgentBot(AgentBotTestBase):
             "content": {"msgtype": "m.text", "body": "typed first"},
         }
         voice_event = self._make_handler_event("voice", sender="@user:localhost", event_id="$voice")
+        text_lookup_started = asyncio.Event()
         release_text_lookup = asyncio.Event()
         dispatches: list[list[str]] = []
 
         async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event) -> str | None:
             if event.event_id == "$typed":
+                text_lookup_started.set()
                 await release_text_lookup.wait()
             return "$thread-root"
 
@@ -528,7 +525,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             text_task = asyncio.create_task(bot._turn_controller.handle_text_event(room, text_event))
-            await asyncio.sleep(0)
+            # The later voice message arrives while the text's thread lookup blocks.
+            await text_lookup_started.wait()
             await bot._turn_controller.handle_media_event(room, voice_event)
             await asyncio.sleep(0.03)
 
@@ -563,11 +561,13 @@ class TestAgentBot(AgentBotTestBase):
             "type": "m.room.message",
             "content": {"msgtype": "m.text", "body": "typed second"},
         }
+        media_lookup_started = asyncio.Event()
         release_media_lookup = asyncio.Event()
         dispatches: list[list[str]] = []
 
         async def coalescing_thread_id(_room: nio.MatrixRoom, event: nio.Event) -> str | None:
             if event.event_id == "$image":
+                media_lookup_started.set()
                 await release_media_lookup.wait()
             return "$thread-root"
 
@@ -597,7 +597,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             media_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, image_event))
-            await asyncio.sleep(0)
+            # The later text arrives while the image's thread lookup blocks.
+            await media_lookup_started.wait()
             await bot._turn_controller.handle_text_event(room, text_event)
             await asyncio.sleep(0.03)
 
@@ -651,10 +652,12 @@ class TestAgentBot(AgentBotTestBase):
             },
             server_timestamp=1234567890,
         )
+        preview_normalization_started = asyncio.Event()
         release_preview_normalization = asyncio.Event()
         dispatches: list[list[str]] = []
 
         async def prepare_file_sidecar_text_event(_event: nio.RoomMessageFile) -> PreparedIngress:
+            preview_normalization_started.set()
             await release_preview_normalization.wait()
             return prepared_sidecar
 
@@ -688,7 +691,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             sidecar_task = asyncio.create_task(bot._turn_controller.handle_media_event(room, sidecar_event))
-            await asyncio.sleep(0)
+            # The later text arrives while the sidecar's preview normalization blocks.
+            await preview_normalization_started.wait()
             await bot._turn_controller.handle_text_event(room, text_event)
             await asyncio.sleep(0.03)
 
@@ -711,10 +715,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        _set_turn_store_tracker(bot, tracker)
 
         history_attachment_id = "att_prev_image"
         current_attachment_id = _attachment_id_for_event("$img_event_history")
@@ -744,7 +744,6 @@ class TestAgentBot(AgentBotTestBase):
         generate_response = AsyncMock(return_value="$response")
         install_generate_response_mock(bot, generate_response)
         _replace_turn_policy_deps(bot, resolver=bot._conversation_resolver)
-        _set_turn_store_tracker(bot, tracker)
 
         room = MagicMock()
         room.room_id = "!test:localhost"
@@ -820,7 +819,8 @@ class TestAgentBot(AgentBotTestBase):
         assert model_prompt.startswith("Attachments sent with the current message")
         assert current_attachment_id in model_prompt
         assert history_attachment_id not in model_prompt
-        tracker.record_handled_turn.assert_called_once_with(
+        await assert_turn_answered(
+            bot,
             _agent_response_handled_turn(
                 agent_name=mock_agent_user.agent_name,
                 room_id=room.room_id,
@@ -1292,10 +1292,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
 
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        _set_turn_store_tracker(bot, tracker)
-
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
                 am_i_mentioned=False,
@@ -1329,7 +1325,7 @@ class TestAgentBot(AgentBotTestBase):
             await drain_coalescing(bot)
 
         generate_response.assert_not_called()
-        tracker.record_handled_turn.assert_not_called()
+        await assert_no_turn_answered(bot)
 
     @pytest.mark.asyncio
     async def test_agent_bot_on_file_message_forwards_local_path_to_generate_response(
@@ -1341,10 +1337,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -1419,7 +1411,8 @@ class TestAgentBot(AgentBotTestBase):
         assert len(media.files) == 1
         assert str(media.files[0].filepath) == str(attachment_record.local_path)
         assert list(media.videos) == []
-        tracker.record_handled_turn.assert_called_once_with(
+        await assert_turn_answered(
+            bot,
             replace(
                 _agent_response_handled_turn(
                     agent_name=mock_agent_user.agent_name,
@@ -1448,10 +1441,6 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = AsyncMock()
-
-        tracker = MagicMock()
-        tracker.has_responded.return_value = False
-        _set_turn_store_tracker(bot, tracker)
 
         bot._conversation_resolver.extract_message_context = AsyncMock(
             return_value=MessageContext(
@@ -1491,4 +1480,4 @@ class TestAgentBot(AgentBotTestBase):
             await drain_coalescing(bot)
 
         generate_response.assert_not_called()
-        tracker.record_handled_turn.assert_not_called()
+        await assert_no_turn_answered(bot)

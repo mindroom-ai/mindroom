@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     import asyncio
 
     from mindroom.coalescing.batch import CoalescingKey, PendingEvent
-    from mindroom.handled_turns import TurnRecord
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
+    from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnStore
 
 
@@ -54,7 +54,7 @@ class IngressTicket:
                 return TurnDispatchOutcome.DEFERRED
             case ClaimRefused():
                 # It has no source, or a completed turn of another identity owns one of its aliases.
-                if any(map(self.turn_store.is_handled, record.source_event_ids)):
+                if await self.turn_store.handled_among(self.slot.room_id, record.source_event_ids):
                     return TurnDispatchOutcome.DEFERRED
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
 

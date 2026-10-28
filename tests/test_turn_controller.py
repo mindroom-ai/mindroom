@@ -291,17 +291,17 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert captured_metadata[MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
     request = bot._response_runner.generate_response.await_args.args[0]
     assert request.history_boundary_event_id == "$selection:localhost"
-    _assert_interactive_turn_aliases(bot, selection, "$selection:localhost")
+    await _assert_interactive_turn_aliases(bot, selection, "$selection:localhost")
 
 
-def _assert_interactive_turn_aliases(
+async def _assert_interactive_turn_aliases(
     bot: AgentBot,
     selection: interactive.InteractiveSelection,
     selection_event_id: str,
 ) -> None:
     """Assert that question and selection IDs resolve to one canonical turn."""
-    question_record = bot._turn_store.get_turn_record(selection.question_event_id)
-    selection_record = bot._turn_store.get_turn_record(selection_event_id)
+    question_record = await bot._turn_store.get_turn_record(selection.question_event_id)
+    selection_record = await bot._turn_store.get_turn_record(selection_event_id)
     assert question_record is not None
     assert question_record == selection_record
     assert question_record.source_event_ids == (selection_event_id,)

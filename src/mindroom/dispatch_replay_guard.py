@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 from mindroom.ingress_facts import command_for, is_router_voice_echo
@@ -18,10 +18,11 @@ if TYPE_CHECKING:
 
 # Classify a stored item from its sender and Matrix source the way ingress classifies a live event.
 type _Classify = Callable[[str, Mapping[str, object]], IngressFacts]
-type _HandledLookup = Callable[[str], bool]
+# Which of these events already have a terminal outcome, answered or redacted in the turn's room.
+type _HandledLookup = Callable[[Collection[str]], Awaitable[frozenset[str]]]
 
 
-def has_newer_unresponded_in_thread(
+async def has_newer_unresponded_in_thread(
     event: PreparedIngress,
     requester_user_id: str,
     thread_history: Sequence[ResolvedVisibleMessage],
@@ -37,18 +38,20 @@ def has_newer_unresponded_in_thread(
     event_ts = event.server_timestamp
     if event_ts is None or not thread_history:
         return False
-    for message in thread_history:
-        if message.timestamp is None or message.timestamp <= event_ts:
-            continue
-        if message.event_id == event.event_id:
-            continue
+    newer = [
+        message
+        for message in thread_history
+        if message.timestamp is not None and message.timestamp > event_ts and message.event_id != event.event_id
+    ]
+    handled = await is_handled([message.event_id for message in newer]) if newer else frozenset()
+    for message in newer:
         if not _is_unresponded_requester_event(
             message,
             source={"content": message.content},
             body=message.body,
             requester_user_id=requester_user_id,
             classify=classify,
-            is_handled=is_handled,
+            handled=handled,
         ):
             continue
         logger.info(
@@ -67,7 +70,7 @@ def _is_unresponded_requester_event(
     body: object,
     requester_user_id: str,
     classify: _Classify,
-    is_handled: _HandledLookup,
+    handled: Collection[str],
 ) -> bool:
     """Return whether a normalized candidate is an unanswered requester turn.
 
@@ -77,10 +80,10 @@ def _is_unresponded_requester_event(
     before a response would be owed -- so none of the three can be decided from
     a column.
 
-    ``is_handled`` stays even though a pending row is the journal's own answer
+    ``handled`` stays even though a pending row is the journal's own answer
     to "unfinished". The two records settle at different moments: a source is
-    handed to the outbox when its answer becomes durable, and the handled-turn
-    ledger records the terminal outcome separately, so a turn recorded there
+    handed to the outbox when its answer becomes durable, and the turn's own
+    row records the terminal outcome separately, so a turn recorded there
     before a crash replays as a pending row afterwards. Trusting pending alone
     would let an already-answered message suppress an older one forever.
     """
@@ -88,7 +91,7 @@ def _is_unresponded_requester_event(
     content = source.get("content")
     if is_router_voice_echo(facts, content) or facts.lane_requester_id != requester_user_id:
         return False
-    if is_handled(event.event_id):
+    if event.event_id in handled:
         return False
     if not isinstance(body, str):
         return True
@@ -136,6 +139,7 @@ async def has_newer_unresponded_journal_thread_event(
         )
         return False
 
+    handled = await is_handled([candidate.event_id for candidate in candidates]) if candidates else frozenset()
     for candidate in candidates:
         content = candidate.source.get("content")
         body = cast("Mapping[str, object]", content).get("body") if isinstance(content, Mapping) else None
@@ -145,7 +149,7 @@ async def has_newer_unresponded_journal_thread_event(
             body=body,
             requester_user_id=requester_user_id,
             classify=classify,
-            is_handled=is_handled,
+            handled=handled,
         ):
             logger.info(
                 "Skipping older message — newer pending journal event from same sender in degraded thread replay guard",

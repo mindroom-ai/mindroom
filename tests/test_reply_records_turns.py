@@ -41,7 +41,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
-from mindroom.turn_store import TurnStore
+from mindroom.turn_store import SourcePreparation
 from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import message_origin, patch_response_runner_module, unwrap_extracted_collaborator
@@ -243,7 +243,6 @@ async def test_the_replys_settlement_alone_records_its_turn_answered(tmp_path: P
     await _pending_turn(bot)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with (
-        patch.object(TurnStore, "terminal_turn_record", return_value=None),
         patch_response_runner_module(
             ai_response=AsyncMock(return_value="A complete answer."),
             should_use_streaming=AsyncMock(return_value=False),
@@ -252,11 +251,11 @@ async def test_the_replys_settlement_alone_records_its_turn_answered(tmp_path: P
     ):
         await runner.generate_response(_plain_request(_target()))
 
-    record = bot._turn_store.get_turn_record("$event")
+    record = await bot._turn_store.get_turn_record("$event")
     assert record is not None
     assert record.completed
     assert record.response_event_id is None
-    assert bot._turn_store.is_handled("$event")
+    assert await bot._turn_store.is_handled(_target().room_id, "$event")
 
 
 async def test_an_answered_turn_is_ready_for_shutdown_from_its_reply_alone(tmp_path: Path) -> None:
@@ -265,7 +264,7 @@ async def test_an_answered_turn_is_ready_for_shutdown_from_its_reply_alone(tmp_p
     await _pending_turn(bot)
     await _answer(bot, _plain_request(_target()), AsyncMock(return_value="A complete answer."))
 
-    record = bot._turn_store.get_turn_record("$event")
+    record = await bot._turn_store.get_turn_record("$event")
     assert record is not None
     assert record.response_event_id is None
     assert await bot._turn_store.response_recovery_ready(record)
@@ -281,7 +280,7 @@ async def test_a_turn_whose_reply_still_owes_a_row_is_ready_for_shutdown(tmp_pat
 
     reply = await _reply(bot)
     assert await bot._reply_runtime.store.replies.has_unresolved_rows(reply.reply_id)
-    record = bot._turn_store.get_turn_record("$event")
+    record = await bot._turn_store.get_turn_record("$event")
     assert record is not None
     assert await bot._turn_store.response_recovery_ready(record)
 
@@ -884,7 +883,7 @@ async def test_a_retry_whose_source_ended_settles_the_reply_its_earlier_attempt_
     retry = replace(
         _plain_request(_target()),
         existing_event_id="$sent1",
-        prepare_source_turn=AsyncMock(return_value=True),
+        prepare_source_turn=AsyncMock(return_value=SourcePreparation(invalid=("$event",))),
     )
     assert await _answer(bot, retry, AsyncMock(return_value="Never.")) is None
 
@@ -907,7 +906,7 @@ async def test_a_selection_whose_source_ended_before_its_claim_removes_the_ackno
         _plain_request(_target()),
         existing_event_id=ack_event_id,
         interactive_span_id=span_id,
-        prepare_source_turn=AsyncMock(return_value=True),
+        prepare_source_turn=AsyncMock(return_value=SourcePreparation(invalid=("$event",))),
     )
     assert await _answer(bot, selection, AsyncMock(return_value="Never.")) is None
 
@@ -996,7 +995,7 @@ async def test_a_suppressed_reply_settles_its_sources_through_its_records_alone(
 
     no_reply.assert_not_awaited()
     assert not await bot._reply_runtime.store.is_pending("$event")
-    assert bot._turn_store.is_handled("$event")
+    assert await bot._turn_store.is_handled(_target().room_id, "$event")
 
 
 async def test_a_silent_schedule_whose_hook_fails_reports_the_failure(tmp_path: Path) -> None:
@@ -1202,7 +1201,7 @@ async def test_a_stop_before_the_create_is_acknowledged_applies_when_it_is(tmp_p
         assert await bot._user_stop_reconciler.accepts_reply_stop("$sent1", _target().room_id)
         assert await bot._user_stop_reconciler.finalize("$sent1", 7, room_id=_target().room_id)
         assert (await _reply(bot)).stop_receipt_order is None
-        pending = bot._turn_store.get_turn_record("$event")
+        pending = await bot._turn_store.get_turn_record("$event")
         assert pending is not None
         assert not pending.completed
 
@@ -1693,17 +1692,17 @@ async def test_a_prompt_deleted_before_the_model_runs_removes_its_placeholder(tm
 
     checks = 0
 
-    async def deleted_while_locking(_history: object) -> bool:
+    async def deleted_while_locking(_history: object) -> SourcePreparation:
         # The first check passes; the deletion lands before the refreshed history's check.
         nonlocal checks
         checks += 1
         if checks == 1:
-            return False
+            return SourcePreparation(surviving=("$event",))
         await bot.journal_principal().admit(
             _inbound_event(room_id, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
             _projected_event(room_id, redaction, EventKind.REDACTION, self_sender=bot.matrix_id.full_id),
         )
-        return True
+        return SourcePreparation(invalid=("$event",))
 
     model = AsyncMock(return_value="Unreachable.")
     runner = unwrap_extracted_collaborator(bot._response_runner)

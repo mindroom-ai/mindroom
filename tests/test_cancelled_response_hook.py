@@ -25,7 +25,6 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_source import EDIT_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -50,6 +49,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
@@ -517,7 +517,7 @@ async def test_team_edit_regeneration_empty_prompt_emits_cancelled_hook_once(tmp
         ),
         patch.object(turn_store, "build_run_metadata", return_value={}),
         patch.object(turn_store, "register_edit_revision", return_value=turn_record),
-        patch.object(turn_store, "record_turn"),
+        patch.object(turn_store, "record_edit"),
         patch.object(turn_store, "remove_stale_runs_for_edit"),
         patch.object(turn_store, "prepare_edit_snapshot", return_value=False),
         patch.object(bot._ingress_hook_runner, "emit_message_received_hooks", new=AsyncMock(return_value=False)),

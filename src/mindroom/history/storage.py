@@ -40,7 +40,6 @@ from mindroom.constants import (
 from mindroom.history import summary_rows
 from mindroom.history.run_visibility import is_model_history_visible_run, replays_in_scope, run_in_scope
 from mindroom.history.types import HistoryScope, HistoryScopeState, replayed_summary_text
-from mindroom.legacy_revision_replay import summary_depends_on_source
 from mindroom.session_storage.agent_storage import save_compaction_usage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.store import seen_event_ids, source_event_ids
@@ -317,11 +316,7 @@ def _legacy_summary_may_contain(
     legacy_event_ids: frozenset[str],
 ) -> bool:
     """Return whether a summary written before the archive existed may contain the redacted event."""
-    return event_id in legacy_event_ids or summary_depends_on_source(
-        legacy_source_event_id,
-        has_summary=True,
-        seen_event_ids=set(legacy_event_ids),
-    )
+    return event_id in legacy_event_ids or legacy_source_event_id in legacy_event_ids
 
 
 def update_scope_state_on_latest(

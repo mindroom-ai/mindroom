@@ -29,6 +29,7 @@ from .legacy_schema import (
     upgrade_legacy_journal,
     upgrade_outbox_reply_rows,
 )
+from .legacy_turn_rows import upgrade_turn_records_to_rows
 from .offloading import ThreadOffload, settled
 from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
@@ -211,6 +212,12 @@ class SqliteBackend:
                 str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
             )
             upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
+            upgrade_turn_records_to_rows(
+                _SqliteTransaction(connection),
+                existing_tables,
+                outbox_columns,
+                schema_ddl=schema_statements(SQLITE_DIALECT),
+            )
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
             connection.execute("COMMIT")

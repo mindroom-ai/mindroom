@@ -13,7 +13,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 
@@ -41,13 +40,10 @@ class _NoReplyGateway:
 
 
 async def _store(journal_store: EventJournalStore) -> TurnStore:
-    _reset_handled_turn_ledger_runtime()
     store = TurnStore(
         TurnStoreDeps(
             agent_name="agent",
             turn_records=journal_store.turn_records("agent"),
-            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
-            relations=journal_store.principal("agent@alice"),
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
@@ -65,8 +61,8 @@ async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
 ) -> None:
     """A stop naming a visible voice echo has no response to finalize, so it must not write or raise."""
     store = await _store(journal_store)
-    await store.record_visible_echo("$voice", "$echo")
-    before = store.get_turn_record("$voice")
+    await store.record_visible_echo(_ROOM_ID, "$voice", "$echo")
+    before = await store.get_turn_record("$voice")
     gateway = _NoReplyGateway()
     reconciler = UserStopReconciler(
         UserStopReconcilerDeps(turn_store=store, delivery_gateway=cast("DeliveryGateway", gateway)),
@@ -75,5 +71,5 @@ async def test_stop_on_a_voice_echo_without_a_response_target_changes_nothing(
     finalized = await reconciler.finalize("$echo", _STOP_RECEIPT_ORDER, room_id=_ROOM_ID)
 
     assert finalized is False
-    assert store.get_turn_record("$voice") == before
+    assert await store.get_turn_record("$voice") == before
     assert gateway.stops == 0

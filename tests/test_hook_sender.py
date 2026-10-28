@@ -27,7 +27,6 @@ from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_MESSAGE_ENRICH,
@@ -59,6 +58,7 @@ from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -1296,7 +1296,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
         ),
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
@@ -2163,7 +2163,7 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     """hook_dispatch should enforce room authorization against the preserved requester."""
     bot = _hook_bot(tmp_path)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     room.canonical_alias = None
@@ -2191,6 +2191,4 @@ async def test_precheck_rejects_hook_dispatch_with_unauthorized_original_sender(
     prechecked = await bot._turn_controller._precheck_dispatch_event(room, event)
 
     assert prechecked is None
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create([event.event_id]),
-    )
+    turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)

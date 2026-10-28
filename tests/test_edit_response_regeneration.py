@@ -26,7 +26,6 @@ from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.llm.media import Audio
 from mindroom.llm.runs import RunRecord
@@ -42,6 +41,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.types import ConversationSession
 from mindroom.teams.formation import TeamOutcome, TeamResolution
 from mindroom.teams.spec import TeamMode
+from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot, make_test_team_bot
@@ -129,9 +129,9 @@ def _turn_store(bot: AgentBot | TeamBot) -> object:
     return unwrap_extracted_collaborator(bot._turn_store)
 
 
-def _response_event_id(bot: AgentBot | TeamBot, source_event_id: str) -> str | None:
+async def _response_event_id(bot: AgentBot | TeamBot, source_event_id: str) -> str | None:
     """Return the stored response event for one source event when present."""
-    turn_record = bot._turn_store.get_turn_record(source_event_id)
+    turn_record = await bot._turn_store.get_turn_record(source_event_id)
     if turn_record is None:
         return None
     return turn_record.response_event_id
@@ -166,7 +166,6 @@ async def _record_handled_turn(
         TurnRecord.create(
             source_event_ids,
             response_event_id=response_event_id,
-            visible_echo_event_id=response_event_id,
             source_event_prompts=source_event_prompts,
             source_event_metadata=source_event_metadata,
             response_owner=response_owner,
@@ -174,18 +173,12 @@ async def _record_handled_turn(
             history_scope=history_scope,
             conversation_target=conversation_target,
         ),
+        room_id=conversation_target.room_id if conversation_target is not None else "!test:example.com",
     )
 
 
 def _source_metadata(*source_event_ids: str) -> dict[str, SourceEventMetadata]:
     return {source_event_id: SourceEventMetadata(sender="@user:example.com") for source_event_id in source_event_ids}
-
-
-def _source_metadata_records(*source_event_ids: str) -> dict[str, dict[str, object]]:
-    return {
-        source_event_id: metadata._to_record()
-        for source_event_id, metadata in _source_metadata(*source_event_ids).items()
-    }
 
 
 def _tagged_prompt(source_event_ids: tuple[str, ...], prompts: dict[str, str]) -> str:
@@ -275,7 +268,10 @@ def _generate_response_with_locked_callback(
     async def _generate_response(request: ResponseRequest) -> str | None:
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if request.prepare_source_turn is not None and await request.prepare_source_turn(request.thread_history):
+        if (
+            request.prepare_source_turn is not None
+            and (await request.prepare_source_turn(request.thread_history)).invalid
+        ):
             return None
         # The claim of the reply succeeded, as the runner's admission would run its hook.
         if request.on_reply_claimed is not None:
@@ -483,7 +479,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         assert "m.relates_to" not in envelope["m.new_content"]
 
         # Verify that the response tracker still maps to the same response
-        assert _response_event_id(bot, original_event.event_id) == response_event_id
+        assert await _response_event_id(bot, original_event.event_id) == response_event_id
 
 
 @pytest.mark.asyncio
@@ -1510,8 +1506,8 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
             },
             "requester_id": "@user:example.com",
         }
-        assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
-        assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$first:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$primary:example.com") == "$response:example.com"
         assert mock_remove_run.call_count == 2
         mock_remove_run.assert_has_calls(
             [
@@ -1643,7 +1639,7 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
         assert response_target.reply_to_event_id == "$original:example.com"
         assert request.existing_event_id == "$response:example.com"
         assert response_target == stored_target
-        assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
 
@@ -1755,12 +1751,11 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
         mock_generate_response.assert_awaited_once()
         turn_store.record_turn.assert_not_called()
-        assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 async def test_handle_message_edit_does_not_mark_regeneration_success_when_existing_edit_fails(
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -1814,8 +1809,6 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         deps=replace(
             gateway.deps,
             outbox=principal,
-            terminal_turn_for=turn_store.terminal_turn_record,
-            terminal_turn_committed=turn_store.publish_completed_turn,
         ),
     )
 
@@ -1873,7 +1866,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
 
     async def fail_visible_update(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
-        assert await request.prepare_source_turn(request.thread_history) is False
+        assert (await request.prepare_source_turn(request.thread_history)).invalid == ()
         assert request.on_reply_claimed is not None
         await request.on_reply_claimed()
         outcome = await final_in_span(
@@ -1930,15 +1923,14 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         await finish_edit_regenerations(bot)
 
         mock_generate_response.assert_awaited_once()
-        assert _response_event_id(bot, "$original:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$original:example.com") == "$response:example.com"
         mock_remove_run.assert_called_once()
 
     delivery = await principal.load_matrix_delivery(delivery_id="$edit:example.com", stage=DeliveryStage.FINAL)
     assert delivery is not None
     assert delivery.attempted
     assert delivery.acknowledged_event_id is None
-    rows = await turn_store.deps.turn_records.load_all()
-    persisted = TurnRecordCodec._from_ledger_record("$original:example.com", json.loads(rows[0][2]))
+    persisted = await TurnStore(turn_store.deps).get_turn_record("$original:example.com")
     assert persisted is not None
     assert persisted.response_event_id == "$response:example.com"
     # The turn took the edit when its regeneration claimed the reply; no answer to it was delivered.
@@ -2080,8 +2072,8 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
 
         mock_generate_response.assert_not_awaited()
         mock_create_storage.assert_not_called()
-        assert _response_event_id(bot, "$first:example.com") == "$response:example.com"
-        assert _response_event_id(bot, "$primary:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$first:example.com") == "$response:example.com"
+        assert await _response_event_id(bot, "$primary:example.com") == "$response:example.com"
         mock_remove_run.assert_not_called()
 
 
@@ -2561,7 +2553,7 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
         await dispatch_reaction_durably(bot, room, reaction_event)
         await bot._response_runner.drain_inbox_responses()
 
-        assert bot._turn_store.is_handled("$question:example.com")
+        assert await bot._turn_store.is_handled(room.room_id, "$question:example.com")
 
         # Verify the methods were called with correct parameters
         claim_interactive.assert_awaited_once()
@@ -2661,7 +2653,7 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         await bot._response_runner.drain_inbox_responses()
 
         assert await bot._journal_dispatcher.store.is_pending(reaction_event.event_id)
-        assert bot._turn_store.is_handled("$question:example.com") is False
+        assert await bot._turn_store.is_handled(room.room_id, "$question:example.com") is False
         request = mock_generate_response.await_args.args[0]
         assert request.existing_event_id == "$ack_event:example.com"
 
@@ -2776,8 +2768,8 @@ async def test_on_message_routes_interactive_text_selection_through_turn_control
         MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY: ["$question:example.com"],
         "requester_id": "@user:example.com",
     }
-    assert bot._turn_store.is_handled("$question:example.com")
-    assert bot._turn_store.is_handled("$selection:example.com")
+    assert await bot._turn_store.is_handled(room.room_id, "$question:example.com")
+    assert await bot._turn_store.is_handled(room.room_id, "$selection:example.com")
 
 
 @pytest.mark.asyncio
@@ -3136,7 +3128,7 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
         await bot._coalescing_gate.drain_all()
 
         # Verify that the bot tracked the response correctly
-        assert bot._turn_store.is_handled("$voice:example.com")
+        assert await bot._turn_store.is_handled(room.room_id, "$voice:example.com")
 
         # Verify the methods were called
         mock_handle_voice.assert_called_once()
@@ -3245,7 +3237,7 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
         await bot._coalescing_gate.drain_all()
 
         # Verify that the bot marked as responded with the fallback relay.
-        assert bot._turn_store.is_handled("$voice:example.com")
+        assert await bot._turn_store.is_handled(room.room_id, "$voice:example.com")
 
         # Verify voice handler was called and the fallback relay ran.
         mock_handle_voice.assert_called_once()
@@ -3426,9 +3418,9 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
         await bot._on_media_message(room, voice_event)
 
         # Verify that the bot marked as responded even for unauthorized sender
-        assert bot._turn_store.is_handled("$voice:example.com")
+        assert await bot._turn_store.is_handled(room.room_id, "$voice:example.com")
         # Should not have a response event ID since no response was sent
-        assert _response_event_id(bot, "$voice:example.com") is None
+        assert await _response_event_id(bot, "$voice:example.com") is None
 
         # Verify authorization was checked but voice handler was not called
         mock_is_authorized.assert_called_once()

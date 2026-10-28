@@ -6,7 +6,6 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
@@ -18,28 +17,25 @@ from mindroom.response_sources import ResponseSources
 from tests.approval_continuation_helpers import approval_continuation, claim_continuation, continuation_claim
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_runner import ResponseRequest, ResponseRunner
-    from mindroom.turn_record import TurnRecord
 
 
 def _runtime(
     principal: PrincipalStore,
     *,
     entity_name: str = "agent",
-    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> ReplyRuntime:
     return ReplyRuntime(
         store=principal,
         entity_name=entity_name,
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=complete_turn or AsyncMock(),
         hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
     )
@@ -175,16 +171,13 @@ async def final_in_span(
     request: FinalDeliveryRequest,
     *,
     regenerates: bool = False,
-    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
     A regeneration regenerates the answer the request names; any other
     request with an existing event shows that event as its placeholder.
-    ``complete_turn`` sees each turn the reply records answered, as the bot's
-    gateway runs its reply runtime's effects.
     """
-    runtime = _runtime(principal, complete_turn=complete_turn)
+    runtime = _runtime(principal)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     sources = request.identity.sources
     regenerated = request.existing_event_id if regenerates else None

@@ -28,8 +28,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
+from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, ClaimRefused, TurnClaim
 from tests.conftest import bind_runtime_paths, make_visible_message, test_runtime_paths
 from tests.test_turn_controller_focused import (

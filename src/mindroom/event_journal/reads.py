@@ -19,6 +19,7 @@ from .models import (
     VisibleMessage,
 )
 from .projection import decode_content
+from .turn_rows import agent_of_principal
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction
@@ -336,10 +337,10 @@ def latest_visible_event_id(
         """
         SELECT CASE
                    WHEN EXISTS (
-                       SELECT 1 FROM redaction_tombstones AS tombstone
-                       WHERE tombstone.principal_id = visible.principal_id
-                         AND tombstone.room_id = visible.room_id
-                         AND tombstone.redacted_event_id = visible.revision_event_id
+                       SELECT 1 FROM event_redactions AS redaction
+                       WHERE redaction.agent_name = ?
+                         AND redaction.room_id = visible.room_id
+                         AND redaction.event_id = visible.revision_event_id
                    )
                    THEN visible.logical_event_id
                    ELSE visible.revision_event_id
@@ -349,7 +350,7 @@ def latest_visible_event_id(
         ORDER BY visible.created_ts DESC, visible.logical_event_id DESC
         LIMIT 1
         """,
-        (principal_id, room_id, encode_thread_id(thread_id)),
+        (agent_of_principal(principal_id), principal_id, room_id, encode_thread_id(thread_id)),
     )
     return None if row is None else str(row["reply_target"])
 

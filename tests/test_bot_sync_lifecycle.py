@@ -275,28 +275,30 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             await store_before_login.existing_generation()
 
     @pytest.mark.asyncio
-    async def test_live_redaction_tombstones_the_source_it_names(self, bot: AgentBot) -> None:
-        """The redaction callback owes exactly one thing: the durable tombstone, scoped to its room."""
+    async def test_live_redaction_callback_only_runs_what_its_admission_ended(self, bot: AgentBot) -> None:
+        """Admission already recorded and applied the redaction, so the callback owes only the ended replies' effects."""
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_agent:localhost")
         redaction_event = MagicMock(spec=nio.RedactionEvent)
         redaction_event.redacts = "$source:localhost"
+        ended = object()
 
-        with patch.object(
-            bot._turn_store,
-            "mark_source_redacted",
-        ) as mark_source_redacted:
+        with (
+            patch.object(bot._reply_runtime, "deletions_ended", AsyncMock(return_value=ended)),
+            patch.object(bot, "_replies_ended") as replies_ended,
+        ):
             await bot._on_redaction(room, redaction_event)
 
-        mark_source_redacted.assert_called_once_with("$source:localhost", room_id="!test:localhost")
+        replies_ended.assert_called_once_with(ended)
+        assert not await bot._turn_store.redacted_event_ids(room.room_id, ("$source:localhost",))
 
     @pytest.mark.asyncio
     async def test_running_bot_prunes_stale_handled_turns_without_a_restart(self, bot: AgentBot) -> None:
-        """Ledger retention must keep applying while sync runs, not only at startup."""
+        """Turn retention keeps applying while sync runs, not only at startup."""
         await bot._turn_store.warm()
-        ledger = bot._turn_store._ledger
         now = time.time()
-        await ledger.record_handled_turn(TurnRecord.create(["$old:localhost"], timestamp=now - 40 * 24 * 60 * 60))
-        await ledger.record_handled_turn(TurnRecord.create(["$recent:localhost"], timestamp=now))
+        with patch("mindroom.event_journal.turn_rows.time.time", return_value=now - 40 * 24 * 60 * 60):
+            await bot._turn_store.record_turn(TurnRecord.create(["$old:localhost"]), room_id="!test:localhost")
+        await bot._turn_store.record_turn(TurnRecord.create(["$recent:localhost"]), room_id="!test:localhost")
 
         async def publish_frame() -> None:
             await bot._run_sync_response_side_effects(first_sync_response=False)
@@ -307,13 +309,13 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             patch.object(bot, "_schedule_delivery_recovery"),
         ):
             await publish_frame()
-            assert bot._turn_store.get_turn_record("$old:localhost") is not None
+            assert await bot._turn_store.get_turn_record("$old:localhost") is not None
 
             bot._next_handled_turn_cleanup_at = 0.0
             await publish_frame()
 
-        assert bot._turn_store.get_turn_record("$old:localhost") is None
-        assert bot._turn_store.get_turn_record("$recent:localhost") is not None
+        assert await bot._turn_store.get_turn_record("$old:localhost") is None
+        assert await bot._turn_store.get_turn_record("$recent:localhost") is not None
 
     @pytest.mark.asyncio
     async def test_handled_turn_cleanup_stops_at_sync_shutdown(self, bot: AgentBot) -> None:

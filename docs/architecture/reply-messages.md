@@ -99,6 +99,8 @@ Delivery and recovery:
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message, because upgrades are assumed to run with no reply in flight.
 - An upgrade from an earlier release cancels every approval of a paused reply that release left pending, because it cannot rule out that one is pending; approvals of scheduled calls are kept.
   A cancelled approval's Matrix message keeps what it showed, which can still say that it waits for approval, and a click on its card does nothing.
+- When some messages of a coalesced turn are deleted, or answered by another turn, after its reply already exists, the whole turn ends unanswered rather than answering the rest: a reply's span pins its sources, and a reply that ended refuses any later claim by them, so answering the survivors would need moving them to a new reply.
+  Before any reply exists, as while the turn waits for its conversation or an approval, only those messages settle and the rest are answered as their own turn.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
 - A 30-second recheck of the approvals holding a conversation that lands while a reply's pause is still committing can drop that approval's hold, so later messages are answered while it waits; this needs the recheck to land inside that commit.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.

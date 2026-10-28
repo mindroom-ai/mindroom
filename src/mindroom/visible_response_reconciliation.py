@@ -18,10 +18,10 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.delivery_gateway import DeliveryGateway
-    from mindroom.handled_turns import TurnRecord
     from mindroom.message_target import MessageTarget
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_protocols import SupportsClientConfig
+    from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnStore
 
 
@@ -59,11 +59,12 @@ class VisibleResponseReconciler:
         excluded_event_ids: Collection[str] = (),
     ) -> str | None:
         """Return the durable visible response owned by a replayed turn."""
-        incomplete_records = tuple(
+        incomplete_records = [
             record
             for source_event_id in handled_turn.source_event_ids
-            if (record := self.deps.turn_store.get_turn_record(source_event_id)) is not None and not record.completed
-        )
+            if (record := await self.deps.turn_store.get_turn_record(source_event_id)) is not None
+            and not record.completed
+        ]
         response_event_ids = {
             record.response_event_id for record in incomplete_records if record.response_event_id is not None
         }
@@ -142,9 +143,7 @@ class VisibleResponseReconciler:
 
     async def record_pending_visible_response(self, handled_turn: TurnRecord, response_event_id: str) -> None:
         """Durably bind one visible response to its incomplete turn before generation."""
-        await self.deps.turn_store.record_pending_turn(
-            canonicalize_turn_record(handled_turn, response_event_id=response_event_id, completed=False),
-        )
+        await self.deps.turn_store.record_placeholder(handled_turn, response_event_id)
 
     async def deliver_recoverable_text(
         self,
@@ -193,6 +192,7 @@ class VisibleResponseReconciler:
                 extra_content=command_result_content_to_dict(handled_turn.command_result_extra_content),
                 skip_mentions=skip_mentions,
                 delivery_turn_id=handled_turn.anchor_event_id,
+                delivery_turn_key=handled_turn.turn_key,
             ),
         )
         if response_event_id is not None:
@@ -249,7 +249,7 @@ class VisibleResponseReconciler:
         excluded_event_ids: Collection[str] = (),
     ) -> tuple[TurnRecord | None, str | None]:
         """Persist one non-model delivery intent and recover any visible event."""
-        reconcile_visible_response = self.deps.turn_store.has_pending_response_intent(
+        reconcile_visible_response = await self.deps.turn_store.has_pending_response_intent(
             handled_turn.source_event_ids,
         )
         tracked_turn = self.deps.turn_store.attach_response_context(
@@ -261,9 +261,9 @@ class VisibleResponseReconciler:
             conversation_target=target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(tracked_turn)
-        if pending_turn is None or pending_turn.completed:
+        if pending_turn is None:
             return None, None
-        if pending_turn.redacted_source_event_ids:
+        if await self.deps.turn_store.deleted_sources(pending_turn):
             await self.settle_source_events_ignored(pending_turn)
             return None, None
         recovered_response_event_id = (

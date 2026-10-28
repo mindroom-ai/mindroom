@@ -126,8 +126,9 @@ class FakeHomeserver:
         return len(self.room_events)
 
 
-# A turn here answers exactly one source, and hands over exactly that one.
-_SETTLE_THE_SOURCE = TurnHandoff(sources_for_turn=lambda turn_id: (turn_id,), released=lambda _event_ids: None)
+# A turn here answers exactly one source, and hands over exactly that one: with no stored turn, its FINAL
+# settles only the delivery's own source.
+_SETTLE_THE_SOURCE = TurnHandoff(released=lambda _event_ids: None)
 
 
 @dataclass
@@ -707,13 +708,12 @@ class TestTheHandoffIsOneTransaction:
             ),
             pytest.raises(CrashError),
         ):
-            await runtime.store.enqueue_matrix_delivery(
+            await runtime.store.enqueue_final_answer(
                 delivery_id=SOURCE,
-                stage=DeliveryStage.FINAL,
                 room_id=ROOM,
                 thread_id=None,
                 payload={"msgtype": "m.text", "body": "the answer"},
-                settle_source_event_ids=(SOURCE,),
+                turn_key=None,
             )
 
         assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
@@ -737,16 +737,15 @@ class TestTheHandoffIsOneTransaction:
         await admit_room_membership(runtime.store, ROOM, "leave", source=DepartureSource.LOCAL)
         assert await runtime.store.pending() == (), "the fence left unanswerable work offered"
 
-        transaction_id = await runtime.store.enqueue_matrix_delivery(
+        enqueued = await runtime.store.enqueue_final_answer(
             delivery_id=SOURCE,
-            stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
             payload={"msgtype": "m.text", "body": "the answer"},
-            settle_source_event_ids=(SOURCE,),
+            turn_key=None,
         )
 
-        assert transaction_id is None
+        assert enqueued is None
         assert await runtime.store.load_matrix_delivery(delivery_id=SOURCE, stage=DeliveryStage.FINAL) is None
         settled = await runtime.store.load_event(SOURCE)
         assert settled is not None, "the journal row is still the proof this event had its turn"

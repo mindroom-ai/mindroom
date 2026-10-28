@@ -252,14 +252,6 @@ _TABLES = (
     )
     """,
     """
-    CREATE TABLE IF NOT EXISTS redaction_tombstones (
-        principal_id TEXT NOT NULL,
-        room_id TEXT NOT NULL,
-        redacted_event_id TEXT NOT NULL,
-        PRIMARY KEY (principal_id, room_id, redacted_event_id)
-    )
-    """,
-    """
     CREATE TABLE IF NOT EXISTS room_membership (
         principal_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
@@ -425,24 +417,6 @@ _TABLES = (
         UNIQUE (principal_id, approval_id, generation, call_ordinal),
         FOREIGN KEY (principal_id, approval_id)
             REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE
-    )
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS turn_records (
-        -- Scoped to the agent, not to a journal principal. Every other table
-        -- here is per (agent, Matrix identity), because what it holds is only
-        -- meaningful next to the sync that produced it. A turn record is not:
-        -- it is the proof that a message was already answered, and a bot that
-        -- re-logs in under a new Matrix ID must not answer everything twice.
-        -- Sharing the database is what makes this transactional with a
-        -- settlement; sharing the scope key is not required and would be wrong.
-        agent_name TEXT NOT NULL,
-        -- A coalesced turn answers several sources at once and is reachable by
-        -- any of them, so one record is stored once per event that indexes it.
-        index_event_id TEXT NOT NULL,
-        anchor_event_id TEXT NOT NULL,
-        record_json TEXT NOT NULL,
-        PRIMARY KEY (agent_name, index_event_id)
     )
     """,
     """
@@ -690,15 +664,11 @@ _INDEXES = (
     ON matrix_delivery_outbox (principal_id, reply_id, reply_sequence)
     WHERE reply_id IS NOT NULL
     """,
-    """
-    CREATE INDEX IF NOT EXISTS turn_records_anchor
-    ON turn_records (agent_name, anchor_event_id)
-    """,
 )
 
 
-# Turn state as rows, agent-scoped like turn_records: "answered" must survive a
-# re-login. A turn is named by an immutable surrogate key for one ordered tuple
+# Turn state as rows, scoped to the agent rather than a journal principal: "answered"
+# must survive a re-login. A turn is named by an immutable surrogate key for one ordered tuple
 # of physical sources; a different tuple is a different turn. Physical
 # membership (turn_sources) is exclusive per agent, while an alias may be
 # indexed by several turns at once, because an original and the router relay

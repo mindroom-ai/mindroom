@@ -21,11 +21,11 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.ingress_facts import command_for
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
+from mindroom.turn_record import SourceEventMetadata, TurnRecord
 
 if TYPE_CHECKING:
     import nio

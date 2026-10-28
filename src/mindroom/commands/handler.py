@@ -30,7 +30,6 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
     persisted_bot_user_ids,
 )
-from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.room_membership import cached_member_ids, room_membership_is_complete
@@ -54,6 +53,7 @@ from mindroom.tool_jobs.client_cancel import (
     person_may_cancel,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.turn_record import TurnRecord
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable

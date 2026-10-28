@@ -17,13 +17,25 @@ sources no row names at all, for which the blob is the only record.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.handled_turns import TurnRecordCodec
+from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
-from mindroom.turn_record import SourceEventMetadata, SourceVisibleEcho, TurnRecord, canonicalize_turn_record
+from mindroom.message_target import MessageTarget
+from mindroom.model_selection import freeze_command_result_content
+from mindroom.turn_record import (
+    RevisionReplay,
+    SourceEventMetadata,
+    SourceVisibleEcho,
+    TurnRecord,
+    canonical_optional_string,
+    canonical_source_event_ids,
+    canonicalize_turn_record,
+)
 
 from . import journal, turn_rows
 
@@ -33,32 +45,219 @@ if TYPE_CHECKING:
 
     from mindroom.turn_record import SourceEventRevision
 
-    from .backend import Backend, Transaction
+    from .backend import Transaction
 
 logger = get_logger(__name__)
 
 _LEDGER_RECORDS_KEY = "records"
 
 
+def legacy_responses_file_path(storage_path: Path, agent_name: str) -> Path:
+    """Return where a pre-journal MindRoom kept this agent's handled turns.
+
+    Named rather than spelled out at the one call site because it is half of a
+    contract with a version that is no longer in this tree: a reader that
+    drifted off the path would find no file, import nothing, and re-answer the
+    backlog of every installation being upgraded.
+    """
+    return storage_path / "tracking" / f"{agent_name}_responded.json"
+
+
+@dataclass(frozen=True, slots=True)
+class _Decoded:
+    """One stored blob as the handled-turn codec read it: its current facts and the legacy ones beside them."""
+
+    record: TurnRecord
+    # Sources and aliases the blob recorded redacted, and the revisions it flagged redacted.
+    redacted: tuple[str, ...]
+    redacted_revisions: frozenset[str]
+    # Revisions a pre-v2026.9.43 summary consumed through their source: revision to source.
+    summary_revisions: Mapping[str, str]
+    echo: str | None
+    echo_is_fallback: bool | None
+    timestamp: float
+
+    @property
+    def replay_source_event_ids(self) -> tuple[str, ...]:
+        """Return the sources the blob still treated as live, as its reader did."""
+        redacted = {self.record.prompt_source_event_id(event_id) for event_id in self.redacted}
+        return tuple(event_id for event_id in self.record.source_event_ids if event_id not in redacted)
+
+
 @dataclass(frozen=True, slots=True)
 class _Group:
     """One stored blob, decoded, and the index entries that still point at it."""
 
-    record: TurnRecord
+    decoded: _Decoded
     rows: frozenset[str]
 
     @property
+    def record(self) -> TurnRecord:
+        return self.decoded.record
+
+    @property
     def precedence(self) -> tuple[bool, float, str]:
-        return (self.record.completed, self.record.timestamp, self.record.anchor_event_id or "")
+        return (self.record.completed, self.decoded.timestamp, self.record.anchor_event_id or "")
+
+
+def _mapping(value: object) -> Mapping[str, Any] | None:
+    return cast("Mapping[str, Any]", value) if isinstance(value, Mapping) else None
+
+
+# LEGACY_COMPAT: Ledger records carrying redaction cleanup obligations.
+# Legacy format: A stored record with pending_redaction_cleanup_event_ids, and revision replay entries with
+# cleanup_pending, naming session cleanup still owed for its tombstoned sources.
+# Last legacy release: v2026.10.145; replacement: v2026.10.146 derives session cleanup at each response from the
+# history's own event ids against the recorded redactions.
+# Handling: Both keys are ignored when the blob is converted; every owed event is also a recorded redaction, so the
+# next response of each affected history finds and removes it.
+# Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables.
+# LEGACY_COMPAT: Turn records carrying Stop, edit order, and correlation state.
+# Legacy format: A stored record with user_stop_receipt_order, user_stop_settled_receipt_order,
+# latest_edit_receipt_order, or correlation_id.
+# Last legacy release: v2026.10.227; replacement: the durable reply messages of v2026.10.228 own Stop and edit state
+# in reply_messages and reply_spans.
+# Handling: The keys are ignored when the blob is converted; an edit of an answer that has no reply record
+# regenerates nothing.
+# Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables,
+# tests/test_edit_regenerator.py::test_edit_without_previous_response_event_is_skipped.
+# LEGACY_COMPAT: Handled-turn records without source or suppressed revision summaries.
+# Legacy format: Schema-version-1 handled turns without source or suppressed revision summaries.
+# Last legacy release: v2026.7.252; replacement: v2026.7.253 added optional source-level summaries.
+# Handling: Accept absent summaries without inventing revision identity that the old writer never persisted.
+# Coverage: tests/test_turn_rows_conversion.py::test_an_interrupted_import_into_a_populated_store_keeps_its_owners.
+def _decode(event_id: str, raw: object) -> _Decoded | None:
+    """Read one stored record the way the handled-turn codec did, or None when the codec rejected it for this index.
+
+    Every field is read by name, so a key an older writer emitted is dropped
+    rather than rejected. A redacted source keeps no prompt, selection,
+    attribution, or voice checkpoint, as the codec's canonical form kept none.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    stored = cast("Mapping[str, object]", raw)
+    raw_sources = stored.get("source_event_ids")
+    raw_aliases = stored.get("discovery_event_ids", [])
+    raw_redacted = stored.get("redacted_source_event_ids", [])
+    anchor_event_id = stored.get("anchor_event_id")
+    completed = stored.get("completed")
+    timestamp = stored.get("timestamp")
+    response_event_id = stored.get("response_event_id")
+    if (
+        not isinstance(raw_sources, list)
+        or not isinstance(raw_aliases, list)
+        or not isinstance(raw_redacted, list)
+        or not isinstance(anchor_event_id, str)
+        or not anchor_event_id
+        or not isinstance(completed, bool)
+        or not isinstance(timestamp, int | float)
+        or isinstance(timestamp, bool)
+        or (response_event_id is not None and not isinstance(response_event_id, str))
+    ):
+        return None
+    sources = canonical_source_event_ids(raw_sources)
+    if not sources:
+        return None
+    aliases = tuple(event_id for event_id in canonical_source_event_ids(raw_aliases) if event_id not in sources)
+    if event_id not in (*sources, *aliases):
+        return None
+    redacted = tuple(
+        event_id for event_id in canonical_source_event_ids(raw_redacted) if event_id in (*sources, *aliases)
+    )
+    raw_metadata = _mapping(stored.get("source_event_metadata"))
+    metadata = (
+        None
+        if raw_metadata is None
+        else {
+            source: parsed
+            for source in sources
+            if source not in redacted
+            and (parsed := SourceEventMetadata._from_raw(raw_metadata.get(source))) is not None
+        }
+    )
+    unpruned = TurnRecord.create(sources, discovery_event_ids=aliases, source_event_metadata=metadata)
+    redacted_sources = {unpruned.prompt_source_event_id(event_id) for event_id in redacted}
+    raw_revisions = _mapping(stored.get("source_event_revisions")) or {}
+    selections = {key: value for key, value in raw_revisions.items() if key not in redacted}
+    raw_prompts = _mapping(stored.get("source_event_prompts")) or {}
+    raw_voice = _mapping(stored.get("prepared_voice_sources")) or {}
+    replay, redacted_revisions, summary_revisions = _revision_replay(stored.get("revision_replay"))
+    echo = canonical_optional_string(stored.get("visible_echo_event_id"))
+    echo_is_fallback = stored.get("visible_echo_is_fallback")
+    record = TurnRecord.create(
+        sources,
+        discovery_event_ids=aliases,
+        anchor_event_id=anchor_event_id,
+        response_event_id=response_event_id,
+        completed=completed,
+        source_event_prompts={key: value for key, value in raw_prompts.items() if key not in redacted_sources} or None,
+        source_event_revisions=selections or None,
+        revision_replay=replay,
+        source_event_metadata=metadata,
+        prepared_voice_sources={key: value for key, value in raw_voice.items() if key not in redacted_sources} or None,
+        response_owner=canonical_optional_string(stored.get("response_owner")),
+        requester_id=canonical_optional_string(stored.get("requester_id")),
+        command_execution_started=stored.get("command_execution_started") is True,
+        command_result_text=canonical_optional_string(stored.get("command_result_text")),
+        command_result_extra_content=freeze_command_result_content(stored.get("command_result_extra_content")),
+        history_scope=HistoryScope.from_metadata(stored.get("history_scope")),
+        conversation_target=MessageTarget.from_metadata(stored.get("conversation_target")),
+    )
+    # LEGACY_COMPAT: Revision summaries without per-revision replay state.
+    # Legacy format: Source-level revision summaries without per-revision replay state.
+    # Last legacy release: v2026.9.42; replacement: v2026.9.43 added revision_replay.
+    # Handling: Reconstruct the replay rows from the summaries and keep their summary-only provenance.
+    # Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables.
+    if "revision_replay" not in stored and record.source_event_revisions:
+        summarized = {
+            revision_id: RevisionReplay(record.prompt_source_event_id(source), timestamp_ms)
+            for source, (timestamp_ms, revision_id) in record.source_event_revisions.items()
+            if revision_id != record.prompt_source_event_id(source)
+        }
+        record = canonicalize_turn_record(record, revision_replay=summarized)
+        summary_revisions = {revision_id: revision.source_event_id for revision_id, revision in summarized.items()}
+    return _Decoded(
+        record=record,
+        redacted=redacted,
+        redacted_revisions=redacted_revisions,
+        summary_revisions=MappingProxyType(dict(summary_revisions)),
+        echo=echo,
+        echo_is_fallback=echo_is_fallback if isinstance(echo_is_fallback, bool) and echo is not None else None,
+        timestamp=float(timestamp),
+    )
+
+
+def _revision_replay(raw: object) -> tuple[dict[str, RevisionReplay], frozenset[str], dict[str, str]]:
+    """Return a blob's revision provenance, the revisions it flagged redacted, and its summary-only revisions."""
+    replay: dict[str, RevisionReplay] = {}
+    redacted: set[str] = set()
+    summary: dict[str, str] = {}
+    for revision_id, value in (_mapping(raw) or {}).items():
+        entry = _mapping(value)
+        if entry is None:
+            continue
+        source = entry.get("source_event_id")
+        timestamp_ms = entry.get("timestamp_ms")
+        if not isinstance(source, str) or not isinstance(timestamp_ms, int) or isinstance(timestamp_ms, bool):
+            continue
+        replay[revision_id] = RevisionReplay(
+            source,
+            timestamp_ms,
+            response_event_id=canonical_optional_string(entry.get("response_event_id")),
+        )
+        if entry.get("redacted") is True:
+            redacted.add(revision_id)
+        if entry.get("legacy_summary_provenance") is True:
+            summary[revision_id] = source
+    return replay, frozenset(redacted), summary
 
 
 # LEGACY_COMPAT: Turn records stored as one JSON blob per indexed event.
 # Legacy format: turn_records rows (agent_name, index_event_id, anchor_event_id, record_json), one copy of a turn's
 # record under each of its sources and discovery aliases, read by the handled-turn codec, whose own markers cover the
 # retired keys it drops on read.
-# Last legacy release: v2026.10.634, the newest release when this conversion was written, still writes them (the
-# table arrived in v2026.8.31); replacement: the release that ships turn rows stores turns in turns, turn_sources,
-# turn_aliases, and turn_revisions.
+# Last legacy release: v2026.10.639 (the table arrived in v2026.8.31); replacement: the next release stores turns in
+# turns, turn_sources, turn_aliases, and turn_revisions.
 # Handling: the schema upgrade converts every agent's rows by the rules marked below and drops turn_records, all in
 # the schema transaction, so a failure leaves the old table in place for the next open to retry.
 # Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables,
@@ -112,9 +311,8 @@ def upgrade_turn_records_to_rows(
 # LEGACY_COMPAT: Redaction tombstones scoped to one journal principal.
 # Legacy format: redaction_tombstones (principal_id, room_id, redacted_event_id), one row per Matrix login of an agent,
 # deleted when that login left the room.
-# Last legacy release: v2026.10.634, the newest release when this conversion was written (the table arrived in
-# v2026.8.31); replacement: the release that ships turn rows records each redaction once per agent in
-# event_redactions and keeps it when the bot leaves.
+# Last legacy release: v2026.10.639 (the table arrived in v2026.8.31); replacement: the next release records each
+# redaction once per agent in event_redactions and keeps it when the bot leaves.
 # Handling: every row becomes (agent of its principal, room, event) and applies the redaction to every login of that
 # agent, as a live redaction does; the table is dropped.
 # Coverage: tests/test_turn_rows_conversion.py::test_journal_tombstones_apply_to_every_login_of_their_agent.
@@ -145,14 +343,14 @@ def _groups(entries: Iterable[tuple[str, str, str]]) -> list[_Group]:
     for (_anchor, record_json), index_event_ids in indexes.items():
         try:
             raw = json.loads(record_json)
-            decoded = {index: TurnRecordCodec._from_ledger_record(index, raw) for index in index_event_ids}
+            decoded = {index: _decode(index, raw) for index in index_event_ids}
         except (TypeError, ValueError):
             continue
-        owned = [index for index, record in decoded.items() if record is not None]
+        owned = [index for index, blob in decoded.items() if blob is not None]
         if owned:
-            record = decoded[owned[0]]
-            assert record is not None
-            groups.append(_Group(record, frozenset(owned)))
+            blob = decoded[owned[0]]
+            assert blob is not None
+            groups.append(_Group(blob, frozenset(owned)))
     return groups
 
 
@@ -189,14 +387,20 @@ def _convert(
             if record.conversation_target is not None
             else _single_room(rooms, physical)
         )
-        converted = _converted_turn(record, physical, aliases, room_id=room_id)
+        converted = _converted_turn(group.decoded, physical, aliases, room_id=room_id)
         if converted is None:
             continue
-        turn_key = turn_rows.insert_turn(transaction, agent_name, converted, room_id=room_id)
+        turn_key = turn_rows.insert_turn(
+            transaction,
+            agent_name,
+            converted,
+            room_id=room_id,
+            updated_at=group.decoded.timestamp or time.time(),
+        )
         _bind_outstanding_delivery(transaction, agent_name, turn_key, converted, room_id, final_deliveries)
         written += 1
-    for record in evidence:
-        turn_rows.insert_turn(transaction, agent_name, record, room_id=None)
+    for record, updated_at in evidence:
+        turn_rows.insert_turn(transaction, agent_name, record, room_id=None, updated_at=updated_at or time.time())
         written += 1
     return written
 
@@ -205,8 +409,8 @@ def _convert(
 # Legacy format: a record's redacted_source_event_ids and redacted revision_replay entries, and a standalone record
 # indexed by a redacted revision whose owners' flags each warm-up joined; releases up to v2026.9.383 also wrote them
 # onto turns recorded in another room.
-# Last legacy release: v2026.10.634, the newest release when this conversion was written (since v2026.7.197 and
-# v2026.9.43); replacement: the release that ships turn rows keeps redactions only in event_redactions.
+# Last legacy release: v2026.10.639 (since v2026.7.197 and v2026.9.43); replacement: the next release keeps
+# redactions only in event_redactions.
 # Handling: from every blob, including ones the row ownership below discards, each redaction of a record that has a
 # conversation_target is applied in that conversation's room, and a revision such a record selected or consumed is
 # redacted there when the standalone record tombstones it, as the warm-up joined it. Redactions of records without a
@@ -214,7 +418,7 @@ def _convert(
 # that wedge another room's thread (#2544), and the legitimate ones already age out within 30 days.
 # Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables.
 def _extract_redactions(transaction: Transaction, agent_name: str, groups: Sequence[_Group]) -> None:
-    tombstoned = {index for group in groups for index in group.rows if _tombstones(group.record, index)}
+    tombstoned = {index for group in groups for index in group.rows if _tombstones(group.decoded, index)}
     for group in groups:
         record = group.record
         if record.conversation_target is None:
@@ -223,19 +427,19 @@ def _extract_redactions(transaction: Transaction, agent_name: str, groups: Seque
         replay = record.revision_replay or {}
         selected = {revision_id for _timestamp, revision_id in (record.source_event_revisions or {}).values()}
         redacted = {
-            *record.redacted_source_event_ids,
-            *(revision_id for revision_id, revision in replay.items() if revision.redacted),
+            *group.decoded.redacted,
+            *group.decoded.redacted_revisions,
             *(tombstoned & {*replay, *selected}),
         }
         for event_id in sorted(redacted):
             _redact(transaction, agent_name, room_id, event_id)
-        _record_summary_provenance(transaction, agent_name, room_id, record)
+        _record_summary_provenance(transaction, agent_name, room_id, group.decoded)
 
 
-def _tombstones(record: TurnRecord, index_event_id: str) -> bool:
+def _tombstones(decoded: _Decoded, index_event_id: str) -> bool:
     """Return whether the record an event indexes marks that event deleted, as warm-up reconciliation read it."""
-    return index_event_id in record.redacted_source_event_ids or (
-        index_event_id in record.source_event_ids and index_event_id not in record.replay_source_event_ids
+    return index_event_id in decoded.redacted or (
+        index_event_id in decoded.record.source_event_ids and index_event_id not in decoded.replay_source_event_ids
     )
 
 
@@ -247,14 +451,13 @@ def _tombstones(record: TurnRecord, index_event_id: str) -> bool:
 # legacy_summary_revisions, which history cleanup of redacted events reads.
 # Handling: each such revision of a record with a conversation_target becomes (agent, room, revision, source).
 # Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables.
-def _record_summary_provenance(transaction: Transaction, agent_name: str, room_id: str, record: TurnRecord) -> None:
-    for revision_id, revision in (record.revision_replay or {}).items():
-        if revision.legacy_summary_provenance:
-            transaction.execute(
-                "INSERT INTO legacy_summary_revisions (agent_name, room_id, revision_id, source_event_id) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT (agent_name, room_id, revision_id, source_event_id) DO NOTHING",
-                (agent_name, room_id, revision_id, revision.source_event_id),
-            )
+def _record_summary_provenance(transaction: Transaction, agent_name: str, room_id: str, decoded: _Decoded) -> None:
+    for revision_id, source_event_id in decoded.summary_revisions.items():
+        transaction.execute(
+            "INSERT INTO legacy_summary_revisions (agent_name, room_id, revision_id, source_event_id) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT (agent_name, room_id, revision_id, source_event_id) DO NOTHING",
+            (agent_name, room_id, revision_id, source_event_id),
+        )
 
 
 def legacy_summary_sources(
@@ -281,8 +484,7 @@ def legacy_summary_sources(
 # Legacy format: turn_records index rows whose blobs differ for one turn (a stale pending copy beside a completed one,
 # an original's row a completed relay's alias row overwrote, a partially adopted legacy import) and declared sources
 # no row names, including groups left with only alias rows.
-# Last legacy release: v2026.10.634, the newest release when this conversion was written; replacement: the release
-# that ships turn rows keeps one exclusive physical owner per source.
+# Last legacy release: v2026.10.639; replacement: the next release keeps one exclusive physical owner per source.
 # Handling: a group of rows sharing one blob owns the declared sources and aliases whose row it holds, plus declared
 # sources no row names, which the completed, then most recent, declaring blob claims. A completed group with only
 # alias rows keeps each alias answered as content-free completion evidence; an unfinished one carries no proof and
@@ -292,7 +494,7 @@ def legacy_summary_sources(
 def _owned_members(
     groups: Sequence[_Group],
     occupied: frozenset[str],
-) -> tuple[list[tuple[_Group, list[str], list[str]]], list[TurnRecord]]:
+) -> tuple[list[tuple[_Group, list[str], list[str]]], list[tuple[TurnRecord, float]]]:
     """Return each group's owned physical sources and aliases, and the alias evidence of source-less completed ones."""
     row_owner = {index: group for group in groups for index in group.rows}
     rowless: dict[str, _Group] = {}
@@ -303,7 +505,7 @@ def _owned_members(
                 if claimant is None or group.precedence > claimant.precedence:
                     rowless[source] = group
     owned: list[tuple[_Group, list[str], list[str]]] = []
-    evidence: list[TurnRecord] = []
+    evidence: list[tuple[TurnRecord, float]] = []
     for group in groups:
         physical = [
             source
@@ -318,9 +520,7 @@ def _owned_members(
         if physical:
             owned.append((group, physical, aliases))
         elif group.record.completed:
-            evidence.extend(
-                TurnRecord.create([alias], completed=True, timestamp=group.record.timestamp) for alias in aliases
-            )
+            evidence.extend((TurnRecord.create([alias], completed=True), group.decoded.timestamp) for alias in aliases)
     return owned, evidence
 
 
@@ -350,9 +550,8 @@ def _single_room(rooms: Mapping[str, set[str]], sources: Sequence[str]) -> str |
 # requester's when it had one source; and one visible_echo_event_id per record, which an unfinished record's
 # finalization also wrote as its response_event_id. suppressed_source_event_revisions has had no writer since
 # v2026.10.228.
-# Last legacy release: v2026.10.634, the newest release when this conversion was written, writes the first three
-# (suppressed revisions: v2026.10.227); replacement: the release that ships turn rows names every turn's room,
-# attributes each source, and keeps echoes per source.
+# Last legacy release: v2026.10.639 writes the first three (suppressed revisions: v2026.10.227); replacement: the
+# next release names every turn's room, attributes each source, and keeps echoes per source.
 # Handling: the room comes from the conversation target, else from the one room every login of the agent admitted
 # the turn's sources in; without one, a completed turn stays only as content-free completion evidence (no room,
 # prompt, voice, attribution, revisions, response, or context) and an unfinished one is dropped. A one-source record
@@ -363,24 +562,19 @@ def _single_room(rooms: Mapping[str, set[str]], sources: Sequence[str]) -> str |
 # tests/test_turn_rows_conversion.py::test_attribution_is_fixed_before_membership_changes,
 # tests/test_turn_rows_conversion.py::test_a_legacy_echo_reaches_every_source_and_is_not_an_answer.
 def _converted_turn(
-    record: TurnRecord,
+    decoded: _Decoded,
     physical: Sequence[str],
     aliases: Sequence[str],
     *,
     room_id: str | None,
 ) -> TurnRecord | None:
-    echo = record.visible_echo_event_id
-    echoes = {source: SourceVisibleEcho(echo, record.visible_echo_is_fallback) for source in physical} if echo else None
+    record = decoded.record
+    echo = decoded.echo
+    echoes = {source: SourceVisibleEcho(echo, decoded.echo_is_fallback) for source in physical} if echo else None
     if room_id is None:
         if not record.completed:
             return None
-        return TurnRecord.create(
-            physical,
-            discovery_event_ids=aliases,
-            completed=True,
-            visible_echoes=echoes,
-            timestamp=record.timestamp,
-        )
+        return TurnRecord.create(physical, discovery_event_ids=aliases, completed=True, visible_echoes=echoes)
     response_event_id = record.response_event_id
     if not record.completed and echo is not None and response_event_id == echo:
         response_event_id = None
@@ -389,13 +583,9 @@ def _converted_turn(
         source_event_ids=physical,
         discovery_event_ids=aliases,
         anchor_event_id=physical[-1],
-        redacted_source_event_ids=(),
         response_event_id=response_event_id,
-        visible_echo_event_id=None,
-        visible_echo_is_fallback=None,
         visible_echoes=echoes,
         source_event_revisions=_selections_by_source(record),
-        suppressed_source_event_revisions=None,
         source_event_metadata=_attribution(record),
     )
 
@@ -439,8 +629,8 @@ def _outstanding_final_deliveries(transaction: Transaction) -> dict[str, dict[st
 # LEGACY_COMPAT: Non-AI FINAL deliveries whose turn the acknowledgement looked up when it arrived.
 # Legacy format: an unacknowledged FINAL outbox row without reply identity, whose acknowledgement completed the turn
 # anchored at its delivery id through terminal_turn_record.
-# Last legacy release: v2026.10.634, the newest release when this conversion was written; replacement: the release
-# that ships turn rows binds the turn in the transaction that makes the FINAL durable.
+# Last legacy release: v2026.10.639; replacement: the next release binds the turn in the transaction that makes the
+# FINAL durable.
 # Handling: such a row still deliverable binds the converted turn anchored at its delivery id in its room; with no
 # such turn, or two rows for one delivery, it stays unbound and its acknowledgement completes nothing, as before.
 # Coverage: tests/test_turn_rows_conversion.py::test_an_outstanding_final_delivery_completes_its_turn_after_upgrade.
@@ -501,7 +691,7 @@ def import_legacy_ledger_rows(transaction: Transaction, agent_name: str, raw_led
     return _convert(transaction, agent_name, groups, occupied=occupied, final_deliveries=deliveries)
 
 
-async def import_legacy_ledger_file(backend: Backend, *, path: Path | None, agent_name: str) -> int:
+async def import_legacy_ledger_file(records: turn_rows.TurnRecordStore, *, path: Path | None) -> int:
     """Import an agent's pre-journal ledger file once, then rename it; return how many turns were written.
 
     The file's presence is the only trigger and its rename the only marker:
@@ -511,15 +701,16 @@ async def import_legacy_ledger_file(backend: Backend, *, path: Path | None, agen
     if path is None or not path.exists():
         return 0
     raw = json.loads(path.read_text())
-    imported = await backend.write(lambda transaction: import_legacy_ledger_rows(transaction, agent_name, raw))
+    imported = await records.write(import_legacy_ledger_rows, raw)
     path.replace(path.with_suffix(f"{path.suffix}.imported"))
-    logger.info("handled_turn_ledger_imported", agent=agent_name, imported_turn_count=imported)
+    logger.info("handled_turn_ledger_imported", agent=records.agent_name, imported_turn_count=imported)
     return imported
 
 
 __all__ = [
     "import_legacy_ledger_file",
     "import_legacy_ledger_rows",
+    "legacy_responses_file_path",
     "legacy_summary_sources",
     "upgrade_turn_records_to_rows",
 ]

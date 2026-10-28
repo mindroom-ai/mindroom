@@ -15,13 +15,13 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     make_ingress_facts,
     patch_response_runner_module,
@@ -39,7 +39,6 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: PLR0915
     tmp_path: Path,
@@ -106,8 +105,6 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         deps=replace(
             gateway.deps,
             outbox=principal,
-            terminal_turn_for=store.terminal_turn_record,
-            terminal_turn_committed=store.publish_completed_turn,
         ),
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -117,7 +114,7 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         runner.deps,
         delivery_gateway=gateway,
         approval_store=principal,
-        replies=replace(runner.deps.replies, store=principal, complete_turn=store.publish_completed_turn),
+        replies=replace(runner.deps.replies, store=principal),
     )
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
@@ -190,9 +187,8 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
                 never_finish.set()
                 request_task_cancel(task, process_shutdown=True)
                 await asyncio.gather(task, return_exceptions=True)
-    _reset_handled_turn_ledger_runtime()
     reopened = await _store(journal_store, agent_name="general")
-    persisted = reopened.get_turn_record(source_id)
+    persisted = await reopened.get_turn_record(source_id)
     assert persisted is not None
     assert persisted.completed
     assert persisted.source_event_revisions == {source_id: (20, edit_id)}

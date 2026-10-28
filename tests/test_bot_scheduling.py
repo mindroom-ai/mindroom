@@ -22,7 +22,6 @@ from mindroom.constants import ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME, SOURCE_KI
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import DispatchIngressMetadata
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
@@ -31,6 +30,7 @@ from mindroom.scheduling import tasks as scheduling
 from mindroom.thread_utils import AgentResponseDecision
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_origin import TurnIntent
+from mindroom.turn_record import TurnRecord
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -117,7 +117,7 @@ def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     """Rebind planner deps after tests replace the bot logger or ledger."""
     install_runtime_journal_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
     _replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_controller_deps(bot, logger=bot.logger)
@@ -910,7 +910,7 @@ class TestCommandHandling:
             )
 
     @pytest.mark.asyncio
-    async def test_non_router_agent_responds_to_non_commands(self) -> None:
+    async def test_non_router_agent_responds_to_non_commands(self, tmp_path: Path) -> None:
         """Test that non-router agents still respond to regular messages."""
         # Create a calculator agent (not router)
         agent_user = AgentMatrixUser(
@@ -930,14 +930,13 @@ class TestCommandHandling:
             ),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
@@ -1933,7 +1932,7 @@ class TestRouterSkipsSingleAgent:
         assert "Skipping routing: only one responder candidate" not in info_calls
 
     @pytest.mark.asyncio
-    async def test_router_requires_mention_with_multiple_non_agent_users_in_thread(self) -> None:
+    async def test_router_requires_mention_with_multiple_non_agent_users_in_thread(self, tmp_path: Path) -> None:
         """Router should not auto-route when multiple non-agent users posted in the thread."""
         agent_user = AgentMatrixUser(
             agent_name=ROUTER_AGENT_NAME,
@@ -1952,14 +1951,13 @@ class TestRouterSkipsSingleAgent:
                 },
             ),
         )
-        with tempfile.TemporaryDirectory() as tmpdir:
-            bot = make_test_agent_bot(
-                agent_user=agent_user,
-                storage_path=Path(tmpdir),
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                rooms=["!test:server"],
-            )
+        bot = make_test_agent_bot(
+            agent_user=agent_user,
+            storage_path=tmp_path,
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            rooms=["!test:server"],
+        )
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
         bot.logger = MagicMock()

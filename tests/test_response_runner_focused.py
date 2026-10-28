@@ -91,7 +91,6 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -165,6 +164,8 @@ from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, f
 from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import SourcePreparation
 from tests.approval_continuation_helpers import (
     advance_continuation,
     approval_continuation,
@@ -1517,10 +1518,10 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
     preparations = 0
     on_source_turn_suppressed = AsyncMock()
 
-    async def prepare_source_turn(_history: object) -> bool:
+    async def prepare_source_turn(_history: object) -> SourcePreparation:
         nonlocal preparations
         preparations += 1
-        return True
+        return SourcePreparation(invalid=(envelope.source_event_id,))
 
     request = ResponseRequest(
         sources=ResponseSources(
@@ -1569,7 +1570,9 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
         is_full_history=True,
     )
     runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=history)
-    prepare = AsyncMock(side_effect=[False, final_result])
+    prepare = AsyncMock(
+        side_effect=[SourcePreparation(), SourcePreparation(invalid=("$event",) if final_result else ())],
+    )
     acquired = MagicMock()
     suppressed = AsyncMock()
     request = ResponseRequest(
@@ -1609,10 +1612,10 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
     preparation_started = asyncio.Event()
     allow_preparation_finish = asyncio.Event()
 
-    async def prepare_source_turn(_history: object) -> bool:
+    async def prepare_source_turn(_history: object) -> SourcePreparation:
         preparation_started.set()
         await allow_preparation_finish.wait()
-        return False
+        return SourcePreparation()
 
     request = ResponseRequest(
         sources=ResponseSources(

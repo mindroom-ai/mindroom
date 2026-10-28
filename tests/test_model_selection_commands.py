@@ -27,7 +27,7 @@ from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
-from tests.test_turn_controller_focused import _build_harness
+from tests.test_turn_controller_focused import _build_harness, _in_room
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -186,7 +186,7 @@ async def test_other_runtime_target_never_owns_checkpoint(tmp_path: Path, wrong_
         handled_turn=TurnRecord.create(["$command"]),
     )
     assert owned is False
-    assert harness.turn_store.get_turn_record("$command") is None
+    assert await harness.turn_store.get_turn_record("$command") is None
     assert not harness.gateway.sent
     assert _helper_override(paths, config) is None
 
@@ -225,7 +225,7 @@ async def test_replay_preserves_result_after_single_real_mutation(tmp_path: Path
             target=target,
             handled_turn=TurnRecord.create(["$command"]),
         )
-    pending = harness.turn_store.get_turn_record("$command")
+    pending = await harness.turn_store.get_turn_record("$command")
     assert pending is not None
     assert _helper_override(paths, config) == "default"
     saved = json.dumps(command_result_content_to_dict(pending.command_result_extra_content), sort_keys=True)
@@ -270,7 +270,7 @@ async def test_crash_before_result_returns_uncertainty_without_success(tmp_path:
     )
     command = command_parser.parse(event.body)
     pending = await harness.turn_store.record_pending_turn(
-        TurnRecord.create(["$command"], completed=False, command_execution_started=True),
+        _in_room(TurnRecord.create(["$command"], completed=False, command_execution_started=True), ROOM),
     )
     assert pending is not None
     await executor.execute(

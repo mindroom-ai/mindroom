@@ -85,6 +85,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch
+from mindroom.turn_store import SourcePreparation
 from tests.bot_helpers import (
     AgentBotTestBase,
     _handled_response_event_id,
@@ -2489,7 +2490,7 @@ class TestAgentBot(AgentBotTestBase):
                     agent_name=bot.agent_name,
                     source_kind=SILENT_SCHEDULE_SOURCE_KIND,
                 ),
-                prepare_source_turn=AsyncMock(return_value=True),
+                prepare_source_turn=AsyncMock(return_value=SourcePreparation(invalid=("$event",))),
             ),
         )
 

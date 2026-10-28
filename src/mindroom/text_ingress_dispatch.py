@@ -42,10 +42,10 @@ if TYPE_CHECKING:
         MediaDispatchEvent,
         PreparedIngress,
     )
-    from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.turn_controller import TurnController
     from mindroom.turn_policy import PreparedDispatch, ResponseAction
+    from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnClaim
 
 
@@ -238,7 +238,7 @@ async def _blocked_before_plan(
     coalescing_key = prepared.turn.ingress.coalescing_key
     may_be_superseded = (
         prepared.dispatch.envelope.origin.may_be_superseded_by_newer_requester_turn
-        and prepared.handled_turn.replay_sources_all_from_requester(requester_user_id)
+        and prepared.handled_turn.sources_all_from_requester(requester_user_id)
         # While another run still waits in the queue, whether another
         # requester's follow-ups, an entity's reply written for this
         # requester, or this requester's message for another participant, a
@@ -269,7 +269,8 @@ async def _blocked_before_plan(
                 thread_read_degraded=True,
             )
     else:
-        skips_turn = controller._has_newer_unresponded_in_thread(
+        skips_turn = await controller._has_newer_unresponded_in_thread(
+            room.room_id,
             prepared.event,
             requester_user_id,
             prepared.replay_guard.history,
@@ -333,9 +334,9 @@ async def _apply_turn_plan(
     visible_responses = controller.deps.visible_responses
     if plan.kind == "ignore":
         if plan.ignore_reason == "router":
-            router_outcome = controller._router_handled_turn_outcome(prepared.handled_turn)
+            router_outcome = await controller._router_handled_turn_outcome(room.room_id, prepared.handled_turn)
             if router_outcome is not None:
-                await controller.deps.turn_store.record_responded_turn(router_outcome)
+                await controller.deps.turn_store.record_responded_turn(router_outcome, room_id=room.room_id)
             else:
                 await visible_responses.settle_source_events_ignored(prepared.handled_turn)
         else:
@@ -348,7 +349,7 @@ async def _apply_turn_plan(
     response_action = plan.response_action
     assert response_action is not None
     _ensure_response_admission_open(controller)
-    reconcile_visible_response = controller.deps.turn_store.has_pending_response_intent(
+    reconcile_visible_response = await controller.deps.turn_store.has_pending_response_intent(
         prepared.handled_turn.source_event_ids,
     )
     response_history_scope = (
@@ -373,9 +374,9 @@ async def _apply_turn_plan(
         conversation_target=prepared.dispatch.target,
     )
     pending_turn = await controller.deps.turn_store.record_pending_turn(handled_turn)
-    if pending_turn is None or pending_turn.completed:
+    if pending_turn is None:
         return
-    if pending_turn.redacted_source_event_ids:
+    if await controller.deps.turn_store.deleted_sources(pending_turn):
         await visible_responses.settle_source_events_ignored(pending_turn)
         return
     handled_turn = pending_turn
