@@ -76,7 +76,7 @@ async def test_agent_reply_uses_fallback_for_over_budget_requester(tmp_path: Pat
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     _budget(coordinator.deps.runtime.config)
 
-    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
+    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()), show_tool_calls=True)
 
     assert runtime.active_model_name == "luna"
 
@@ -86,7 +86,7 @@ async def test_agent_reply_keeps_its_model_within_budget(tmp_path: Path) -> None
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     _budget(coordinator.deps.runtime.config, monthly_limit_usd=None)
 
-    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
+    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()), show_tool_calls=True)
 
     assert runtime.active_model_name == "default"
 
@@ -98,7 +98,10 @@ async def test_scheduled_model_is_budgeted_too(tmp_path: Path) -> None:
     _budget(config)
     config.models["large"] = ModelConfig(provider="openai", id="gpt-6-astra", pricing=ModelPricing(input=5, output=30))
 
-    runtime = await coordinator.prepare_response_runtime(replace(_plain_request(_target()), scheduled_model="large"))
+    runtime = await coordinator.prepare_response_runtime(
+        replace(_plain_request(_target()), scheduled_model="large"),
+        show_tool_calls=True,
+    )
 
     assert runtime.active_model_name == "luna"
 

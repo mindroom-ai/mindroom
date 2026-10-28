@@ -7280,7 +7280,10 @@ async def test_tools_get_the_reply_correlation_when_the_request_names_none(tmp_p
         "build_dispatch_context",
         side_effect=recording_build_dispatch_context,
     ):
-        await coordinator.prepare_response_runtime(_plain_request(_target(reply_to_event_id="$selection")))
+        await coordinator.prepare_response_runtime(
+            _plain_request(_target(reply_to_event_id="$selection")),
+            show_tool_calls=True,
+        )
 
     assert observed == ["$selection"]
 
@@ -7483,7 +7486,7 @@ async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path:
         await coordinator.generate_response(replace(_plain_request(_target()), scheduled_model="cheap"))
 
     assert active_models == ["cheap"]
-    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
+    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()), show_tool_calls=True)
     assert runtime.active_model_name == "large"
 
 

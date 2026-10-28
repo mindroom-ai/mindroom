@@ -33,7 +33,7 @@ def _request(hook_source: str | None, intent: TurnIntent) -> ResponseRequest:
 async def _turn(tmp_path: Path, hook_source: str | None, intent: TurnIntent) -> ResponseTurnContext:
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     request = _request(hook_source, intent)
-    runtime = await runner.prepare_response_runtime(request)
+    runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
     return runner._agent_turn_context(
         request,
         runtime=runtime,

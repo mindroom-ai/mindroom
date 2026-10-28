@@ -962,7 +962,8 @@ class ResponseRunner:
     def _turn_show_tool_calls(self) -> bool:
         """Return the tool-call visibility of the current turn: what its reply was claimed with, read once per turn."""
         handle = current_span()
-        return handle.base.show_tool_calls if handle is not None else self._show_tool_calls()
+        assert handle is not None, "a turn reads its tool-call visibility once its reply is claimed"
+        return handle.base.show_tool_calls
 
     def _thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
         """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
@@ -4418,6 +4419,7 @@ class ResponseRunner:
         self,
         request: ResponseRequest,
         *,
+        show_tool_calls: bool,
         active_model_name: str | None = None,
         participation: ParticipationGate | None = None,
     ) -> _PreparedResponseRuntime:
@@ -4451,7 +4453,7 @@ class ResponseRunner:
             session_id=session_id,
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
-            show_tool_calls=self._turn_show_tool_calls(),
+            show_tool_calls=show_tool_calls,
             tool_dispatch=tool_dispatch,
             participation=participation
             if participation is not None
@@ -4617,6 +4619,7 @@ class ResponseRunner:
             request.pipeline_timing.mark("response_runtime_start")
         runtime = await self.prepare_response_runtime(
             normalized_request,
+            show_tool_calls=self._turn_show_tool_calls(),
             active_model_name=active_model_name,
             participation=participation,
         )
