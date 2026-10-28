@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import RESERVED_ENTITY_NAMES
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -113,7 +114,13 @@ def expand_generated_agents(
                 builds.append((name, name, entry.edits, None))
 
     agents = dict(data.get("agents") or {})
-    taken = {*agents, *base.teams, *base.personal_agents, *(entry.agent_name for entry in roster.entries)}
+    taken = {
+        *agents,
+        *base.teams,
+        *base.personal_agents,
+        *RESERVED_ENTITY_NAMES,
+        *(entry.agent_name for entry in roster.entries),
+    }
     counts: Counter[tuple[str, str]] = Counter()
     for created in roster.created:
         name, creator = created.agent_name, created.creator

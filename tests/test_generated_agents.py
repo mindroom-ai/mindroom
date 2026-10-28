@@ -406,6 +406,16 @@ def test_a_created_name_taken_by_an_authored_agent_is_skipped(tmp_path: Path) ->
     assert _skipped(logs) == [("creator_research", "name_taken")]
 
 
+def test_a_created_entry_with_a_reserved_name_is_skipped_alone(tmp_path: Path) -> None:
+    """A hand-edited entry named router is skipped by itself, so the other created agents still load."""
+    with capture_logs() as logs:
+        config = _load(tmp_path, created=[_created(agent_name="router"), _created(agent_name="creator_writer")])
+    assert "creator_writer" in config.agents
+    assert config.generated_agent("router") is None
+    assert _skipped(logs) == [("router", "name_taken")]
+    assert "generated_agents_invalid" not in [log["event"] for log in logs]
+
+
 def test_an_invalid_pass_two_falls_back_to_pass_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A generated agent that fails validation leaves the pass-one config, so loading never breaks."""
     monkeypatch.setattr(generated_agents, "_generated_agent_data", lambda *_args, **_kwargs: ({"display_name": 5}, []))
