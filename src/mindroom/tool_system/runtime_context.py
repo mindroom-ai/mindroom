@@ -517,11 +517,10 @@ def _hook_context_base_kwargs(
     *,
     event_name: str,
     correlation_id: str,
-    logger: BoundLogger,
 ) -> dict[str, Any]:
     """Return the base fields of a hook context MindRoom emits from one tool runtime context.
 
-    ``logger`` is the logger the hooks write through, already bound by the caller.
+    ``emit`` gives each hook its own ``plugin_name``, ``settings``, and ``logger``, so those three are placeholders.
     """
     bindings = resolve_tool_runtime_hook_bindings(context)
     return {
@@ -530,7 +529,7 @@ def _hook_context_base_kwargs(
         "settings": {},
         "config": context.config,
         "runtime_paths": context.runtime_paths,
-        "logger": logger,
+        "logger": get_logger("mindroom.hooks").bind(event_name=event_name),
         "correlation_id": correlation_id,
         "message_sender": bindings.message_sender,
         "matrix_admin": bindings.matrix_admin,
@@ -545,7 +544,6 @@ def scope_hook_context_kwargs(
     *,
     event_name: str,
     correlation_id: str,
-    logger: BoundLogger,
     scope: HistoryScope,
     session_id: str,
 ) -> dict[str, Any]:
@@ -554,12 +552,7 @@ def scope_hook_context_kwargs(
     A team scope's hooks name the team as ``agent_name``; an agent scope's name the agent ``context`` runs.
     """
     return {
-        **_hook_context_base_kwargs(
-            context,
-            event_name=event_name,
-            correlation_id=correlation_id,
-            logger=logger.bind(event_name=event_name, session_id=session_id),
-        ),
+        **_hook_context_base_kwargs(context, event_name=event_name, correlation_id=correlation_id),
         "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
         "scope": scope,
         "session_id": session_id,
@@ -750,7 +743,6 @@ async def emit_custom_event(
             context,
             event_name=event_name,
             correlation_id=context.correlation_id or f"{event_name}:{uuid4().hex}",
-            logger=get_logger("mindroom.hooks.tools").bind(event_name=event_name),
         ),
         payload=payload,
         source_plugin=plugin_name,

@@ -50,7 +50,6 @@ async def session_started_on_creation(
     reply: ReplySession | None,
     *,
     correlation_id: str,
-    logger: structlog.stdlib.BoundLogger,
 ) -> AsyncIterator[None]:
     """Run one reply, then emit ``session:started`` once if a write the reply made created its session's row.
 
@@ -72,7 +71,6 @@ async def session_started_on_creation(
             context,
             event_name=EVENT_SESSION_STARTED,
             correlation_id=correlation_id,
-            logger=logger,
             scope=reply.scope,
             session_id=context.session_id,
         ),

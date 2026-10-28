@@ -307,7 +307,6 @@ async def _emit_compaction_hook(
             runtime_context,
             event_name=event_name,
             correlation_id=runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}",
-            logger=logger,
             scope=scope,
             session_id=session_id,
         ),
