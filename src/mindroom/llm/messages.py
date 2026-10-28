@@ -110,6 +110,18 @@ class Message:
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[Any] | None = None
     id: str = field(default_factory=_new_id)
+    # LEGACY_COMPAT: Messages stored with a compressed copy of their content.
+    # Legacy format: a stored message whose ``compressed_content`` holds a shortened copy of a tool result, in
+    # ``run_data`` messages, summary-row segments, and tool-job payloads; only Agno's ``compress_tool_results`` wrote it.
+    # Last legacy release: v2026.10.498, the last release that ran ``compress_tool_results``; v2026.10.499 retired it,
+    # and no MindRoom writer has set the field since.
+    # Handling: a stored copy reads, and a rewritten row writes it back, so token estimates, summary input, and a
+    # replayed viewed-image notice read it in place of the content (``render_message_content``) as before the upgrade;
+    # a new message never has one, and no provider is sent it.
+    # Coverage: tests/llm/test_codecs.py::test_a_message_agno_stored_with_a_compressed_copy_keeps_it,
+    #   tests/test_history_request_messages.py::test_history_viewed_images_fit_the_aggregate_byte_cap,
+    #   tests/llm/test_stored_dicts.py::test_a_new_message_stores_no_compressed_copy_of_its_content
+    compressed_content: str | None = None
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -152,6 +164,7 @@ class Message:
             "content": self.content,
             "reasoning_content": self.reasoning_content,
             "from_history": self.from_history,
+            "compressed_content": self.compressed_content,
             "stop_after_tool_call": self.stop_after_tool_call,
             "role": self.role,
             "name": self.name,
@@ -200,17 +213,6 @@ class Message:
         # Handling: the keys are ignored on read and never written again; every key MindRoom reads survives.
         # Coverage: tests/llm/test_codecs.py::test_message_from_dict_ignores_agno_only_keys,
         #   tests/llm/test_codecs.py::test_message_from_dict_reads_non_persisted_flags_from_model_dump_payloads
-        # LEGACY_COMPAT: Messages stored with a compressed copy of their content.
-        # Legacy format: a stored message whose ``compressed_content`` holds a shortened copy of a tool result, which
-        # only Agno's ``compress_tool_results`` wrote, in ``run_data`` messages, summary-row segments, and tool-job
-        # payloads.
-        # Last legacy release: v2026.10.627, whose typed model still wrote a stored value back with a rewritten row,
-        # though no provider sent it after v2026.10.498, the last release to run the writer; replacement: the next
-        # release, whose ``Message`` has no such field.
-        # Handling: the key is ignored on read and never written again, so estimates, summary input, and replay read
-        # the content every provider has been sent since v2026.10.499.
-        # Coverage: tests/llm/test_codecs.py::test_a_message_agno_stored_with_a_compressed_copy_reads_as_its_full_content,
-        #   tests/test_history_request_messages.py::test_history_viewed_images_fit_the_aggregate_byte_cap
         metrics = data.get("metrics")
         identifier = data.get("id")
         created_at = data.get("created_at")
@@ -218,6 +220,7 @@ class Message:
             role=data["role"],
             content=data.get("content"),
             id=identifier if isinstance(identifier, str) else _new_id(),
+            compressed_content=data.get("compressed_content"),
             name=data.get("name"),
             tool_call_id=data.get("tool_call_id"),
             tool_calls=data.get("tool_calls"),

@@ -72,7 +72,7 @@ def project_history_media_for_replay(messages: Sequence[Message]) -> list[Messag
         omitted = sum(_is_viewed_image(image) for image in images) - len(kept)
         copy = replace(message, images=kept or None, audio=None, videos=None, files=None)
         if omitted:
-            copy = replace(copy, content=_content_with_viewed_image_omission(message, omitted))
+            copy = replace(copy, content=_content_with_viewed_image_omission(message, omitted), compressed_content=None)
         projected.append(copy)
     return projected
 
@@ -104,8 +104,11 @@ def image_content_for_token_estimation(value: object) -> object:
 
 
 def render_message_content(message: Message) -> str:
-    """Render one replayable string form of a message body."""
-    content = message.content
+    """Render one replayable string form of a message body: a legacy row's compressed copy, if any, else the content.
+
+    The copy is legacy data (``Message.compressed_content``); no provider is sent it.
+    """
+    content = message.compressed_content if message.compressed_content is not None else message.content
     if isinstance(content, str):
         return content
     if content is None:

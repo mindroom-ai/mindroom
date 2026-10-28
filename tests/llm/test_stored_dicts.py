@@ -236,6 +236,13 @@ def test_a_message_stores_each_field_it_holds_under_its_key_and_reads_back_as_it
     assert Message.from_dict(stored) == owned
 
 
+def test_a_new_message_stores_no_compressed_copy_of_its_content() -> None:
+    """Only rows Agno's retired ``compress_tool_results`` wrote hold a compressed copy; no MindRoom writer makes one."""
+    result = Message(role="tool", content="a long tool result", tool_call_id="c", tool_name="t")
+
+    assert "compressed_content" not in result.to_dict()
+
+
 def test_only_context_no_history_keeps_stores_its_flag_and_reads_back_as_it() -> None:
     """A paused run's turn context stores ``add_to_agent_memory: false``; every other message stores no such key."""
     context = Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False)
