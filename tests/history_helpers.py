@@ -86,6 +86,7 @@ from tests.fakes.summary_model import summary_model
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from mindroom.history.request_messages import TurnMessages
     from mindroom.history.types import ScopeSummary
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
@@ -94,6 +95,17 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_TEST_COMPACTION = CompactionConfig()
+
+
+def stored_turn(turn: TurnMessages, *, requester: str) -> RunRecord:
+    """Return the run that stores ``turn`` and the answer "Answered.", each message as a load reads it back."""
+    messages = [*turn.in_request_order(), Message(role="assistant", content="Answered.")]
+    return RunRecord(
+        run_id="stored-turn",
+        agent_id="agent",
+        user_id=requester,
+        messages=[Message.from_dict(message.to_dict()) for message in messages],
+    )
 
 
 def replay_settings(

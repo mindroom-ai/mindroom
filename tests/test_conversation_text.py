@@ -6,7 +6,7 @@ import pytest
 
 from mindroom.agent_loop.tools import media_follow_up
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
-from mindroom.history.conversation_text import utterances
+from mindroom.history.conversation_text import thread_context_note, utterances
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
@@ -151,12 +151,18 @@ def test_runtime_prompts_and_stopped_summaries_are_nobodys_words(
             ),
             id="tool-media-follow-up",
         ),
+        # A turn's thread context can open with a note, such as that earlier messages were omitted.
+        pytest.param(
+            Message.from_dict(thread_context_note("[2 earlier message(s) in this thread were omitted.]").to_dict()),
+            id="thread-context-note",
+        ),
     ],
 )
 def test_user_messages_mindroom_stores_in_a_turn_are_nobodys_words(stored: Message) -> None:
-    """A user message MindRoom stores mid-turn is not the requester's.
+    """A user message MindRoom stores in a turn is not the requester's.
 
-    Such are a pause notice, a run's own compaction summary, and the follow-up that carries a tool result's media.
+    Such are a pause notice, a run's own compaction summary, the follow-up that carries a tool result's media, and a
+    note on the turn's thread context.
     """
     run = _run(
         Message(role="user", content="Deploy it."),
