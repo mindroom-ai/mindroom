@@ -64,7 +64,6 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.test_tool_hooks import _plugin
@@ -76,6 +75,7 @@ from tests.tool_job_helpers import (
     call_job_tool,
     cancel_settled,
     job_actor,
+    job_owner,
     job_tool,
     lookup,
     pending_outcomes,
@@ -1440,16 +1440,7 @@ async def test_a_managed_call_that_fails_unexpectedly_finishes_its_record_failed
 @pytest.mark.parametrize("status", sorted(TERMINAL_STATUSES))
 def test_a_read_of_one_job_fails_every_outcome_but_completion_with_its_reason(status: str) -> None:
     """The call that started a job and a later wait on it share this rule, so neither reads a denial as a success."""
-    owner = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="leader",
-        requester_id="@alice:localhost",
-        room_id="!room:localhost",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session",
-    )
-    job = BackgroundJob("job", owner, tool_name="slow", depth=0, status=status)  # type: ignore[arg-type]
+    job = BackgroundJob("job", job_owner(), tool_name="slow", depth=0, status=status)  # type: ignore[arg-type]
 
     failure = job_failure(job, "the reason", ToolResultPayload(value="the reason"))
 
