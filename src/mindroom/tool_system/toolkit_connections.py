@@ -47,15 +47,15 @@ async def _connect(toolkit: Toolkit) -> ToolkitClose | None:
         # That cleanup closes the toolkit instance, so connecting first would let it close this run's connection.
         await asyncio.wait({cleanup})
     try:
-        await _connect_on_thread(toolkit)
+        await _connect_shielded(toolkit)
     except Exception as exc:
         logger.warning("toolkit_connect_failed", toolkit=toolkit.name, error=str(exc))
         return None
     return partial(_close, toolkit)
 
 
-async def _connect_on_thread(toolkit: Toolkit) -> None:
-    """Connect ``toolkit`` on a thread; a caller cancelled meanwhile stops waiting, and the connection closes once made."""
+async def _connect_shielded(toolkit: Toolkit) -> None:
+    """Connect ``toolkit`` on the loop or a thread; a cancelled caller stops waiting, and what connects is closed."""
 
     def close_once_connected(connecting: asyncio.Task[None]) -> None:
         cleanup = create_background_task(_close_once_connected(toolkit, connecting), name="toolkit-connect-cleanup")
