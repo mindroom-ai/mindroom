@@ -127,6 +127,59 @@ def test_a_subclass_offers_its_bases_tool_methods_first() -> None:
     assert toolkit.functions["second"]() == "overridden"
 
 
+class StaticAndClassTools(Toolkit):
+    """Static and class methods marked with ``@tool`` in either decorator order."""
+
+    @staticmethod
+    @tool(name="static_marked_first", description="A static method marked before it became one.")
+    def _static_inside(text: str) -> str:
+        return f"static:{text}"
+
+    @tool(name="static_marked_last", description="A static method marked after it became one.")
+    @staticmethod
+    def _static_outside(text: str) -> str:
+        return f"static:{text}"
+
+    @classmethod
+    @tool(name="class_marked_first", description="A class method marked before it became one.")
+    def _class_inside(cls, text: str) -> str:
+        return f"{cls.__name__}:{text}"
+
+    @tool(name="class_marked_last", description="A class method marked after it became one.")
+    @classmethod
+    def _class_outside(cls, text: str) -> str:
+        return f"{cls.__name__}:{text}"
+
+
+@pytest.mark.asyncio
+async def test_static_and_class_methods_are_tool_functions_in_either_decorator_order() -> None:
+    """Each keeps the name and description ``@tool`` gave it, and the model fills only its own parameters."""
+    toolkit = StaticAndClassTools()
+    functions = _by_name(adapt_toolkit(toolkit).functions)
+    names = ["static_marked_first", "static_marked_last", "class_marked_first", "class_marked_last"]
+
+    outcomes = [await execute_tool_call(functions[name], {"text": "hi"}, _CONTEXT, middleware=()) for name in names]
+
+    assert list(toolkit.functions) == names
+    assert [functions[name].description for name in names] == [
+        "A static method marked before it became one.",
+        "A static method marked after it became one.",
+        "A class method marked before it became one.",
+        "A class method marked after it became one.",
+    ]
+    assert all(
+        functions[name].parameters
+        == {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+        for name in names
+    )
+    assert [outcome.content for outcome in outcomes] == [
+        "static:hi",
+        "static:hi",
+        "StaticAndClassTools:hi",
+        "StaticAndClassTools:hi",
+    ]
+
+
 def test_only_tool_marks_make_a_class_attribute_a_function() -> None:
     """An attribute that answers any attribute lookup, such as a lazy client proxy, is no tool function."""
 

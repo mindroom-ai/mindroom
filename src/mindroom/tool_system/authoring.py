@@ -33,14 +33,14 @@ class _ToolMark:
 
 
 @overload
-def tool[F: Callable[..., Any]](function: F, /) -> F: ...
+def tool[F](function: F, /) -> F: ...
 
 
 @overload
-def tool[F: Callable[..., Any]](*, name: str | None = None, description: str | None = None) -> Callable[[F], F]: ...
+def tool[F](*, name: str | None = None, description: str | None = None) -> Callable[[F], F]: ...
 
 
-def tool[F: Callable[..., Any]](
+def tool[F](
     function: F | None = None,
     /,
     *,
@@ -50,10 +50,11 @@ def tool[F: Callable[..., Any]](
     """Mark a method as one of its toolkit's functions and return it unchanged, so it stays directly callable.
 
     ``name`` replaces the function's own name for the model, and ``description`` its docstring's summary and body.
+    A static or class method may be marked before or after it becomes one.
     """
 
     def mark(marked: F) -> F:
-        setattr(marked, _TOOL_MARK, _ToolMark(name=name, description=description))
+        setattr(_function_of(marked), _TOOL_MARK, _ToolMark(name=name, description=description))
         return marked
 
     return mark if function is None else mark(function)
@@ -77,6 +78,11 @@ def authored_description(function: Callable[..., Any]) -> str | None:
 def _mark(function: object) -> _ToolMark | None:
     mark = getattr(function, _TOOL_MARK, None)
     return mark if isinstance(mark, _ToolMark) else None
+
+
+def _function_of(member: object) -> object:
+    """Return the function a static or class method wraps, which the mark lives on; any other member as it is."""
+    return member.__func__ if isinstance(member, staticmethod | classmethod) else member
 
 
 class Toolkit:
@@ -108,7 +114,7 @@ class Toolkit:
         methods = [
             getattr(self, attribute)
             for attribute in attributes
-            if _mark(inspect.getattr_static(cls, attribute)) is not None
+            if _mark(_function_of(inspect.getattr_static(cls, attribute))) is not None
         ]
         self.functions: dict[str, Callable[..., Any]] = {}
         for function in (*methods, *tools):
