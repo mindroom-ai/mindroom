@@ -1,17 +1,18 @@
-"""Shared failure preparation before each owner's distinct terminal publication."""
+"""What every owner of a paused reply's ending shares: its final-answer read and its failure preparation."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.event_journal import ApprovalFailure
+from mindroom.event_journal import ApprovalFailure, DeliveryStage
 from mindroom.reply_lifecycle import ApprovalFailureKind
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.cancellation import CancelSource
-    from mindroom.event_journal import ApprovalContinuation
+    from mindroom.event_journal import ApprovalContinuation, MatrixDelivery, PrincipalStore
+    from mindroom.reply_lifecycle import SpanOutcome
 
 _CANCELLED_KINDS = {
     "user_stop": ApprovalFailureKind.USER_STOP,
@@ -30,6 +31,16 @@ def response_failure(*, cancel_source: CancelSource | None, reason: str | None, 
     if cancel_source is not None:
         return cancelled_failure(cancel_source)
     return ApprovalFailure(ApprovalFailureKind.ERROR, reason or default)
+
+
+async def read_final(
+    principal: PrincipalStore,
+    continuation: ApprovalContinuation,
+) -> tuple[MatrixDelivery | None, SpanOutcome | None]:
+    """Read the FINAL delivery the continuation names and the outcome of the span that wrote it."""
+    final = await principal.load_matrix_delivery(delivery_id=continuation.final_delivery_id, stage=DeliveryStage.FINAL)
+    span = None if final is None or final.span_id is None else await principal.replies.span(final.span_id)
+    return final, None if span is None else span.outcome
 
 
 async def prepare_approval_failure(

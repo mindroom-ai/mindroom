@@ -1,4 +1,4 @@
-"""What a paused reply does next, per trigger and journal fact, as each of today's deciders decides it.
+"""What a paused reply does next, per trigger and journal fact, end to end through each trigger's owner.
 
 Each case builds a paused reply's journal state with the shared approval helpers, runs one trigger at the
 collaborator seam that owns it, and compares the whole observable outcome: whether the paused reply is kept
@@ -574,9 +574,17 @@ async def _resume(bot: AgentBot, run: Callable[..., Awaitable[object]], **patche
     async with resumed_approval(bot, owned) as claimed:
         with patch.object(runner._approvals, "_execute_claimed_approval", side_effect=run):
             if not patches:
-                return await runner._approvals._run_owned_approval_continuation(claimed, target=_recovery_target())
+                event_id, _suspended = await runner._approvals._run_owned_approval_continuation(
+                    claimed,
+                    target=_recovery_target(),
+                )
+                return event_id
             with patch.multiple(runner, **patches):
-                return await runner._approvals._run_owned_approval_continuation(claimed, target=_recovery_target())
+                event_id, _suspended = await runner._approvals._run_owned_approval_continuation(
+                    claimed,
+                    target=_recovery_target(),
+                )
+                return event_id
 
 
 _FAILED_RESUMES = (
@@ -1208,5 +1216,5 @@ async def test_settle_leaves_a_reply_whose_answer_stands(tmp_path: Path) -> None
     bot = _new_bot(tmp_path)
     continuation = await _claimed_with_final(bot, "answered")
     with _observed(bot) as observer:
-        assert not await _runner(bot)._approvals._approval_responses.settle_failure(continuation, _HTTP_502)
+        assert not await _runner(bot)._approvals._settle(continuation, _HTTP_502)
     assert await _outcome(bot, observer) == Outcome(continuation="claimed", reply=ReplyState.COMPLETED)

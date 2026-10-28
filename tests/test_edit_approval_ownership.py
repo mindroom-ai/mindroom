@@ -32,7 +32,7 @@ from mindroom.response_runner import DeliveryProgress, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
-from tests.approval_continuation_helpers import claim_continuation
+from tests.approval_continuation_helpers import claim_continuation, dispatch_approval
 from tests.conftest import (
     finish_edit_regenerations,
     handle_card_response_for_test,
@@ -209,9 +209,7 @@ class _ApprovalCase:
             event_id="$final-edit",
             delivered_projections=(),
         )
-        assert (
-            await self.runner._approvals._recover_claimed_approval_lifecycle(claimed, target=self.target) == "$answer"
-        )
+        assert await dispatch_approval(self.runner._approvals, claimed, target=self.target) == "$answer"
         assert await self.principal.approvals.approval_continuation(claimed.approval_id) is None
 
     async def resume(self) -> None:
@@ -318,10 +316,6 @@ async def _paused_case(  # noqa: PLR0915
         ),
     )
     await runner.deps.replies.start()
-    runner._approvals._approval_responses.store = principal.approvals
-    runner._approvals._approval_responses.load_span = principal.replies.span
-    runner._approvals._approval_responses.delivery_gateway = gateway
-    runner._approvals._approval_responses.finish_approval = runner.deps.replies.finish_approval
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,
@@ -408,6 +402,7 @@ async def _paused_case(  # noqa: PLR0915
                     approval_store=MagicMock(
                         spec=type(principal.approvals),
                         wraps=principal.approvals,
+                        principal_id=principal.approvals.principal_id,
                     ),
                 ),
             ),
@@ -506,7 +501,7 @@ class TestEditApprovalOwnership:
         case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
         await case.dispatch_newer()
         assert await case.principal.approvals.approval_continuation_for_source("$newer-edit") is None
-        assert not await case.runner._approvals._approval_responses.settle_failure(
+        assert not await case.runner._approvals._settle(
             claimed,
             "Paused run is no longer available",
         )

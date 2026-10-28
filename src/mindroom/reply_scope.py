@@ -597,7 +597,7 @@ class ReplyRuntime:
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
         claim = await self._new_request(
-            delivery_id=continuation.source_event_ids[0],
+            delivery_id=continuation.final_delivery_id,
             sources=continuation.sources,
             room_id=continuation.room_id,
             thread_id=continuation.thread_id,

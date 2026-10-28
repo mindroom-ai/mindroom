@@ -103,7 +103,7 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    failing = await runner._approvals._approval_responses.request_failure(
+    failing = await runner._approvals._request_failure(
         claimed,
         ApprovalFailure(ApprovalFailureKind.RESTART),
     )

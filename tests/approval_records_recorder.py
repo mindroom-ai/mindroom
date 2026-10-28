@@ -33,7 +33,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -41,14 +40,13 @@ import pytest_asyncio
 from mindroom.approval import manager as approval_manager_module
 from mindroom.approval import response as approval_response_module
 from mindroom.approval.manager import ApprovalManager
-from mindroom.approval.response import ApprovalResponseCoordinator, continuation_target, plan_approval_calls
+from mindroom.approval.response import continuation_target, plan_approval_calls, publish_generation
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     BackgroundScriptToolOrigin,
     ToolApprovalTransportError,
 )
 from mindroom.config.main import Config
-from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import (
     ApprovalDecision,
     ApprovalDecisionMetadata,
@@ -77,7 +75,7 @@ from tests.reply_span_helpers import paused_for_approval
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from mindroom.approval.response import _ApprovalPausePlan
+    from mindroom.approval.response import ApprovalPausePlan
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation, BackgroundApprovalDecision, MatrixDelivery, PrincipalStore
 
@@ -212,7 +210,6 @@ class _Recording:
     runtime_paths: RuntimePaths
     config: Config
     manager: ApprovalManager
-    coordinator: ApprovalResponseCoordinator
     # Sends Matrix refuses, by delivery and stage.
     refused_sends: set[tuple[str, DeliveryStage]]
     workflow_digests: dict[str, str] = field(default_factory=dict)
@@ -265,7 +262,7 @@ class _Recording:
             ),
         )
 
-    async def plan(self, *calls: ToolExecution, thread_id: str = THREAD) -> _ApprovalPausePlan:
+    async def plan(self, *calls: ToolExecution, thread_id: str = THREAD) -> ApprovalPausePlan:
         """Evaluate the approval policy for one paused generation, as a pausing response does."""
         return await plan_approval_calls(
             tuple((call, AGENT) for call in calls),
@@ -277,14 +274,18 @@ class _Recording:
             thread_id=thread_id,
         )
 
-    async def publish(self, continuation: ApprovalContinuation, plan: _ApprovalPausePlan) -> ApprovalContinuation:
-        """Publish a waiting generation's cards and release its publication lease, as the response coordinator does."""
+    async def publish(self, continuation: ApprovalContinuation, plan: ApprovalPausePlan) -> ApprovalContinuation:
+        """Publish a waiting generation's cards and release its publication lease, as the paused reply's runner does."""
         self.clock.advance()
-        await self.coordinator.publish_generation(
+        await publish_generation(
             continuation,
             plan,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            store=self.responder.approvals,
             target=continuation_target(continuation),
             failure_reason=_PUBLICATION_FAILED,
+            retry_sources=lambda _room_id, _sources: None,
         )
         published = await self.responder.approvals.approval_continuation(continuation.approval_id)
         assert published is not None
@@ -294,7 +295,7 @@ class _Recording:
         """Pause the agent's reply to a new message on ``calls`` and publish the cards its policy asks for.
 
         The continuation is ``name``; its message is ``$message-<name>`` and its reply ``$reply-<name>``. Each card's
-        delivery is ``<name>-<generation>-<call index>``, as the coordinator names them.
+        delivery is ``<name>-<generation>-<call index>``, as card publication names them.
         """
         source = f"$message-{name}"
         await self.message(source, body=f"Please {name}.", thread_id=thread_id)
@@ -533,16 +534,6 @@ async def _open_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _R
     monkeypatch.setattr(manager, "_ensure_deadline_sweep", lambda: None)
     monkeypatch.setattr(approval_manager_module, "_MANAGER", manager)
     responder = journal.principal(RESPONDER)
-    coordinator = ApprovalResponseCoordinator(
-        config=lambda: config,
-        runtime_paths=runtime_paths,
-        store=responder.approvals,
-        load_span=responder.replies.span,
-        delivery_gateway=MagicMock(spec=DeliveryGateway),
-        retry_sources=lambda _room_id, _sources: None,
-        finish_approval=AsyncMock(return_value=True),
-        release_approval=AsyncMock(return_value=True),
-    )
     # The router left the room once and was invited back, so its cards belong to its second membership.
     router = journal.principal(ROUTER)
     for membership in ("join", "leave", "join"):
@@ -557,7 +548,6 @@ async def _open_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _R
         runtime_paths=runtime_paths,
         config=config,
         manager=manager,
-        coordinator=coordinator,
         refused_sends=refused_sends,
     )
 

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
+from mindroom.approval.continuation_rules import CliExit
 from mindroom.approval.failure import response_failure
 from mindroom.event_journal import ApprovalDecision
 from mindroom.orchestration.runtime import (
@@ -24,7 +25,6 @@ from mindroom.response_turn import ResponsePausedForApproval, apply_exact_approv
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from mindroom.approval.response import ApprovalResponseCoordinator
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
@@ -43,16 +43,15 @@ class _ApprovalProgress(Protocol):
 
 @dataclass
 class CliApprovalWaits:
-    """Keep waiter registration, durable claims, and terminal cleanup in one owner."""
+    """Keep waiter registration and durable claims in one owner, and report each scope's end."""
 
     store: ApprovalStore
-    responses: ApprovalResponseCoordinator
-    runtime_generation: str
-    retry_sources: Callable[[str, tuple[str, ...]], None]
     # Claims a ready continuation for the waiting response, with its reply's resume in place.
     claim: Callable[[ApprovalContinuation], Awaitable[ApprovalContinuation | None]]
     # Records a claimed continuation's next pause while the response waits in place.
     advance: Callable[[ApprovalContinuation, PausedAttempt, MessageTarget], Awaitable[object]]
+    # Runs what the paused reply of a source does as a scope that paused it ends.
+    exit: Callable[[str, CliExit], Awaitable[None]]
     waiters: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
 
     def wake(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
@@ -201,35 +200,19 @@ class CliApprovalWaits:
         progress: _ApprovalProgress,
         settle_terminal: bool,
     ) -> None:
-        current = await self.store.approval_continuation_for_source(source)
-        if suspended and current is not None and current.state == "ready":
-            self.retry_sources(current.room_id, tuple(current.source_event_ids))
-        if (
-            settle_terminal
-            and not suspended
-            and current is not None
-            and current.cli_call is not None
-            and (current.state != "claimed" or current.runtime_generation == self.runtime_generation)
-        ):
-            final = await self.responses.final_delivery(current)
-            if current.state == "failing" and await self.responses.successful_final_delivery(current) is None:
-                # A Stop or failure fenced the wait before an answer: its settlement expires the cards before it
-                # ends the reply, which approval recovery does instead after a shutdown.
-                if not current_task_is_process_shutdown():
-                    assert current.failure is not None, "a failing continuation holds its failure"
-                    await self.responses.settle_failure(current, current.failure)
-            elif final is not None and not final.permanently_failed:
-                await self.responses.finish_approval(current.approval_id)
-            elif not current_task_is_process_shutdown():
-                # No answer reached the room, including one Matrix refused for good: the approval fails.
-                await self.responses.request_failure(
-                    current,
-                    response_failure(
-                        # The response's progress records a cancellation as its canonical failure reason.
-                        cancel_source=cancel_source_from_failure_reason(progress.failure_reason)
-                        if progress.cancelled
-                        else None,
-                        reason=progress.failure_reason,
-                        default="CLI approval response ended before final delivery.",
-                    ),
-                )
+        await self.exit(
+            source,
+            CliExit(
+                suspended=suspended,
+                live=settle_terminal,
+                shutting_down=current_task_is_process_shutdown(),
+                failure=response_failure(
+                    # The response's progress records a cancellation as its canonical failure reason.
+                    cancel_source=cancel_source_from_failure_reason(progress.failure_reason)
+                    if progress.cancelled
+                    else None,
+                    reason=progress.failure_reason,
+                    default="CLI approval response ended before final delivery.",
+                ),
+            ),
+        )

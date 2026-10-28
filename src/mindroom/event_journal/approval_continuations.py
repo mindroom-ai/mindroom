@@ -262,6 +262,11 @@ class ApprovalContinuation:
         """Return the captured pending sources owned by this continuation."""
         return self.sources.pending_event_ids
 
+    @property
+    def final_delivery_id(self) -> str:
+        """Return the delivery of the run's final answer, which its resume or its settlement writes."""
+        return self.source_event_ids[0]
+
 
 def _context(continuation: ApprovalContinuation) -> dict[str, object]:
     """Return the opaque response snapshot stored beside normalized routing facts."""
@@ -752,7 +757,7 @@ def _answer_frozen(transaction: Transaction, principal_id: str, continuation: Ap
     final = outbox.load(
         transaction,
         principal_id,
-        delivery_id=continuation.source_event_ids[0],
+        delivery_id=continuation.final_delivery_id,
         stage=DeliveryStage.FINAL,
     )
     return final is not None and final.permanent_failure_reason is None
@@ -849,7 +854,7 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
         WHERE principal_id = ? AND delivery_id = ? AND stage = ?
           AND (acknowledged_event_id IS NOT NULL OR permanent_failure_reason IS NOT NULL)
         """,
-        (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
+        (principal_id, continuation.final_delivery_id, DeliveryStage.FINAL.value),
     )
     return None if delivered is None else continuation
 
@@ -888,8 +893,7 @@ def may_release(
     continuation = _get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None or continuation.state != "failing" or continuation.generation != expected_generation:
         return None
-    delivery_id = continuation.source_event_ids[0]
-    if outbox.load(transaction, principal_id, delivery_id=delivery_id, stage=DeliveryStage.FINAL) is not None:
+    if outbox.load(transaction, principal_id, delivery_id=continuation.final_delivery_id, stage=DeliveryStage.FINAL):
         return None
     return continuation
 

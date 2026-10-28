@@ -33,6 +33,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAtt
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_store import TurnStore
+from tests.approval_continuation_helpers import dispatch_approval
 from tests.conftest import (
     initialize_approval_store_for_test,
     patch_response_runner_module,
@@ -210,8 +211,8 @@ async def test_a_handoff_that_fails_after_its_pause_committed_writes_nothing_beh
         runner = unwrap_extracted_collaborator(bot._response_runner)
         with (
             patch.object(
-                runner._approvals._approval_responses,
-                "publish_generation",
+                runner._approvals,
+                "_publish_generation",
                 AsyncMock(side_effect=RuntimeError("cards unavailable")),
             ),
             patch.object(type(runner._approvals), "_failed_approval_handoff", AsyncMock(return_value=None)),
@@ -479,7 +480,7 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
             return "Never answered."
 
         published = asyncio.Event()
-        publish_generation = runner._approvals._approval_responses.publish_generation
+        publish_generation = runner._approvals._publish_generation
 
         async def publish_then_wait(*args: object, **kwargs: object) -> object:
             result = await publish_generation(*args, **kwargs)
@@ -492,7 +493,7 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
                 should_use_streaming=AsyncMock(return_value=False),
                 typing_indicator=_noop_typing,
             ),
-            patch.object(runner._approvals._approval_responses, "publish_generation", new=publish_then_wait),
+            patch.object(runner._approvals, "_publish_generation", new=publish_then_wait),
         ):
             response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
             # The cards are out and the run waits for the decision.
@@ -622,7 +623,7 @@ async def test_a_shutdown_during_an_approval_resume_leaves_it_for_replay(tmp_pat
         assert failing is not None
         assert failing.state == "failing"
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        await runner._approvals._recover_failing_approval(failing, target=_target())
+        await dispatch_approval(runner._approvals, failing, target=_target())
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.ACTIVE
@@ -816,15 +817,15 @@ async def test_a_failure_note_that_could_not_be_sent_is_resent_not_written_again
         runner = unwrap_extracted_collaborator(bot._response_runner)
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
-        failing = await runner._approvals._approval_responses.request_failure(continuation, _CARD_PUBLICATION_FAILED)
+        failing = await runner._approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
         assert failing is not None
         before = (await _reply(bot)).reply_sequence
 
         flaky = _FlakyHomeserver(failures=2)
         with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
-            assert not await runner._approvals._approval_responses.settle_failure(failing, _CARD_PUBLICATION_FAILED)
-            assert not await runner._approvals._approval_responses.settle_failure(failing, _CARD_PUBLICATION_FAILED)
-            assert await runner._approvals._approval_responses.settle_failure(failing, _CARD_PUBLICATION_FAILED)
+            assert not await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+            assert not await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+            assert await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.FAILED
@@ -842,12 +843,12 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
         gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
-        failing = await runner._approvals._approval_responses.request_failure(continuation, _CARD_PUBLICATION_FAILED)
+        failing = await runner._approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
         assert failing is not None
         # The Stop commits on the reply before this settlement writes its note.
         assert await gateway.stop_reply("$sent1", 5, room_id=_target().room_id, may_wait=False)
 
-        assert await runner._approvals._approval_responses.settle_failure(failing, _CARD_PUBLICATION_FAILED)
+        assert await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED
