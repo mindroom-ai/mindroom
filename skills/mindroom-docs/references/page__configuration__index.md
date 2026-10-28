@@ -16,7 +16,7 @@ Validate a file with:
 mindroom config validate --path /path/to/config.yaml
 ```
 
-Every section rejects keys MindRoom does not define, so a misspelled key fails validation and startup with an error that names its location, for example `memory → embedder → config → base_url: Unknown key 'base_url': remove it or correct its spelling`.
+Every section rejects keys MindRoom does not define, except free-form maps such as a plugin's `settings`, `memory.llm.config`, and `voice.stt.extra_kwargs`, so a misspelled key fails validation and startup with an error that names its location, for example `memory → embedder → config → base_url: Unknown key 'base_url': remove it or correct its spelling`.
 
 Edits to `config.yaml` apply by hot reload without restarting MindRoom, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes and turning [background tool jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) on or off or changing their excluded toolkits, which need a restart.
 Edits to an agent's or team's own settings, such as `instructions`, `model`, `tools`, or a team's `mode`, apply from its next reply without restarting it.
