@@ -1990,6 +1990,33 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("correlation_id", "expected_prefix"),
+    [("corr-runtime", "corr-runtime"), (None, "demo:tool_custom_event:")],
+)
+async def test_emit_custom_event_carries_the_turn_correlation_id(
+    tmp_path: Path,
+    correlation_id: str | None,
+    expected_prefix: str,
+) -> None:
+    """A tool-emitted custom event carries its turn's correlation ID, or a fresh one naming the event."""
+    seen: list[str] = []
+
+    @hook("demo:tool_custom_event")
+    async def on_custom_event(ctx: CustomEventContext) -> None:
+        seen.append(ctx.correlation_id)
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
+    runtime_context = replace(_tool_runtime_context(tmp_path, hook_registry=registry), correlation_id=correlation_id)
+
+    with tool_runtime_context(runtime_context):
+        await emit_custom_event("tool-policy", "demo:tool_custom_event", {})
+
+    [seen_id] = seen
+    assert seen_id.startswith(expected_prefix)
+
+
+@pytest.mark.asyncio
 async def test_emit_custom_event_preserves_message_received_depth_and_bound_room_state_accessors(
     tmp_path: Path,
 ) -> None:

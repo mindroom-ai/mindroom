@@ -2,8 +2,9 @@
 
 Agno stays the tool authoring library: tools subclass ``agno.tools.Toolkit``, and Agno's public ``process_entrypoint``
 derives each schema and wraps each entrypoint in pydantic coercion.
-At call time this module builds the Agno-shaped arguments an entrypoint declares and reads the ``ToolResult`` it
-returns as owned values, which live in ``tool_function`` so a module that only handles them imports no Agno module.
+At call time this module builds the Agno-shaped arguments an entrypoint declares, and ``read_tool_value`` reads the
+Agno ``ToolResult`` a vendor tool returns as the ``ToolValue`` MindRoom's own tools return. Those owned values live in
+``tool_function``, so a module that only handles them imports no Agno module.
 MindRoom modules outside the tool and toolkit packages import Agno's tool types only from here.
 """
 
@@ -14,12 +15,9 @@ import re
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_type_hints, runtime_checkable
 
-from agno.media import Audio as AgnoAudio
-from agno.media import File as AgnoFile
-from agno.media import Image as AgnoImage
-from agno.media import Video as AgnoVideo
 from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
@@ -31,13 +29,18 @@ from agno.utils.schema import (
     unwrap_annotation,
 )
 
-from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.media import Audio, File, Image, Video, named_by_resource
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import finished_tool_schema
 from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
+
+    from agno.media import Audio as AgnoAudio
+    from agno.media import File as AgnoFile
+    from agno.media import Image as AgnoImage
+    from agno.media import Video as AgnoVideo
 
     from mindroom.tool_system.invocation import ToolCallContext
 
@@ -434,44 +437,39 @@ def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dic
 
 @dataclass(slots=True)
 class StreamCollector:
-    """Accumulate what a generator tool yields: text joins, and ``ToolResult`` media and metadata merge."""
+    """Accumulate what a generator tool yields: text joins, and the media of each tool value it yields collects."""
 
     _chunks: list[str] = field(default_factory=list)
-    _merged: ToolResult | None = None
+    _values: list[ToolValue] = field(default_factory=list)
 
     def add(self, item: object) -> None:
         """Record one yielded item."""
-        if not isinstance(item, ToolResult):
+        value = read_tool_value(item)
+        if value is None:
             self._chunks.append(str(item))
             return
-        self._chunks.append(item.content)
-        merged = self._merged if self._merged is not None else ToolResult(content="")
-        merged.images = [*(merged.images or []), *(item.images or [])] or None
-        merged.videos = [*(merged.videos or []), *(item.videos or [])] or None
-        merged.audios = [*(merged.audios or []), *(item.audios or [])] or None
-        merged.files = [*(merged.files or []), *(item.files or [])] or None
-        merged.metadata = {**(merged.metadata or {}), **(item.metadata or {})} or None
-        self._merged = merged
+        self._chunks.append(value.content)
+        self._values.append(value)
 
     def value(self) -> object:
-        """Return the drained value: the joined text, carried by a ``ToolResult`` when any item had media."""
+        """Return the drained value: the joined text, carried by a ``ToolValue`` when any item was one."""
         text = "".join(self._chunks)
-        if self._merged is None:
+        if not self._values:
             return text
-        self._merged.content = text
-        return self._merged
-
-
-def tool_value(result: object) -> ToolValue:
-    """Read a tool's return value: a ``ToolResult`` or ``ToolValue`` gives its text and media, anything else its text."""
-    value = read_tool_value(result)
-    return ToolValue(content=str(result)) if value is None else value
+        return ToolValue(
+            content=text,
+            images=tuple(image for value in self._values for image in value.images),
+            audios=tuple(audio for value in self._values for audio in value.audios),
+            videos=tuple(video for value in self._values for video in value.videos),
+            files=tuple(file for value in self._values for file in value.files),
+        )
 
 
 def read_tool_value(result: object) -> ToolValue | None:
-    """Read a ``ToolResult``'s text and media; None for a value that is neither a ``ToolResult`` nor a ``ToolValue``.
+    """Read a tool's return value as a ``ToolValue``; None for a value that is not a tool value.
 
-    A value already in owned terms, as a tool job's saved result or minimal mode's Bash facade returns, stands as it is.
+    This is the one place a vendor tool's Agno ``ToolResult`` becomes MindRoom's, its text and its media as MindRoom's
+    media. A ``ToolValue``, as MindRoom's own tools and a tool job's saved result return, stands as it is.
     """
     if isinstance(result, ToolValue):
         return result
@@ -550,7 +548,7 @@ def _owned_video(video: AgnoVideo) -> Video:
 
 def _owned_file(file: AgnoFile) -> File:
     content = file.content if isinstance(file.content, bytes | str) else None
-    return File(
+    owned = File(
         **_media_id(file.id),
         url=file.url,
         filepath=_filepath(file.filepath, content),
@@ -563,19 +561,18 @@ def _owned_file(file: AgnoFile) -> File:
         name=file.name,
         metadata=file.metadata,
     )
+    if file.filepath is None or owned.filepath is not None:
+        return owned
+    # The bytes stand in for the path, unread, so the file keeps the name and type the path gives it.
+    return named_by_resource(owned, Path(file.filepath).name)
 
 
 __all__ = [
     "AGNO_EMPTY_PARAMETERS",
-    "AgnoAudio",
-    "AgnoFile",
-    "AgnoImage",
-    "AgnoVideo",
     "Function",
     "FunctionScopedInstructions",
     "StreamCollector",
     "ToolCallActor",
-    "ToolResult",
     "Toolkit",
     "adapt_function",
     "adapt_toolkit",
@@ -584,7 +581,6 @@ __all__ = [
     "model_arguments",
     "offered_refusal",
     "read_tool_value",
-    "tool_value",
     "warm_agno_tool_imports",
     "with_offered_instructions",
 ]

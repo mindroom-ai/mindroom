@@ -20,9 +20,8 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
-from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, ToolResult
+from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, Function, Toolkit, read_tool_value
 from mindroom.tool_system.declarations import declare_tool_schema_finisher, declare_tool_schema_source
-from mindroom.tool_system.tool_function import ToolValue
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if sys.version_info >= (3, 14):
@@ -357,15 +356,11 @@ def _normalize_json_value(value: object) -> object:  # noqa: PLR0911 - One branc
     raise TypeError(msg)
 
 
-def _has_tool_result_media(result: ToolResult | ToolValue) -> bool:
-    return bool(result.images or result.videos or result.audios or result.files)
-
-
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    if isinstance(result, ToolResult | ToolValue):
-        if _has_tool_result_media(result):
-            return "ToolResult media artifacts cannot be redirected to workspace files."
-        serialized = _SerializedToolOutput(payload=result.content.encode("utf-8"), format="text")
+    if (value := read_tool_value(result)) is not None:
+        if any(value.media()):
+            return "Tool media results cannot be redirected to workspace files."
+        serialized = _SerializedToolOutput(payload=value.content.encode("utf-8"), format="text")
     elif isinstance(result, str):
         serialized = _SerializedToolOutput(payload=result.encode("utf-8"), format="text")
     elif isinstance(result, bytes | bytearray | memoryview):
