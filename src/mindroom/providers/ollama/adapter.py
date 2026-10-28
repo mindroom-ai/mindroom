@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,20 +20,12 @@ from ollama import AsyncClient
 from mindroom.credentials.sync import get_ollama_api_key, get_ollama_host
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.messages import tool_result_view, with_joined_system
-from mindroom.llm.provider import (
-    Capabilities,
-    ModelIdentity,
-    StreamProgress,
-    TextDelta,
-    ToolCallReady,
-    TurnCompleted,
-    UsageReported,
-)
+from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
-from mindroom.providers.assistant_turn import ThinkTagSplitter, finished_assistant_message, output_started
+from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings
@@ -107,15 +98,13 @@ class OllamaProvider:
         model = self.identity.id.strip()
         chat_kwargs = self._chat_kwargs(request)
         reply = _OllamaReply()
-        started = time.monotonic()
-        first_output_at: float | None = None
+        timer = TurnTimer()
         try:
             client = self._sdk_client()
             chunks = await client.chat(model=model, messages=messages, stream=True, **chat_kwargs)
             async with aclosing(cast("AsyncGenerator[ChatResponse]", chunks)) as responses:
                 async for chunk in responses:
-                    for event in _read_chunk(reply, chunk) or [StreamProgress()]:
-                        first_output_at = output_started(first_output_at, event)
+                    for event in timer.chunk(_read_chunk(reply, chunk)):
                         yield event
         except Exception as error:
             # Any exception that is not a provider failure propagates as it is.
@@ -125,18 +114,16 @@ class OllamaProvider:
         if not reply.done:
             # The stream ended before its done chunk, so the turn did not finish.
             return
-        message = finished_assistant_message(
+        for event in finished_turn(
             self.identity,
+            timer,
             content=reply.content or None,
             reasoning=reply.reasoning or None,
             tool_calls=reply.tool_calls,
             usage=reply.usage,
-            started=started,
-            first_output_at=first_output_at,
-        )
-        if reply.usage is not None:
-            yield UsageReported(message.metrics)
-        yield TurnCompleted(message=message, stop_reason=_stop_reason(reply))
+            stop_reason=_stop_reason(reply),
+        ):
+            yield event
 
     def _chat_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         """Return the chat parameters of one request; authored ``request_params`` override the settings and tools.
