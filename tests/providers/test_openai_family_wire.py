@@ -609,6 +609,29 @@ async def test_a_chat_request_sends_no_participant_name_and_no_empty_call_list(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+async def test_a_chat_request_sends_stored_calls_without_other_routes_fields(tmp_path: Path, provider: str) -> None:
+    """A call another route stored keeps only the Chat call fields, without Gemini's or Responses' replay state."""
+    gemini_call = {**_CALL, "id": "call_gemini", "thought_signature": "c2ln"}
+    responses_call = {**_CALL, "id": "fc_1", "call_id": "call_resp"}
+    history = [
+        _user(),
+        Message(role="assistant", tool_calls=[gemini_call, responses_call]),
+        Message(role="tool", tool_call_id="call_gemini", tool_name="get_weather", content="sunny"),
+        Message(role="tool", tool_call_id="fc_1", tool_name="get_weather", content="rainy"),
+        _user(),
+    ]
+    model_config = _OPENAI_CHAT if provider == "openai" else _DECISION_ROUTES[provider][0]
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=history))
+
+    sent = built.body()["messages"][1]["tool_calls"]
+    assert [set(call) for call in sent] == [{"id", "type", "function"}] * 2
+    assert [call["function"] for call in sent] == [_CALL["function"]] * 2
+
+
+@pytest.mark.asyncio
 async def test_a_thread_switching_to_a_chat_route_rewrites_foreign_call_ids(tmp_path: Path) -> None:
     """Calls a Responses model made earlier in the thread, and their results, take ids Chat Completions accepts."""
     responses_call = {**_CALL, "id": "fc_68a1", "call_id": "call_68a1"}

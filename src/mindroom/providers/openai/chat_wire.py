@@ -111,12 +111,21 @@ def _message_content(message: Message) -> str | list[Any] | None:
     return tool_result_view(message).content if message.role == "tool" else message.content
 
 
+# The fields of a Chat tool call. A call another route stored may carry that route's replay state beside them, such as
+# Gemini's ``thought_signature`` or the Responses ``call_id``, which a Chat request leaves out.
+_CALL_FIELDS = frozenset({"id", "type", "function"})
+
+
+def _chat_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in call.items() if key in _CALL_FIELDS}
+
+
 def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: str) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": system_role if message.role == "system" else message.role,
         "content": _message_content(message),
         "tool_call_id": message.tool_call_id,
-        "tool_calls": message.tool_calls or None,
+        "tool_calls": [_chat_call(call) for call in message.tool_calls or ()] or None,
     }
     if wire.route == "deepseek":
         values["reasoning_content"] = message.reasoning_content
