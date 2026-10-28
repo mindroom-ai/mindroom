@@ -19,8 +19,8 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Request snapshots omit their provider and model.
 # Legacy format: Requests contain only created_at and metrics.
 # Last legacy release: v2026.9.303 for run requests (replacement: v2026.9.304, which attributes each request to its
-# model) and v2026.10.628 for a compaction summary's and a voice transcription's one request (replacement:
-# v2026.10.629).
+# model) and v2026.10.631 for a compaction summary's and a voice transcription's one request (replacement:
+# v2026.10.632).
 # Current producer: voice transcription emits one request without a model when its usage row names no provider (a
 # compatible or custom-host endpoint).
 # Handling: Inherit only a single run model; the caller must reconcile every counter.
