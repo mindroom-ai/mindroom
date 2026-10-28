@@ -2435,7 +2435,6 @@ A model with any other key, including a misspelled key or a retired Agno model s
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
-A Claude model that sets no `max_tokens` may write up to the maximum Anthropic documents for it: 128,000 tokens on Claude 4.6 and later models, 64,000 on Claude Opus 4.5 and Haiku 4.5, and 8,192 on a model MindRoom does not list.
 
 Some models reject sampling controls:
 
