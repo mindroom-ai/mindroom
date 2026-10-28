@@ -34,12 +34,7 @@ from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loa
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, client_tool_result, run_tool_call
 from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
-    WorkerRuntimeContext,
-    tool_runtime_context,
-    worker_runtime_context,
-)
+from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
@@ -159,10 +154,7 @@ async def _selected_operation[T](
             await run_gateway_sync(require_current_access)
         return await run_toolkit_operation(context, entry, manager, authorized, require_current_access)
 
-    with (
-        tool_runtime_context(None),
-        worker_runtime_context(WorkerRuntimeContext(runtime_paths=context.runtime_paths, config=context.config)),
-    ):
+    with tool_runtime_context(None):
         return await run_with_tool_execution_identity(
             context.execution_identity,
             operation=selected,

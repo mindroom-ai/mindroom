@@ -100,6 +100,7 @@ from mindroom.startup_errors import EventJournalHoldLostError, PermanentStartupE
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.workers.backend import WorkerBackendError
 from tests.bot_helpers import (
     AgentBotTestBase,
     _configured_team_test_config,
@@ -1835,6 +1836,48 @@ class TestAgentBot(AgentBotTestBase):
             await main(log_level="INFO", runtime_paths=self._runtime_paths(tmp_path), api=False)
 
         assert watched_paths == [resolved_config_path]
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_main_launches_workers_from_the_fully_applied_config_until_they_shut_down(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Dedicated workers launch only from the lifecycle's fully applied config, from start through shutdown."""
+        reset_runtime_state()
+        runtime_paths = self._runtime_paths(tmp_path)
+        applied = Config()
+        mock_orchestrator = _mock_runtime_orchestrator()
+        mock_orchestrator.stop = AsyncMock()
+        mock_orchestrator.config = Config()
+        mock_orchestrator.config_reload = SimpleNamespace(fully_applied_config=None)
+        seen: dict[str, object] = {}
+
+        async def _start() -> None:
+            # A reload that has not finished applying publishes no launch.
+            with pytest.raises(WorkerBackendError, match="applied config"):
+                workers_runtime_module.current_worker_launch_config(runtime_paths)
+            mock_orchestrator.config_reload.fully_applied_config = applied
+            seen["start"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
+            msg = "stop after the launch check"
+            raise RuntimeError(msg)
+
+        def _shutdown_workers() -> None:
+            seen["shutdown"] = workers_runtime_module.current_worker_launch_config(runtime_paths).config
+
+        mock_orchestrator.start = AsyncMock(side_effect=_start)
+        with (
+            patch("mindroom.orchestrator.setup_logging"),
+            patch("mindroom.orchestrator.sync_env_to_credentials"),
+            patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
+            patch("mindroom.orchestrator._run_auxiliary_task_forever", new=AsyncMock()),
+            patch("mindroom.orchestrator.shutdown_primary_worker_manager", side_effect=_shutdown_workers),
+            pytest.raises(RuntimeError, match="stop after the launch check"),
+        ):
+            await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
+
+        assert seen == {"start": applied, "shutdown": applied}
+        with pytest.raises(WorkerBackendError, match="applied config"):
+            workers_runtime_module.current_worker_launch_config(runtime_paths)
 
     @pytest.mark.asyncio
     async def test_orchestrator_main_starts_provisioning_heartbeat(self, tmp_path: Path) -> None:
@@ -4675,7 +4718,8 @@ class TestMultiAgentOrchestrator:
         tmp_path: Path,
     ) -> None:
         """A failed prepare keeps the old backend authoritative and reopens admission."""
-        current_config = _runtime_bound_config(Config(), tmp_path)
+        script_agent = {"watcher": {"display_name": "Watcher", "tools": ["script"]}}
+        current_config = _runtime_bound_config(Config(agents=script_agent), tmp_path)
         new_config = _runtime_bound_config(Config(), tmp_path)
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(current_config))
         orchestrator.config = current_config
@@ -4685,7 +4729,8 @@ class TestMultiAgentOrchestrator:
             configured_entities=set(),
             entities_to_restart=set(),
             new_entities=set(),
-            removed_entities=set(),
+            # Removing a script agent revokes its runs, so the reload crosses the script runtime's boundary.
+            removed_entities={"watcher"},
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
@@ -4708,10 +4753,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch(
-                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
-                side_effect=lambda _paths, config: "new" if config is new_config else "old",
-            ),
             patch.object(
                 type(runtime),
                 "_apply_update_pass",
@@ -4756,10 +4797,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
-            patch(
-                "mindroom.orchestration.script_runtime.configured_primary_worker_manager_identity",
-                side_effect=lambda _paths, config: "new" if config is new_config else "current",
-            ),
             patch.object(
                 orchestrator._startup_maintenance,
                 "cancel",

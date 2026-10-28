@@ -38,7 +38,6 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
@@ -48,7 +47,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers.runtime import shutdown_primary_worker_manager
+from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -181,7 +180,7 @@ class Fixture:
             user,
             self.room,
             self.agent,
-            WorkerSpec(key, private_agent_names=frozenset(), mirrored_credential_services=frozenset()),
+            WorkerSpec(key, private_agent_names=frozenset(), mirror_grantable_credentials=False),
             "local-fixture",
         )
 
@@ -205,7 +204,6 @@ class Fixture:
         """Exercise primary worker reconciliation before the next tool dispatch."""
         return await asyncio.to_thread(
             computers._resolve_worker,
-            self.config,
             self.paths,
             self.target(self.viewer),
             start=True,
@@ -222,7 +220,7 @@ class Fixture:
         """Send an actual validated runner request to the configured primary manager worker."""
         user = user or self.viewer
         target = self.target(user)
-        handle = await asyncio.to_thread(computers._resolve_worker, self.config, self.paths, target, start=False)
+        handle = await asyncio.to_thread(computers._resolve_worker, self.paths, target, start=False)
         container_id = await command("docker", "inspect", "--format", "{{.Id}}", handle.worker_id)
         if container_id not in self.container_ids:
             host_config = json.loads(
@@ -329,7 +327,7 @@ class Fixture:
             execution_identity=identity,
             runtime_paths=self.paths,
         )
-        with worker_runtime_context(WorkerRuntimeContext(self.paths, self.config)), tool_execution_identity(identity):
+        with tool_execution_identity(identity):
             toolkit = get_tool_by_name(
                 "browser_mcp",
                 self.paths,
@@ -455,47 +453,48 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
             ),
         )
         state.computer_runtime = computers.ComputerRuntime(self.authorize, 1, self.config)
-        try:
-            if self.args.serve:
-                await asyncio.to_thread(
-                    computers._resolve_worker,
-                    self.config,
-                    self.paths,
-                    self.target(self.viewer),
-                    start=True,
-                )
-                await self.prepare_page()
-                metadata = {
-                    "api_origin": self.origin,
-                    "ui_origin": self.args.chat_origin,
-                    "homeserver": self.matrix["homeserver"],
-                    "room_id": self.room,
-                    "thread_id": self.matrix["thread_id"],
-                    "agent_user_id": self.agent,
-                    "viewer": self.matrix["users"]["computer_viewer"],
-                }
-                path = self.args.output / "chat-fixture.json"
-                path.touch(mode=0o600)
-                path.write_text(json.dumps(metadata, indent=2) + "\n")
-                print(f"Chat fixture ready: {path}", flush=True)
-            yield
-        finally:
-            # Uvicorn re-raises shutdown signals after lifespan exit, before main's
-            # outer finally can reliably run. Retire Matrix here, even if later
-            # worker shutdown waits on a local browser driver handshake.
+        # The fixture owns the applied config its computer workers launch from, until they are removed.
+        with bind_worker_launch_config_source(lambda: self.config):
             try:
-                await self.remove_owned_matrix()
+                if self.args.serve:
+                    await asyncio.to_thread(
+                        computers._resolve_worker,
+                        self.paths,
+                        self.target(self.viewer),
+                        start=True,
+                    )
+                    await self.prepare_page()
+                    metadata = {
+                        "api_origin": self.origin,
+                        "ui_origin": self.args.chat_origin,
+                        "homeserver": self.matrix["homeserver"],
+                        "room_id": self.room,
+                        "thread_id": self.matrix["thread_id"],
+                        "agent_user_id": self.agent,
+                        "viewer": self.matrix["users"]["computer_viewer"],
+                    }
+                    path = self.args.output / "chat-fixture.json"
+                    path.touch(mode=0o600)
+                    path.write_text(json.dumps(metadata, indent=2) + "\n")
+                    print(f"Chat fixture ready: {path}", flush=True)
+                yield
             finally:
-                if state.computer_sessions is not None:
-                    state.computer_sessions.close_all()
-                await asyncio.to_thread(shutdown_primary_worker_manager)
-                # Verify exact IDs, never delete by a name prefix or global prune.
-                remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
-                for container_id in sorted(self.container_ids & remaining):
-                    await command("docker", "rm", "-f", container_id)
-                remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
-                assert not self.container_ids & remaining
-                print("Exact fixture workers removed.", flush=True)
+                # Uvicorn re-raises shutdown signals after lifespan exit, before main's
+                # outer finally can reliably run. Retire Matrix here, even if later
+                # worker shutdown waits on a local browser driver handshake.
+                try:
+                    await self.remove_owned_matrix()
+                finally:
+                    if state.computer_sessions is not None:
+                        state.computer_sessions.close_all()
+                    await asyncio.to_thread(shutdown_primary_worker_manager)
+                    # Verify exact IDs, never delete by a name prefix or global prune.
+                    remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+                    for container_id in sorted(self.container_ids & remaining):
+                        await command("docker", "rm", "-f", container_id)
+                    remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+                    assert not self.container_ids & remaining
+                    print("Exact fixture workers removed.", flush=True)
 
     def app(self) -> FastAPI:
         """Expose actual public routes plus loopback-only fixture helpers."""
@@ -686,7 +685,6 @@ with sync_playwright() as playwright:
                 # The running worker and noVNC stream must survive that update.
                 before_worker = await asyncio.to_thread(
                     computers._resolve_worker,
-                    fixture.config,
                     fixture.paths,
                     fixture.target(fixture.viewer),
                     start=False,

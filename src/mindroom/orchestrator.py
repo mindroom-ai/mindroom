@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from contextvars import Context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -126,6 +126,7 @@ from mindroom.tool_system.plugins import (
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
     clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
     reset_primary_worker_manager,
@@ -524,7 +525,6 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
             worker_lease_provider=lambda required_backend_locator: lease_configured_primary_worker_manager(
                 self.runtime_paths,
-                runtime_config=self.config,
                 required_backend_locator=required_backend_locator,
             ),
             api_enabled=self.api_enabled,
@@ -3217,6 +3217,8 @@ async def _run_runtime(  # noqa: PLR0915
     shutdown_wait_task: asyncio.Task[bool] | None = None
     api_task: asyncio.Task[None] | None = None
     stall_detector: EventLoopStallDetector | None = None
+    # Holds the binding of the applied config as the one source dedicated workers launch from.
+    worker_launch_binding = ExitStack()
 
     try:
         # Drop any stale worker manager before startup work builds the active runtime.
@@ -3241,6 +3243,12 @@ async def _run_runtime(  # noqa: PLR0915
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)
+        config_reload = orchestrator.config_reload
+        # Bound before the API and the bots start, and kept until the worker manager has shut down; a reload that
+        # is still applying, or failed partway, never reaches a worker launch.
+        worker_launch_binding.enter_context(
+            bind_worker_launch_config_source(lambda: config_reload.fully_applied_config),
+        )
         set_runtime_starting()
         auxiliary_tasks.extend(
             _start_auxiliary_tasks(orchestrator, runtime_paths, shutdown_requested, journal_hold_lost),
@@ -3314,10 +3322,13 @@ async def _run_runtime(  # noqa: PLR0915
             ),
             name="runtime_shutdown",
         )
-        await _wait_for_runtime_shutdown_cleanup(
-            cleanup_task,
-            shutdown_was_requested=shutdown_was_requested,
-        )
+        try:
+            await _wait_for_runtime_shutdown_cleanup(
+                cleanup_task,
+                shutdown_was_requested=shutdown_was_requested,
+            )
+        finally:
+            worker_launch_binding.close()
     if journal_hold_lost.is_set():
         # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
         msg = "MindRoom stopped because it no longer holds its event journal"

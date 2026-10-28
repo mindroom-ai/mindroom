@@ -590,10 +590,7 @@ class ScriptRuntimeLifecycle:
                 retired_lease = self._current_worker_lease
                 try:
                     current_config = self.config_provider()
-                    if (
-                        current_config is None
-                        or configured_primary_worker_manager_identity(self.runtime_paths, current_config) is None
-                    ):
+                    if current_config is None or configured_primary_worker_manager_identity(self.runtime_paths) is None:
                         self._publish_worker_lease(None)
                     else:
                         replacement_lease = await asyncio.wait_for(
@@ -668,15 +665,9 @@ class ScriptRuntimeLifecycle:
         current_config = self.config_provider()
         if current_config is None:
             return
-        current_worker_configuration_identity = configured_primary_worker_manager_identity(
-            self.runtime_paths,
-            current_config,
-        )
-        next_worker_configuration_identity = configured_primary_worker_manager_identity(
-            self.runtime_paths,
-            plan.new_config,
-        )
-        worker_configuration_changed = current_worker_configuration_identity != next_worker_configuration_identity
+        # The worker manager's identity is its backend settings, which a config reload never changes, and script
+        # workers use per-run keys no other call ensures, so a reload leaves their processes running.
+        worker_configuration_changed = False
         removed_agents = plan.removed_entities & set(current_config.agents)
         isolation_changes = {
             agent_name

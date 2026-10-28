@@ -15,7 +15,11 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers.runtime import get_primary_worker_manager, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
+    lease_primary_worker_manager,
+    shutdown_primary_worker_manager,
+)
 from tests.test_docker_worker_backend import _FakeDockerClient, _FakeDockerError, _FakeImage, _FakeNotFoundError
 
 if TYPE_CHECKING:
@@ -101,15 +105,18 @@ def _containers(docker_daemon: _FakeDockerClient) -> list[tuple[str, str]]:
 
 
 def _start_docker_worker(api_app: FastAPI) -> WorkerHandle:
-    """Start one worker the way a worker-routed tool call does."""
+    """Start one worker the way a worker-routed tool call does, launching from the API's loaded config."""
     runtime_paths = main._app_runtime_paths(api_app)
-    worker_manager = get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=None,
-        proxy_token="test-token",  # noqa: S106
-        storage_root=runtime_paths.storage_root,
-    )
-    return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
+    with (
+        bind_worker_launch_config_source(lambda: main._app_context(api_app).runtime_config),
+        lease_primary_worker_manager(
+            runtime_paths,
+            proxy_url=None,
+            proxy_token="test-token",  # noqa: S106
+            storage_root=runtime_paths.storage_root,
+        ) as worker_manager,
+    ):
+        return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
 
 
 @pytest.mark.asyncio

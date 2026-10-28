@@ -127,6 +127,11 @@ class ConfigReloadLifecycle:
     _incomplete_config: Config | None = field(default=None, init=False, repr=False)
     status: ConfigReloadStatus = field(default_factory=ConfigReloadStatus, init=False)
 
+    @property
+    def fully_applied_config(self) -> Config | None:
+        """Return the last config whose complete update plan returned, never a pending or failed transition."""
+        return self._fully_applied_config
+
     def record_applied(self, config: Config) -> None:
         """Acknowledge source bytes only after their complete runtime publication."""
         self._fully_applied_config = config

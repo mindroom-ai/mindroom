@@ -281,7 +281,7 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
     def provision_forbidden(*_args: object, **_kwargs: object) -> object:
         pytest.fail("Invalid arguments reached worker provisioning")
 
-    monkeypatch.setattr(sandbox_proxy, "_primary_worker_manager_context", provision_forbidden)
+    monkeypatch.setattr(sandbox_proxy, "_lease_worker_manager", provision_forbidden)
     value: object = {
         "value": Opaque(),
         "nested": {"payload": [Opaque()]},

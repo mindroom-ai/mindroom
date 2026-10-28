@@ -60,8 +60,10 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     serialize_tool_execution_identity,
 )
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
+from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerLaunchConfig, WorkerSpec
+from mindroom.workers.runtime import current_worker_launch_config
 from mindroom.workers.worker_retirement import remove_directory_tree_at
 
 if TYPE_CHECKING:
@@ -387,7 +389,8 @@ class ScriptRunManager:
             else WorkerSpec(
                 worker_key=_require_worker_key(worker_key),
                 private_agent_names=worker_target.private_agent_names,
-                mirrored_credential_services=frozenset(),
+                launch=_script_worker_launch(context.runtime_paths),
+                mirror_grantable_credentials=False,
                 state_scope_worker_key=worker_target.worker_key,
                 resource_profile=selected_profile,
             )
@@ -437,7 +440,8 @@ class ScriptRunManager:
                 worker_backend_locator=backend.cleanup_locator,
                 recovery_signature=script_recovery_signature(
                     backend=self.worker_backend,
-                    config=context.config,
+                    # The config the worker launches with, so recovery binds to the authority it actually got.
+                    config=_require_launch(worker_spec).config,
                     agent_name=context.agent_name,
                     gateway_url=self.gateway_url,
                     resource_profile=profile,
@@ -1456,6 +1460,20 @@ def _require_script_worker_backend(
         msg = "Background script worker backend does not support exact worker retirement."
         raise ScriptRunManagerError(msg)
     return backend
+
+
+def _script_worker_launch(runtime_paths: RuntimePaths) -> WorkerLaunchConfig:
+    try:
+        return current_worker_launch_config(runtime_paths)
+    except WorkerBackendError as exc:
+        raise ScriptRunManagerError(str(exc)) from exc
+
+
+def _require_launch(worker_spec: WorkerSpec) -> WorkerLaunchConfig:
+    if worker_spec.launch is None:
+        msg = "A background script worker needs the launch config of the applied config."
+        raise ScriptRunManagerError(msg)
+    return worker_spec.launch
 
 
 def _require_script_launch_backend(

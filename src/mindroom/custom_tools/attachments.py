@@ -529,6 +529,7 @@ class AttachmentTools(Toolkit):
                 result = await asyncio.to_thread(
                     view_file_from_worker,
                     runtime_paths=runtime_paths,
+                    runtime_config=context.config,
                     worker_target=self._worker_target,
                     worker_tools_override=self._worker_tools_override,
                     workspace_root=self._tool_output_workspace_root,
@@ -758,6 +759,7 @@ class AttachmentTools(Toolkit):
                 worker_receipt = await asyncio.to_thread(
                     save_attachment_to_worker,
                     runtime_paths=runtime_paths,
+                    runtime_config=context.config,
                     worker_target=self._worker_target,
                     worker_tools_override=self._worker_tools_override,
                     attachment_id=requested_attachment_id,

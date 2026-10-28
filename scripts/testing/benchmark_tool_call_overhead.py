@@ -190,6 +190,7 @@ async def _run_shell_benchmark(iterations: int, warmup: int) -> list[dict[str, o
 
 def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> list[dict[str, object]]:
     """Measure a disposable Docker worker with empty credentials and isolated storage."""
+    from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
     from mindroom.tool_system.worker_proxy_client import (  # noqa: PLC0415
         WorkerProxyClientConfig,
@@ -197,6 +198,10 @@ def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> lis
     )
     from mindroom.workers.backends.docker import DockerWorkerBackend  # noqa: PLC0415
     from mindroom.workers.models import WorkerSpec  # noqa: PLC0415
+    from mindroom.workers.runtime import (  # noqa: PLC0415
+        build_worker_launch_config,
+        serialized_dedicated_worker_validation_snapshot,
+    )
 
     with tempfile.TemporaryDirectory(prefix="mindroom-docker-benchmark-") as tmp:
         root = Path(tmp)
@@ -210,12 +215,13 @@ def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> lis
                 "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
             },
         )
-        manager = DockerWorkerBackend.from_runtime(
-            runtime,
-            auth_token=secrets.token_urlsafe(32),
-            worker_grantable_credentials=frozenset(),
+        manager = DockerWorkerBackend.from_runtime(runtime, auth_token=secrets.token_urlsafe(32))
+        config = load_config(runtime)
+        launch = build_worker_launch_config(
+            config,
+            tool_validation_snapshot=serialized_dedicated_worker_validation_snapshot(runtime, runtime_config=config),
         )
-        spec = WorkerSpec("v1:default:unscoped:benchmark", mirrored_credential_services=frozenset())
+        spec = WorkerSpec("v1:default:unscoped:benchmark", launch=launch, mirror_grantable_credentials=False)
         proxy = WorkerProxyClientConfig(
             proxy_url=None,
             proxy_token=None,

@@ -80,7 +80,11 @@ from mindroom.runtime_state import get_runtime_state
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
-from mindroom.workers.runtime import lease_configured_primary_worker_manager, shutdown_primary_worker_manager
+from mindroom.workers.runtime import (
+    bind_worker_launch_config_source,
+    lease_configured_primary_worker_manager,
+    shutdown_primary_worker_manager,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -251,15 +255,11 @@ def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> f
 def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
-    runtime_config: Config | None = None,
     touch_live_workers: Callable[[WorkerBackend], None] | None = None,
     computer_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
-    worker_lease = lease_configured_primary_worker_manager(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
+    worker_lease = lease_configured_primary_worker_manager(runtime_paths)
     if worker_lease is None:
         return 0
     with worker_lease as worker_manager:
@@ -305,15 +305,9 @@ async def _worker_cleanup_loop(
             break
         except TimeoutError:
             try:
-                try:
-                    runtime_config, runtime_paths = config_lifecycle.read_app_committed_runtime_config(api_app)
-                except HTTPException:
-                    runtime_config = None
-                    runtime_paths = _app_runtime_paths(api_app)
                 await asyncio.to_thread(
                     _cleanup_workers_once,
-                    runtime_paths,
-                    runtime_config=runtime_config,
+                    _app_runtime_paths(api_app),
                     touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
                     computer_worker_keys=active_computer_worker_keys(api_app),
                 )
@@ -1130,4 +1124,6 @@ app.include_router(frontend_router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104
+    # A standalone API owns the applied config, and an edit that fails to load keeps the last one that loaded.
+    with bind_worker_launch_config_source(lambda: _app_context(app).runtime_config):
+        uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104

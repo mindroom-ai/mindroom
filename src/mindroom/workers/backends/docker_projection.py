@@ -14,12 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
-import yaml
-
 from mindroom import yaml_io
-from mindroom.config.personal_agents import expand_personal_agents, read_personal_agent_roster
-from mindroom.config.worker_projection import worker_config_data
-from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, open_regular_file_within_root
@@ -32,7 +27,6 @@ from mindroom.tool_system.worker_routing import (
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
 from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -48,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
+    from mindroom.workers.models import WorkerLaunchConfig
 
 logger = get_logger(__name__)
 
@@ -144,21 +139,6 @@ def _path_state_fingerprint(host_path: Path) -> str:
     if resolved_host_path.is_dir():
         return f"dir:{_directory_state_fingerprint(resolved_host_path)}"
     return _file_state_fingerprint(resolved_host_path)
-
-
-def _config_sources_state_fingerprint(source_files: frozenset[Path]) -> str | None:
-    """Stat-based cache key over the config file plus every !include file.
-
-    ``None`` when any source file is unreadable, which callers treat as a cache
-    miss so the next load re-derives the source set.
-    """
-    entries = []
-    for path in sorted(source_files):
-        try:
-            entries.append(f"{path.as_posix()}:{_file_state_fingerprint(path)}")
-        except OSError:
-            return None
-    return hashlib.sha256("\0".join(entries).encode("utf-8")).hexdigest()
 
 
 def _compute_path_contents_hash(host_path: Path) -> str:
@@ -264,12 +244,12 @@ class DockerProjectionManager:
         self._projected_configs_root = projected_configs_root
         self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
-        self._config_data_cache: tuple[Path, str | None, dict[str, object], frozenset[Path]] | None = None
 
     def config_mount_specs(
         self,
         paths: LocalWorkerStatePaths,
         *,
+        launch: WorkerLaunchConfig,
         worker_key: str | None = None,
         materialize_projection: bool = True,
         storage_mounts: Sequence[tuple[Path, str, bool]] = (),
@@ -280,6 +260,7 @@ class DockerProjectionManager:
 
         projection = self._projected_config(
             paths,
+            launch=launch,
             worker_key=worker_key,
             materialize=materialize_projection,
             storage_mounts=storage_mounts,
@@ -291,18 +272,19 @@ class DockerProjectionManager:
         self,
         paths: LocalWorkerStatePaths,
         *,
+        launch: WorkerLaunchConfig,
         worker_key: str | None = None,
         materialize: bool = True,
         storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> _DockerProjectedConfig:
         """Return the projected config snapshot for one worker root."""
-        host_config_path = self.config.host_config_path
-        if host_config_path is None:
+        if self.config.host_config_path is None:
             msg = "Projected Docker worker config requires a host config path."
             raise WorkerBackendError(msg)
 
-        config_data = worker_config_data(self._load_host_config_data(host_config_path))
-        resolved_agent_policies = resolved_agent_policies_from_config_data(config_data)
+        # The launch's mapping is shared by every worker, and projection rewrites it in place.
+        config_data = cast("dict[str, object]", copy.deepcopy(launch.config_data))
+        resolved_agent_policies = launch.config.get_agent_policies()
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path] = {}
         assets: list[_DockerProjectedConfigAsset] = []
@@ -365,13 +347,6 @@ class DockerProjectionManager:
     def _worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
         """Return the directory containing one worker root's projected config snapshots."""
         return self._projected_configs_root / paths.root.name
-
-    def current_resolved_agent_policies(self) -> dict[str, ResolvedAgentPolicy]:
-        """Return the current agent-policy view derived from the host config."""
-        host_config_path = self.config.host_config_path
-        if host_config_path is None:
-            return {}
-        return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
     def retire_worker_projection(self, worker_name: str) -> None:
         """Remove every projected config snapshot owned by one exact worker root."""
@@ -442,47 +417,6 @@ class DockerProjectionManager:
         except Exception:
             _remove_path(temp_root)
             raise
-
-    def _load_host_config_data(self, host_config_path: Path) -> dict[str, object]:
-        resolved_host_config_path = host_config_path.expanduser().resolve()
-        cached = self._config_data_cache
-        if (
-            cached is not None
-            and cached[0] == resolved_host_config_path
-            and cached[1] is not None
-            and cached[1] == _config_sources_state_fingerprint(cached[3])
-        ):
-            return self._with_personal_agents(copy.deepcopy(cached[2]))
-
-        try:
-            data, source_digests, _uses_includes = load_yaml_config_source_with_digests(resolved_host_config_path)
-        except (OSError, yaml.YAMLError, UnicodeError) as exc:
-            msg = f"Failed to read Docker worker config file '{resolved_host_config_path}': {exc}"
-            raise WorkerBackendError(msg) from exc
-        if not isinstance(data, dict):
-            msg = f"Docker worker config file '{resolved_host_config_path}' must contain a YAML object."
-            raise WorkerBackendError(msg)
-        normalized_data = cast("dict[str, object]", data)
-        source_files = frozenset(source_digests)
-        self._config_data_cache = (
-            resolved_host_config_path,
-            _config_sources_state_fingerprint(source_files),
-            copy.deepcopy(normalized_data),
-            source_files,
-        )
-        return self._with_personal_agents(copy.deepcopy(normalized_data))
-
-    def _with_personal_agents(self, config_data: dict[str, object]) -> dict[str, object]:
-        """Add the generated personal agents, which live in the roster rather than the config file.
-
-        The cache keeps the raw file data, so a roster change shows up without a config change.
-        """
-        try:
-            expansion = expand_personal_agents(config_data, read_personal_agent_roster(self._runtime_paths))
-        except (OSError, ValueError) as exc:
-            msg = f"Failed to add personal agents to the Docker worker config: {exc}"
-            raise WorkerBackendError(msg) from exc
-        return cast("dict[str, object]", expansion.data)
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()

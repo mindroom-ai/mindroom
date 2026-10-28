@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 import httpx
 
-from mindroom.config.worker_projection import worker_config_data
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -29,9 +28,7 @@ from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
-    get_tool_runtime_context,
     get_worker_progress_pump,
-    get_worker_runtime_context,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.worker_proxy_client import (
@@ -51,13 +48,11 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
-    get_primary_worker_manager,
     lease_primary_worker_manager,
     primary_worker_backend_available,
     primary_worker_backend_is_dedicated,
     primary_worker_backend_name,
-    serialized_dedicated_worker_validation_snapshot,
-    serialized_kubernetes_worker_config_snapshot,
+    worker_config_snapshot,
 )
 
 if TYPE_CHECKING:
@@ -162,17 +157,6 @@ class _SandboxProxyConfig:
     credential_lease_ttl_seconds: int
     proxy_tools: set[str] | None
     credential_policy: dict[str, tuple[str, ...]]
-
-
-@dataclass(frozen=True)
-class _PrimaryWorkerManagerContext:
-    """Runtime-context-derived parameters for resolving the primary worker manager."""
-
-    storage_root: Path
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None
-    kubernetes_config_snapshot: dict[str, object] | None
-    worker_grantable_credentials: frozenset[str] | None
-    runtime_config: Config | None
 
 
 def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
@@ -318,11 +302,9 @@ def _build_worker_routing_payload(
     tool_name: str,
     function_name: str,
     worker_target: ResolvedWorkerTarget | None,
+    worker_manager: WorkerBackend,
     progress_sink: ProgressSink | None = None,
-    worker_manager: WorkerBackend | None = None,
 ) -> tuple[dict[str, object], WorkerHandle | None]:
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    resolved_worker_manager = worker_manager or _get_worker_manager(runtime_paths, proxy_config)
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
@@ -347,7 +329,7 @@ def _build_worker_routing_payload(
             tenant_id=worker_target.tenant_id,
             account_id=worker_target.account_id,
         )
-        worker_handle = resolved_worker_manager.ensure_worker(
+        worker_handle = worker_manager.ensure_worker(
             WorkerSpec(worker_key),
             progress_sink=progress_sink,
         )
@@ -377,7 +359,7 @@ def _build_worker_routing_payload(
         )
         raise RuntimeError(msg)
     resolved_private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
-    worker_handle = resolved_worker_manager.ensure_worker(
+    worker_handle = worker_manager.ensure_worker(
         WorkerSpec(worker_key, private_agent_names=resolved_private_agent_names),
         progress_sink=progress_sink,
     )
@@ -395,36 +377,6 @@ def _build_worker_routing_payload(
     )
 
 
-def _primary_worker_manager_context(runtime_paths: RuntimePaths) -> _PrimaryWorkerManagerContext:
-    """Resolve runtime-context-dependent primary worker manager parameters."""
-    worker_context = get_worker_runtime_context()
-    if worker_context is not None and worker_context.runtime_paths != runtime_paths:
-        msg = "Worker runtime context belongs to a different runtime"
-        raise ValueError(msg)
-    context = worker_context if worker_context is not None else get_tool_runtime_context()
-    storage_root = (
-        context.storage_path if context is not None and context.storage_path is not None else runtime_paths.storage_root
-    )
-    dedicated_worker_validation_snapshot: dict[str, dict[str, object]] | None = None
-    kubernetes_config_snapshot: dict[str, object] | None = None
-    if context is not None and primary_worker_backend_name(runtime_paths) in {"docker", "kubernetes"}:
-        dedicated_worker_validation_snapshot = serialized_dedicated_worker_validation_snapshot(
-            runtime_paths,
-            runtime_config=context.config,
-        )
-    if context is not None and primary_worker_backend_name(runtime_paths) == "kubernetes":
-        kubernetes_config_snapshot = serialized_kubernetes_worker_config_snapshot(context.config)
-    return _PrimaryWorkerManagerContext(
-        storage_root=storage_root,
-        dedicated_worker_validation_snapshot=dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=kubernetes_config_snapshot,
-        worker_grantable_credentials=(
-            context.config.get_worker_grantable_credentials() if context is not None else None
-        ),
-        runtime_config=context.config if context is not None else None,
-    )
-
-
 def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config | None) -> dict[str, object] | None:
     """Return the live config fields runners resolve, for one runner or worker request.
 
@@ -434,42 +386,16 @@ def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config |
     """
     if runtime_config is None or primary_worker_backend_name(runtime_paths) == "docker":
         return None
-    return cast(
-        "dict[str, object]",
-        to_json_compatible(worker_config_data(runtime_config.runtime_model_dump())),
-    )
+    return worker_config_snapshot(runtime_config)
 
 
-def _get_worker_manager(
-    runtime_paths: RuntimePaths,
-    proxy_config: _SandboxProxyConfig,
-) -> WorkerBackend:
-    manager_context = _primary_worker_manager_context(runtime_paths)
-    return get_primary_worker_manager(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-        storage_root=manager_context.storage_root,
-        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
-        worker_grantable_credentials=manager_context.worker_grantable_credentials,
-    )
-
-
-def _lease_worker_manager(
-    runtime_paths: RuntimePaths,
-    proxy_config: _SandboxProxyConfig,
-    manager_context: _PrimaryWorkerManagerContext,
-) -> PrimaryWorkerManagerLease:
-    """Borrow the primary worker manager for one request under these proxy settings and runtime context."""
+def _lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxProxyConfig) -> PrimaryWorkerManagerLease:
+    """Borrow the primary worker manager for one request under these proxy settings."""
     return lease_primary_worker_manager(
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
-        storage_root=manager_context.storage_root,
-        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
-        kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
-        worker_grantable_credentials=manager_context.worker_grantable_credentials,
+        storage_root=runtime_paths.storage_root,
     )
 
 
@@ -545,6 +471,7 @@ def _post_worker_file_request(
 def save_attachment_to_worker(
     *,
     runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
     attachment_id: str,
@@ -570,14 +497,12 @@ def save_attachment_to_worker(
         raise RuntimeError(msg)
 
     proxy_config = sandbox_proxy_config(runtime_paths)
-    manager_context = _primary_worker_manager_context(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config, manager_context) as worker_manager:
+    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         worker_payload, worker_handle = _build_worker_routing_payload(
             runtime_paths=runtime_paths,
             tool_name="attachments",
             function_name="get_attachment",
             worker_target=worker_target,
-            progress_sink=None,
             worker_manager=worker_manager,
         )
         if worker_handle is None and proxy_config.proxy_url is None:
@@ -591,7 +516,7 @@ def save_attachment_to_worker(
             **attachment_fields,
             "mime_type": mime_type,
             "filename": filename,
-            "config_snapshot": runner_config_snapshot(runtime_paths, manager_context.runtime_config),
+            "config_snapshot": runner_config_snapshot(runtime_paths, runtime_config),
         }
 
         response_data = _post_worker_file_request(
@@ -626,6 +551,7 @@ def save_attachment_to_worker(
 def view_file_from_worker(
     *,
     runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
     worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
     workspace_root: Path | None = None,
@@ -639,14 +565,12 @@ def view_file_from_worker(
         return None
 
     proxy_config = sandbox_proxy_config(runtime_paths)
-    manager_context = _primary_worker_manager_context(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config, manager_context) as worker_manager:
+    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         worker_payload, worker_handle = _build_worker_routing_payload(
             runtime_paths=runtime_paths,
             tool_name="attachments",
             function_name="view_file",
             worker_target=worker_target,
-            progress_sink=None,
             worker_manager=worker_manager,
         )
         if worker_handle is None and proxy_config.proxy_url is None:
@@ -655,7 +579,7 @@ def view_file_from_worker(
         worker_key = worker_payload.get("worker_key")
         tool_init_overrides = _portable_tool_init_overrides(
             {"base_dir": str(workspace_root)} if workspace_root is not None else None,
-            shared_storage_root_path=manager_context.storage_root,
+            shared_storage_root_path=runtime_paths.storage_root,
             worker_key=worker_key if isinstance(worker_key, str) else None,
         )
         if tool_init_overrides:
@@ -671,7 +595,7 @@ def view_file_from_worker(
             {
                 **worker_payload,
                 "path": path,
-                "config_snapshot": runner_config_snapshot(runtime_paths, manager_context.runtime_config),
+                "config_snapshot": runner_config_snapshot(runtime_paths, runtime_config),
             },
             worker_handle=worker_handle,
             worker_manager=worker_manager,
@@ -894,6 +818,7 @@ def _call_proxy_sync(
     execution_env: dict[str, str] | None,
     extra_env_passthrough: str | None,
     worker_target: ResolvedWorkerTarget | None,
+    runtime_config: Config | None,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
     metadata = TOOL_METADATA.get(tool_name)
@@ -920,24 +845,22 @@ def _call_proxy_sync(
         "args": wire_args,
         "kwargs": wire_kwargs,
     }
-    manager_context = _primary_worker_manager_context(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config, manager_context) as worker_manager:
+    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
         worker_payload, worker_handle = _build_worker_routing_payload(
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
             worker_target=worker_target,
-            progress_sink=progress_sink,
             worker_manager=worker_manager,
+            progress_sink=progress_sink,
         )
         payload.update(worker_payload)
-        payload["config_snapshot"] = runner_config_snapshot(runtime_paths, manager_context.runtime_config)
+        payload["config_snapshot"] = runner_config_snapshot(runtime_paths, runtime_config)
         # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
         # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
         call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
         execution_env = call_environment.applied(execution_env or {}, runtime_paths.process_env)
         extra_env_passthrough = ",".join(filter(None, (extra_env_passthrough, *call_environment.pass_through))) or None
-        runtime_config = manager_context.runtime_config
         agent_name = worker_target.routing_agent_name if worker_target is not None else None
         # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
         if (
@@ -998,7 +921,9 @@ def _call_proxy_sync(
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
-            worker_grantable_credentials=manager_context.worker_grantable_credentials,
+            worker_grantable_credentials=(
+                runtime_config.get_worker_grantable_credentials() if runtime_config is not None else None
+            ),
             cancellation=cancellation,
         )
         # Deferred: Agno's tool layer, which both modules load, must stay out of the slim tool registry.
@@ -1042,6 +967,7 @@ def _wrap_sync_function(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    runtime_config: Config | None = None,
     primary_placement: SupportsPrimaryCallPlacement | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
@@ -1069,6 +995,7 @@ def _wrap_sync_function(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            runtime_config=runtime_config,
         )
 
     declare_tool_schema_source(proxy_entrypoint, entrypoint)
@@ -1089,6 +1016,7 @@ def _wrap_async_proxy(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    runtime_config: Config | None = None,
     primary_placement: SupportsPrimaryCallPlacement | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
@@ -1123,6 +1051,7 @@ def _wrap_async_proxy(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            runtime_config=runtime_config,
             cancellation=cancellation,
         )
         try:
@@ -1149,8 +1078,11 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
     extra_env_passthrough: str | None = None,
     worker_tools_override: list[str] | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    runtime_config: Config | None = None,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
+
+    ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
 
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this).
@@ -1183,6 +1115,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
                 execution_env=execution_env,
                 extra_env_passthrough=extra_env_passthrough,
                 worker_target=worker_target,
+                runtime_config=runtime_config,
                 primary_placement=primary_placement,
             )
             for function_name, function in functions.items()

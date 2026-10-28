@@ -767,6 +767,7 @@ def get_tool_by_name(
                 worker_tools_override=worker_tools_override,
                 shared_storage_root_path=shared_storage_root_path,
                 worker_target=worker_target,
+                runtime_config=runtime_config,
             )
         authored = bool(init_kwargs.get("instructions"))
         return bind_toolkit_construction(toolkit, replace(construction, authored_instructions=authored))

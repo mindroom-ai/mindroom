@@ -15,11 +15,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx
-import yaml
 
-from mindroom.config.yaml_includes import load_yaml_config_source_with_digests, source_files_fingerprint
 from mindroom.constants import (
-    DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     RuntimePaths,
     resolve_primary_runtime_paths,
     runtime_env_values,
@@ -50,7 +47,12 @@ from mindroom.tool_system.worker_routing import (
     worker_key_agent_name,
     worker_log_id,
 )
-from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend import (
+    WorkerBackendError,
+    mirrored_credential_services,
+    required_launch,
+    resolve_launch,
+)
 from mindroom.workers.backends._dedicated_worker_common import (
     build_dedicated_worker_runtime_paths,
     plan_scoped_workspace_mounts,
@@ -104,6 +106,8 @@ from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
+
+    from mindroom.workers.models import WorkerLaunchConfig
 
     class _DockerContainer(Protocol):
         attrs: dict[str, object]
@@ -257,25 +261,6 @@ def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespac
     return f"{_container_name_prefix(prefix)}-{digest}"
 
 
-def _host_config_contents_hash(host_config_path: Path | None) -> str:
-    if host_config_path is None:
-        return ""
-    try:
-        _, source_digests, _uses_includes = load_yaml_config_source_with_digests(host_config_path)
-    except OSError as exc:
-        msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
-        raise WorkerBackendError(msg) from exc
-    except (yaml.YAMLError, UnicodeError):
-        # An unparseable config still hashes by its top-level bytes so worker
-        # staleness checks keep working while the user fixes the file.
-        try:
-            return hashlib.sha256(host_config_path.read_bytes()).hexdigest()
-        except OSError as exc:
-            msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
-            raise WorkerBackendError(msg) from exc
-    return source_files_fingerprint(host_config_path, source_digests)
-
-
 def _docker_image_identity_state(
     image: str,
     *,
@@ -293,20 +278,6 @@ def _docker_image_identity_state(
     if isinstance(image_id, str) and image_id.strip():
         return image_id, True
     return image, False
-
-
-def _resolved_docker_image_identity(
-    image: str,
-    *,
-    client: _DockerClient,
-    docker_errors: _DockerErrors,
-) -> str:
-    resolved_identity, _ = _docker_image_identity_state(
-        image,
-        client=client,
-        docker_errors=docker_errors,
-    )
-    return resolved_identity
 
 
 def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> None:
@@ -472,6 +443,7 @@ class _DockerLaunchConfig:
     image_reference: str
     launch_config_hash: str
     image_resolved: bool
+    tool_snapshot_digest: str
 
 
 class DockerWorkerBackend:
@@ -485,10 +457,9 @@ class DockerWorkerBackend:
         *,
         config: DockerWorkerBackendConfig,
         auth_token: str | None,
+        current_launch: Callable[[], WorkerLaunchConfig],
         storage_path: Path | None = None,
         runtime_paths: RuntimePaths | None = None,
-        tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
-        worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ) -> None:
         if auth_token is None:
             msg = "A worker auth token is required for Docker workers."
@@ -507,6 +478,7 @@ class DockerWorkerBackend:
             )
 
         self.config = config
+        self._current_launch = current_launch
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
         self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
@@ -525,7 +497,6 @@ class DockerWorkerBackend:
             base_runtime_paths = runtime_paths_with_config_path(base_runtime_paths, config.host_config_path)
         self._runtime_paths = runtime_paths_with_storage_root(base_runtime_paths, self._storage_path)
         config.validate_runtime_security(self._runtime_paths)
-        self._tool_validation_snapshot = tool_validation_snapshot
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
@@ -539,7 +510,6 @@ class DockerWorkerBackend:
             self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
         else:
             self._credentials_manager = get_runtime_credentials_manager(self._runtime_paths)
-        self.worker_grantable_credentials = worker_grantable_credentials
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._workers_root.mkdir(parents=True, exist_ok=True)
         self._adopt_legacy_worker_records()
@@ -550,18 +520,16 @@ class DockerWorkerBackend:
         runtime_paths: RuntimePaths,
         *,
         auth_token: str | None,
+        current_launch: Callable[[], WorkerLaunchConfig],
         storage_path: Path | None = None,
-        tool_validation_snapshot: dict[str, dict[str, object]] | None = None,
-        worker_grantable_credentials: frozenset[str] = DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
     ) -> DockerWorkerBackend:
         """Construct a backend instance from one explicit runtime context."""
         return cls(
             config=DockerWorkerBackendConfig.from_runtime(runtime_paths),
             auth_token=auth_token,
+            current_launch=current_launch,
             storage_path=storage_path,
             runtime_paths=runtime_paths,
-            tool_validation_snapshot=tool_validation_snapshot,
-            worker_grantable_credentials=worker_grantable_credentials,
         )
 
     def shutdown(self) -> None:
@@ -601,7 +569,7 @@ class DockerWorkerBackend:
         now: float | None = None,
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
-        """Resolve or start the dedicated worker container for the given worker key."""
+        """Resolve or start the worker container for the given worker key, from the launch applied once its lock is held."""
         timestamp = time.time() if now is None else now
         start_time = time.monotonic()
 
@@ -619,16 +587,17 @@ class DockerWorkerBackend:
             )
 
         with self._worker_lock(spec.worker_key):
+            spec, launch = resolve_launch(spec, self._current_launch)
             # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
             plan_scoped_workspace_mounts(
                 worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=spec.private_agent_names,
-                resolved_agent_policies=self._projection_manager.current_resolved_agent_policies(),
+                resolved_agent_policies=launch.config.get_agent_policies(),
                 create_shared=True,
             )
-            launch_config = self._resolve_launch_config()
+            launch_config = self._resolve_launch_config(launch)
             paths = self._worker_paths(spec.worker_key)
             metadata = self._load_metadata(paths, expected_worker_key=spec.worker_key) or self._default_metadata(
                 spec.worker_key,
@@ -640,8 +609,7 @@ class DockerWorkerBackend:
             should_restart = identity_changed or self._should_restart(
                 metadata,
                 paths,
-                private_agent_names=spec.private_agent_names,
-                state_scope_worker_key=spec.state_scope_worker_key,
+                spec=spec,
                 launch_config=launch_config,
             )
             lifecycle_state = prepare_worker_ensure_lifecycle(
@@ -657,11 +625,7 @@ class DockerWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 spec.worker_key,
-                allowed_services=(
-                    self.worker_grantable_credentials
-                    if spec.mirrored_credential_services is None
-                    else spec.mirrored_credential_services
-                ),
+                allowed_services=mirrored_credential_services(spec),
                 credentials_manager=self._credentials_manager,
             )
 
@@ -669,8 +633,7 @@ class DockerWorkerBackend:
                 container = self._ensure_container(
                     metadata,
                     paths,
-                    private_agent_names=spec.private_agent_names,
-                    state_scope_worker_key=spec.state_scope_worker_key,
+                    spec=spec,
                     launch_config=launch_config,
                 )
                 try:
@@ -690,8 +653,8 @@ class DockerWorkerBackend:
                     container, launch_config = self._relaunch_after_stale_image(
                         metadata,
                         paths,
-                        private_agent_names=spec.private_agent_names,
-                        state_scope_worker_key=spec.state_scope_worker_key,
+                        spec=spec,
+                        launch_config=launch_config,
                         stale_error=stale_error,
                     )
                     endpoint = self._wait_for_ready(container)
@@ -863,14 +826,16 @@ class DockerWorkerBackend:
             return self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
 
     def _adopt_legacy_worker_records(self) -> None:
-        """Give workers from before the control directory a fresh backend-owned record."""
+        """Give workers from before the control directory a fresh backend-owned record.
+
+        The record has no launch identity, so the next ensure replaces the worker's container.
+        """
         worker_keys = legacy_docker_worker_keys(self._workers_root, control_root=self._control_root)
         if not worker_keys:
             return
         now = time.time()
-        launch_config_hash = self._resolve_launch_config().launch_config_hash
         for worker_key in worker_keys:
-            metadata = self._default_metadata(worker_key, now, launch_config_hash=launch_config_hash)
+            metadata = self._default_metadata(worker_key, now)
             write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
             self._save_metadata(self._worker_paths(worker_key), metadata)
 
@@ -894,9 +859,6 @@ class DockerWorkerBackend:
     ) -> _DockerWorkerMetadata:
         worker_id = self._container_name_for_worker(worker_key)
         lifecycle = initial_worker_lifecycle_state(now=now)
-        resolved_launch_config_hash = (
-            self._compute_launch_config_hash() if launch_config_hash is None else launch_config_hash
-        )
         return _DockerWorkerMetadata(
             worker_id=worker_id,
             worker_key=worker_key,
@@ -909,7 +871,7 @@ class DockerWorkerBackend:
             image=self.config.image,
             publish_host=self.config.publish_host,
             worker_port=self.config.worker_port,
-            launch_config_hash=resolved_launch_config_hash,
+            launch_config_hash=launch_config_hash,
         )
 
     def _container_name_for_worker(self, worker_key: str) -> str:
@@ -1065,8 +1027,7 @@ class DockerWorkerBackend:
         metadata: _DockerWorkerMetadata,
         paths: _DockerWorkerPaths,
         *,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None,
+        spec: WorkerSpec,
         launch_config: _DockerLaunchConfig,
     ) -> bool:
         container = self._require_owned_container(metadata.worker_key)
@@ -1079,8 +1040,7 @@ class DockerWorkerBackend:
                 metadata,
                 container,
                 paths,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
+                spec=spec,
                 launch_config=launch_config,
             )
             is None
@@ -1094,8 +1054,7 @@ class DockerWorkerBackend:
         container: _DockerContainer,
         paths: _DockerWorkerPaths,
         *,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None,
+        spec: WorkerSpec,
         launch_config: _DockerLaunchConfig,
     ) -> list[tuple[Path, str, bool]] | None:
         """Return the bind mounts of a container that matches the current config, or None when it must be replaced."""
@@ -1109,13 +1068,10 @@ class DockerWorkerBackend:
         ):
             return None
 
-        storage_mounts = self._scoped_storage_mount_specs(
-            metadata.worker_key,
-            private_agent_names=private_agent_names,
-            state_scope_worker_key=state_scope_worker_key,
-        )
+        storage_mounts = self._scoped_storage_mount_specs(spec)
         config_mount_specs, projection = self._projection_manager.config_mount_specs(
             paths.state,
+            launch=required_launch(spec),
             worker_key=metadata.worker_key,
             materialize_projection=False,
             storage_mounts=storage_mounts,
@@ -1154,8 +1110,7 @@ class DockerWorkerBackend:
         metadata: _DockerWorkerMetadata,
         paths: _DockerWorkerPaths,
         *,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None,
+        spec: WorkerSpec,
         launch_config: _DockerLaunchConfig,
     ) -> _DockerContainer:
         paths.state.root.mkdir(parents=True, exist_ok=True)
@@ -1166,8 +1121,7 @@ class DockerWorkerBackend:
                 metadata,
                 container,
                 paths,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
+                spec=spec,
                 launch_config=launch_config,
             )
             if mounts is None:
@@ -1183,13 +1137,8 @@ class DockerWorkerBackend:
                     raise WorkerBackendError(msg) from exc
 
         if container is None:
-            self._write_startup_manifest(paths, worker_key=metadata.worker_key)
-            volumes = self._container_volumes(
-                paths,
-                worker_key=metadata.worker_key,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
-            )
+            self._write_startup_manifest(paths, spec=spec)
+            volumes = self._container_volumes(paths, spec=spec)
             self._prepare_nested_storage_mount_targets(paths, (volume.rsplit(":", 2)[1] for volume in volumes))
             security_kwargs = (
                 {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
@@ -1227,8 +1176,8 @@ class DockerWorkerBackend:
         metadata: _DockerWorkerMetadata,
         paths: _DockerWorkerPaths,
         *,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None,
+        spec: WorkerSpec,
+        launch_config: _DockerLaunchConfig,
         stale_error: WorkerBackendError,
     ) -> tuple[_DockerContainer, _DockerLaunchConfig]:
         """Pull the configured image once and relaunch after a protocol mismatch.
@@ -1245,6 +1194,7 @@ class DockerWorkerBackend:
         launch_config = self._launch_config_from_image_identity(
             pulled_image.id,
             image_resolved=True,
+            tool_snapshot_digest=launch_config.tool_snapshot_digest,
         )
         metadata.launch_config_hash = launch_config.launch_config_hash
         self._save_metadata(paths, metadata)
@@ -1255,8 +1205,7 @@ class DockerWorkerBackend:
             self._ensure_container(
                 metadata,
                 paths,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
+                spec=spec,
                 launch_config=launch_config,
             ),
             launch_config,
@@ -1372,13 +1321,13 @@ class DockerWorkerBackend:
         env[SANDBOX_STARTUP_MANIFEST_PATH_ENV] = str(sandbox_startup_manifest_path(dedicated_root))
         return env
 
-    def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, worker_key: str) -> None:
+    def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, spec: WorkerSpec) -> None:
         """Persist primary validation state before creating one Docker worker."""
         dedicated_root = Path(self.config.storage_mount_path)
         write_startup_manifest(
             paths.state.root,
-            self._worker_runtime_paths(worker_key=worker_key, dedicated_root=dedicated_root),
-            tool_validation_snapshot=self._tool_validation_snapshot,
+            self._worker_runtime_paths(worker_key=spec.worker_key, dedicated_root=dedicated_root),
+            tool_validation_snapshot=required_launch(spec).tool_validation_snapshot,
             public_runtime=True,
         )
 
@@ -1460,35 +1409,22 @@ class DockerWorkerBackend:
             ),
         ]
 
-    def _container_volumes(
-        self,
-        paths: _DockerWorkerPaths,
-        *,
-        worker_key: str | None = None,
-        private_agent_names: frozenset[str] | None = None,
-        state_scope_worker_key: str | None = None,
-    ) -> list[str]:
-        volumes = [
-            f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
-            for host_path, container_path, read_only in self._worker_root_mount_specs(paths.state)
-        ]
-        storage_mounts = []
-        if worker_key is not None:
-            storage_mounts = self._scoped_storage_mount_specs(
-                worker_key,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
-            )
-            for host_path, container_path, read_only in storage_mounts:
-                volumes.append(f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}")
-        mount_specs, _projection = self._projection_manager.config_mount_specs(
+    def _container_volumes(self, paths: _DockerWorkerPaths, *, spec: WorkerSpec) -> list[str]:
+        storage_mounts = self._scoped_storage_mount_specs(spec)
+        config_mounts, _projection = self._projection_manager.config_mount_specs(
             paths.state,
-            worker_key=worker_key,
+            launch=required_launch(spec),
+            worker_key=spec.worker_key,
             storage_mounts=storage_mounts,
         )
-        for host_path, container_path, read_only in mount_specs:
-            volumes.append(f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}")
-        return volumes
+        return [
+            f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}"
+            for host_path, container_path, read_only in (
+                *self._worker_root_mount_specs(paths.state),
+                *storage_mounts,
+                *config_mounts,
+            )
+        ]
 
     def _prepare_nested_storage_mount_targets(
         self,
@@ -1513,22 +1449,16 @@ class DockerWorkerBackend:
                 msg = f"Docker worker mount target must be a real directory: {paths.state.root / relative_path}"
                 raise WorkerBackendError(msg) from exc
 
-    def _scoped_storage_mount_specs(
-        self,
-        worker_key: str,
-        *,
-        private_agent_names: frozenset[str] | None,
-        state_scope_worker_key: str | None = None,
-    ) -> list[tuple[Path, str, bool]]:
-        resolved_agent_policies = self._projection_manager.current_resolved_agent_policies()
-        state_scope_key = resolve_state_scope_worker_key(worker_key, state_scope_worker_key)
+    def _scoped_storage_mount_specs(self, spec: WorkerSpec) -> list[tuple[Path, str, bool]]:
+        resolved_agent_policies = required_launch(spec).config.get_agent_policies()
+        state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
             for workspace_mount in plan_scoped_workspace_mounts(
                 worker_key=state_scope_key,
                 local_shared_storage_root=self._storage_path,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
-                private_agent_names=private_agent_names,
+                private_agent_names=spec.private_agent_names,
                 resolved_agent_policies=resolved_agent_policies,
             )
         ]
@@ -1543,7 +1473,7 @@ class DockerWorkerBackend:
         )
         validate_unique_worker_visible_paths(
             (container_path for _host_path, container_path, _read_only in mount_specs),
-            worker_key=worker_key,
+            worker_key=spec.worker_key,
             duplicate_label="Docker mount",
         )
         return mount_specs
@@ -1566,25 +1496,21 @@ class DockerWorkerBackend:
         labels.update(self.config.extra_labels)
         return labels
 
-    def _compute_launch_config_hash(self, *, image_identity: str | None = None) -> str:
-        resolved_image_identity = image_identity or _resolved_docker_image_identity(
-            self.config.image,
-            client=self._client,
-            docker_errors=self._docker_errors,
-        )
+    def _compute_launch_config_hash(self, *, image_identity: str, tool_snapshot_digest: str) -> str:
+        # The worker's own projected config and assets restart it through the projection mount it compares,
+        # so config edits that other workers or only the primary see never restart this one.
         config_payload: dict[str, object] = {
             "auth_token": self.auth_token or "",
             "config_path": self.config.config_path,
-            "config_contents_hash": _host_config_contents_hash(self.config.host_config_path),
             "extra_env": self.config.extra_env,
             "extra_labels": self.config.extra_labels,
             "host_config_path": str(self.config.host_config_path or ""),
             "image": self.config.image,
-            "resolved_image": resolved_image_identity,
+            "resolved_image": image_identity,
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,
-            "tool_validation_snapshot": self._tool_validation_snapshot,
+            "tool_snapshot_digest": tool_snapshot_digest,
             "workers_root": str(self._workers_root),
             "user": self.config.user or "",
             "worker_port": self.config.worker_port,
@@ -1596,7 +1522,7 @@ class DockerWorkerBackend:
         normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    def _resolve_launch_config(self) -> _DockerLaunchConfig:
+    def _resolve_launch_config(self, launch: WorkerLaunchConfig) -> _DockerLaunchConfig:
         image_identity, image_resolved = _docker_image_identity_state(
             self.config.image,
             client=self._client,
@@ -1605,6 +1531,7 @@ class DockerWorkerBackend:
         return self._launch_config_from_image_identity(
             image_identity,
             image_resolved=image_resolved,
+            tool_snapshot_digest=launch.tool_snapshot_digest,
         )
 
     def _launch_config_from_image_identity(
@@ -1612,11 +1539,16 @@ class DockerWorkerBackend:
         image_identity: str,
         *,
         image_resolved: bool,
+        tool_snapshot_digest: str,
     ) -> _DockerLaunchConfig:
         return _DockerLaunchConfig(
             image_reference=image_identity if image_resolved else self.config.image,
-            launch_config_hash=self._compute_launch_config_hash(image_identity=image_identity),
+            launch_config_hash=self._compute_launch_config_hash(
+                image_identity=image_identity,
+                tool_snapshot_digest=tool_snapshot_digest,
+            ),
             image_resolved=image_resolved,
+            tool_snapshot_digest=tool_snapshot_digest,
         )
 
     def _container_config_labels(self, container: _DockerContainer) -> dict[str, str]:
@@ -1668,11 +1600,21 @@ class DockerWorkerBackend:
             return compatible_hashes
 
         if not launch_config.image_resolved:
-            compatible_hashes.add(self._compute_launch_config_hash(image_identity=container_image_identity))
+            compatible_hashes.add(
+                self._compute_launch_config_hash(
+                    image_identity=container_image_identity,
+                    tool_snapshot_digest=launch_config.tool_snapshot_digest,
+                ),
+            )
             return compatible_hashes
 
         if container_image_identity == current_image_identity:
-            compatible_hashes.add(self._compute_launch_config_hash(image_identity=self.config.image))
+            compatible_hashes.add(
+                self._compute_launch_config_hash(
+                    image_identity=self.config.image,
+                    tool_snapshot_digest=launch_config.tool_snapshot_digest,
+                ),
+            )
         return compatible_hashes
 
     def _container_mount_layout_matches(

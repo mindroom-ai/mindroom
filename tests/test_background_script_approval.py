@@ -22,8 +22,9 @@ from mindroom.event_journal import (
 )
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from tests.conftest import handle_card_response_for_test, test_runtime_paths
+from tests.conftest import bound_worker_launch_config, handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
+from tests.test_script_run_manager import _config as _manager_config
 from tests.test_script_run_manager import _context as _manager_context
 from tests.test_script_run_manager import _manager
 from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolver
@@ -47,7 +48,8 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(
     """A live allowlist added after launch cannot bypass Matrix approval."""
     manager, _backend, worker_client = _manager(tmp_path)
     launch_context = _manager_context(tmp_path)
-    launched = await manager.run(launch_context, source="print('ok')\n")
+    with bound_worker_launch_config(_manager_config()):
+        launched = await manager.run(launch_context, source="print('ok')\n")
     durable_run = manager.store.get_run(launched.run_id)
     assert durable_run.preapprove_launch_grants is False
 
