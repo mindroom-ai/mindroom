@@ -51,6 +51,12 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             "Ask the user to connect the service's own account at manage_url, then retry.",
         ),
         (
+            "credential_not_configured",
+            {"service": "team_calendar", "provider": "google_calendar", "own_account": True, "reuse_off": True},
+            "No team_calendar account is allowed for this agent. "
+            "Ask the user to connect and allow the service's own account at manage_url, then retry.",
+        ),
+        (
             "oauth_connection_required",
             {"service": "github", "provider": "github", "connectable": True},
             "The github account for github must be connected again. "

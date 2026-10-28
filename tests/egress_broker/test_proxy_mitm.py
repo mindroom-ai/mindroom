@@ -1749,3 +1749,29 @@ async def test_a_service_without_its_own_account_asks_to_connect_it_on_the_page(
         "Ask the user to connect the service's own account at manage_url, then retry.",
     }
     assert tls_upstream.hits == []
+
+
+@pytest.mark.asyncio
+async def test_a_service_whose_own_account_is_not_allowed_never_asks_for_a_key(
+    broker: BrokerFactory,
+    tls_upstream: Upstream,
+    proxy_client: ProxyClient,
+) -> None:
+    """Right after saving, before Connect, the refusal asks to connect and allow its own account, not to add a key."""
+    lookup = SecretMissing(provider="google_calendar", reuse_off=True, own_account=True)
+    await broker(single_rule_config(), resolve_secret=lambda *_: lookup, manage_url=MANAGE_URL)
+    client = proxy_client(broker.token())
+
+    response = await client.get(tls_upstream.url("/echo"))
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "svc",
+        "provider": "google_calendar",
+        "oauth_reuse": "off",
+        "manage_url": MANAGE_URL,
+        "message": "No svc account is allowed for this agent. "
+        "Ask the user to connect and allow the service's own account at manage_url, then retry.",
+    }
+    assert tls_upstream.hits == []

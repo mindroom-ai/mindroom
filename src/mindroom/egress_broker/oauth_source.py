@@ -152,6 +152,7 @@ def resolve_oauth_token(  # noqa: PLR0911 - checks in order
             provider=provider.id,
             reuse_off=True,
             requester_owned=provider.requester_scoped_credentials,
+            own_account=separate_account,
         )
     if level == "read" and not read_only_allows(read_only, request):
         return SecretReadOnly(provider=provider.id, requester_owned=provider.requester_scoped_credentials)

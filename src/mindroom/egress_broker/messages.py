@@ -65,6 +65,11 @@ _OWN_ACCOUNT_MISSING = (
     "No {service} account is connected for this agent. "
     "Ask the user to connect the service's own account at manage_url, then retry."
 )
+# The same before anyone allowed Agent Keys to use it, such as right after the service is saved; it takes no key.
+_OWN_ACCOUNT_OFF = (
+    "No {service} account is allowed for this agent. "
+    "Ask the user to connect and allow the service's own account at manage_url, then retry."
+)
 _CONNECTABLE = (
     "No {service} credential is set for this agent. "
     "Ask the user to connect it at connect_url or add a key at manage_url, then retry."
@@ -176,12 +181,12 @@ def _template(  # noqa: C901, PLR0911 - one text per case, checked in order
     service_header: bool,
 ) -> str:
     without_page = not (shared or personal_page)
+    if code == "credential_not_configured" and own_account and not without_page:
+        return _OWN_ACCOUNT_OFF if reuse_off else _OWN_ACCOUNT_MISSING
     if code == "credential_not_configured" and reuse_off:
         return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
     if code == "read_only":
         return _read_only_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
-    if code == "credential_not_configured" and own_account and not without_page:
-        return _OWN_ACCOUNT_MISSING
     if code == "credential_not_configured" and connectable and not without_page:
         return _CONNECTABLE
     if code == "credential_not_configured" and shared:
@@ -260,8 +265,8 @@ def refusal_body(
     edits it. A `credential_not_configured` with `reuse_off` (nobody allowed Agent Keys to use the `provider` account)
     adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
     requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
-    writes the same way. `own_account` (the service's own account is not connected) asks the user to connect it at
-    `manage_url`. An `oauth_connection_required` without a connect link names only `manage_url`, and on a `shared`
+    writes the same way. `own_account` (the service's own account is not connected, or with `reuse_off` not allowed)
+    asks the user to connect it, or to connect and allow it, at `manage_url`. An `oauth_connection_required` without a connect link names only `manage_url`, and on a `shared`
     agent its `managers` (or an administrator) as the ones who can reconnect, unless the account is `requester_owned`.
     A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
     services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`

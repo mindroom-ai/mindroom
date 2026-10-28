@@ -1252,7 +1252,7 @@ def test_an_opt_in_unlocks_only_the_connection_it_was_given_for(
     switched = _resolve_mine(config, runtime_paths, manager, separate_account=not own_first)
 
     assert allowed == Secret("own-access" if own_first else "tools-access")
-    assert switched == SecretMissing(provider="demo", reuse_off=True)
+    assert switched == SecretMissing(provider="demo", reuse_off=True, own_account=not own_first)
 
 
 @pytest.mark.usefixtures("demo_registry")
@@ -1273,7 +1273,11 @@ def test_an_opt_in_without_a_credential_service_counts_for_the_tools_connection_
     )
 
     assert _resolve_mine(config, runtime_paths, manager, separate_account=False) == Secret("tools-access")
-    assert _resolve_mine(config, runtime_paths, manager) == SecretMissing(provider="demo", reuse_off=True)
+    assert _resolve_mine(config, runtime_paths, manager) == SecretMissing(
+        provider="demo",
+        reuse_off=True,
+        own_account=True,
+    )
 
 
 @pytest.mark.usefixtures("demo_registry")
