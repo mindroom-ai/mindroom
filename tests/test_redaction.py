@@ -1582,7 +1582,7 @@ def test_a_redacted_url_keeps_its_scheme_host_port_and_path(url: str, redacted: 
 # Text the parser rejects as a URL that holds no userinfo: a sentence running on from a host without a path, and an at
 # sign after the host.
 _REJECTED_WITHOUT_USERINFO = {
-    "chinese-comma": "请看https://github.com，里面有详细说明。你觉得怎么样？",  # noqa: RUF001
+    "chinese-question-mark": "请看https://github.com，里面有详细说明。你觉得怎么样？",  # noqa: RUF001
     "chinese-colon": "我在https://example.com上找到了答案：用这个方法就行。",  # noqa: RUF001
     "japanese-colon": "公式サイトhttps://example.jpを参照してください。質問：",  # noqa: RUF001
     "at-sign-in-path": "我看https://example.com：见/docs@v2说明",  # noqa: RUF001

@@ -525,8 +525,8 @@ def _may_hide_userinfo(url: str) -> bool:
     """Return whether the authority of a URL the parser rejected holds an at sign once NFKC-normalised.
 
     A URL in running text reaches the next ASCII space, so after a host without a path it runs on into the sentence,
-    whose fullwidth punctuation, such as a fullwidth comma or colon, makes the parser reject it; such a URL holds no
-    userinfo unless an at sign comes before the first ASCII ``/``, ``?``, or ``#``.
+    whose fullwidth punctuation, such as a fullwidth question mark or colon, makes the parser reject it; such a URL
+    holds no userinfo unless an at sign comes before the first ASCII ``/``, ``?``, or ``#``.
     """
     authority = re.split(r"[/?#]", url.partition("://")[2], maxsplit=1)[0]
     return "@" in unicodedata.normalize("NFKC", authority)
