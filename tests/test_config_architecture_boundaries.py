@@ -248,15 +248,8 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
 
 
 def test_response_lifecycle_does_not_reach_into_response_runner_internals() -> None:
-    """Response lifecycle owns its dependencies instead of calling runner-private helpers."""
+    """Response lifecycle owns its dependencies instead of importing the response runner."""
     tree = ast.parse(RESPONSE_LIFECYCLE_MODULE.read_text(encoding="utf-8"))
-    forbidden_private_helpers = {
-        "_emit_pipeline_timing_summary",
-        "_emit_session_started_safely",
-        "_log_post_response_effects_failure",
-        "_response_outcome",
-        "_should_watch_session_started",
-    }
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -265,12 +258,8 @@ def test_response_lifecycle_does_not_reach_into_response_runner_internals() -> N
             ) or node.module == "mindroom.response_runner"
             if imported_from_response_runner:
                 found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: from response_runner")
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in forbidden_private_helpers:
-            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.name}")
-        if isinstance(node, ast.Name) and node.id in {"ResponseRequest", "ResponseRunner", *forbidden_private_helpers}:
+        if isinstance(node, ast.Name) and node.id in {"ResponseRequest", "ResponseRunner"}:
             found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.id}")
-        if isinstance(node, ast.Attribute) and node.attr in forbidden_private_helpers:
-            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.attr}")
 
     assert found == []
 

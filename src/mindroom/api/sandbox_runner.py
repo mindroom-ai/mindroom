@@ -755,7 +755,7 @@ async def _maybe_await(value: object) -> object:
 async def _call_entrypoint(entrypoint: Callable[..., object], args: list[Any], kwargs: dict[str, Any]) -> object:
     if inspect.iscoroutinefunction(entrypoint):
         return await entrypoint(*args, **kwargs)
-    # A blocking function on the loop would stop the call's stream from sending keep-alives.
+    # A blocking function on the loop would stop keep-alives and every other call in this worker.
     executor = JOB_CALL_EXECUTOR if job_owns_execution() else None
     work = asyncio.get_running_loop().run_in_executor(
         executor,
@@ -776,11 +776,13 @@ async def _run_toolkit_entrypoint(
     if not toolkit.requires_connect:
         return await _call_entrypoint(entrypoint, args, kwargs)
 
-    await _maybe_await(toolkit.connect())
+    # Connect and close can block on a slow database like any tool function. A connect that failed or was
+    # cancelled partway may still hold a connection, so close runs on every path.
     try:
+        await _call_entrypoint(toolkit.connect, [], {})
         return await _call_entrypoint(entrypoint, args, kwargs)
     finally:
-        await _maybe_await(toolkit.close())
+        await _call_entrypoint(toolkit.close, [], {})
 
 
 def _runtime_paths_for_runner_agent_paths(runtime_paths: RuntimePaths) -> RuntimePaths:

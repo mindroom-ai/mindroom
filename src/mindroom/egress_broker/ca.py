@@ -32,6 +32,9 @@ __all__ = [
 _CACHE_SIZE = 1024
 _LEAF_VALIDITY_HOURS = 24
 _CA_VALIDITY_YEARS = 10
+# Certificates start this long before they are issued, so a verifier whose clock reads behind the broker's accepts
+# one issued just now: OpenSSL checks validity against the coarse system clock, and other hosts' clocks drift.
+_CLOCK_SKEW_ALLOWANCE = timedelta(hours=1)
 _CACHE_REFRESH_MARGIN_SECONDS = 3600  # Replace cached context when <1h validity remains
 _CA_CERT_NAME = "ca.pem"
 _CA_KEY_NAME = "ca.key"
@@ -172,7 +175,7 @@ class BrokerCA:
         )
 
         now = datetime.now(UTC)
-        not_before = now - timedelta(hours=1)  # 1h in the past
+        not_before = now - _CLOCK_SKEW_ALLOWANCE
         not_after = now + timedelta(hours=_LEAF_VALIDITY_HOURS)
 
         leaf_cert = (
@@ -241,7 +244,7 @@ def _issue_ca_certificate(ca_key: ec.EllipticCurvePrivateKey) -> x509.Certificat
         .issuer_name(issuer)
         .public_key(ca_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
+        .not_valid_before(now - _CLOCK_SKEW_ALLOWANCE)
         .not_valid_after(now + timedelta(days=_CA_VALIDITY_YEARS * 365))
         .add_extension(
             x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()),
