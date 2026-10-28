@@ -42,7 +42,7 @@ from mindroom.slack.api import (
     slack_http_client,
 )
 from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, SlackAppCredentials, load_slack_app, slack_bot_identity
-from mindroom.slack.files import MAX_FILE_BYTES, SlackFileError, fetch_file, save_download, upload_file
+from mindroom.slack.files import MAX_FILE_BYTES, SlackFileError, fetch_file, save_download, share_file
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.render import (
     json_object,
@@ -989,7 +989,7 @@ class SlackTools(Toolkit):
             channel_id = await self._destination(session, parsed)
             filename, content = await asyncio.to_thread(_read_upload, path, self._workspace_root, self._file_access)
             root = reply_root(parsed)
-            file_id = await upload_file(
+            file_id = await share_file(
                 session.client,
                 session.token,
                 filename=filename,

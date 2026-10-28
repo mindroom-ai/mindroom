@@ -90,7 +90,7 @@ async def _send_upload(client: httpx.AsyncClient, url: str, content: bytes) -> N
         raise SlackFileError(msg)
 
 
-async def upload_file(
+async def share_file(
     client: httpx.AsyncClient,
     token: str,
     *,
