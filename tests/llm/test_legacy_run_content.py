@@ -95,6 +95,15 @@ def test_a_requester_quoting_a_notice_leaves_it_read_as_no_content() -> None:
     assert stored_run_record(stored).content is None
 
 
+def test_an_earlier_reply_the_input_carried_is_not_the_run_s_answer() -> None:
+    """A thread's earlier reply that the run's input carried is not the run's own answer, whatever its words."""
+    stored = deepcopy(_ROWS["agent_paused"])
+    earlier = {"role": "assistant", "content": stored["content"], "created_at": 0}
+    stored["messages"] = [stored["messages"][0], earlier, *stored["messages"][1:]]
+
+    assert stored_run_record(stored).content is None
+
+
 def test_a_completed_row_that_carried_the_notice_hands_over_none() -> None:
     """A row whose resume wrote no text, and so kept the notice, hands its reader nothing."""
     stored = _ROWS["agent_resumed_without_text"]
