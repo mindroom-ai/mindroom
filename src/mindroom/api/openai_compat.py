@@ -61,6 +61,7 @@ from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.error_handling import needs_provider_key
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
@@ -69,6 +70,7 @@ from mindroom.llm.request_context import RequestAttribution
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
 from mindroom.response_turn import CompletedAttempt, build_llm_request_log_context, stream_with_llm_request_log_context
@@ -835,7 +837,13 @@ async def _non_stream_completion(
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
     # that failed for want of a provider key answers with its reply, the setup guidance the user has to read.
     if not completed and not any(needs_provider_key(error) for error in failures):
-        logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
+        # The reply text can hold the answer the turn had started, which is conversation content; log only why it failed.
+        logger.warning(
+            "AI response failed",
+            model=agent_name,
+            session_id=session_id,
+            error=redact_sensitive_text(failure_text(failures[-1])) if failures else None,
+        )
         return error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)

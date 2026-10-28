@@ -1896,6 +1896,7 @@ depends_on = [
     "mindroom.api.openai_streaming_protocol",
     "mindroom.api.response_activity",
     "mindroom.constants",
+    "mindroom.failure_text",
     "mindroom.helper_usage",
     "mindroom.history.session_context",
     "mindroom.knowledge.utils",

@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
@@ -1356,6 +1357,7 @@ class TestChatCompletions:
             patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
             TestClient(app, base_url="http://localhost") as client,
+            capture_logs() as logs,
         ):
             response = client.post(
                 "/v1/chat/completions",
@@ -1366,6 +1368,10 @@ class TestChatCompletions:
             assert response.status_code == 500
             assert response.json()["error"]["message"] == "Agent execution failed"
             assert response.json()["error"]["type"] == "server_error"
+            # The warning names why the turn failed, never the answer it had started, which is conversation content.
+            [warning] = [log for log in logs if log["event"] == "AI response failed"]
+            assert warning["error"] == "provider connection lost"
+            assert "Checking." not in str(warning)
             return
         assert response.status_code == 200
         content = "".join(
