@@ -337,7 +337,7 @@ class File:
 
 
 # The MIME type family of each media kind that a file name or a declared type can name.
-_MEDIA_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
+MEDIA_MIME_FAMILIES: dict[type[Image | Audio | Video], str] = {Image: "image/", Audio: "audio/", Video: "video/"}
 
 
 def named_by_resource[T: Image | Audio | Video | File](
@@ -362,7 +362,7 @@ def named_by_resource[T: Image | Audio | Video | File](
     mime_type, media_format = media.mime_type, media.format
     named_type = mimetypes.guess_type(resource_name)[0]
     if mime_type is None and media_format is None:
-        family = _MEDIA_FAMILIES[type(media)]
+        family = MEDIA_MIME_FAMILIES[type(media)]
         candidates = (declared_mime, named_type if isinstance(media, Image) else None)
         mime_type = next((value for value in candidates if value and value.startswith(family)), None)
     if not isinstance(media, Image) and media.format is None:
@@ -379,6 +379,7 @@ def named_by_resource[T: Image | Audio | Video | File](
 __all__ = [
     "DOCUMENT_MIME_TYPES",
     "IMAGE_HEADER_BYTES",
+    "MEDIA_MIME_FAMILIES",
     "VIEWED_IMAGE_ID_PREFIX",
     "Audio",
     "File",
