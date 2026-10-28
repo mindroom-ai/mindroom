@@ -481,6 +481,7 @@ Changing `seed` changes the response length, split point, and tool-call choice, 
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
+`role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` with `provider: openai` and as `system` with every other provider, so remove it, or for an OpenAI-compatible server that rejects the `developer` role use `provider: llama_cpp` with that server's `base_url`.
 
 - `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
 - `api_key` is the same as the model's `api_key` field.
@@ -490,7 +491,7 @@ A model with any other key, including a misspelled key or a retired Agno model s
 
 | Provider | Accepted keys |
 |----------|---------------|
-| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `role_map`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
+| `openai` with Chat Completions, `zai`, `llama_cpp` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `frequency_penalty`, `logit_bias`, `logprobs`, `max_completion_tokens`, `max_tokens`, `metadata`, `organization`, `presence_penalty`, `reasoning_effort`, `request_params`, `seed`, `service_tier`, `stop`, `store`, `strict_output`, `temperature`, `timeout`, `top_logprobs`, `top_p`, `user`, `verbosity` |
 | `azure` | The Chat Completions keys, plus `api_version`, `azure_endpoint`, `azure_deployment`, and `azure_ad_token` |
 | `openrouter` | The Chat Completions keys, plus `models`, `cache_system_prompt`, and `extended_cache_time` |
 | `deepseek` | The Chat Completions keys, plus `use_thinking` |

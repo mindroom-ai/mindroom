@@ -61,7 +61,6 @@ class ChatSettings:
     extra_query: dict[str, Any] | None = field(default=None, metadata=SECRET)
     extra_body: dict[str, Any] | None = None
     request_params: dict[str, Any] | None = None
-    role_map: dict[str, str] | None = None
     # Client parameters.
     api_key: str | None = field(default=None, metadata=SECRET)
     organization: str | None = None
@@ -184,7 +183,7 @@ class ResponsesSettings:
 
 
 # Each route accepts the request fields its API takes and the settings the wire or client reads otherwise.
-CHAT_FIELDS = _CLIENT_FIELDS | {*ChatSettings().request_fields(), "strict_output", "request_params", "role_map"} - {
+CHAT_FIELDS = _CLIENT_FIELDS | {*ChatSettings().request_fields(), "strict_output", "request_params"} - {
     "repetition_penalty",
     "top_k",
 }

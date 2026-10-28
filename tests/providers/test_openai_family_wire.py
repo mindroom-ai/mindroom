@@ -589,6 +589,26 @@ async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fiel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+async def test_a_chat_request_sends_no_participant_name_and_no_empty_call_list(tmp_path: Path, provider: str) -> None:
+    """A stored message's ``name`` is not sent, and an assistant message with no calls sends no ``tool_calls``."""
+    history = [
+        Message(role="user", content="Hi", name="alice"),
+        Message(role="assistant", content="Hello.", tool_calls=[]),
+        _user(),
+    ]
+    model_config = _OPENAI_CHAT if provider == "openai" else _DECISION_ROUTES[provider][0]
+    built = _Built(tmp_path, model_config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=history))
+
+    assert built.body()["messages"][:2] == [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello."},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_thread_switching_to_a_chat_route_rewrites_foreign_call_ids(tmp_path: Path) -> None:
     """Calls a Responses model made earlier in the thread, and their results, take ids Chat Completions accepts."""
     responses_call = {**_CALL, "id": "fc_68a1", "call_id": "call_68a1"}

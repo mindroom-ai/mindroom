@@ -923,6 +923,23 @@ def test_a_retired_max_retries_fails_config_load_with_its_reason(tmp_path: Path,
     )
 
 
+@pytest.mark.parametrize("provider", ["openai", "openrouter", "llama_cpp", "groq"])
+def test_a_retired_role_map_fails_config_load_with_its_reason(tmp_path: Path, provider: str) -> None:
+    """The role map is gone, so a model that sets it is told how requests name the system prompt and what to do."""
+    role_map = {"system": "system", "user": "user", "assistant": "assistant", "tool": "tool"}
+    data = {"models": {"default": {"provider": provider, "id": "m", "extra_kwargs": {"role_map": role_map}}}}
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    assert str(exc_info.value) == (
+        f"models.default: Unsupported extra_kwargs for provider '{provider}': role_map was removed; "
+        "Chat Completions requests send the system prompt as developer with provider openai and as system with every "
+        "other provider, so remove the setting, or use provider llama_cpp with the base_url of an OpenAI-compatible "
+        "server that rejects the developer role."
+    )
+
+
 _MODELS_DOC = Path(__file__).resolve().parents[1] / "docs" / "configuration" / "models.md"
 
 

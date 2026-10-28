@@ -111,13 +111,12 @@ def _message_content(message: Message) -> str | list[Any] | None:
     return tool_result_view(message).content if message.role == "tool" else message.content
 
 
-def _chat_message(message: Message, wire: ChatWire, role_map: Mapping[str, str], provider: str) -> dict[str, Any]:
+def _chat_message(message: Message, wire: ChatWire, system_role: str, provider: str) -> dict[str, Any]:
     values: dict[str, Any] = {
-        "role": role_map.get(message.role, message.role),
+        "role": system_role if message.role == "system" else message.role,
         "content": _message_content(message),
-        "name": message.name,
         "tool_call_id": message.tool_call_id,
-        "tool_calls": message.tool_calls,
+        "tool_calls": message.tool_calls or None,
     }
     if wire.route == "deepseek":
         values["reasoning_content"] = message.reasoning_content
@@ -132,8 +131,6 @@ def _chat_message(message: Message, wire: ChatWire, role_map: Mapping[str, str],
             ),
             *(part for audio in message.audio or () if (part := chat_audio_part(audio, provider=provider)) is not None),
         ]
-    if message.tool_calls is not None and len(message.tool_calls) == 0:
-        formatted["tool_calls"] = None
     if message.files is not None:
         content = formatted.get("content")
         parts: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
@@ -150,15 +147,11 @@ def _chat_message(message: Message, wire: ChatWire, role_map: Mapping[str, str],
     return formatted
 
 
-def _chat_messages(
-    messages: Sequence[Message],
-    wire: ChatWire,
-    settings: ChatSettings,
-    provider: str,
-) -> list[dict[str, Any]]:
-    role_map = settings.role_map or {"system": "developer" if wire.route == "openai" else "system"}
+def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
+    """Return the request's messages: the system prompt as one, as ``developer`` on OpenAI, and foreign call ids fitted."""
+    system_role = "developer" if wire.route == "openai" else "system"
     canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
-    return [_chat_message(message, wire, role_map, provider) for message in canonical]
+    return [_chat_message(message, wire, system_role, provider) for message in canonical]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
@@ -374,7 +367,7 @@ def chat_request_kwargs(
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
     params = {
         "model": model_id,
-        "messages": _chat_messages(messages, wire, settings, provider),
+        "messages": _chat_messages(messages, wire, provider),
         **disable_tool_selection(params, tool_choice),
     }
     params["stream"] = True
