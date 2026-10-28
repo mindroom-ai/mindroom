@@ -3697,8 +3697,9 @@ depends_on = [
     "mindroom.embeddings.signatures",
     "mindroom.logging_config",
     "mindroom.memory._mem0_usage",
-    # Deferred (function-level) import that loads the Ollama SDK only once Mem0's Ollama embedder fails.
+    # Deferred (function-level) imports that load the provider SDK only once an embedder Mem0 builds fails.
     "mindroom.providers.ollama.errors",
+    "mindroom.providers.openai",
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]

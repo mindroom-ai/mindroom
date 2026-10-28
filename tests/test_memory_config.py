@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types import TextBlock
@@ -21,6 +22,7 @@ from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.openai import OpenAIEmbedding
 from mem0.llms.openai import OpenAILLM
 from mem0.utils.factory import LlmFactory
+from openai import APIConnectionError
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
@@ -1054,7 +1056,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        expected_memory = SimpleNamespace(llm=_fake_mem0_llm())
+        expected_memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock())
         mock_from_config.return_value = expected_memory
 
         result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
@@ -1083,7 +1085,7 @@ class TestMemoryConfig:
             llm=None,
         )
         config = Config(memory=memory, router=RouterConfig(model="default"))
-        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm())
+        mock_from_config.return_value = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=MagicMock())
         install_running = threading.Event()
         finish_install = threading.Event()
 
@@ -1187,6 +1189,36 @@ class TestMemoryConfig:
         mem0_embedder.embed_batch.side_effect = refused
         with pytest.raises(EmbedderRequestError, match="embedder endpoint unreachable"):
             result.embedding_model.embed_batch(["memory"])
+
+    @pytest.mark.asyncio
+    async def test_an_outage_of_another_mem0_embedder_reaches_mem0_callers_as_an_unreachable_embedder(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """An embedder only Mem0 provides, such as Azure OpenAI over the OpenAI SDK, fails as the typed embedder error."""
+        config = Config(
+            memory=MemoryConfig(
+                embedder=_MemoryEmbedderConfig(
+                    provider="azure_openai",
+                    config=EmbedderConfig(model="text-embedding-3-small"),
+                ),
+                llm=None,
+            ),
+            router=RouterConfig(model="default"),
+        )
+        request = httpx.Request("POST", "https://r.openai.azure.com/openai/deployments/e/embeddings")
+        refused = APIConnectionError(request=request)
+        refused.__cause__ = httpx.ConnectError("connection refused", request=request)
+        mem0_embedder = MagicMock()
+        mem0_embedder.embed.side_effect = refused
+        memory = SimpleNamespace(llm=_fake_mem0_llm(), embedding_model=mem0_embedder)
+
+        with patch.object(AsyncMemory, "from_config", return_value=memory):
+            result = await create_memory_instance(tmp_path / "memory", config, _runtime_paths(tmp_path))
+        with pytest.raises(EmbedderRequestError) as search:
+            result.embedding_model.embed("query", "search")
+
+        assert (str(search.value), search.value.retryable) == ("embedder endpoint unreachable", True)
 
     @pytest.mark.asyncio
     async def test_a_failure_unrelated_to_ollama_while_building_mem0_keeps_its_type(self, tmp_path: Path) -> None:
