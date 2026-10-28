@@ -854,31 +854,32 @@ async def _record_interrupted(
     if not sinks.persist_interrupted:
         return
     response_event_id = sinks.response_event_id() if sinks.response_event_id is not None else None
-    persist = create_background_task(
-        asyncio.to_thread(_persist_interrupted, adapter, run, response_event_id),
+    run.record.store = create_background_task(
+        asyncio.to_thread(_persist_interrupted, ctx, adapter, run, response_event_id),
         name="persist_interrupted_turn",
     )
-    try:
-        await asyncio.shield(persist)
-    except Exception:
-        # A lost replay row is the lesser harm; the turn's own exit must still run.
-        logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
+    await asyncio.shield(run.record.store)
 
 
 def _persist_interrupted(
+    ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
     run: TurnRunState,
     response_event_id: str | None,
 ) -> None:
     """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not."""
-    scope_context = run.scope_context or adapter.load_scope()
     record = run.record
-    persist_interrupted_replay_snapshot(
-        storage=scope_context.storage,
-        session=scope_context.stored_or_first_session(),
-        run_id=record.run_id or str(uuid4()),
-        snapshot=record.interrupted_snapshot(response_event_id=response_event_id),
-    )
+    try:
+        scope_context = run.scope_context or adapter.load_scope()
+        persist_interrupted_replay_snapshot(
+            storage=scope_context.storage,
+            session=scope_context.stored_or_first_session(),
+            run_id=record.run_id or str(uuid4()),
+            snapshot=record.interrupted_snapshot(response_event_id=response_event_id),
+        )
+    except Exception:
+        # A lost replay row is the lesser harm; the turn's own exit must still run.
+        logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
 
 
 async def _failed_turn_text(

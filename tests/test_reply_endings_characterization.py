@@ -19,6 +19,7 @@ bug; flip it deliberately when it is fixed.
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
@@ -38,7 +39,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -656,6 +657,51 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
     # CHARACTERIZATION: current behavior; an interrupted row stores the bare message tag, not the model prompt.
     assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
     assert not await turn.pending()
+
+
+async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_record_is_stored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stopped turn's record can take longer to store than the stream's bounded unwind; the turn waits for it.
+
+    The conversation's next turn reads history once this turn ends, so it must find the stopped turn there.
+    """
+    running = asyncio.Event()
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=True,
+        scripts={"default": [_streams_then_blocks("Partial answer", running)]},
+    )
+    release = threading.Event()
+    store = persist_interrupted_replay_snapshot
+
+    def slow_store(**kwargs: Any) -> None:  # noqa: ANN401
+        release.wait(timeout=30)
+        store(**kwargs)
+
+    monkeypatch.setattr("mindroom.response_turn.persist_interrupted_replay_snapshot", slow_store)
+    response = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
+    try:
+        await asyncio.wait_for(running.wait(), timeout=10)
+        await _wait_shown(turn, "Partial answer")
+        assert await _stop(turn)
+
+        async def reply_ended() -> None:
+            while "cancelled" not in turn.hooks.names:  # noqa: ASYNC110
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(reply_ended(), timeout=10)
+        done, _pending = await asyncio.wait({response}, timeout=1)
+        assert response not in done
+        assert not any(is_interrupted_replay_run(run) for run in turn.agent_runs())
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(response, timeout=10) == "$sent0"
+    [run] = turn.agent_runs()
+    assert is_interrupted_replay_run(run)
 
 
 async def test_a_user_stop_while_a_whole_delivery_runs_the_model(

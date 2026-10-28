@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -35,6 +36,8 @@ class TurnRecorder:
     original_status: RunStatus | None = None
     # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
     folded_tool_call_ids: set[str] = field(default_factory=set)
+    # The store of an interrupted record, which can outlast the stream's bounded unwind after a Stop.
+    store: asyncio.Task[None] | None = None
 
     def start(self, *, user_message: str, user_message_is_structured: bool, run_metadata: Mapping[str, Any]) -> None:
         """Seed the record of a turn that starts: its user message, and the Matrix metadata it runs with."""
@@ -95,6 +98,11 @@ class TurnRecorder:
     def mark_suspended(self) -> None:
         """Record a native pause without classifying it as terminal."""
         self.outcome = "suspended"
+
+    async def stored(self) -> None:
+        """Wait until the interrupted record the driver started storing is stored, so the conversation's next turn reads it."""
+        if self.store is not None:
+            await asyncio.shield(self.store)
 
     def interrupted_snapshot(self, *, response_event_id: str | None = None) -> InterruptedReplaySnapshot:
         """Build one canonical interrupted snapshot from the recorded facts and the event the reply shows."""

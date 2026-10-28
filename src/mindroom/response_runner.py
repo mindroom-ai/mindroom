@@ -4097,29 +4097,33 @@ class ResponseRunner:
                 generated.append(delivery)
                 progress.settle(delivery)
 
-            return await self._run_and_settle_locked_response(
-                request,
-                target=dispatched.response_target,
-                lifecycle=lifecycle,
-                progress=progress,
-                response_function=generate,
-                user_id=request.user_id,
-                build_post_response_outcome=build_post_response_outcome,
-                post_response_deps=dispatched.post_response_deps,
-                approval_suspension_handler=lambda pause: self._suspend_for_approval(
-                    _paused_with_committed_presentation(pause, show_tool_calls=dispatched.runtime.show_tool_calls),
-                    request=request,
+            try:
+                return await self._run_and_settle_locked_response(
+                    request,
                     target=dispatched.response_target,
-                    execution_identity=dispatched.execution_identity,
-                    entity_kind="agent" if dispatched.response_kind == "ai" else "team",
-                    history_scope=dispatched.history_scope,
-                    show_tool_calls=dispatched.runtime.show_tool_calls,
-                    team_member_names=dispatched.team_member_names,
-                    team_mode=dispatched.team_mode,
-                ),
-                participation=dispatched.runtime.participation,
-                reply_session=ReplySession(dispatched.history_scope, dispatched.runtime.tool_dispatch),
-            )
+                    lifecycle=lifecycle,
+                    progress=progress,
+                    response_function=generate,
+                    user_id=request.user_id,
+                    build_post_response_outcome=build_post_response_outcome,
+                    post_response_deps=dispatched.post_response_deps,
+                    approval_suspension_handler=lambda pause: self._suspend_for_approval(
+                        _paused_with_committed_presentation(pause, show_tool_calls=dispatched.runtime.show_tool_calls),
+                        request=request,
+                        target=dispatched.response_target,
+                        execution_identity=dispatched.execution_identity,
+                        entity_kind="agent" if dispatched.response_kind == "ai" else "team",
+                        history_scope=dispatched.history_scope,
+                        show_tool_calls=dispatched.runtime.show_tool_calls,
+                        team_member_names=dispatched.team_member_names,
+                        team_mode=dispatched.team_mode,
+                    ),
+                    participation=dispatched.runtime.participation,
+                    reply_session=ReplySession(dispatched.history_scope, dispatched.runtime.tool_dispatch),
+                )
+            finally:
+                # The conversation's next turn reads history once this one releases it.
+                await recorder.stored()
 
     @asynccontextmanager
     async def _turn_dispatch_scope(

@@ -21,6 +21,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
   A whole delivery collects the turn to its end before its delivery hooks run, so a Stop in `message:before_response` leaves the completed run in history while the reply ends stopped; recording it again after delivery would make the runner a second writer of the record.
   Its run-only effects (memory, skill review) still skip it, because the turn's generation never returned a delivery.
 - The streamer now closes the response stream in its consumer task, and forwards the supervising task's shutdown tag to that task.
+  After a Stop the streamer waits only 0.5 s for that task to unwind, so the locked turn waits for the interrupted record's store itself before it releases the conversation, whose next turn reads history.
   Before, a Stop that landed while the streamer awaited Matrix left the driver suspended until garbage collection closed it in a different task, which carried no shutdown tag.
 - A turn rejected before any attempt ran (a team member that is not running or that the requester may not use, a team name sent to the agent path) records nothing; its message and the rejection reach the next turn through the thread as unseen events.
 - The cancel source has one owner, the cancellation's message; the per-task source registry nobody read is gone, and with it the promise to keep the first source, which `Task.cancel` never kept.
@@ -45,7 +46,3 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 - Turning a final-only `RunFinished` body into a delta, which would move final-only replies from `before_response` to `final_response_transform`.
 - Routing the OpenAI-compatible team endpoints through the Matrix team driver, which would add document rendering the API strips again.
 - Turning `response_runner.py` into a package while the approval-records refactor moves its approval methods out of the same file.
-
-## Open
-
-- After a Stop the streamer waits 0.5 s for its stream task to unwind, and that task now stores the interrupted turn; a store slower than that still lands the row, but possibly after the conversation's next turn started.
