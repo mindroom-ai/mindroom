@@ -9820,7 +9820,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.slack.watches"
-depends_on = ["mindroom.oauth.credential_lifecycle"]
+depends_on = ["mindroom.oauth.credential_lifecycle", "mindroom.slack.api", "mindroom.slack.app"]
 
 [[modules]]
 path = "mindroom.custom_tools.slack"

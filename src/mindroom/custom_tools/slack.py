@@ -26,16 +26,15 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialUnreadableError,
     load_oauth_credentials_snapshot,
     oauth_credentials_usable,
-    oauth_verified_claim,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
-from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.slack.api import (
     SLACK_TS_RE,
     SLACK_UNREACHABLE,
     SlackApiError,
     neutralize_broadcasts,
+    parse_conversation_target,
     parse_slack_target,
     reply_root,
     slack_call,
@@ -55,7 +54,7 @@ from mindroom.slack.render import (
     render_person,
     slack_display_name,
 )
-from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for, watch_problem, watch_room_problem
+from mindroom.slack.watches import SlackWatchCaller, SlackWatchRefusalError, run_watch_action, started_by_a_watch
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -66,7 +65,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.slack.api import SlackTarget
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _TOOL_NAME = "slack"
@@ -98,14 +96,7 @@ _PERSONAL_RECENT_ONLY = "Recent conversations need a personal Slack connection"
 _WRITE_UNANSWERED = "Slack did not answer; the message may have been sent, so check with slack_read before retrying"
 _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
 # A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
-_WATCH_SOURCE_PREFIX = "slack-watch/"
 _WATCH_TURN_WRITE_REFUSAL = "Ask me in a new message to post to Slack"
-_WATCH_TURN_CHANGE_REFUSAL = "Ask me in a new message to change your Slack watch"
-_WATCH_ACTIONS = ("start", "stop", "status")
-_WATCH_NEEDS_APP_TOKEN = "The MindRoom Slack app needs an app-level token for watches"  # noqa: S105
-_WATCH_NEEDS_A_FILTER = "Watch mentions, direct messages, or both"
-_WATCH_NEEDS_A_CONVERSATION = "Slack watches work only in a Matrix conversation"
-_WATCH_NEEDS_CONTROL_STATE = "Slack watches need the primary runtime's control state"
 _REPLY_MIRRORED = (
     "Your final reply in a thread that started from a Slack message is posted to that Slack thread automatically, "
     "so do not call slack_post to answer it."
@@ -214,28 +205,16 @@ def _message_target(target: str, action: str) -> tuple[str, str]:
 
 
 def _conversation_target(target: str) -> tuple[str, SlackTarget]:
-    parsed = _parse_target(target)
-    if parsed.channel_id is None:
-        msg = "Use a Slack conversation ID, <conversation>:<ts>, or a message link"
-        raise _SlackRefusalError(msg)
-    return parsed.channel_id, parsed
+    try:
+        return parse_conversation_target(target)
+    except ValueError as exc:
+        raise _SlackRefusalError(str(exc)) from None
 
 
-def _refuse_in_watch_turn(refusal: str) -> None:
-    """Refuse a Slack write or a watch change when a Slack watch started this turn; a call outside any turn passes."""
-    context = get_tool_runtime_context()
-    if context is not None and (context.hook_source or "").startswith(_WATCH_SOURCE_PREFIX):
-        raise _SlackRefusalError(refusal)
-
-
-def _watching_message(watch: SlackWatch) -> str:
-    kinds = (
-        kind for kind, wanted in (("mentions", watch.mentions), ("direct messages", watch.direct_messages)) if wanted
-    )
-    message = f"Watching your Slack {' and '.join(kinds)}; they'll arrive here."
-    if watch.channels:
-        message += f" Channel messages count only from {', '.join(watch.channels)}."
-    return message
+def _refuse_write_in_watch_turn() -> None:
+    """Refuse a Slack write when a Slack watch started this turn; a call outside any turn passes."""
+    if started_by_a_watch(get_tool_runtime_context()):
+        raise _SlackRefusalError(_WATCH_TURN_WRITE_REFUSAL)
 
 
 def _name_matches(query: str, *names: object) -> bool:
@@ -497,7 +476,7 @@ class SlackTools(Toolkit):
         write = function in _WRITE_FUNCTIONS
         try:
             if write:
-                _refuse_in_watch_turn(_WATCH_TURN_WRITE_REFUSAL)
+                _refuse_write_in_watch_turn()
             async with slack_http_client() as client:
                 fields = await operation(await self._session(client))
         except (_SlackRefusalError, SlackFileError) as exc:
@@ -1000,107 +979,23 @@ class SlackTools(Toolkit):
                 messages are not limited by it.
 
         """
+        caller = SlackWatchCaller(
+            context=get_tool_runtime_context(),
+            runtime_paths=self._runtime_paths,
+            credentials_manager=self._credentials_manager,
+            requester_credentials=self._requester_credentials,
+            reconnect=lambda: _connection_required(self._credential_context(), reason=OAUTH_ACCESS_REJECTED_REASON),
+        )
         try:
-            fields = await self._watch(action, mentions, direct_messages, channels)
-        except _SlackRefusalError as exc:
+            fields = await run_watch_action(
+                caller,
+                action,
+                mentions=mentions,
+                direct_messages=direct_messages,
+                channels=channels,
+            )
+        except SlackWatchRefusalError as exc:
             return _error(str(exc))
         except OAuthConnectionRequired as exc:
             return custom_tool_payload(_TOOL_NAME, "error", **oauth_connection_required_payload(exc))
         return custom_tool_payload(_TOOL_NAME, "ok", **fields)
-
-    async def _watch(
-        self,
-        action: str,
-        mentions: bool,
-        direct_messages: bool,
-        channels: list[str] | None,
-    ) -> dict[str, object]:
-        """Run one watch action for the requester, this agent and this room, touching no one else's watch."""
-        if action not in _WATCH_ACTIONS:
-            msg = "action must be start, stop, or status"
-            raise _SlackRefusalError(msg)
-        if action != "status":
-            # Slack text started this turn, so it must not change what is delivered to the owner.
-            _refuse_in_watch_turn(_WATCH_TURN_CHANGE_REFUSAL)
-        context = get_tool_runtime_context()
-        if context is None:
-            raise _SlackRefusalError(_WATCH_NEEDS_A_CONVERSATION)
-        if self._runtime_paths.control_state_root is None:
-            raise _SlackRefusalError(_WATCH_NEEDS_CONTROL_STATE)
-        store = SlackWatchStore(self._runtime_paths.control_state_root)
-        # Ingress already resolves bridge aliases; a person's watch must stay theirs under either ID.
-        owner_id = resolve_human_requester_alias(context.requester_id, context.current_config, context.runtime_paths)
-        if action == "start":
-            return await self._start_watch(store, context, owner_id, (mentions, direct_messages, channels))
-        watch_id = watch_id_for(owner_id, context.agent_name, context.room_id)
-        if action == "stop":
-            stopped = await asyncio.to_thread(store.remove, watch_id)
-            message = (
-                "Stopped watching your Slack in this room" if stopped else "You were not watching Slack in this room"
-            )
-            return {"message": message}
-        watch = await asyncio.to_thread(store.get, watch_id)
-        if watch is None:
-            return {"watching": False, "message": "You are not watching Slack in this room"}
-        return {
-            "watching": True,
-            "mentions": watch.mentions,
-            "direct_messages": watch.direct_messages,
-            "channels": list(watch.channels),
-            "problem": await self._watch_problem(watch, context),
-        }
-
-    async def _start_watch(
-        self,
-        store: SlackWatchStore,
-        context: ToolRuntimeContext,
-        owner_id: str,
-        filters: tuple[bool, bool, list[str] | None],
-    ) -> dict[str, object]:
-        """Store the watch for the connected Slack account, once the app, the connection and the room allow it."""
-        mentions, direct_messages, channels = filters
-        if not (mentions or direct_messages):
-            raise _SlackRefusalError(_WATCH_NEEDS_A_FILTER)
-        channel_ids = tuple(dict.fromkeys(_conversation_target(channel)[0] for channel in channels or ()))
-        app = await asyncio.to_thread(load_slack_app, self._credentials_manager)
-        if app is None:
-            raise _SlackRefusalError(SLACK_APP_NOT_CONFIGURED)
-        if app.app_token is None:
-            raise _SlackRefusalError(_WATCH_NEEDS_APP_TOKEN)
-        credentials = await self._requester_credentials()
-        team_id = oauth_verified_claim(credentials, "team_id")
-        slack_user_id = oauth_verified_claim(credentials, "sub")
-        if team_id is None or slack_user_id is None:
-            raise await _connection_required(self._credential_context(), reason=OAUTH_ACCESS_REJECTED_REASON)
-        problem = await watch_room_problem(
-            context.client,
-            context.room_id,
-            owner_id,
-            context.current_config,
-            context.runtime_paths,
-        )
-        if problem is not None:
-            msg = f"Cannot watch Slack here: {problem.removeprefix('paused: ')}"
-            raise _SlackRefusalError(msg)
-        watch = SlackWatch(
-            watch_id=watch_id_for(owner_id, context.agent_name, context.room_id),
-            owner_id=owner_id,
-            agent_name=context.agent_name,
-            room_id=context.room_id,
-            team_id=team_id,
-            slack_user_id=slack_user_id,
-            mentions=mentions,
-            direct_messages=direct_messages,
-            channels=channel_ids,
-            created_at=int(time.time()),
-        )
-        await asyncio.to_thread(store.put, watch)
-        return {"message": _watching_message(watch)}
-
-    async def _watch_problem(self, watch: SlackWatch, context: ToolRuntimeContext) -> str | None:
-        """Read the owner's Slack credentials, then ask the watch module why the watch is paused."""
-        try:
-            credentials = await self._requester_credentials()
-        except OAuthConnectionRequired:
-            credentials = None
-        return await watch_problem(watch, credentials, context.client, context.current_config, context.runtime_paths)

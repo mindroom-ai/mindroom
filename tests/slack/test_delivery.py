@@ -32,7 +32,7 @@ from mindroom.slack import identity as slack_identity
 from mindroom.slack import turns
 from mindroom.slack.app import SlackAppCredentials, load_slack_app
 from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
-from mindroom.slack.watches import SlackWatchStore, watch_id_for
+from mindroom.slack.watches import SlackWatchStore, _watch_id_for
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
@@ -814,7 +814,7 @@ async def test_watches_of_other_teams_are_not_looked_up(harness: Harness, monkey
     watch = alice_watch(harness.paths)
     assert harness.paths.control_state_root is not None
     SlackWatchStore(harness.paths.control_state_root).put(
-        replace(watch, watch_id=watch_id_for(BOB, "assistant", WATCH_ROOM), owner_id=BOB, team_id="T0OTHER00"),
+        replace(watch, watch_id=_watch_id_for(BOB, "assistant", WATCH_ROOM), owner_id=BOB, team_id="T0OTHER00"),
     )
     looked_up: list[str] = []
     bound_thread_root = DeliveryReplayStore.bound_thread_root

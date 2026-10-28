@@ -20,7 +20,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.slack.delivery import SlackRuntime
 from mindroom.slack.oauth import slack_oauth_provider
-from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for
+from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -195,7 +195,7 @@ def entity_id(config: Config, runtime_paths: RuntimePaths, name: str) -> str:
 def alice_watch(runtime_paths: RuntimePaths) -> SlackWatch:
     """Store and return Alice's watch with `assistant` in `WATCH_ROOM`."""
     watch = SlackWatch(
-        watch_id=watch_id_for(ALICE, "assistant", WATCH_ROOM),
+        watch_id=_watch_id_for(ALICE, "assistant", WATCH_ROOM),
         owner_id=ALICE,
         agent_name="assistant",
         room_id=WATCH_ROOM,

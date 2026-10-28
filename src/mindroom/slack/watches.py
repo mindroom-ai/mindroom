@@ -1,9 +1,14 @@
-"""Personal Slack watches: who wants which Slack events delivered to which room, and the check that a room may receive them."""
+"""Personal Slack watches: who wants which Slack events in which room, and the `slack_watch` actions on them.
+
+A watch's room must still allow it each time an event is delivered, which `watch_problem` checks.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -13,13 +18,23 @@ import nio
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.oauth.credential_lifecycle import oauth_verified_claim
-from mindroom.requester_identity import equivalent_requester_ids, is_access_checked_requester_id
+from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_access_checked_requester_id,
+    resolve_human_requester_alias,
+)
+from mindroom.slack.api import parse_conversation_target
+from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, load_slack_app
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 # What `status` reports while a watch is not delivering; each names what the owner can fix.
 _PAUSED_SLACK_NOT_CONNECTED = "paused: Slack is not connected"
@@ -32,6 +47,14 @@ _PAUSED_ROOM_UNCHECKED = "paused: room members could not be checked"
 # Matrix hides earlier messages from a person who joins later only under these, and `shared` is its default.
 _PRIVATE_HISTORY_VISIBILITY = frozenset({"invited", "joined"})
 _PRESENT_MEMBERSHIPS = frozenset({"join", "invite"})
+# A turn a Slack watch started carries Slack users' words, not the owner's.
+_WATCH_SOURCE_PREFIX = "slack-watch/"
+_ACTIONS = ("start", "stop", "status")
+_TURN_CHANGE_REFUSAL = "Ask me in a new message to change your Slack watch"
+_NEEDS_APP_TOKEN = "The MindRoom Slack app needs an app-level token for watches"  # noqa: S105
+_NEEDS_A_FILTER = "Watch mentions, direct messages, or both"
+_NEEDS_A_CONVERSATION = "Slack watches work only in a Matrix conversation"
+_NEEDS_CONTROL_STATE = "Slack watches need the primary runtime's control state"
 
 
 @dataclass(frozen=True)
@@ -54,7 +77,7 @@ class SlackWatch:
     created_at: int
 
 
-def watch_id_for(owner_id: str, agent_name: str, room_id: str) -> str:
+def _watch_id_for(owner_id: str, agent_name: str, room_id: str) -> str:
     """Return the ID of the one watch an owner can have with an agent in a room."""
     return hashlib.sha256(f"{owner_id}|{agent_name}|{room_id}".encode()).hexdigest()[:16]
 
@@ -110,7 +133,7 @@ class SlackWatchStore:
         write_json_file_durable(self._path, stored, indent=2)
 
 
-async def watch_room_problem(
+async def _watch_room_problem(
     client: nio.AsyncClient,
     room_id: str,
     owner_id: str,
@@ -170,4 +193,149 @@ async def watch_problem(
     account = (oauth_verified_claim(credentials, "team_id"), oauth_verified_claim(credentials, "sub"))
     if account != (watch.team_id, watch.slack_user_id):
         return _PAUSED_SLACK_ACCOUNT_CHANGED
-    return await watch_room_problem(client, watch.room_id, watch.owner_id, config, runtime_paths)
+    return await _watch_room_problem(client, watch.room_id, watch.owner_id, config, runtime_paths)
+
+
+class SlackWatchRefusalError(Exception):
+    """A watch action refused; `str()` is the message for the agent."""
+
+
+@dataclass(frozen=True)
+class SlackWatchCaller:
+    """The `slack_watch` call a watch action runs for.
+
+    `context` is the call's turn, or None outside one.
+    `requester_credentials` returns the requester's usable Slack credentials or raises `OAuthConnectionRequired`;
+    `reconnect` returns the prompt to connect Slack again, for a connection whose Slack account is not confirmed.
+    """
+
+    context: ToolRuntimeContext | None
+    runtime_paths: RuntimePaths
+    credentials_manager: CredentialsManager
+    requester_credentials: Callable[[], Awaitable[dict[str, Any]]]
+    reconnect: Callable[[], Awaitable[OAuthConnectionRequired]]
+
+
+def watch_hook_source(watch: SlackWatch) -> str:
+    """Return the hook source of the turns a watch starts."""
+    return f"{_WATCH_SOURCE_PREFIX}{watch.watch_id}"
+
+
+def started_by_a_watch(context: ToolRuntimeContext | None) -> bool:
+    """Return whether a Slack watch started this turn; a call outside any turn was not."""
+    return context is not None and (context.hook_source or "").startswith(_WATCH_SOURCE_PREFIX)
+
+
+def _watching_message(watch: SlackWatch) -> str:
+    kinds = (
+        kind for kind, wanted in (("mentions", watch.mentions), ("direct messages", watch.direct_messages)) if wanted
+    )
+    message = f"Watching your Slack {' and '.join(kinds)}; they'll arrive here."
+    if watch.channels:
+        message += f" Channel messages count only from {', '.join(watch.channels)}."
+    return message
+
+
+async def run_watch_action(
+    caller: SlackWatchCaller,
+    action: str,
+    *,
+    mentions: bool,
+    direct_messages: bool,
+    channels: list[str] | None,
+) -> dict[str, object]:
+    """Run one watch action for the requester, this agent and this room, touching no one else's watch.
+
+    A refusal raises `SlackWatchRefusalError`, and a missing Slack connection `OAuthConnectionRequired`.
+    """
+    if action not in _ACTIONS:
+        msg = "action must be start, stop, or status"
+        raise SlackWatchRefusalError(msg)
+    context = caller.context
+    if action != "status" and started_by_a_watch(context):
+        # Slack text started this turn, so it must not change what is delivered to the owner.
+        raise SlackWatchRefusalError(_TURN_CHANGE_REFUSAL)
+    if context is None:
+        raise SlackWatchRefusalError(_NEEDS_A_CONVERSATION)
+    if caller.runtime_paths.control_state_root is None:
+        raise SlackWatchRefusalError(_NEEDS_CONTROL_STATE)
+    store = SlackWatchStore(caller.runtime_paths.control_state_root)
+    # Ingress already resolves bridge aliases; a person's watch must stay theirs under either ID.
+    owner_id = resolve_human_requester_alias(context.requester_id, context.current_config, context.runtime_paths)
+    if action == "start":
+        return await _start_watch(caller, context, store, owner_id, (mentions, direct_messages, channels))
+    watch_id = _watch_id_for(owner_id, context.agent_name, context.room_id)
+    if action == "stop":
+        stopped = await asyncio.to_thread(store.remove, watch_id)
+        message = "Stopped watching your Slack in this room" if stopped else "You were not watching Slack in this room"
+        return {"message": message}
+    watch = await asyncio.to_thread(store.get, watch_id)
+    if watch is None:
+        return {"watching": False, "message": "You are not watching Slack in this room"}
+    return {
+        "watching": True,
+        "mentions": watch.mentions,
+        "direct_messages": watch.direct_messages,
+        "channels": list(watch.channels),
+        "problem": await _status_problem(caller, watch, context),
+    }
+
+
+async def _start_watch(
+    caller: SlackWatchCaller,
+    context: ToolRuntimeContext,
+    store: SlackWatchStore,
+    owner_id: str,
+    filters: tuple[bool, bool, list[str] | None],
+) -> dict[str, object]:
+    """Store the watch for the connected Slack account, once the app, the connection and the room allow it."""
+    mentions, direct_messages, channels = filters
+    if not (mentions or direct_messages):
+        raise SlackWatchRefusalError(_NEEDS_A_FILTER)
+    try:
+        channel_ids = tuple(dict.fromkeys(parse_conversation_target(channel)[0] for channel in channels or ()))
+    except ValueError as exc:
+        raise SlackWatchRefusalError(str(exc)) from None
+    app = await asyncio.to_thread(load_slack_app, caller.credentials_manager)
+    if app is None:
+        raise SlackWatchRefusalError(SLACK_APP_NOT_CONFIGURED)
+    if app.app_token is None:
+        raise SlackWatchRefusalError(_NEEDS_APP_TOKEN)
+    credentials = await caller.requester_credentials()
+    team_id = oauth_verified_claim(credentials, "team_id")
+    slack_user_id = oauth_verified_claim(credentials, "sub")
+    if team_id is None or slack_user_id is None:
+        raise await caller.reconnect()
+    problem = await _watch_room_problem(
+        context.client,
+        context.room_id,
+        owner_id,
+        context.current_config,
+        context.runtime_paths,
+    )
+    if problem is not None:
+        msg = f"Cannot watch Slack here: {problem.removeprefix('paused: ')}"
+        raise SlackWatchRefusalError(msg)
+    watch = SlackWatch(
+        watch_id=_watch_id_for(owner_id, context.agent_name, context.room_id),
+        owner_id=owner_id,
+        agent_name=context.agent_name,
+        room_id=context.room_id,
+        team_id=team_id,
+        slack_user_id=slack_user_id,
+        mentions=mentions,
+        direct_messages=direct_messages,
+        channels=channel_ids,
+        created_at=int(time.time()),
+    )
+    await asyncio.to_thread(store.put, watch)
+    return {"message": _watching_message(watch)}
+
+
+async def _status_problem(caller: SlackWatchCaller, watch: SlackWatch, context: ToolRuntimeContext) -> str | None:
+    """Read the owner's Slack credentials, then say why the watch is paused."""
+    try:
+        credentials = await caller.requester_credentials()
+    except OAuthConnectionRequired:
+        credentials = None
+    return await watch_problem(watch, credentials, context.client, context.current_config, context.runtime_paths)

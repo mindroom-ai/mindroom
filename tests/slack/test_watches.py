@@ -16,7 +16,7 @@ import pytest
 
 from mindroom import constants
 from mindroom.config.main import Config
-from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for, watch_problem, watch_room_problem
+from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for, _watch_room_problem, watch_problem
 from tests.slack.room_state import room_state_client
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ LATER_JOINERS = "paused: people who join this room later could read earlier mess
 
 
 WATCH = SlackWatch(
-    watch_id=watch_id_for(ALICE, "assistant", ROOM),
+    watch_id=_watch_id_for(ALICE, "assistant", ROOM),
     owner_id=ALICE,
     agent_name="assistant",
     room_id=ROOM,
@@ -47,15 +47,15 @@ WATCH = SlackWatch(
     channels=(),
     created_at=1_800_000_000,
 )
-BOB_WATCH = replace(WATCH, watch_id=watch_id_for(BOB, "assistant", ROOM), owner_id=BOB)
+BOB_WATCH = replace(WATCH, watch_id=_watch_id_for(BOB, "assistant", ROOM), owner_id=BOB)
 
 
 def test_watch_id_hashes_owner_agent_and_room() -> None:
     expected = hashlib.sha256(f"{ALICE}|assistant|{ROOM}".encode()).hexdigest()[:16]
 
-    assert watch_id_for(ALICE, "assistant", ROOM) == expected
+    assert _watch_id_for(ALICE, "assistant", ROOM) == expected
     assert len(expected) == 16
-    assert len({watch_id_for(owner, agent, room) for owner in (ALICE, BOB) for agent in "ab" for room in "xy"}) == 8
+    assert len({_watch_id_for(owner, agent, room) for owner in (ALICE, BOB) for agent in "ab" for room in "xy"}) == 8
 
 
 def test_store_round_trips_a_watch_through_the_control_state_file(tmp_path: Path) -> None:
@@ -163,7 +163,7 @@ async def test_a_room_with_only_the_owner_and_mindroom_accounts_passes(
 ) -> None:
     client = room_state_client(joined, history_visibility=history_visibility)
 
-    assert await watch_room_problem(client, ROOM, ALICE, config, paths) is None
+    assert await _watch_room_problem(client, ROOM, ALICE, config, paths) is None
     client.room_get_state.assert_awaited_once_with(ROOM)
 
 
@@ -171,14 +171,14 @@ async def test_a_room_with_only_the_owner_and_mindroom_accounts_passes(
 async def test_the_owner_may_be_present_under_a_bridge_alias(config: Config, paths: RuntimePaths) -> None:
     client = room_state_client((ALICE_BRIDGE, AGENT))
 
-    assert await watch_room_problem(client, ROOM, ALICE, config, paths) is None
+    assert await _watch_room_problem(client, ROOM, ALICE, config, paths) is None
 
 
 @pytest.mark.asyncio
 async def test_people_who_left_and_agents_invited_do_not_count(config: Config, paths: RuntimePaths) -> None:
     client = room_state_client((ALICE, AGENT), invited=(ROUTER,), departed=(BOB,))
 
-    assert await watch_room_problem(client, ROOM, ALICE, config, paths) is None
+    assert await _watch_room_problem(client, ROOM, ALICE, config, paths) is None
 
 
 @pytest.mark.asyncio
@@ -191,7 +191,7 @@ async def test_an_owner_who_is_not_joined_pauses_the_watch(
     paths: RuntimePaths,
     room: dict[str, tuple[str, ...]],
 ) -> None:
-    problem = await watch_room_problem(room_state_client(**room), ROOM, ALICE, config, paths)
+    problem = await _watch_room_problem(room_state_client(**room), ROOM, ALICE, config, paths)
 
     assert problem == "paused: you are not in this room"
 
@@ -213,7 +213,7 @@ async def test_another_person_or_bot_account_pauses_the_watch(
     paths: RuntimePaths,
     room: dict[str, tuple[str, ...]],
 ) -> None:
-    problem = await watch_room_problem(room_state_client(**room), ROOM, ALICE, config, paths)
+    problem = await _watch_room_problem(room_state_client(**room), ROOM, ALICE, config, paths)
 
     assert problem == "paused: another person is in this room"
 
@@ -227,7 +227,7 @@ async def test_a_room_that_shows_history_to_later_joiners_pauses_the_watch(
 ) -> None:
     client = room_state_client((ALICE, AGENT), history_visibility=history_visibility)
 
-    assert await watch_room_problem(client, ROOM, ALICE, config, paths) == LATER_JOINERS
+    assert await _watch_room_problem(client, ROOM, ALICE, config, paths) == LATER_JOINERS
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_a_room_that_cannot_be_read_pauses_the_watch(config: Config, paths
     unreadable.room_get_state.return_value = nio.RoomGetStateError("boom")
 
     assert (
-        await watch_room_problem(unreadable, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
+        await _watch_room_problem(unreadable, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
     )
 
 
@@ -246,7 +246,7 @@ async def test_a_room_whose_read_fails_pauses_the_watch(config: Config, paths: R
     failing = AsyncMock()
     failing.room_get_state.side_effect = error
 
-    assert await watch_room_problem(failing, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
+    assert await _watch_room_problem(failing, ROOM, ALICE, config, paths) == "paused: room members could not be checked"
 
 
 def _credentials(**claims: str) -> dict[str, object]:

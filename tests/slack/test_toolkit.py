@@ -28,7 +28,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
 from mindroom.slack import files as slack_files
 from mindroom.slack.oauth import slack_oauth_provider
-from mindroom.slack.watches import SlackWatch, SlackWatchStore, watch_id_for
+from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
@@ -1778,7 +1778,7 @@ def _stored_watches(paths: RuntimePaths) -> tuple[SlackWatch, ...]:
 
 
 ALICE_WATCH = SlackWatch(
-    watch_id=watch_id_for(ALICE, "assistant", ROOM),
+    watch_id=_watch_id_for(ALICE, "assistant", ROOM),
     owner_id=ALICE,
     agent_name="assistant",
     room_id=ROOM,
@@ -2144,7 +2144,7 @@ async def test_a_bridge_alias_owns_the_watch_as_its_person(paths: RuntimePaths) 
 @pytest.mark.asyncio
 async def test_a_person_only_stops_and_reads_their_own_watch(paths: RuntimePaths) -> None:
     assert paths.control_state_root is not None
-    bob_watch = replace(ALICE_WATCH, watch_id=watch_id_for(BOB, "assistant", ROOM), owner_id=BOB)
+    bob_watch = replace(ALICE_WATCH, watch_id=_watch_id_for(BOB, "assistant", ROOM), owner_id=BOB)
     SlackWatchStore(paths.control_state_root).put(bob_watch)
     tools = _watch_tools(paths)
 
@@ -2162,7 +2162,7 @@ async def test_a_watch_is_one_per_agent_and_room(paths: RuntimePaths) -> None:
     _save_app_token(paths)
     tools = _watch_tools(paths)
     await _call_watch(tools, paths, action="start")
-    elsewhere = replace(ALICE_WATCH, watch_id=watch_id_for(ALICE, "assistant", "!other:example.org"))
+    elsewhere = replace(ALICE_WATCH, watch_id=_watch_id_for(ALICE, "assistant", "!other:example.org"))
     assert paths.control_state_root is not None
     SlackWatchStore(paths.control_state_root).put(elsewhere)
 

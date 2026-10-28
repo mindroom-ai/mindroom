@@ -39,7 +39,7 @@ from mindroom.slack.turns import (
     running_bot,
     skipped,
 )
-from mindroom.slack.watches import SlackWatchStore, watch_problem
+from mindroom.slack.watches import SlackWatchStore, watch_hook_source, watch_problem
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -151,7 +151,7 @@ async def _deliver_to_watch(
             agent=watch.agent_name,
             room_id=watch.room_id,
             header=f"Slack {kind} for you from {author.display_name} (@{event.user_id}){where}: {attempt.permalink}",
-            hook_source=f"slack-watch/{watch.watch_id}",
+            hook_source=watch_hook_source(watch),
             requester=watch.owner_id,
         )
         return await claim_and_send(attempt, bot, client, turn)

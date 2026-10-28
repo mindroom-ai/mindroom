@@ -23,6 +23,7 @@ _USER_RE = re.compile(r"[UW][A-Z0-9]{8,}")
 _CONVERSATION_TS_RE = re.compile(rf"({_CONVERSATION_ID}):({SLACK_TS_RE.pattern})")
 _PERMALINK_PATH_RE = re.compile(rf"/archives/({_CONVERSATION_ID})/p([0-9]{{10}})([0-9]{{6}})")
 _INVALID_TARGET = "Use a Slack conversation ID, <conversation>:<ts>, a message link, or a user ID"
+_NOT_A_CONVERSATION = "Use a Slack conversation ID, <conversation>:<ts>, or a message link"
 SLACK_UNREACHABLE = "Slack could not be reached; try again"
 
 
@@ -127,6 +128,14 @@ def parse_slack_target(target: str) -> SlackTarget:
     if (permalink := _parse_permalink(target)) is not None:
         return permalink
     raise ValueError(_INVALID_TARGET)
+
+
+def parse_conversation_target(target: str) -> tuple[str, SlackTarget]:
+    """Parse a target that names a conversation, refusing a user ID, and return its conversation too."""
+    parsed = parse_slack_target(target)
+    if parsed.channel_id is None:
+        raise ValueError(_NOT_A_CONVERSATION)
+    return parsed.channel_id, parsed
 
 
 def slack_permalink(workspace_url: str, channel_id: str, ts: str, *, thread_ts: str | None = None) -> str:
