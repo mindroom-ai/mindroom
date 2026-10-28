@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.credentials.sync import get_api_key_for_provider, get_ollama_host
+from mindroom.embeddings.errors import embedder_request_error
 from mindroom.embeddings.factory import resolve_embedder_settings
 from mindroom.embeddings.signatures import effective_mem0_embedder_signature, ensure_sentence_transformers_dependencies
 from mindroom.logging_config import get_logger
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.base import Embedder, EmbeddingPurpose
+    from mindroom.llm.errors import ProviderError
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
@@ -81,6 +83,39 @@ class _Mem0StrictOpenAIEmbedder:
         except Exception as exc:
             self._remember_operation_failure(exc)
             raise
+
+
+def _ollama_failure(error: Exception) -> ProviderError | None:
+    """Return the typed provider error of an Ollama SDK or transport failure, as MindRoom's Ollama embedder maps it."""
+    from mindroom.providers.ollama.errors import provider_error  # noqa: PLC0415 - loads the Ollama SDK
+
+    return provider_error(error, provider="ollama")
+
+
+@dataclass(frozen=True)
+class _Mem0ClassifiedOllamaEmbedder:
+    """Raise the failures of Mem0's own Ollama embedder as the typed embedder errors MindRoom's embedders raise.
+
+    It sends what Mem0's embedder sends, so stored memories keep matching their searches.
+    """
+
+    embedder: Any
+
+    def embed(self, text: str, memory_action: Literal["add", "search", "update"] | None = None) -> list[float]:
+        try:
+            return self.embedder.embed(text, memory_action)
+        except Exception as exc:
+            raise embedder_request_error(exc, _ollama_failure(exc)) from exc
+
+    def embed_batch(
+        self,
+        texts: list[str],
+        memory_action: Literal["add", "search", "update"] | None = "add",
+    ) -> list[list[float]]:
+        try:
+            return self.embedder.embed_batch(texts, memory_action)
+        except Exception as exc:
+            raise embedder_request_error(exc, _ollama_failure(exc)) from exc
 
 
 def _memory_collection_name(config: Config) -> str:
@@ -243,7 +278,14 @@ async def create_memory_instance(
         with _STORE_BUILD_LOCKS.setdefault(store_path, threading.Lock()), optional_dependency_environment():
             from mem0 import AsyncMemory  # noqa: PLC0415
 
-            return AsyncMemory.from_config(config_dict)
+            try:
+                return AsyncMemory.from_config(config_dict)
+            except Exception as exc:
+                # Mem0's Ollama embedder asks the server for its model while the memory is built, the only request
+                # building it sends, so an Ollama failure here is the embedder's.
+                if config_dict["embedder"]["provider"] != "ollama" or (failure := _ollama_failure(exc)) is None:
+                    raise
+                raise embedder_request_error(exc, failure) from exc
 
     memory = await asyncio.to_thread(build_memory)
     memory_llm = config.memory.llm
@@ -267,6 +309,8 @@ async def create_memory_instance(
 
         strict_embedder = create_configured_embedder(config, runtime_paths)
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
+    elif config.memory.embedder.provider == "ollama":
+        cast("Any", memory).embedding_model = _Mem0ClassifiedOllamaEmbedder(memory.embedding_model)
 
     logger.info("created_memory_instance", path=store_path)
     return memory
