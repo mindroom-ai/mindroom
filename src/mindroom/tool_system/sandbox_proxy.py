@@ -49,6 +49,7 @@ from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     resolve_unscoped_worker_key,
 )
+from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
     get_primary_worker_manager,
@@ -328,6 +329,9 @@ def _build_worker_routing_payload(
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
     if worker_scope is None:
         if not primary_worker_backend_is_dedicated(runtime_paths):
+            # An unscoped call goes to the shared runner without a worker handle, so the protocol check happens here.
+            if isinstance(resolved_worker_manager, StaticSandboxRunnerBackend):
+                resolved_worker_manager.require_compatible_runner()
             payload: dict[str, object] = {}
             if routing_agent_name is not None:
                 payload["routing_agent_name"] = routing_agent_name

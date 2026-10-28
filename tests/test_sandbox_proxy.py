@@ -91,8 +91,10 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+from mindroom.workers.compatibility import _WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -4378,6 +4380,100 @@ def test_static_sandbox_runner_backend_marks_idle_workers() -> None:
     assert len(cleaned_workers) == 1
     assert cleaned_workers[0].worker_key == "worker-a"
     assert cleaned_workers[0].status == "idle"
+
+
+def _runner_health_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    *answers: dict[str, object] | int | Exception,
+) -> list[str]:
+    """Answer the static runner's health probes in order with a payload, an error status, or an exception.
+
+    Returns the probed runner roots.
+    """
+    probed: list[str] = []
+    pending = list(answers)
+
+    def answer(runner_root: str) -> httpx.Response:
+        probed.append(runner_root)
+        next_answer = pending.pop(0)
+        if isinstance(next_answer, Exception):
+            raise next_answer
+        request = httpx.Request("GET", f"{runner_root}/healthz")
+        if isinstance(next_answer, int):
+            return httpx.Response(next_answer, json={"detail": "unavailable"}, request=request)
+        return httpx.Response(200, json=next_answer, request=request)
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", answer)
+    return probed
+
+
+_STALE_RUNNER_HEALTH = {"status": "ok", "mindroom_version": "2026.10.612", "worker_protocol": 4}
+_CURRENT_RUNNER_HEALTH = {"status": "ok", "mindroom_version": "test", "worker_protocol": _WORKER_PROTOCOL_VERSION}
+
+
+def test_static_runner_refuses_a_runner_on_another_worker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shared runner from another release is refused with the dedicated backends' compatibility error."""
+    probed = _runner_health_answers(monkeypatch, _STALE_RUNNER_HEALTH)
+    backend = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
+
+    with pytest.raises(WorkerBackendError) as exc_info:
+        backend.ensure_worker(WorkerSpec("worker-a"))
+
+    assert probed == ["http://sandbox-runner:8765"]
+    assert str(exc_info.value) == (
+        "Sandbox runner at 'http://sandbox-runner:8765' is incompatible with this MindRoom runtime: "
+        f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got 4 (worker MindRoom version 2026.10.612). "
+        "Use a worker image built for this MindRoom release. "
+        "Restart the runner on this release, pulling its image again when it runs a tag such as ':latest'."
+    )
+    assert backend.list_workers() == []
+
+
+def test_static_runner_asks_once_and_again_after_a_failed_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner is probed at first use, not on every call, and again once a call to it has failed."""
+    probed = _runner_health_answers(
+        monkeypatch,
+        httpx.ConnectError("Connection refused"),
+        503,
+        _CURRENT_RUNNER_HEALTH,
+        _STALE_RUNNER_HEALTH,
+    )
+    backend = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
+
+    with pytest.raises(WorkerBackendError, match="did not answer its health check: Connection refused"):
+        backend.ensure_worker(WorkerSpec("worker-a"))
+    with pytest.raises(WorkerBackendError, match="did not answer its health check: Server error '503"):
+        backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-b"))
+    assert len(probed) == 3
+
+    backend.record_failure("worker-a", "Connection reset by peer")
+    with pytest.raises(WorkerBackendError, match="got 4"):
+        backend.ensure_worker(WorkerSpec("worker-b"))
+    assert len(probed) == 4
+
+
+def test_unscoped_call_never_reaches_a_runner_on_another_worker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unscoped call, which goes to the shared runner without a worker handle, is refused before it is sent."""
+    captured: dict[str, Any] = {}
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        execution_mode="selective",
+        proxy_tools={"calculator"},
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class(captured=captured))
+    probed = _runner_health_answers(monkeypatch, _STALE_RUNNER_HEALTH)
+
+    entrypoint = get_tool_by_name("calculator", runtime_paths, worker_target=None).functions["add"].entrypoint
+    assert entrypoint is not None
+    with pytest.raises(WorkerBackendError, match="is incompatible with this MindRoom runtime"):
+        entrypoint(1, 2)
+
+    assert probed == ["http://sandbox-runner:8765"]
+    assert captured == {}
 
 
 def test_get_worker_manager_singleton_creation_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
