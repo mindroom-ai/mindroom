@@ -2471,7 +2471,7 @@ class _MultiAgentOrchestrator:
         await store.load_approval_signals()
 
     async def event_journal_still_held(self) -> bool:
-        """Return whether this runtime still holds the journal it claimed; true before it claims one."""
+        """Return whether this runtime still holds the journal it claimed and can still use it; true before it claims one."""
         journal = self._open_journal
         return journal is None or not self._journal_held or await journal.store.still_held()
 
@@ -3116,7 +3116,10 @@ async def _watch_event_journal_hold(
     shutdown_requested: asyncio.Event,
     hold_lost: asyncio.Event,
 ) -> None:
-    """Stop the runtime once it no longer holds its event journal, before another runtime can take it over."""
+    """Stop the runtime once it lost its event journal's lock session or one of the journal's connections.
+
+    Another runtime could take over a journal whose lock lapsed, and a lost connection never reconnects.
+    """
     while not shutdown_requested.is_set():
         await asyncio.sleep(_EVENT_JOURNAL_HOLD_CHECK_SECONDS)
         if not await orchestrator.event_journal_still_held():
@@ -3316,5 +3319,5 @@ async def _run_runtime(  # noqa: PLR0915
         )
     if journal_hold_lost.is_set():
         # Exiting with a failure lets a supervisor that restarts only on failure bring the runtime back.
-        msg = "MindRoom stopped because it no longer holds its event journal"
+        msg = "MindRoom stopped because it lost its event journal's lock session or one of its database connections"
         raise EventJournalHoldLostError(msg)

@@ -10570,8 +10570,12 @@ async def test_a_postgres_journal_hold_lets_the_server_drop_a_vanished_holder(po
         await store.close()
 
 
-async def test_a_postgres_journal_whose_writer_lost_its_connection_is_no_longer_held(postgres_journal_url: str) -> None:
-    """The writer never reconnects, so a lost writer connection stops the runtime as a lost lock session does."""
+@pytest.mark.parametrize("lost", ["writer", "readers"])
+async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_held(
+    postgres_journal_url: str,
+    lost: str,
+) -> None:
+    """Journal connections never reconnect, so losing one stops the runtime as losing the lock's session does."""
     import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
 
     from mindroom.event_journal.postgres_backend import PostgresBackend  # noqa: PLC0415 - keeps psycopg optional
@@ -10579,15 +10583,19 @@ async def test_a_postgres_journal_whose_writer_lost_its_connection_is_no_longer_
     database_url = postgres_journal_schema_url(postgres_journal_url)
     store = EventJournalStore.open_postgres(database_url)
     try:
-        assert await store.hold_exclusively("writer-identity")
-        assert await admit(store.principal(ALICE), "$before") is AdmissionResult.ADMITTED
+        assert await store.hold_exclusively("connection-identity")
+        principal = store.principal(ALICE)
+        assert await admit(principal, "$before") is AdmissionResult.ADMITTED
         backend = store.backend
         assert isinstance(backend, PostgresBackend)
+        terminated = [backend._writer] if lost == "writer" else backend._pool
         with psycopg.connect(database_url, autocommit=True) as admin:
-            admin.execute("SELECT pg_terminate_backend(%s)", (backend._writer.info.backend_pid,))
+            for connection in terminated:
+                admin.execute("SELECT pg_terminate_backend(%s)", (connection.info.backend_pid,))
 
+        use = admit(principal, "$after") if lost == "writer" else principal.is_pending("$before")
         with pytest.raises(psycopg.OperationalError):
-            await admit(store.principal(ALICE), "$after")
+            await use
 
         assert backend._hold is not None
         assert backend._hold.execute("SELECT 1").fetchone() == (1,)

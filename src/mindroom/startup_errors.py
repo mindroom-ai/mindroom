@@ -8,4 +8,4 @@ class PermanentStartupError(ValueError):
 
 
 class EventJournalHoldLostError(RuntimeError):
-    """Raised after a runtime stopped because it no longer held its event journal; a supervisor restarts it."""
+    """Raised after a runtime lost its event journal's lock session or a journal connection; a supervisor restarts it."""
