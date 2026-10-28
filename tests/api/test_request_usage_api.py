@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.api import config_lifecycle
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts, VoiceDuration
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from tests.api.test_private_usage_api import _client as _private_client
@@ -54,13 +54,14 @@ def test_live_voice_duration_exports_separately_from_delegate_tokens(
             usage_id="live_voice:provider-session",
             kind="live_voice",
             requester_id="@alice:example.org",
-            run={
-                "model_provider": "OpenAI",
-                "model": "gpt-live-1",
-                "created_at": 1_700_000_000,
-                "voice_seconds": seconds,
-                "voice_finalized": finalized,
-            },
+            usage=HelperUsage(
+                run_id="provider-session",
+                model="gpt-live-1",
+                provider="OpenAI",
+                metrics=RunMetrics(),
+                voice=VoiceDuration(seconds=seconds, finalized=finalized),
+                created_at=1_700_000_000,
+            ),
         )
     storage.delete_runs(["run-1"], session_id="session")
     runner, workers = _install_manual_export_runner(client)
@@ -173,27 +174,22 @@ def test_helper_usage_exports_once_without_counting_another_reply(
     )
     assert run.metrics is not None
     persist_runs(storage, ConversationSession(kind="agent", session_id="session", owner_id="test_agent"), run)
-    helper = {
-        "model": "helper-model",
-        "model_provider": "test-provider",
-        "created_at": 1_700_000_000,
-        "metrics": {"input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
-        "messages": [
-            {
-                "role": "assistant",
-                "content": "Sample response.",
-                "created_at": 1_700_000_000,
-                "metrics": {"input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
-            },
-        ],
-    }
+    tokens = TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)
+    helper = HelperUsage(
+        run_id="helper",
+        model="helper-model",
+        provider="test-provider",
+        metrics=RunMetrics(tokens=tokens),
+        requests=(RequestUsage(created_at=1_700_000_000, metrics=MessageMetrics(tokens=tokens)),),
+        created_at=1_700_000_000,
+    )
     for _ in range(2):
         storage.save_independent_usage(
             session_id="session",
             usage_id="helper",
             kind=kind,
             requester_id=None,
-            run=helper,
+            usage=helper,
         )
     runner, workers = _install_manual_export_runner(client)
     headers = {"Authorization": "Bearer test-usage-key"}
@@ -209,7 +205,6 @@ def test_helper_usage_exports_once_without_counting_another_reply(
         assert len(payload["request_breakdown"]) == 1
         assert payload["request_breakdown"][0]["kind"] == kind
         assert payload["request_breakdown"][0]["totals"]["total_tokens"] == 22
-        assert "Sample response" not in response.text
     finally:
         runner.close()
         config_lifecycle.app_state(client.app).usage_export_runner = None

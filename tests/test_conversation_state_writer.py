@@ -24,6 +24,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import EVENT_SESSION_STARTED, HookRegistry, SessionHookContext, hook
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -278,7 +279,7 @@ def _usage_write(session: ConversationSession) -> Callable[[ConversationStore], 
             usage_id="u1",
             kind="compaction_summary",
             requester_id=None,
-            run={"model_provider": "P", "model": "m", "created_at": 1, "metrics": {}, "messages": []},
+            usage=HelperUsage(run_id="u1", model="m", provider="P", metrics=RunMetrics(), created_at=1),
             initial_session=session,
         )
 
