@@ -18,7 +18,8 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 - The driver is the only writer of the turn record and stores an interrupted turn once, into the scope its runs are stored in, so the row kind comes from the scope and `is_team` disappeared.
   It settles the record before it yields the text that ends a turn, because a consumer may close the stream as soon as it reads that text.
   A consumer that stops reading (a Stop in the streamer, a delivery failure) leaves the turn recorded as stopped; process shutdown records nothing, because the successor replays the turn.
-  A whole delivery collects the turn to its end before its delivery hooks run, so a Stop in `message:before_response` leaves the completed run in history while the reply ends stopped; recording it again after delivery would make the runner a second writer of the record. Its run-only effects (memory, skill review) still skip it, because the turn's generation never returned a delivery.
+  A whole delivery collects the turn to its end before its delivery hooks run, so a Stop in `message:before_response` leaves the completed run in history while the reply ends stopped; recording it again after delivery would make the runner a second writer of the record.
+  Its run-only effects (memory, skill review) still skip it, because the turn's generation never returned a delivery.
 - The streamer now closes the response stream in its consumer task, and forwards the supervising task's shutdown tag to that task.
   Before, a Stop that landed while the streamer awaited Matrix left the driver suspended until garbage collection closed it in a different task, which carried no shutdown tag.
 - A turn rejected before any attempt ran (a team member that is not running or that the requester may not use, a team name sent to the agent path) records nothing; its message and the rejection reach the next turn through the thread as unseen events.
@@ -30,7 +31,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
   A stopped stream's final message therefore keeps what it last showed plus the note; text generated after its last progress edit stays in history, not in the message.
 - A whole delivery with nothing to show ends as a stream that showed only its placeholder does: the placeholder goes, instead of the placeholder text standing as a completed answer.
 - Approval-resumed replies keep `message:before_response`, because they are delivered whole once the approved run finishes; only a stream that finishes successfully runs `message:final_response_transform`.
-- An ordinary answer whose final write is recorded but not yet acknowledged reports `suspended`, and its run-only effects (finished notification, memory, skill review) apply at once, because its run finished and nothing applies them when the outbox later delivers it.
+- An ordinary answer delivered whole whose final write is recorded but not yet acknowledged reports `suspended`, and its run-only effects (finished notification, memory, skill review) apply at once, because its run finished and nothing applies them when the outbox later delivers it.
   Effects and hooks that need a delivered completed answer (`message:after_response`, buttons, thread summary) still skip it; an approval's owed final keeps running everything after acknowledgement, so it reports its run unfinished until then.
   A failed or cancelled effect is only logged there, because the outbox owns the answer by then and settling it again would fire `message:cancelled` and release its sources for an answer still on its way.
 

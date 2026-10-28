@@ -146,6 +146,8 @@ class _Homeserver:
     hold_text: str | None = None
     held: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
+    # Text whose first write the server fails, as an unreachable homeserver does.
+    fail_text: str | None = None
 
     async def room_send(
         self,
@@ -157,6 +159,9 @@ class _Homeserver:
         **_kwargs: object,
     ) -> nio.RoomSendResponse:
         """Accept one send, collapsing a repeated transaction ID onto one event."""
+        if message_type == "m.room.message" and self.fail_text is not None and self.fail_text in _body(content):
+            self.fail_text = None
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         event_id = self.events.setdefault(tx_id or f"anon-{len(self.events)}", f"$sent{len(self.events)}")
         if message_type == "m.room.message":
             self.writes.append(content)
@@ -862,6 +867,30 @@ async def test_a_run_whose_reply_a_hook_suppressed_still_counts_as_succeeded(
     final, outcome, _deps = effects.await_args.args
     assert final.suppressed
     assert outcome.run_succeeded is True
+
+
+async def test_an_answer_the_homeserver_did_not_take_yet_applies_its_run_s_effects_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An answer left for the outbox to send finished its run, so memory and skill review take it as it settles.
+
+    No delivery hook fires for it, and its sources go to the outbox with the answer.
+    """
+    turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": [answer("Owed answer.")]})
+    turn.homeserver.fail_text = "Owed answer."
+    effects = AsyncMock(return_value=None)
+    monkeypatch.setattr("mindroom.response_lifecycle.apply_post_response_effects", effects)
+    request = replace(_plain_request(_target()), source_handoff=asyncio.Event())
+
+    await turn.runner.generate_response(request)
+
+    effects.assert_awaited_once()
+    final, outcome, _deps = effects.await_args.args
+    assert (final.terminal_status, outcome.run_succeeded) == ("suspended", True)
+    assert turn.hooks.names == ["before"]
+    assert request.source_handoff is not None
+    assert request.source_handoff.is_set()
 
 
 async def test_a_before_response_hook_that_suppresses_a_whole_reply_removes_its_placeholder(

@@ -136,7 +136,6 @@ __all__ = [
     "agent_run_metadata_content",
     "ai_response",
     "build_matrix_run_metadata",
-    "collect_streamed_response_content",
     "run_delegated_child_response",
     "stream_agent_response",
 ]
