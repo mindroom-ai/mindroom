@@ -17,7 +17,12 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.providers.errors import classify_provider_error, is_context_window_error, provider_failure
+from mindroom.providers.errors import (
+    classify_provider_error,
+    is_context_window_error,
+    provider_failure,
+    retry_after_seconds,
+)
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
 
 
@@ -69,6 +74,25 @@ def test_statuses_and_wording_classify_the_same_for_every_family(
     )
     assert error.code is None
     assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    ("headers", "seconds"),
+    [
+        ({"retry-after": "2.5"}, 2.5),
+        ({"Retry-After": " 7 "}, 7.0),
+        ({"retry-after": "0"}, 0.0),
+        ({"retry-after": "-1"}, None),
+        ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, None),
+        ({}, None),
+    ],
+)
+def test_a_retry_after_header_counts_only_as_a_number_of_seconds(
+    headers: dict[str, str],
+    seconds: float | None,
+) -> None:
+    """A negative or HTTP-date ``Retry-After`` is no hint, so the backoff decides the wait."""
+    assert retry_after_seconds(headers) == seconds
 
 
 def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
