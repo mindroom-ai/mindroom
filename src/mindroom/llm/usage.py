@@ -149,7 +149,10 @@ def _merge_numeric(target: dict[str, Any], source: Mapping[str, Any] | None) -> 
 
 @dataclass(slots=True, kw_only=True)
 class MessageMetrics(_Counts):
-    """Usage one provider request reported; stored on the assistant message."""
+    """Usage one provider request reported; stored on the assistant message.
+
+    ``duration`` covers the same work as the counters: every attempt of a retried request.
+    """
 
     duration: float | None = None
     time_to_first_token: float | None = None
@@ -218,7 +221,11 @@ def _details_from_dict(details: Mapping[str, list[Any]]) -> dict[str, list[Model
 
 @dataclass(slots=True, kw_only=True)
 class RunMetrics(_Counts):
-    """Usage one run accumulated over all its requests, with a per-model breakdown in ``details``."""
+    """Usage one run accumulated over all its requests, with a per-model breakdown in ``details``.
+
+    ``duration`` covers the same work as the counters: every leg of a run that paused and resumed. A team turn's
+    usage keeps its leader's duration, since its members run inside the leader's run (``teams.runtime.team_usage``).
+    """
 
     time_to_first_token: float | None = None
     duration: float | None = None

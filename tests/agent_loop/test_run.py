@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -28,6 +29,7 @@ from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
@@ -932,6 +934,50 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
     assert record.metrics.tokens.total_tokens == 6
+
+
+@pytest.mark.parametrize(("ending", "status"), [("completed", "COMPLETED"), ("failed", "ERROR")])
+@pytest.mark.asyncio
+async def test_a_resume_adds_its_time_to_the_paused_runs_duration_as_it_adds_its_usage(
+    ending: str,
+    status: str,
+) -> None:
+    """A resumed run's counters count every leg of the run, so its duration does too, however the resume ends."""
+
+    async def throttle() -> None:
+        msg = "Rate limited"
+        raise RateLimited(msg, provider="Synthetic")
+
+    paused = _paused_record(_gated_add())
+    paused.metrics = RunMetrics(tokens=TokenCounts(input_tokens=4, output_tokens=1, total_tokens=5), duration=5.0)
+    turn = answer("Three.", usage(2, 2)) if ending == "completed" else [UsageReported(usage(2, 2)), Await(throttle)]
+    store = _Store()
+    resume = resume_agent(
+        spec(ScriptedModel([turn]), gated(add)),
+        paused,
+        build_resume_request(paused=paused.messages, summary=None, history=[]),
+        approved=[_approval("c1", "add", {"a": 1, "b": 2})],
+        denied={},
+        external_results={},
+        context=lambda run_id: context(run_id=run_id, session_id="session-1"),
+        hooks=NO_HOOKS,
+        persist=store,
+        request_template=EMPTY_REQUEST,
+    )
+
+    before = time.monotonic()
+    if ending == "completed":
+        await collect(resume)
+    else:
+        with pytest.raises(RateLimited):
+            await collect(resume)
+    resumed_for = time.monotonic() - before
+
+    [stored] = store.saved
+    assert stored["status"] == status
+    assert stored["metrics"]["total_tokens"] == 9
+    assert 5.0 < stored["metrics"]["duration"] <= 5.0 + resumed_for
+    assert paused.metrics.duration == 5.0
 
 
 def switch_thread_model(model_name: str) -> str:

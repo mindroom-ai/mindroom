@@ -415,7 +415,7 @@ async def _store_interrupted[R: AnyRunRecord](
 
 
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
-    """Snapshot the live messages the run stores, stamp its status, and close its duration.
+    """Snapshot the live messages the run stores, stamp its status, and add this leg's time to its duration.
 
     Replayed history never stores. A paused run also stores, in place, the context its requests sent but no history
     holds (``add_to_agent_memory=False``), such as memory results and the approval receipt, so its resume sends the
@@ -427,7 +427,8 @@ def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, stat
     ]
     record.status = status
     assert record.metrics is not None
-    record.metrics.duration = time.monotonic() - started
+    # A resume continues the paused run's counters, so it continues its duration too.
+    record.metrics.duration = (record.metrics.duration or 0.0) + time.monotonic() - started
 
 
 async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> None:
