@@ -753,7 +753,8 @@ class _LockedTurn:
     """One admitted agent or team turn, prepared: everything its generation and settlement read.
 
     ``request`` is the turn's request as admitted, which its lifecycle, effects, and approval pause read;
-    ``delivery_request`` is the same request with the model-facing history and prompt the stream answers.
+    ``delivery_request`` is the same request locked to the target the reply streams into, with the model-facing
+    history and prompt the stream answers.
     """
 
     request: ResponseRequest
@@ -3858,11 +3859,11 @@ class ResponseRunner:
             timezone=self.deps.runtime.config.get_entity_timezone(self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
+        target = resolved_target.with_thread_root(_response_thread_id(request, resolved_target))
         delivery_request = self._request_with_locked_target(
             replace(request, thread_history=model_thread_history, media=request.media or MediaInputs()),
-            resolved_target,
+            target,
         )
-        target = resolved_target.with_thread_root(_response_thread_id(request, resolved_target))
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
             target,
             user_id=request.user_id or "",
@@ -4125,7 +4126,7 @@ class ResponseRunner:
         progress: _DeliveryProgress,
     ) -> FinalDeliveryOutcome:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
-        request = self._request_with_locked_target(turn.delivery_request, turn.runtime.resolved_target)
+        request = turn.delivery_request
         active_event_ids = await self._active_response_event_ids(request.room_id)
         compaction_lifecycle = self._build_compaction_lifecycle(target=turn.runtime.resolved_target, request=request)
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
