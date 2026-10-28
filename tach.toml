@@ -525,6 +525,7 @@ depends_on = [
     "mindroom.legacy_delivery_payloads",
     "mindroom.logging_config",
     "mindroom.matrix.sidecar_content",
+    "mindroom.redaction",
     "mindroom.reply_lifecycle",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",

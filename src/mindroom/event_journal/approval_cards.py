@@ -2,11 +2,11 @@
 
 A card is one Matrix event showing one call: a ``request`` that asks for its
 decision, or a receipt that shows a call a timed grant or a scheduled approval
-already decided. Transaction IDs, frozen payloads, attempts, devices, and
-acknowledgements live in ``matrix_delivery_outbox``; a card's decision is its
-call's, in ``approval_calls``. Every Matrix event known to show a card has a row
-in ``approval_card_events``, which is how a click finds its card, even after the
-card retired.
+already decided. Transaction IDs, frozen payloads, membership tenure, attempts,
+devices, and acknowledgements live in ``matrix_delivery_outbox``; a card's
+decision is its call's, in ``approval_calls``. Every Matrix event known to show
+a card has a row in ``approval_card_events``, which is how a click finds its
+card, even after the card retired.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ class ApprovalCardView:
     created_at_ns: int
     approvable: bool
     retired: bool
-    # Whether the card principal's current membership of the room owns the card.
+    # Whether the card principal's current membership of the room owns the card's deliveries; a retired card has none.
     current: bool
     # The call's facts; None once a retired card's call is gone.
     owner_kind: OwnerKind | None
@@ -205,8 +205,8 @@ def _reserve(
         """
         INSERT INTO approval_cards (
             principal_id, delivery_id, kind, owner_id, generation, tool_call_id,
-            room_id, thread_id, approvable, membership_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            room_id, thread_id, approvable
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             principal_id,
@@ -218,7 +218,6 @@ def _reserve(
             room_id,
             encode_thread_id(thread_id),
             int(approvable),
-            membership_epoch,
         ),
     )
 
@@ -409,7 +408,7 @@ def reserve_detached_card(
     owner_kind: OwnerKind,
     tool_name: str,
     toolkit_name: str | None,
-    invoking_agent: str | None,
+    invoking_agent: str,
     room_id: str,
     thread_id: str | None,
     expires_at_ns: int,
@@ -645,7 +644,7 @@ _VIEW_COLUMNS = """
     cards.room_id AS room_id, cards.thread_id AS thread_id,
     cards.approvable AS approvable, cards.retired AS retired,
     COALESCE(initial.created_at_ns, 0) AS created_at_ns,
-    cards.membership_epoch = COALESCE(membership.membership_epoch, 0)
+    initial.membership_epoch = COALESCE(membership.membership_epoch, 0)
         AND COALESCE(membership.departure_fenced, 0) = 0 AS current_membership,
     calls.owner_kind AS owner_kind, calls.approver_user_id AS approver_user_id,
     calls.expires_at_ns AS expires_at_ns, calls.decision AS decision, calls.invoking_agent AS invoking_agent,
@@ -708,13 +707,13 @@ def card_for_event(
     *,
     room_id: str,
     card_event_id: str,
-) -> ApprovalCardView | Literal["terminal"] | None:
-    """Return the card a Matrix event shows, ``"terminal"`` for a terminal event whose card is unknown, else None."""
+) -> ApprovalCardView | None:
+    """Return the card a Matrix event shows, if the event shows one."""
     row = transaction.fetchone(
         f"""
-        SELECT events.delivery_id AS event_delivery_id, {_VIEW_COLUMNS}
+        SELECT {_VIEW_COLUMNS}
         FROM approval_card_events AS events
-        LEFT JOIN approval_cards AS cards
+        JOIN approval_cards AS cards
           ON cards.principal_id = events.principal_id
          AND cards.delivery_id = events.delivery_id
         LEFT JOIN matrix_delivery_outbox AS initial
@@ -726,16 +725,12 @@ def card_for_event(
         """,  # noqa: S608 - a fixed column list and joins, not input
         (principal_id, room_id, card_event_id),
     )
-    if row is None:
-        return None
-    if row["delivery_id"] is None:
-        return "terminal"
-    return _view(row, card_event_id)
+    return None if row is None else _view(row, card_event_id)
 
 
 _LIVE_REQUESTS = """
     cards.principal_id = ? AND cards.kind = 'request' AND cards.retired = 0
-    AND cards.membership_epoch = COALESCE(membership.membership_epoch, 0)
+    AND initial.membership_epoch = COALESCE(membership.membership_epoch, 0)
     AND COALESCE(membership.departure_fenced, 0) = 0
 """
 
@@ -746,6 +741,10 @@ def pending_room_ids(transaction: Transaction, principal_id: str) -> tuple[str, 
         f"""
         SELECT DISTINCT cards.room_id/*bytes*/ AS room_id
         FROM approval_cards AS cards
+        JOIN matrix_delivery_outbox AS initial
+          ON initial.principal_id = cards.principal_id
+         AND initial.delivery_id = cards.delivery_id
+         AND initial.stage = 'initial'
         LEFT JOIN room_membership AS membership
           ON membership.principal_id = cards.principal_id
          AND membership.room_id = cards.room_id
@@ -894,10 +893,6 @@ def deny_for_departed_card_owner(
         if not bool(row["attempted"]):
             _delete_unattempted(transaction, card_principal_id, delivery_id)
             continue
-        transaction.execute(
-            "UPDATE approval_cards SET membership_epoch = ? WHERE principal_id = ? AND delivery_id = ?",
-            (int(row["current_membership_epoch"]), card_principal_id, delivery_id),
-        )
         transaction.execute(
             "UPDATE matrix_delivery_outbox SET membership_epoch = ? WHERE principal_id = ? AND delivery_id = ?",
             (int(row["current_membership_epoch"]), card_principal_id, delivery_id),

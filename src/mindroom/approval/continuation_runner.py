@@ -83,7 +83,6 @@ from mindroom.orchestration.runtime import (
     current_task_is_process_shutdown,
 )
 from mindroom.post_response_effects import ResponseOutcome
-from mindroom.redaction import redact_sensitive_text
 from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
@@ -1700,7 +1699,7 @@ class ApprovalContinuationRunner:
             current.response_event_id,
             approval_id=current.approval_id,
             note=_FAILURE_NOTES.get(failure.kind, NoteKind.ERROR),
-            text=redact_sensitive_text(failure.reason),
+            text=failure.reason,
             target=continuation_target(current),
         )
         # The reply's records show the note; the finish ends the reply.

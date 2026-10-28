@@ -222,7 +222,19 @@ async def test_every_recording_converts_to_consistent_rows_once(
                 SELECT events.card_event_id FROM approval_card_events AS events
                 LEFT JOIN approval_cards AS cards
                   ON cards.principal_id = events.principal_id AND cards.delivery_id = events.delivery_id
-                WHERE events.delivery_id IS NOT NULL AND cards.delivery_id IS NULL
+                WHERE cards.delivery_id IS NULL
+                """,
+            )
+            == []
+        )
+        # A tombstone's placeholder card exists only for the event no converted card showed.
+        assert (
+            journal.query(
+                """
+                SELECT cards.delivery_id FROM approval_cards AS cards
+                LEFT JOIN approval_card_events AS events
+                  ON events.principal_id = cards.principal_id AND events.delivery_id = cards.delivery_id
+                WHERE cards.delivery_id LIKE 'legacy-tombstone:%' AND events.card_event_id IS NULL
                 """,
             )
             == []
@@ -395,15 +407,37 @@ async def test_undelivered_terminal_edits_stay_owed(recorded_journal: Callable[[
 
 
 @pytest.mark.asyncio
-async def test_a_retired_card_click_is_still_terminal(recorded_journal: Callable[[str], _Journal]) -> None:
-    """A card retired to its tombstone is recognized by its event alone, so a click on it does nothing."""
+async def test_a_retired_card_click_is_still_terminal(
+    recorded_journal: Callable[[str], _Journal],
+    tmp_path: Path,
+) -> None:
+    """A card retired to its tombstone is still a retired card, so a click on it is consumed and decides nothing."""
     store = recorded_journal("09_retired_card.sql").open()
+    sent: list[MatrixDelivery] = []
+    manager = _manager(tmp_path, store, sent)
     try:
-        assert (
-            await store.principal(_ROUTER).approvals.approval_card(room_id=_ROOM, card_event_id="$retired-0-0")
-            == "terminal"
+        card = await store.principal(_ROUTER).approvals.approval_card(room_id=_ROOM, card_event_id="$retired-0-0")
+        assert isinstance(card, ApprovalCardView)
+        assert (card.retired, card.terminal) == (True, True)
+        consumed: list[bool] = []
+
+        async def consume() -> None:
+            consumed.append(True)
+
+        result = await handle_card_response_for_test(
+            manager,
+            room_id=_ROOM,
+            sender_id=_ALICE,
+            card_event_id="$retired-0-0",
+            status="approved",
+            authorize_responder=lambda _entity_name: True,
+            before_consume=consume,
         )
+        assert result.consumed is True
+        assert consumed == [True]
+        assert sent == []
     finally:
+        await manager.shutdown()
         await store.close()
 
 
@@ -425,7 +459,8 @@ async def test_a_background_script_call_survives_pending(recorded_journal: Calla
 @pytest.mark.asyncio
 async def test_a_pending_job_card_is_denied_as_a_restart_denies_it(recorded_journal: Callable[[str], _Journal]) -> None:
     """A job's pending call is denied with the reason a restart gives it, and its terminal edit is queued."""
-    store = recorded_journal("11_tool_job_calls.sql").open()
+    journal = recorded_journal("11_tool_job_calls.sql")
+    store = journal.open()
     try:
         router = store.principal(_ROUTER)
         decision = await router.approvals.detached_decision(CallKey.detached("tool-job:job-pending", "call-pending"))
@@ -436,13 +471,16 @@ async def test_a_pending_job_card_is_denied_as_a_restart_denies_it(recorded_jour
         denied = await router.approvals.detached_decision(CallKey.detached("tool-job:job-denied", "call-denied"))
         assert denied is not None
         assert (denied.status, denied.reason) == ("denied", "Keep the build cache.")
-        assert (
-            await router.approvals.approval_card(
-                room_id=_ROOM,
-                card_event_id="$script-approval:tool-job:job-denied:call-denied",
-            )
-            == "terminal"
+        # Its card retired before the upgrade, so no payload was left to name its tool and agent.
+        assert journal.query(
+            "SELECT tool_name, invoking_agent FROM approval_calls WHERE owner_id = 'tool-job:job-denied'",
+        ) == [(None, None)]
+        retired = await router.approvals.approval_card(
+            room_id=_ROOM,
+            card_event_id="$script-approval:tool-job:job-denied:call-denied",
         )
+        assert isinstance(retired, ApprovalCardView)
+        assert retired.terminal
     finally:
         await store.close()
 
@@ -553,7 +591,8 @@ async def test_timed_grants_keep_their_scope_receipts_and_revocation(
         assert (live_receipt.kind, live_receipt.terminal) == ("grant_receipt", True)
         for event_id in ("$grant-batched-0-0", "$receipt-retired-0-0"):
             card = await approvals.approval_card(room_id=_ROOM, card_event_id=event_id)
-            assert card == "terminal" or (isinstance(card, ApprovalCardView) and card.terminal), event_id
+            assert isinstance(card, ApprovalCardView), event_id
+            assert card.terminal, event_id
     finally:
         await store.close()
     journal = recorded_journal("13_timed_grants.sql")

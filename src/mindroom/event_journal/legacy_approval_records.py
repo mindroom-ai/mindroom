@@ -33,10 +33,10 @@ logger = get_logger(__name__)
 # scheduled_call_approvals.
 # Handling: copies every fact a decision or a resume reads, so a card pending before the upgrade can still be answered
 # and its paused reply resumes; metadata never stored is left NULL. Receipts become receipt cards, retired cards
-# become retired card rows where a grant or binding names them, and tombstones become card events, with no delivery
-# when no converted card shows them. A live card or receipt whose paused reply and calls are gone gets its decided
-# call back from its own payloads. Pending background-job calls are denied with the reason a restart gives them and
-# their terminal edits are queued.
+# become retired card rows where a grant or binding names them, and tombstones become card events; a tombstone no
+# converted card shows gets a retired card of its own with a placeholder call, so a click on it is terminal. A live
+# card or receipt whose paused reply and calls are gone gets its decided call back from its own payloads. Pending
+# background-job calls are denied with the reason a restart gives them and their terminal edits are queued.
 # Coverage: tests/test_legacy_approval_records.py::test_every_recording_converts_to_consistent_rows_once,
 # tests/test_legacy_approval_records.py::test_a_pending_card_can_still_be_approved_and_its_reply_becomes_ready,
 # tests/test_legacy_approval_records.py::test_a_scheduled_approval_still_arms_and_claims,
@@ -56,6 +56,7 @@ _DROPPED_TABLES = (
 _REPLACED_TABLES = ("approval_cards", "approval_grants", "scheduled_call_approvals")
 _JOB_RUN_PREFIX = "tool-job:"
 _SCHEDULED_RUN_PREFIX = "scheduled-task:"
+_TOMBSTONE_DELIVERY_PREFIX = "legacy-tombstone:"
 
 
 def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspector) -> None:
@@ -112,7 +113,6 @@ class _Delivery:
 
     room_id: str | None = None
     thread_id: str | None = None
-    membership_epoch: int | None = None
     initial: dict[str, Any] | None = None
     initial_event_id: str | None = None
     final: dict[str, Any] | None = None
@@ -141,8 +141,7 @@ class _Legacy:
         outbox_rows = (
             transaction.fetchall(
                 """
-                SELECT principal_id, delivery_id, stage, room_id, thread_id, membership_epoch,
-                       payload_json, acknowledged_event_id
+                SELECT principal_id, delivery_id, stage, room_id, thread_id, payload_json, acknowledged_event_id
                 FROM matrix_delivery_outbox
                 WHERE event_type = 'io.mindroom.tool_approval' AND stage IN ('initial', 'final')
                 """,
@@ -157,7 +156,6 @@ class _Legacy:
                 delivery = _Delivery(
                     room_id=str(row["room_id"]),
                     thread_id=str(row["thread_id"]),
-                    membership_epoch=int(row["membership_epoch"]),
                     initial=_payload(row["payload_json"]),
                     initial_event_id=cast("str | None", row["acknowledged_event_id"]),
                     final=delivery.final,
@@ -166,7 +164,6 @@ class _Legacy:
                 delivery = _Delivery(
                     room_id=delivery.room_id,
                     thread_id=delivery.thread_id,
-                    membership_epoch=delivery.membership_epoch,
                     initial=delivery.initial,
                     initial_event_id=delivery.initial_event_id,
                     final=_payload(row["payload_json"]),
@@ -312,7 +309,6 @@ class _Converted:
                 room_id=str(delivery.room_id),
                 thread_id=str(delivery.thread_id),
                 approvable=delivery.initial.get("approvable", True) is True,
-                membership_epoch=int(row["membership_epoch"]),
                 retired=False,
                 event_id=delivery.initial_event_id,
             )
@@ -341,7 +337,6 @@ class _Converted:
                     room_id=str(delivery.room_id),
                     thread_id=str(delivery.thread_id),
                     approvable=False,
-                    membership_epoch=int(cast("int", delivery.membership_epoch)),
                     retired=False,
                     event_id=delivery.initial_event_id,
                 )
@@ -357,7 +352,6 @@ class _Converted:
                 room_id=str(row["room_id"]),
                 thread_id=encode_thread_id(str(row["thread_id"])),
                 approvable=False,
-                membership_epoch=int(row["membership_epoch"]),
                 retired=True,
                 event_id=None if grant is None else str(grant["card_event_id"]),
             )
@@ -377,7 +371,6 @@ class _Converted:
                     room_id=str(row["room_id"]),
                     thread_id=encode_thread_id(str(row["thread_id"])),
                     approvable=False,
-                    membership_epoch=int(row["membership_epoch"]),
                     retired=True,
                     event_id=str(row["card_event_id"]),
                 )
@@ -409,7 +402,6 @@ class _Converted:
                     room_id=str(row["room_id"]),
                     thread_id=encode_thread_id(str(row["thread_id"])),
                     approvable=False,
-                    membership_epoch=int(row["membership_epoch"]),
                     retired=True,
                     event_id=cast("str | None", row["card_event_id"]),
                 )
@@ -424,7 +416,6 @@ class _Converted:
                     room_id=str(row["room_id"]),
                     thread_id=encode_thread_id(str(row["thread_id"])),
                     approvable=False,
-                    membership_epoch=int(row["membership_epoch"]),
                     retired=receipt.initial is None,
                     event_id=receipt.initial_event_id,
                 )
@@ -453,13 +444,24 @@ class _Converted:
                 },
             )
 
-        # Retired cards and receipt aliases a grant or binding does not name stay terminal by event alone.
+        # Retired cards and receipt aliases no converted card shows; tombstones never stored their delivery or thread,
+        # and a retired card's call is never read.
         for row in legacy.tombstones:
-            self._event(
-                str(row["principal_id"]),
-                str(row["card_event_id"]),
+            principal_id = str(row["principal_id"])
+            event_id = str(row["card_event_id"])
+            if (principal_id, event_id) in self.events:
+                continue
+            delivery_id = _TOMBSTONE_DELIVERY_PREFIX + event_id
+            self._card(
+                principal_id,
+                delivery_id,
+                kind="request",
+                call=CallKey(delivery_id, 0, delivery_id),
                 room_id=str(row["room_id"]),
-                delivery_id=None,
+                thread_id=encode_thread_id(None),
+                approvable=False,
+                retired=True,
+                event_id=event_id,
             )
 
     def _card(
@@ -472,7 +474,6 @@ class _Converted:
         room_id: str,
         thread_id: str,
         approvable: bool,
-        membership_epoch: int,
         retired: bool,
         event_id: str | None,
     ) -> None:
@@ -486,14 +487,13 @@ class _Converted:
                 "room_id": room_id,
                 "thread_id": thread_id,
                 "approvable": int(approvable),
-                "membership_epoch": membership_epoch,
                 "retired": int(retired),
             },
         )
         if event_id is not None:
             self._event(principal_id, event_id, room_id=room_id, delivery_id=delivery_id)
 
-    def _event(self, principal_id: str, event_id: str, *, room_id: str, delivery_id: str | None) -> None:
+    def _event(self, principal_id: str, event_id: str, *, room_id: str, delivery_id: str) -> None:
         self.events.setdefault((principal_id, event_id), {"room_id": room_id, "delivery_id": delivery_id})
 
     def _rebuilt_call(self, principal_id: str, call: CallKey, delivery: _Delivery, *, grant_id: str | None) -> None:

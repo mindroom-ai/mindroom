@@ -223,7 +223,7 @@ def insert_detached(
     call: CallKey,
     owner_kind: OwnerKind,
     tool_name: str,
-    invoking_agent: str | None,
+    invoking_agent: str,
     toolkit_name: str | None,
     approver_user_id: str,
     expires_at_ns: int,

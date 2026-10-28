@@ -323,8 +323,8 @@ class ApprovalStore:
         *,
         room_id: str,
         card_event_id: str,
-    ) -> ApprovalCardView | Literal["terminal"] | None:
-        """Return the card one Matrix event shows, ``"terminal"`` for a terminal event whose card is unknown."""
+    ) -> ApprovalCardView | None:
+        """Return the card one Matrix event shows, if it shows one."""
         return await self._backend.read(
             lambda transaction: approval_cards.card_for_event(
                 transaction,

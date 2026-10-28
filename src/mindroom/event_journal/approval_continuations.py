@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
+from mindroom.redaction import redact_sensitive_text
 from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
@@ -80,8 +81,8 @@ class ApprovalFailure:
 
     @property
     def reason(self) -> str:
-        """Return the text that explains the failure: its cards' denial reason, and an error note's text."""
-        return self.detail or _FAILURE_REASONS[self.kind]
+        """Return the redacted text that explains the failure: its cards' denial reason, and an error note's text."""
+        return redact_sensitive_text(self.detail) if self.detail else _FAILURE_REASONS[self.kind]
 
 
 def failure_of_row(row: Row) -> ApprovalFailure | None:

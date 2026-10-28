@@ -34,7 +34,8 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
   The call keeps its principal for the same reason.
 - A card stores no `decided` or `finished` state: a request card is decided exactly when its call is, and finished when the outbox acknowledges its terminal edit; storing either again would recreate the two-owner bug.
 - Every Matrix event known to show a card is a row in `approval_card_events`, written by the acknowledgement of the card's first delivery, because one delivery can have several events (transport-verified receipt copies) and a retired card must still be recognized on a click.
-- A card's timed-approval consent (`approval_card_scopes`) is immutable, separate from the card's delivery tenure, because departure cleanup moves a card's outbox rows to a rejoined membership and must not move the grant's fence with them.
+- A card's delivery tenure is its INITIAL outbox row's membership epoch, with no copy on the card, because departure cleanup moves a card's outbox rows to a rejoined membership and a copy would be a second owner of that tenure.
+- A card's timed-approval consent (`approval_card_scopes`) is immutable, separate from the card's delivery tenure, because that move must not move the grant's fence with it.
 - The frozen card payload is only the source of the terminal edit's content; Matrix wire payloads are unchanged, so clients see the same cards.
 - Within one runtime every write runs on one writer connection, which the journal already relies on; the new tables take the locks the rows they replace took, in the same order, so the races the two-store tests pin stay pinned, and no wider lock order is promised.
 
@@ -46,6 +47,7 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - A refused final answer finishes the paused reply on every path; before, a live resume kept its claim until a restart.
 - A live resume that fails keeps settling directly; deferring every settlement to dispatch would still need the live span ended and the final recovered first, and would put a direct settlement behind a wake.
 - `failure_kind` (`error`, `user_stop`, `restart`, `interrupted`, `shutdown`) also names the cards' denial reason, so a Stop's cards say the reply was stopped and an error's give its detail.
+- The failure owns the one redacted rendering of its text, shared by the reply note, the cards, and delegated children, because each rendering site redacting on its own let the cards show raw error text the note hid; the stored detail stays raw.
 - Minimal-mode CLI exits keep their own exhaustive branch, evaluated before every other rule, because the enclosing response has already finalized and a stale claim belongs to another runtime.
 
 ### Holds and detached wake-ups
@@ -73,8 +75,8 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - **Pending job cards are denied**, with the reason a restart gives a job that waited for approval, because the restart that runs the upgrade interrupts every waiting job anyway and an earlier release could leave an ended job's card pending when its denial failed; the conversion reads no job JSON and runs whether background jobs are enabled or not.
 - A detached call's kind comes from its scheduled binding, else its `tool-job:` run id, else script, because a scheduled call's card payload is usually retired by the time of the upgrade.
 - A live card whose calls a departure deleted gets a decided call rebuilt from its frozen payloads, taking the card's principal and ordinals in delivery order; one that never got a terminal edit is expired so it can still retire.
-- An old tombstone that matches no converted card becomes a terminal event identity with no card, matched by event id alone, because tombstones never stored their delivery.
 - A retired card's kind and call are never read, so a retired card whose provenance the old rows cannot tell (a batch-approved request or a receipt) is recorded as a receipt, and a grant whose originating card left no grant-card row gets a retired request card with a placeholder call key.
+- An old tombstone that matches no converted card gets such a placeholder card too, because tombstones never stored their delivery, and a click on it then takes the one retired-card path instead of a special terminal value.
 - Free-text failure reasons convert to their kinds (`cancelled_by_user`, `sync_restart_cancelled`, `interrupted`, the fixed interrupted-before-final text), and any other text becomes an `error` with the text as detail.
 - Rows recorded from the previous code for every approval kind and state (`tests/fixtures/approval_records/`) pin the conversion on both backends.
 
@@ -95,7 +97,7 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 ## Rejected alternatives
 
 - A stored `decided`/`finished` card state: duplicates the call decision and the outbox acknowledgement.
-- One `card_event_id` column on the card: cannot hold receipt aliases, and old tombstones have no card.
+- One `card_event_id` column on the card: cannot hold receipt aliases.
 - Deleting reply-owned calls with their paused reply: departure keeps terminal-edit debt whose decision would then have no owner.
 - Deriving the grant's consent epoch from the card's delivery tenure: departure cleanup moves delivery tenure.
 - Settling every failed live resume from dispatch: see above.

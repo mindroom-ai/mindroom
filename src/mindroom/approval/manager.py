@@ -711,7 +711,7 @@ class ApprovalManager:
                 return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
         if card is None:
             return ApprovalActionResult(consumed=False, card_event_id=card_event_id)
-        if card == "terminal" or card.terminal:
+        if card.terminal:
             if before_consume is not None:
                 await before_consume()
             return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
@@ -864,7 +864,7 @@ class ApprovalManager:
         *,
         room_id: str,
         card_event_id: str,
-    ) -> ApprovalCardView | Literal["terminal"] | None:
+    ) -> ApprovalCardView | None:
         """Bind the exact visible action target to generic delivery debt."""
         delivery_id = await self.transport.resolve_approval_action_delivery(room_id, card_event_id)
         if delivery_id is None:

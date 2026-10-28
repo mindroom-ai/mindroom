@@ -92,6 +92,18 @@ OUTBOX_TABLE = """
 """
 
 
+# LEGACY_COMPAT: Converted approval calls whose tool name or invoking agent the old rows never stored.
+# Legacy format: background_approval_calls kept no tool name or agent, so the conversion reads them from the call's card
+# payload; a call whose card had already retired has no payload left, and a reply call rebuilt from a live card's
+# payload has none when that payload lacked them. Selected by the approval records conversion in
+# legacy_approval_records.py; every call the current release inserts stores both.
+# Last legacy release: v2026.10.633; replacement: the next release stores both on every approval_calls row it writes.
+# Handling: approval_calls.tool_name and approval_calls.invoking_agent stay nullable and hold NULL only in those
+# converted rows. Each is decided, and nothing reads them: a paused reply's calls are read only while the reply exists,
+# and those were copied from approval_continuation_calls, which stored both; a card's invoking agent is read only to
+# authorize a click on an undecided detached call's live card, whose payload named it.
+# Coverage: tests/test_legacy_approval_records.py::test_a_pending_job_card_is_denied_as_a_restart_denies_it,
+# tests/test_legacy_approval_records.py::test_a_departed_responders_card_keeps_its_decided_call_until_it_retires.
 _APPROVAL_CALLS_TABLE = """
     CREATE TABLE IF NOT EXISTS approval_calls (
         -- One gated tool call and its one decision. The owner is a paused
@@ -104,7 +116,7 @@ _APPROVAL_CALLS_TABLE = """
         principal_id TEXT NOT NULL,
         owner_kind TEXT NOT NULL CHECK (owner_kind IN ('reply', 'job', 'script', 'scheduled')),
         call_ordinal BIGINT NOT NULL,
-        -- Null only for a call converted from a record that never stored it.
+        -- Null only in the converted rows the LEGACY_COMPAT note above names.
         tool_name TEXT,
         toolkit_name TEXT,
         invoking_agent TEXT,
@@ -142,8 +154,6 @@ _APPROVAL_CARDS_TABLE = """
         thread_id TEXT NOT NULL,
         -- Whether an approval can be honored: its arguments were reviewable when it was prepared.
         approvable INTEGER NOT NULL CHECK (approvable IN (0, 1)),
-        -- Delivery tenure: the membership that owns its outbox rows.
-        membership_epoch BIGINT NOT NULL,
         retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
         PRIMARY KEY (principal_id, delivery_id)
     )
@@ -151,12 +161,11 @@ _APPROVAL_CARDS_TABLE = """
 
 _APPROVAL_CARD_EVENTS_TABLE = """
     CREATE TABLE IF NOT EXISTS approval_card_events (
-        -- Every Matrix event known to show a card. A null delivery is a
-        -- terminal identity whose card is unknown.
+        -- Every Matrix event known to show a card.
         principal_id TEXT NOT NULL,
         card_event_id TEXT NOT NULL,
         room_id TEXT NOT NULL,
-        delivery_id TEXT,
+        delivery_id TEXT NOT NULL,
         PRIMARY KEY (principal_id, card_event_id)
     )
 """
@@ -164,7 +173,7 @@ _APPROVAL_CARD_EVENTS_TABLE = """
 _APPROVAL_CARD_SCOPES_TABLE = """
     CREATE TABLE IF NOT EXISTS approval_card_scopes (
         -- The consent a card offers for a timed approval. Its epochs are
-        -- immutable; departure cleanup moves only the card's delivery tenure.
+        -- immutable; departure cleanup moves only the card's outbox rows.
         principal_id TEXT NOT NULL,
         delivery_id TEXT NOT NULL,
         scope_key TEXT NOT NULL,

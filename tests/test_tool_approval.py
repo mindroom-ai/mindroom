@@ -112,9 +112,9 @@ def _config(tmp_path: Path) -> Config:
 
 @pytest.mark.asyncio
 async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tmp_path: Path) -> None:
-    """A terminal tombstone remains authoritative without consulting transport."""
+    """A retired card remains authoritative without consulting transport."""
     cards = MagicMock()
-    cards.approvals.approval_card = AsyncMock(return_value="terminal")
+    cards.approvals.approval_card = AsyncMock(return_value=card_view(retired=True))
     initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, send_approval_delivery=AsyncMock())
     before_consume = AsyncMock()
 
