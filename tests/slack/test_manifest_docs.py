@@ -25,11 +25,13 @@ def _manifest() -> dict[str, Any]:
 
 
 def test_manifest_requests_the_user_scopes_the_provider_asks_for() -> None:
-    """People approve exactly the scopes the app's manifest grants, and the bot can map authors by email."""
+    """People approve exactly the scopes the app's manifest grants, the bot can map authors by email, and both upload."""
     scopes = _manifest()["oauth_config"]["scopes"]
 
     assert scopes["user"] == list(SLACK_USER_SCOPES)
     assert "users:read.email" in scopes["bot"]
+    assert "files:write" in scopes["bot"]
+    assert "files:write" in scopes["user"]
 
 
 def test_manifest_points_slack_at_the_routes_mindroom_serves() -> None:

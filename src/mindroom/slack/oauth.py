@@ -48,6 +48,7 @@ SLACK_USER_SCOPES = (
     "im:write",
     "reactions:write",
     "files:read",
+    "files:write",
 )
 
 

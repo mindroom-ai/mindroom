@@ -63,6 +63,7 @@ Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROO
          - chat:write
          - reactions:write
          - files:read
+         - files:write
          - users:read
          - users:read.email
        user:
@@ -81,6 +82,7 @@ Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROO
          - im:write
          - reactions:write
          - files:read
+         - files:write
    settings:
      event_subscriptions:
        request_url: https://mindroom.example.com/api/slack/events
@@ -100,6 +102,7 @@ Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROO
 
    The bot's `users:read.email` scope is what maps a Slack author to a MindRoom account; without it nobody can wake a project agent.
    Keep `token_rotation_enabled` and `socket_mode_enabled` off, because MindRoom stores Slack user tokens that do not expire and receives events over HTTP.
+   When you add `files:write` to an app created from an earlier manifest, reinstall the app, and people who connected Slack before must reconnect before `slack_upload` works.
 
 2. Install the app to the workspace and copy the **Bot User OAuth Token**.
 3. On **Basic Information**, copy the **Client ID**, **Client Secret**, and **Signing Secret**.

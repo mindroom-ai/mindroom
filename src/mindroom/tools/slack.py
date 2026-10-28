@@ -22,14 +22,16 @@ if TYPE_CHECKING:
     name="slack",
     display_name="Slack",
     description=(
-        "Search, read, download, post, react, edit, and delete in Slack as the connected user or in a project's channels"
+        "Search, read, download, post, react, edit, delete, and upload in Slack as the connected user "
+        "or in a project's channels"
     ),
     category=ToolCategory.COMMUNICATION,
-    # Downloads always land in the workspace, like every MindRoom-owned output; no function takes a local path.
-    file_access=ToolFileAccess.NONE,
+    # Uploads read the path they are given under the agent's file_access; downloads always land in the workspace.
+    file_access=ToolFileAccess.AGENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
     requires_primary_runtime=True,
+    consumes_workspace_paths=True,
     auth_provider="slack",
     icon="SiSlack",
     icon_color="text-purple-600",
@@ -40,7 +42,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow posting, editing, and deleting messages and adding reactions.",
+            description="Allow posting, editing, and deleting messages, adding reactions, and uploading files.",
         ),
     ],
     agent_override_fields=[
@@ -72,6 +74,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.CURRENT_ROOM_ID,
+        ToolManagedInitArg.FILE_ACCESS,
     ),
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/slack/",
@@ -89,6 +92,7 @@ if TYPE_CHECKING:
         "slack_react",
         "slack_edit",
         "slack_delete",
+        "slack_upload",
         "slack_watch",
     ),
 )

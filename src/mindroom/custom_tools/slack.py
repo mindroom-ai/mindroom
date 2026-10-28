@@ -21,6 +21,7 @@ from agno.tools import Toolkit
 from mindroom.atomic_file import atomic_write_file_at
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
+from mindroom.custom_tools.microsoft_graph import MicrosoftGraphError, checked_upload_source, read_upload_source
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
     from pathlib import Path
 
+    from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
     from mindroom.slack.api import SlackTarget
@@ -70,7 +72,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _TOOL_NAME = "slack"
-_WRITE_FUNCTIONS = frozenset({"slack_post", "slack_react", "slack_edit", "slack_delete"})
+_WRITE_FUNCTIONS = frozenset({"slack_post", "slack_react", "slack_edit", "slack_delete", "slack_upload"})
 _SEARCH_KINDS = ("messages", "conversations", "people")
 _MAX_LIMIT = 100
 # Slack's search pages stop at page 100.
@@ -85,7 +87,8 @@ _ACTIVE_WITHIN_SECONDS = {"d": 86_400, "h": 3_600, "m": 60}
 # Listing recent conversations reads each one's latest message, with at most this many reads in flight.
 _MAX_READS_IN_FLIGHT = 8
 _LATEST_TEXT_CHARACTERS = 200
-_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+# Downloads and uploads alike.
+_MAX_FILE_BYTES = 50 * 1024 * 1024
 _DOWNLOAD_DIR = "slack-downloads"
 # Slack sends the token only to its own file host, which serves an authorized download without a redirect.
 _DOWNLOAD_HOST = "files.slack.com"
@@ -369,10 +372,37 @@ async def _fetch(session: _Session, url: str) -> bytearray:
         content = bytearray()
         async for chunk in response.aiter_bytes():
             content.extend(chunk)
-            if len(content) > _MAX_DOWNLOAD_BYTES:
-                msg = f"The file is larger than {_MAX_DOWNLOAD_BYTES} bytes"
+            if len(content) > _MAX_FILE_BYTES:
+                msg = f"The file is larger than {_MAX_FILE_BYTES} bytes"
                 raise _SlackRefusalError(msg)
     return content
+
+
+def _read_upload(path: str, workspace_root: Path | None, file_access: FileAccess) -> tuple[str, bytes]:
+    """Return the name and bytes of the file to upload, under the agent's file_access, refusing one over 50 MB."""
+    try:
+        source = checked_upload_source(
+            path,
+            workspace_root=workspace_root,
+            file_access=file_access,
+            max_bytes=_MAX_FILE_BYTES,
+            field_name="path",
+        )
+        return source.name, read_upload_source(source, _MAX_FILE_BYTES)
+    except MicrosoftGraphError as exc:
+        raise _SlackRefusalError(exc.message) from None
+
+
+async def _send_upload(session: _Session, url: str, content: bytes) -> None:
+    """Send the file's bytes to the presigned link Slack returned, which takes no token, so none is sent."""
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not (parts.hostname or "").endswith(".slack.com"):
+        msg = "Slack returned an upload link outside slack.com, so the file was not sent"
+        raise _SlackRefusalError(msg)
+    response = await session.client.post(url, content=content)
+    if not response.is_success:
+        msg = f"Slack refused the upload with HTTP {response.status_code}"
+        raise _SlackRefusalError(msg)
 
 
 def _download_name(file_id: str, name: object) -> str:
@@ -419,6 +449,7 @@ class SlackTools(Toolkit):
         runtime_config: Config | None = None,
         tool_output_workspace_root: Path | None = None,
         current_room_id: str | None = None,
+        file_access: FileAccess = "workspace",
         write: bool = True,
         channels: list[str] | None = None,
         room: str | None = None,
@@ -432,6 +463,7 @@ class SlackTools(Toolkit):
         self._worker_target = worker_target
         self._config = runtime_config
         self._workspace_root = tool_output_workspace_root
+        self._file_access = file_access
         self.project_channels = frozenset(channels) if channels else None
         # A project agent answers a Slack-started thread in its room, and MindRoom mirrors that reply to Slack itself.
         self._reply_mirrored = self.project_channels is not None and bool(room)
@@ -444,6 +476,7 @@ class SlackTools(Toolkit):
             "slack_react": self.slack_react,
             "slack_edit": self.slack_edit,
             "slack_delete": self.slack_delete,
+            "slack_upload": self.slack_upload,
         }
         # MCP builds have no room, and a project toolkit has no person to watch for.
         if self.project_channels is None and current_room_id is not None:
@@ -531,6 +564,20 @@ class SlackTools(Toolkit):
         if info.get("is_member") is not True:
             msg = f"Invite the MindRoom app to <#{channel_id}>"
             raise _SlackRefusalError(msg)
+
+    async def _destination(self, session: _Session, parsed: SlackTarget) -> str:
+        """Return the conversation a post or upload goes to; a user ID opens a direct message, in personal mode only."""
+        if parsed.channel_id is not None:
+            await self._require_project_channel(session, parsed.channel_id)
+            return parsed.channel_id
+        if self.project_channels is not None:
+            raise _SlackRefusalError(_PROJECT_POSTS_IN_CHANNELS)
+        opened = await session.call("conversations.open", users=parsed.user_id)
+        channel_id = json_object(opened, "channel").get("id")
+        if not isinstance(channel_id, str):
+            msg = "Slack did not open the direct message"
+            raise _SlackRefusalError(msg)
+        return channel_id
 
     async def _require_project_file(self, session: _Session, file: Mapping[str, Any]) -> None:
         """Refuse a project download unless Slack shows the file shared in one of the agent's channels."""
@@ -807,8 +854,8 @@ class SlackTools(Toolkit):
             file = json_object(await session.call("files.info", file=file_id), "file")
             await self._require_project_file(session, file)
             size = file.get("size")
-            if isinstance(size, int) and size > _MAX_DOWNLOAD_BYTES:
-                msg = f"The file is {size} bytes; downloads are limited to {_MAX_DOWNLOAD_BYTES} bytes"
+            if isinstance(size, int) and size > _MAX_FILE_BYTES:
+                msg = f"The file is {size} bytes; downloads are limited to {_MAX_FILE_BYTES} bytes"
                 raise _SlackRefusalError(msg)
             url = file.get("url_private_download") or file.get("url_private")
             content = await _fetch(session, url if isinstance(url, str) else "")
@@ -843,17 +890,7 @@ class SlackTools(Toolkit):
 
         async def operation(session: _Session) -> Mapping[str, object]:
             parsed = _parse_target(target)
-            if parsed.channel_id is None:
-                if self.project_channels is not None:
-                    raise _SlackRefusalError(_PROJECT_POSTS_IN_CHANNELS)
-                opened = await session.call("conversations.open", users=parsed.user_id)
-                channel_id = json_object(opened, "channel").get("id")
-                if not isinstance(channel_id, str):
-                    msg = "Slack did not open the direct message"
-                    raise _SlackRefusalError(msg)
-            else:
-                channel_id = parsed.channel_id
-                await self._require_project_channel(session, channel_id)
+            channel_id = await self._destination(session, parsed)
             root = reply_root(parsed)
             posted = await session.call(
                 "chat.postMessage",
@@ -923,6 +960,55 @@ class SlackTools(Toolkit):
             return {"channel_id": channel_id, "ts": ts}
 
         return await self._run("slack_delete", operation)
+
+    async def slack_upload(
+        self,
+        path: str,
+        target: str,
+        title: str | None = None,
+        comment: str | None = None,
+    ) -> str:
+        """Upload one file of up to 50 MB from the agent workspace to Slack, or into a thread.
+
+        A personal connection uploads as the connected person; a project agent uploads as the MindRoom app, in its own
+        channels only. A conversation ID shares the file there; a message, as `<conversation>:<ts>` or a message
+        link, shares it in that message's thread; a user ID such as U0123ABCD opens a direct message with that person
+        (personal connections only). The upload is sent once and never retried; check slack_read before uploading
+        again after an error.
+
+        Args:
+            path: The file's path in the agent workspace.
+            target: A conversation ID such as C0123ABCD, `<conversation>:<ts>`, a Slack message link, or a user ID.
+            title: The file's title in Slack; the file name when not given.
+            comment: A message posted with the file, in Slack's formatting.
+
+        """
+
+        async def operation(session: _Session) -> Mapping[str, object]:
+            parsed = _parse_target(target)
+            filename, content = await asyncio.to_thread(_read_upload, path, self._workspace_root, self._file_access)
+            channel_id = await self._destination(session, parsed)
+            root = reply_root(parsed)
+            link = await session.call("files.getUploadURLExternal", filename=filename, length=len(content))
+            upload_url, file_id = link.get("upload_url"), link.get("file_id")
+            if not isinstance(upload_url, str) or not isinstance(file_id, str):
+                msg = "Slack returned no upload link for this file"
+                raise _SlackRefusalError(msg)
+            await _send_upload(session, upload_url, content)
+            await session.call(
+                "files.completeUploadExternal",
+                files=[{"id": file_id, "title": title or filename}],
+                channel_id=channel_id,
+                thread_ts=root,
+                initial_comment=neutralize_broadcasts(comment) if comment else None,
+            )
+            return {
+                "channel_id": channel_id,
+                "thread_ts": root,
+                "file": {"id": file_id, "name": filename, "title": title or filename, "size": len(content)},
+            }
+
+        return await self._run("slack_upload", operation)
 
     async def slack_watch(
         self,

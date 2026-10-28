@@ -58,6 +58,13 @@ WORKSPACE_URL = "https://example.slack.com/"
 TIMEOUT = "timed out"
 AUTH_TEST = {"ok": True, "url": WORKSPACE_URL, "team_id": "T0123ABCD", "user_id": "U0BOT0000", "user": "mindroom"}
 DANA = {"id": "U0123ABCD", "name": "dana", "real_name": "Dana Example", "profile": {"display_name": "Dana"}}
+UPLOAD_URL = "https://files.slack.com/upload/v1/CwABAAAAXwoAAZnrUWIRYH9X"
+UPLOAD_FILE_ID = "F0UPLOAD00"
+UPLOAD_ANSWERS: dict[str, Answer] = {
+    "files.getUploadURLExternal": {"ok": True, "upload_url": UPLOAD_URL, "file_id": UPLOAD_FILE_ID},
+    UPLOAD_URL: lambda _request: httpx.Response(200, text="OK - 5"),
+    "files.completeUploadExternal": {"ok": True, "files": [{"id": UPLOAD_FILE_ID, "title": "notes.txt"}]},
+}
 
 type Answer = dict[str, Any] | Callable[[httpx.Request], httpx.Response]
 
@@ -111,7 +118,16 @@ def _empty_identity_cache() -> Iterator[None]:
 
 
 @pytest.fixture
-def paths(tmp_path: Path) -> RuntimePaths:
+def notes_workspace(tmp_path: Path) -> Path:
+    """Return an agent workspace holding `notes.txt`, five bytes long."""
+    root = tmp_path / "notes-workspace"
+    root.mkdir()
+    (root / "notes.txt").write_bytes(b"hello")
+    return root
+
+
+def slack_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Return runtime paths whose credential store holds the Slack app and its OAuth client."""
     runtime_paths = constants.resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
@@ -121,6 +137,11 @@ def paths(tmp_path: Path) -> RuntimePaths:
     manager.save_credentials("slack_oauth_client", {"client_id": "slack-client", "client_secret": "slack-secret"})
     manager.save_credentials("slack_app", {"bot_token": BOT_TOKEN, "signing_secret": "signing-secret"})
     return runtime_paths
+
+
+@pytest.fixture
+def paths(tmp_path: Path) -> RuntimePaths:
+    return slack_runtime_paths(tmp_path)
 
 
 def _worker_target() -> ResolvedWorkerTarget:
@@ -383,7 +404,7 @@ async def test_download_stops_once_the_stream_passes_the_cap(
     FakeSlack(
         {"files.info": file_info, download_url: lambda _request: httpx.Response(200, content=b"x" * 9)},
     ).install(monkeypatch)
-    monkeypatch.setattr(slack_toolkit, "_MAX_DOWNLOAD_BYTES", 8)
+    monkeypatch.setattr(slack_toolkit, "_MAX_FILE_BYTES", 8)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -894,6 +915,7 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
         "slack_react",
         "slack_edit",
         "slack_delete",
+        "slack_upload",
     ]
     assert "error" not in schema
     assert set(schema["inputSchema"]["properties"]) >= {"target", "limit", "before", "cursor"}
@@ -923,7 +945,7 @@ def _write_names(tools: SlackTools) -> set[str]:
 
 
 def test_write_false_hides_write_functions(paths: RuntimePaths) -> None:
-    assert _write_names(_tools(paths)) == {"slack_post", "slack_react", "slack_edit", "slack_delete"}
+    assert _write_names(_tools(paths)) == {"slack_post", "slack_react", "slack_edit", "slack_delete", "slack_upload"}
     assert _write_names(_tools(paths, write=False)) == set()
     assert set(_tools(paths, write=False).get_async_functions()) == {
         "slack_search",
@@ -1038,15 +1060,20 @@ async def test_project_post_uses_the_bot_token_in_a_member_channel(
 
 
 @pytest.mark.asyncio
-async def test_project_post_outside_allowlist_refused(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_project_post_outside_allowlist_refused(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+) -> None:
     fake = FakeSlack({"conversations.info": _member(UNLISTED)}).install(monkeypatch)
-    tools = _tools(paths, channels=[CHANNEL])
+    tools = _tools(paths, channels=[CHANNEL], tool_output_workspace_root=notes_workspace)
 
     results = [
         await tools.slack_post(UNLISTED, "hello"),
         await tools.slack_react(f"{UNLISTED}:{ROOT_TS}", "eyes"),
         await tools.slack_edit(f"{UNLISTED}:{ROOT_TS}", "fixed"),
         await tools.slack_delete(f"{UNLISTED}:{ROOT_TS}"),
+        await tools.slack_upload("notes.txt", f"{UNLISTED}:{ROOT_TS}"),
     ]
 
     assert {json.loads(result)["message"] for result in results} == {"Not one of this agent's Slack channels"}
@@ -1190,6 +1217,185 @@ async def test_editing_someone_elses_message_returns_slacks_refusal_once(
 
 
 @pytest.mark.asyncio
+async def test_upload_shares_a_workspace_file_in_a_thread_and_never_sends_the_token_to_the_upload_link(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
+    permalink = f"{WORKSPACE_URL}archives/{CHANNEL}/p1714000100000200?thread_ts={ROOT_TS}&cid={CHANNEL}"
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
+
+    result = json.loads(await tools.slack_upload("notes.txt", permalink, comment="<!channel> notes from today"))
+
+    assert result == {
+        "status": "ok",
+        "tool": "slack",
+        "channel_id": CHANNEL,
+        "thread_ts": ROOT_TS,
+        "file": {"id": UPLOAD_FILE_ID, "name": "notes.txt", "title": "notes.txt", "size": 5},
+    }
+    assert fake.methods() == ["files.getUploadURLExternal", UPLOAD_URL, "files.completeUploadExternal"]
+    asked, uploaded, completed = fake.requests
+    assert _form(asked) == {"filename": "notes.txt", "length": "5"}
+    assert uploaded.method == "POST"
+    assert uploaded.content == b"hello"
+    assert "authorization" not in uploaded.headers
+    assert _form(completed) == {
+        "files": json.dumps([{"id": UPLOAD_FILE_ID, "title": "notes.txt"}]),
+        "channel_id": CHANNEL,
+        "thread_ts": ROOT_TS,
+        "initial_comment": "<\u2060!channel> notes from today",
+    }
+    assert [_bearer(request) for request in (asked, completed)] == [USER_TOKEN, USER_TOKEN]
+
+
+@pytest.mark.asyncio
+async def test_upload_to_a_person_opens_a_direct_message_with_the_given_title(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+) -> None:
+    _connect_alice(paths)
+    dm = "D0123ABCD"
+    fake = FakeSlack({**UPLOAD_ANSWERS, "conversations.open": {"ok": True, "channel": {"id": dm}}}).install(monkeypatch)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
+
+    result = json.loads(await tools.slack_upload("notes.txt", DANA["id"], title="Standup notes"))
+
+    assert (result["channel_id"], result["thread_ts"], result["file"]["title"]) == (dm, None, "Standup notes")
+    assert fake.methods()[0] == "conversations.open"
+    assert _form(fake.calls("files.completeUploadExternal")[0]) == {
+        "files": json.dumps([{"id": UPLOAD_FILE_ID, "title": "Standup notes"}]),
+        "channel_id": dm,
+    }
+
+
+@pytest.mark.asyncio
+async def test_project_upload_uses_the_bot_token_in_a_member_channel_and_never_to_a_person(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+) -> None:
+    fake = FakeSlack({**UPLOAD_ANSWERS, "conversations.info": _member()}).install(monkeypatch)
+    tools = _tools(paths, channels=[CHANNEL], tool_output_workspace_root=notes_workspace)
+
+    result = json.loads(await tools.slack_upload("notes.txt", CHANNEL))
+
+    assert result["status"] == "ok"
+    assert fake.methods() == [
+        "conversations.info",
+        "files.getUploadURLExternal",
+        UPLOAD_URL,
+        "files.completeUploadExternal",
+    ]
+    assert {_bearer(request) for request in fake.calls("conversations.info")} == {BOT_TOKEN}
+    assert _bearer(fake.calls("files.completeUploadExternal")[0]) == BOT_TOKEN
+
+    refusing = FakeSlack().install(monkeypatch)
+    refused = json.loads(await tools.slack_upload("notes.txt", DANA["id"]))
+
+    assert refused["message"] == "Project agents post only in their channels"
+    assert refusing.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        "https://uploads.example.com/upload/v1/x",
+        "http://files.slack.com/upload/v1/x",
+        "https://files.slack.com.example.com/upload/v1/x",
+    ],
+)
+async def test_upload_link_off_slack_is_refused_before_the_file_is_sent(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+    upload_url: str,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(
+        {
+            "files.getUploadURLExternal": {"ok": True, "upload_url": upload_url, "file_id": UPLOAD_FILE_ID},
+            upload_url: lambda _request: httpx.Response(200),
+        },
+    ).install(monkeypatch)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
+
+    result = json.loads(await tools.slack_upload("notes.txt", CHANNEL))
+
+    assert result["message"] == "Slack returned an upload link outside slack.com, so the file was not sent"
+    assert fake.methods() == ["files.getUploadURLExternal"]
+
+
+@pytest.mark.asyncio
+async def test_upload_the_link_refuses_shares_nothing(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack({**UPLOAD_ANSWERS, UPLOAD_URL: lambda _request: httpx.Response(500)}).install(monkeypatch)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
+
+    result = json.loads(await tools.slack_upload("notes.txt", CHANNEL))
+
+    assert result["message"] == "Slack refused the upload with HTTP 500"
+    assert fake.methods() == ["files.getUploadURLExternal", UPLOAD_URL]
+
+
+@pytest.mark.asyncio
+async def test_upload_refuses_a_file_over_the_cap_before_any_request(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
+    monkeypatch.setattr(slack_toolkit, "_MAX_FILE_BYTES", 4)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
+
+    result = json.loads(await tools.slack_upload("notes.txt", CHANNEL))
+
+    assert result["message"] == f"{(notes_workspace / 'notes.txt').resolve()} is 5 bytes; the limit is 4 bytes."
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outside", ["absolute", "relative"])
+async def test_upload_refuses_a_path_outside_the_workspace(
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
+    outside: str,
+) -> None:
+    _connect_alice(paths)
+    (tmp_path / "secret.txt").write_text("secret")
+    fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
+    path = str(tmp_path / "secret.txt") if outside == "absolute" else "../secret.txt"
+
+    result = json.loads(await tools.slack_upload(path, CHANNEL))
+
+    assert result["message"].startswith(f"path '{path}' must be an existing file inside the agent workspace")
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_upload_needs_a_workspace(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_upload("notes.txt", CHANNEL))
+
+    assert result["message"] == "path 'notes.txt' requires an agent workspace; file_access is 'workspace'."
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
 async def test_permalink_to_reply_posts_under_root_reacts_on_message(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
@@ -1242,12 +1448,17 @@ _WRITE_CALLS: dict[str, tuple[Callable[[SlackTools], Awaitable[str]], tuple[str,
     "slack_react": (lambda tools: tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"), ("reactions.add",)),
     "slack_edit": (lambda tools: tools.slack_edit(f"{CHANNEL}:{ROOT_TS}", "fixed"), ("chat.update",)),
     "slack_delete": (lambda tools: tools.slack_delete(f"{CHANNEL}:{ROOT_TS}"), ("chat.delete",)),
+    "slack_upload": (
+        lambda tools: tools.slack_upload("notes.txt", CHANNEL),
+        ("files.getUploadURLExternal", UPLOAD_URL, "files.completeUploadExternal"),
+    ),
 }
 _WRITE_ANSWERS: dict[str, Answer] = {
     "chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS},
     "reactions.add": {"ok": True},
     "chat.update": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS},
     "chat.delete": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS},
+    **UPLOAD_ANSWERS,
 }
 
 
@@ -1260,11 +1471,12 @@ def test_every_write_function_has_a_watch_guard_case() -> None:
 async def test_writes_refused_during_watch_turn(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
     hook_source: str,
 ) -> None:
     _connect_alice(paths)
     fake = FakeSlack(dict(_WRITE_ANSWERS)).install(monkeypatch)
-    tools = _tools(paths)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
     writes = [_WRITE_CALLS[name] for name in sorted(slack_toolkit._WRITE_FUNCTIONS)]
 
     with tool_runtime_context(_turn_context(paths, hook_source)):
@@ -1298,6 +1510,7 @@ async def test_watch_turn_refusal_comes_before_credentials_are_read(
 async def test_unanswered_write_warns_it_may_have_been_sent_and_a_read_does_not(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
+    notes_workspace: Path,
 ) -> None:
     _connect_alice(paths)
 
@@ -1307,7 +1520,7 @@ async def test_unanswered_write_warns_it_may_have_been_sent_and_a_read_does_not(
     writes = [_WRITE_CALLS[name] for name in sorted(_WRITE_CALLS)]
     first_methods = [methods[0] for _, methods in writes]
     fake = FakeSlack(dict.fromkeys([*first_methods, "conversations.history"], timed_out)).install(monkeypatch)
-    tools = _tools(paths)
+    tools = _tools(paths, tool_output_workspace_root=notes_workspace)
 
     results = [json.loads(await write(tools))["message"] for write, _ in writes]
     read = json.loads(await tools.slack_read(CHANNEL))["message"]

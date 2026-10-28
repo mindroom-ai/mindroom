@@ -57,6 +57,9 @@ from tests.microsoft_graph_test_support import publish_grant as publish_microsof
 from tests.microsoft_graph_test_support import runtime_paths as microsoft_runtime_paths
 from tests.microsoft_graph_test_support import save_client_config as save_microsoft_client_config
 from tests.microsoft_graph_test_support import worker_target as microsoft_worker_target
+from tests.slack.test_toolkit import CHANNEL, UPLOAD_ANSWERS, UPLOAD_URL, FakeSlack, slack_runtime_paths
+from tests.slack.test_toolkit import _connect_alice as connect_slack_requester
+from tests.slack.test_toolkit import _tools as slack_tools
 from tests.test_attachments_tool import _tool_context
 from tests.test_browser_upload_safety import _capture_uploads, _upload, _upload_tool
 from tests.test_e2b_tools import _FakeSandbox
@@ -376,6 +379,22 @@ async def _attach_with_outlook_mail(
     return result["status"] == "ok" and attached == [_PNG]
 
 
+async def _upload_to_slack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path | None,
+    file_access: FileAccess,
+    raw_path: str,
+) -> bool:
+    slack = FakeSlack(dict(UPLOAD_ANSWERS)).install(monkeypatch)
+    paths = slack_runtime_paths(tmp_path)
+    connect_slack_requester(paths)
+    tool = slack_tools(paths, tool_output_workspace_root=workspace, file_access=file_access)
+    result = json.loads(await tool.slack_upload(raw_path, CHANNEL))
+    uploaded = [request.content for request in slack.requests if str(request.url) == UPLOAD_URL]
+    return result["status"] == "ok" and uploaded == [_PNG]
+
+
 _PROBES = (
     _ToolProbe("attachments", "register_attachment", _register_attachment, attachments_module),
     _ToolProbe("attachments", "view_file", _view_file, media_delivery_module),
@@ -384,6 +403,8 @@ _PROBES = (
     _ToolProbe("google_drive", "upload_file", _upload_to_google_drive, google_drive_module),
     _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, microsoft_graph_module),
     _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, microsoft_graph_module),
+    # `slack` checks and reads uploads through the Microsoft Graph helpers.
+    _ToolProbe("slack", "slack_upload", _upload_to_slack, microsoft_graph_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "upload_file", _upload_to_e2b, e2b_module),
     _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),

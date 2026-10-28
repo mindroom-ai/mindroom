@@ -483,7 +483,7 @@
         {
           "authored_override": true,
           "default": true,
-          "description": "Allow posting, editing, and deleting messages and adding reactions.",
+          "description": "Allow posting, editing, and deleting messages, adding reactions, and uploading files.",
           "label": "Allow Write Operations",
           "name": "write",
           "options": null,
@@ -493,14 +493,14 @@
           "validation": null
         }
       ],
-      "consumes_workspace_paths": false,
+      "consumes_workspace_paths": true,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Search, read, download, post, react, edit, and delete in Slack as the connected user or in a project's channels",
+      "description": "Search, read, download, post, react, edit, delete, and upload in Slack as the connected user or in a project's channels",
       "display_name": "Slack",
       "docs_url": "https://docs.mindroom.chat/tools/slack/",
       "executes_code": false,
-      "file_access": "none",
+      "file_access": "agent",
       "function_names": [
         "slack_search",
         "slack_recent",
@@ -510,6 +510,7 @@
         "slack_react",
         "slack_edit",
         "slack_delete",
+        "slack_upload",
         "slack_watch"
       ],
       "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for watches, app-level token in slack_app.",
