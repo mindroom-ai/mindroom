@@ -109,6 +109,7 @@ from tests.bot_helpers import (
 from tests.conftest import (
     TEST_PASSWORD,
     bind_mock_config_event_journal,
+    bind_runtime_paths,
     initialize_approval_store_for_test,
     install_bots,
     make_matrix_client_mock,
@@ -4958,6 +4959,36 @@ class TestMultiAgentOrchestrator:
         first_bot._set_presence_with_model_info.assert_awaited_once_with()
         second_bot._set_presence_with_model_info.assert_awaited_once_with()
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
+
+    def test_publishing_a_reload_hands_docker_workers_its_generated_agents(self, tmp_path: Path) -> None:
+        """Agents created or edited by owners arrive by reload, so the reload's commit must publish them to workers."""
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+        new_config = Config()
+
+        with patch("mindroom.orchestrator.publish_generated_agents") as publish:
+            orchestrator._publish_config(ConfigUpdatePlan(new_config=new_config), None)
+
+        assert orchestrator.config is new_config
+        publish.assert_called_once_with(orchestrator.runtime_paths, new_config.generated_agent_data())
+
+    @pytest.mark.asyncio
+    async def test_startup_hands_docker_workers_the_generated_agents_of_the_config_it_loaded(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The config startup commits is the one Docker workers project created agents from."""
+        runtime_paths = TestAgentBot._runtime_paths(tmp_path)
+        config = bind_runtime_paths(Config(), runtime_paths)
+
+        with (
+            patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
+            patch("mindroom.orchestrator.publish_generated_agents") as publish,
+        ):
+            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+            await orchestrator.initialize(config)
+
+        assert orchestrator.config is config
+        publish.assert_called_once_with(runtime_paths, config.generated_agent_data())
 
     def test_publishing_a_reload_gives_every_bot_the_new_hook_registry(self, tmp_path: Path) -> None:
         """Bots kept through a plugin reload dispatch hooks through the registry the reload committed."""
