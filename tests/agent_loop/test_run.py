@@ -14,6 +14,7 @@ import re
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
@@ -62,6 +63,63 @@ class _Store:
 
 
 # --- fresh runs ------------------------------------------------------------------------------------------------------
+
+
+class _FailingFirstStore(_Store):
+    """A persist callback whose first store fails, as a full disk fails it, and whose later stores succeed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def __call__(self, record: RunRecord) -> None:
+        if not self.failed:
+            self.failed = True
+            msg = "disk full"
+            raise OSError(msg)
+        await super().__call__(record)
+
+
+@pytest.mark.parametrize("carried", [None, 5.0])
+@pytest.mark.asyncio
+async def test_a_run_whose_terminal_store_fails_counts_its_time_once(
+    monkeypatch: pytest.MonkeyPatch,
+    carried: float | None,
+) -> None:
+    """A run whose completed record fails to store is stored as failed, its duration still counting its leg once."""
+    readings = iter([100.0])
+    monkeypatch.setattr("mindroom.agent_loop.run.time", SimpleNamespace(monotonic=lambda: next(readings, 103.0)))
+    store = _FailingFirstStore()
+    paused = _paused_record(_gated_add()) if carried is not None else None
+    if paused is not None:
+        paused.metrics = RunMetrics(duration=carried)
+        events = resume_agent(
+            spec(ScriptedModel([answer("Three.")]), gated(add)),
+            paused,
+            build_resume_request(paused=paused.messages, summary=None, history=[]),
+            approved=[_approval("c1", "add", {"a": 1, "b": 2})],
+            denied={},
+            external_results={},
+            context=lambda run_id: context(run_id=run_id, session_id="session-1"),
+            hooks=NO_HOOKS,
+            persist=store,
+            request_template=EMPTY_REQUEST,
+        )
+    else:
+        events = run_agent(
+            spec(ScriptedModel([answer("Done.")])),
+            _prompt(),
+            ctx=context(),
+            persist=store,
+            request_template=EMPTY_REQUEST,
+        )
+
+    with pytest.raises(OSError, match="disk full"):
+        await collect(events)
+
+    [stored] = store.saved
+    assert stored["status"] == "ERROR"
+    assert stored["metrics"]["duration"] == (carried or 0.0) + 3.0
 
 
 @pytest.mark.asyncio

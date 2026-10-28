@@ -330,7 +330,10 @@ async def drive_run[R: AnyRunRecord](
     consumer reads past ``RunFinished`` or closes the stream; a run that fails or is cancelled closes them once its
     record is stored.
     """
-    started = time.monotonic()
+    # The clock reading the run's duration counts from: a resume continues the paused run's duration, and however this
+    # leg ends, once or again after a terminal store fails, its duration is the time since then.
+    carried = record.metrics.duration if record.metrics is not None else None
+    started = time.monotonic() - (carried or 0.0)
     paused = False
     closes: list[ToolkitClose] = []
     try:
@@ -415,7 +418,7 @@ async def _store_interrupted[R: AnyRunRecord](
 
 
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
-    """Snapshot the live messages the run stores, stamp its status, and add this leg's time to its duration.
+    """Snapshot the live messages the run stores, stamp its status, and set its duration, counted from ``started``.
 
     Replayed history never stores. A paused run also stores, in place, the context its requests sent but no history
     holds (``add_to_agent_memory=False``), such as memory results and the approval receipt, so its resume sends the
@@ -427,8 +430,7 @@ def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, stat
     ]
     record.status = status
     assert record.metrics is not None
-    # A resume continues the paused run's counters, so it continues its duration too.
-    record.metrics.duration = (record.metrics.duration or 0.0) + time.monotonic() - started
+    record.metrics.duration = time.monotonic() - started
 
 
 async def _persist_quietly[R: AnyRunRecord](persist: Persist[R], record: R) -> None:
