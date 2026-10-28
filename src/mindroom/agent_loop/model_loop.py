@@ -168,8 +168,9 @@ async def run_model_loop(
     """Request, run the requested tools, and repeat until the run completes or pauses; ``LoopEnded`` comes last.
 
     ``messages`` is the list the run stores from: every assistant and tool message is appended to it.
-    ``record`` collects the loop's text as ``content`` (the loop's requests concatenated, replacing what the record
-    held), its tool executions, its pause requirements, and its usage, in the metrics the record must carry.
+    ``record`` collects the loop's text as ``content`` (a resumed run's carried text and the loop's request texts, a
+    blank line apart), its tool executions, its pause requirements, and its usage, in the metrics the record must
+    carry.
     ``request_template`` carries the per-run request settings; its messages and tools are replaced per request.
     ``resumed`` makes the loop a resume's: the requirements the resume decided, which it answers first, in order, as
     the rest of the paused batch; None for a fresh run.
