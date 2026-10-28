@@ -17,8 +17,9 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   A restart tolerates only a reply that outlived the drain, because the replacement replays it; removal and process shutdown keep a bot that still owns cleanup registered until its deferred stop finishes.
 - A bot start is one attempt and the fleet owns every retry, because a retry inside the fleet's own retry loop multiplied attempts and delayed the degraded report.
 - An edit made while MindRoom starts is applied once startup publishes its config: a reload request made before the runtime runs is kept, and startup reloads once if the config files changed since it loaded them.
-- Each scheduled task has one owner bot, chosen only from room state: the router when it may send the task's trigger and write schedule state in the room, else the account that wrote the task's state.
-  The rule never looks at which bots run, so a restarting owner keeps its tasks and its recurring checkpoint key, and every bot that restores the room computes the same owner.
+- Each scheduled task has one owner bot, decided once when the task is saved and stored in its state: the router when the room's full state lets it send the task's trigger and write schedule state, else the bot that saved the task.
+  Recomputing the owner at each restore from the latest writer disagreed with creation twice over: a synced room view lazy-loads members, so it can lack a joined router that the full state shows, and an edit by another agent made that agent the latest writer while the runner stayed with the creator.
+  Edits, status writes, and cancellations keep the stored owner whichever bot writes them, so a restarting owner keeps its tasks and its recurring checkpoint key, and every bot that restores the room reads the same owner.
   Runners outlive their owner's restarts instead of being cancelled and restored, because a restore races the replacement's own restore on join and a cancelled send has no safe replay; a stopping owner admits no new operation and its operations in flight drain, bounded, before its client closes.
 - A removed entity's scheduled tasks fail; they are never handed to another bot.
   The maintainer decided this: removal is deliberate, and a reminder that silently starts posting as a different agent, with that agent's room access, is worse than one that stops and says why.
@@ -40,11 +41,12 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 ## Accepted limitations
 
-- When membership, power levels, or a task edit by another agent change a scheduled task's owner, the new owner starts from its own recurring checkpoint, and an earlier owner's stale checkpoint can replay one occurrence if ownership returns to it within the catch-up grace.
+- A scheduled task saved before owners were stored keeps no stored owner, so each restore decides its owner from the room's full state and the task's latest writer; for those tasks a membership or power change, or an edit by another agent, can change the owner, the new owner starts from its own recurring checkpoint, and an earlier owner's stale checkpoint can replay one occurrence if ownership returns to it within the catch-up grace.
   The first start after this change hits that case once for recurring tasks the router had restored in rooms where it may not write schedule state, such as an agent's personal room: they return to the agent that wrote them, so each can fire its latest occurrence a second time.
   That one extra firing was accepted over a one-time checkpoint migration, which would have needed precedence rules between owners' checkpoints.
 - A one-time trigger still sending when its owner's stop budget expires is marked failed instead of resent, because a one-time trigger carries no transaction ID that Matrix could deduplicate.
 - A task whose owner is no longer configured stays pending, and is logged, when no bot restoring its room may write the room's schedule state.
+- A task keeps the owner it was saved with even when its room changes: if that owner later leaves the room or loses the power to send the trigger, the task stops running instead of moving to another bot.
 - A removed entity that leaves no room, because its frozen FINAL recovery is still unresolved or it never started, is removed from its rooms by the next router start's orphan cleanup.
 - A file edit made while another reload applies, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step; a dashboard save in that window overwrites it.
   The drain lasts at most 600 seconds, but an apply that creates Matrix accounts waits for an unreachable homeserver for as long as it is down.
