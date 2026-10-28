@@ -180,6 +180,7 @@ def _bind_hook_context(
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
         replacement_kwargs["error"] = _snapshot_tool_observer_error(context.error)
     if isinstance(context, CompactionHookContext):
+        # Hooks share the transcript: it is a tuple of frozen lines no hook can change.
         messages_snapshot = _snapshot_compaction_messages(context.messages)
         if messages_snapshot is None:
             return None
