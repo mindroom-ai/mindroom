@@ -20,6 +20,8 @@ from mindroom.native_compaction import (
     native_replay_messages,
     native_replay_route_matches,
 )
+from mindroom.providers.anthropic.legacy_stored_turns import current_claude_turn
+from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -120,50 +122,39 @@ def native_replay_messages_for_route(
     checkpoint is signed against a different prefix, so its whole later chain is dropped on routes that do not
     replay that checkpoint; a response produced after fallback starts a new valid chain. Legacy manual thinking
     requires unchanged thinking inside a tool turn and predates prefix binding, so it keeps every block.
-    Unsigned thinking never replays. The input messages are not mutated.
+    Unsigned thinking never replays. Each change is to a turn's stored blocks, the only part of a stored Claude turn
+    that replays. The input messages are not mutated.
     """
-    prepared = native_replay_messages(messages, route)
+    prepared = [current_claude_turn(message) for message in native_replay_messages(messages, route)]
     replays_checkpoint = route is not None and any(checkpoint_items(message, route) for message in prepared)
     thinking_route = route if replays_checkpoint else None
     result: list[Message] = []
     stale_thinking = False
     for message in prepared:
         data = message.provider_data or {}
-        if not data and not stale_thinking:
-            result.append(message)
-            continue
         items = checkpoint_items(message, route)
-        block_lists = {
-            key: data[key] for key in ("content_blocks", "server_tool_blocks") if isinstance(data.get(key), list)
-        }
+        blocks = data.get(CLAUDE_BLOCKS_KEY)
         if items:
             stale_thinking = False
-        elif any(
-            block.get("type") == "compaction" and block.get("content")
-            for blocks in block_lists.values()
-            for block in blocks
+        elif isinstance(blocks, list) and any(
+            block.get("type") == "compaction" and block.get("content") for block in blocks
         ):
             stale_thinking = True
         elif (matches := native_replay_route_matches(message, thinking_route)) is not None:
             stale_thinking = not matches
         dropped_types = {"compaction"}
-        drop_thinking = stale_thinking and not manual_thinking
-        if drop_thinking:
-            dropped_types.update({"thinking", "redacted_thinking", "redacted_reasoning_content"})
-        next_data = dict(data)
-        for key, blocks in block_lists.items():
-            next_data[key] = [
+        if stale_thinking and not manual_thinking:
+            dropped_types.update({"thinking", "redacted_thinking"})
+        if items:
+            replayed = [item for item in items if not _is_unsigned_thinking(item)]
+        elif isinstance(blocks, list):
+            replayed = [
                 block for block in blocks if block.get("type") not in dropped_types and not _is_unsigned_thinking(block)
             ]
-        if items:
-            next_data["content_blocks"] = [item for item in items if not _is_unsigned_thinking(item)]
-        if drop_thinking:
-            next_data.pop("signature", None)
-            result.append(
-                replace(message, provider_data=next_data, reasoning_content=None, redacted_reasoning_content=None),
-            )
         else:
-            result.append(replace(message, provider_data=next_data))
+            result.append(message)
+            continue
+        result.append(replace(message, provider_data={**data, CLAUDE_BLOCKS_KEY: replayed}))
     return result, replays_checkpoint
 
 
@@ -179,7 +170,7 @@ def record_native_checkpoint_on(
     # explicit marker so the shared selector sees the no-op rather than an opaque payload.
     items = [
         {**block, "content": block.get("content")} if block.get("type") == "compaction" else block
-        for block in provider_data.get("content_blocks", [])
+        for block in provider_data.get(CLAUDE_BLOCKS_KEY, [])
     ]
     message.provider_data = {
         **provider_data,

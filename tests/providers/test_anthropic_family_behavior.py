@@ -189,24 +189,29 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
     assert message.content == "Looking it up."
     assert message.reasoning_content == "Check first."
     assert message.tool_calls == [events[3].call]
-    provider_data = message.provider_data or {}
-    assert provider_data["signature"] == "sig"
-    assert provider_data["stop_reason"] == "tool_use"
-    assert provider_data["mindroom_model"] == {"id": "claude-sonnet-5-5", "provider": "Anthropic"}
-    assert provider_data["mindroom_native_compaction"] is None
-    assert [block["type"] for block in provider_data["content_blocks"]] == ["thinking", "text", "tool_use"]
+    assert message.provider_data == {
+        "claude_blocks": [
+            {"type": "thinking", "thinking": "Check first.", "signature": "sig"},
+            {"type": "text", "text": "Looking it up."},
+            {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
+        ],
+        "stop_reason": "tool_use",
+        "mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"},
+        "mindroom_native_compaction": None,
+    }
     assert wire.body()["thinking"] == {"type": "adaptive", "block_binding": _DROP_STALE}
 
 
 @pytest.mark.asyncio
 async def test_a_reply_stores_every_thinking_block_joined(tmp_path: Path) -> None:
-    """A reply's reasoning joins its thinking blocks, and its redacted reasoning its redacted thinking blocks."""
+    """A reply's text joins its text blocks, its reasoning its thinking blocks, and its redacted reasoning the rest."""
     blocks = [
         {"type": "thinking", "thinking": "First. ", "signature": "sig-1"},
         {"type": "redacted_thinking", "data": "redacted-1"},
+        {"type": "text", "text": "Half "},
         {"type": "thinking", "thinking": "Second.", "signature": "sig-2"},
         {"type": "redacted_thinking", "data": "redacted-2"},
-        {"type": "text", "text": "Done."},
+        {"type": "text", "text": "done."},
     ]
     provider = route_provider(
         "anthropic",
@@ -218,7 +223,8 @@ async def test_a_reply_stores_every_thinking_block_joined(tmp_path: Path) -> Non
     message = (await claude_turn(provider, ModelRequest(messages=_user()))).message
 
     assert (message.reasoning_content, message.redacted_reasoning_content) == ("First. Second.", "redacted-1redacted-2")
-    assert (message.provider_data or {})["signature"] == "sig-2"
+    assert message.content == "Half done."
+    assert (message.provider_data or {})["claude_blocks"] == blocks
 
 
 @pytest.mark.asyncio
@@ -338,11 +344,7 @@ async def test_block_types_the_sdk_does_not_know_are_kept_for_replay(tmp_path: P
     completed = events[-1]
     assert isinstance(completed, TurnCompleted)
     assert completed.message.content == "Hi."
-    provider_data = completed.message.provider_data or {}
-    assert provider_data["content_blocks"] == [unknown, text]
-    assert [(block["type"], block["payload"]) for block in provider_data["server_tool_blocks"]] == [
-        ("future_block", "p"),
-    ]
+    assert (completed.message.provider_data or {})["claude_blocks"] == [unknown, text]
 
 
 @pytest.mark.asyncio
@@ -353,6 +355,8 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     completed = await claude_turn(provider, ModelRequest(messages=_user()))
     assert completed.stop_reason == "refusal"
     assert completed.message.content is None
+    # Every Claude turn stores its blocks, so a reply without any still reads as one with nothing to replay.
+    assert (completed.message.provider_data or {})["claude_blocks"] == []
     assert completed.message.metrics.tokens.input_tokens == 40
 
 
@@ -1362,7 +1366,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         "checkpoint_prefix": True,
     }
     # The canonical history is untouched: the stored message still starts with its compaction block.
-    assert (first.message.provider_data or {})["content_blocks"][0]["type"] == "compaction"
+    assert (first.message.provider_data or {})["claude_blocks"][0]["type"] == "compaction"
     assert messages[0].content == "Be brief."
 
 

@@ -20,6 +20,7 @@ from mindroom.llm.provider import ModelRequest, complete
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider as build_claude_provider
 from mindroom.providers.anthropic.prompt_cache import native_tool_search_supported, prepare_request_body
+from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.settings import ClaudeSettings
 from mindroom.providers.cache_ladder import MAX_CACHE_MARKERS, has_cache_marker, prompt_cache_control
 from mindroom.providers.claude_wire_blocks import RebuiltBlock
@@ -514,26 +515,24 @@ def _replayed_blocks(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def test_replayed_search_results_carry_only_request_fields() -> None:
-    """Response-only fields stored with a search result are dropped, and the stored history keeps them."""
-    body = _replayed(_SEARCH_USE, _DIRTY_SEARCH_RESULT, _text("found it"), tools=["get_weather"])
+    """A search result's response-only fields are left out of the replayed shape, without changing the input."""
+    blocks = [dict(_SEARCH_USE), dict(_DIRTY_SEARCH_RESULT), _text("found it")]
 
-    assert _replayed_blocks(body) == [_SEARCH_USE, _SEARCH_RESULT, _text("found it")]
-    assert "citations" in body["messages"][0]["content"][1]
+    assert replay_safe_blocks(blocks) == [_SEARCH_USE, _SEARCH_RESULT, _text("found it")]
+    assert "citations" in blocks[1]
 
 
 def test_only_orphaned_search_uses_are_removed() -> None:
     """A regex search without its result in the same turn goes; other server tools and paired searches stay."""
-    body = _replayed(
-        _ORPHAN_SEARCH_USE,
+    blocks = [dict(block) for block in (_ORPHAN_SEARCH_USE, _OTHER_SERVER_TOOL_USE, _SEARCH_USE, _DIRTY_SEARCH_RESULT)]
+
+    assert replay_safe_blocks([*blocks, _text("found it")]) == [
         _OTHER_SERVER_TOOL_USE,
         _SEARCH_USE,
-        _DIRTY_SEARCH_RESULT,
+        _SEARCH_RESULT,
         _text("found it"),
-        tools=["get_weather"],
-    )
-
-    assert _replayed_blocks(body) == [_OTHER_SERVER_TOOL_USE, _SEARCH_USE, _SEARCH_RESULT, _text("found it")]
-    assert body["messages"][0]["content"][0] == _ORPHAN_SEARCH_USE
+    ]
+    assert blocks[0] == _ORPHAN_SEARCH_USE
 
 
 def test_references_to_tools_the_request_no_longer_offers_are_dropped() -> None:

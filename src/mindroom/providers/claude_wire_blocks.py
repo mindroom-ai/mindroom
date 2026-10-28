@@ -1,9 +1,12 @@
-"""Claude request wire names, the rebuilt-block type, and a dict helper shared by the Claude request modules."""
+"""Claude block names, the rebuilt-block type, and a dict helper shared by the Claude request modules."""
 
 from __future__ import annotations
 
 from typing import Any, cast
 
+# The ``Message.provider_data`` key under which a Claude assistant turn stores its response's blocks, in order and in
+# the shape a later request sends them.
+CLAUDE_BLOCKS_KEY = "claude_blocks"
 TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_regex_20251119"
 TOOL_SEARCH_TOOL_NAME = "tool_search_tool_regex"
 SERVER_TOOL_USE_BLOCK_TYPE = "server_tool_use"

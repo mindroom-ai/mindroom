@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import takewhile
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec
 from mindroom.providers.anthropic import prompt_cache
 from mindroom.providers.anthropic.native_compaction import native_replay_messages_for_route
+from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from tests.history_helpers import _completed_run, _session, record_native_checkpoint
 from tests.providers.anthropic_family_support import (
     claude_turn,
@@ -401,6 +403,110 @@ async def test_a_turn_stored_without_content_blocks_replays_its_server_tool_bloc
     )
 
 
+_WEATHER_TOOL = ToolSpec(
+    name="get_weather",
+    description="Forecast.",
+    parameters={"type": "object", "properties": {"city": {"type": "string"}}},
+    strict=None,
+)
+_TOOL_SEARCH = {
+    "type": "server_tool_use",
+    "id": "srvtoolu_found",
+    "name": "tool_search_tool_regex",
+    "input": {"pattern": "weather"},
+}
+_TOOL_SEARCH_RESULT = {
+    "type": "tool_search_tool_result",
+    "tool_use_id": "srvtoolu_found",
+    "content": {
+        "type": "tool_search_tool_search_result",
+        "tool_references": [{"type": "tool_reference", "tool_name": "get_weather"}],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stored_with_its_response_blocks_replays_as_a_new_turn_does(tmp_path: Path) -> None:
+    """A reply an earlier release stored with the response's own blocks sends what the same reply stored now sends.
+
+    The reply cites a document, runs one tool search that got no result, and gets a search result with a field the
+    request schema rejects; this release stores the reply without them, and the earlier shape replays without them.
+    """
+    cited = {"type": "text", "text": _CITED_ANSWER, "citations": [dict(_STORED_CITATIONS["char_location_with_title"])]}
+    unanswered = {**_TOOL_SEARCH, "id": "srvtoolu_unanswered"}
+    result_with_text = {**_TOOL_SEARCH_RESULT, "text": "Found 1 tool"}
+    reply = [_THINKING_BLOCK, unanswered, _TOOL_SEARCH, result_with_text, cited]
+    wire = Wire(sse_reply(copy.deepcopy(reply)))
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"thinking": {"type": "adaptive"}})
+    question = _user("What color is the grass?")
+    stored_now = _assistant(await claude_turn(provider, ModelRequest(messages=[question], tools=[_WEATHER_TOOL])))
+    stored_earlier = Message(
+        role="assistant",
+        content=_CITED_ANSWER,
+        reasoning_content="Look it up.",
+        provider_data={
+            "content_blocks": copy.deepcopy(reply),
+            "server_tool_blocks": copy.deepcopy([unanswered, _TOOL_SEARCH, result_with_text]),
+            "signature": "sig-1",
+            "stop_reason": "end_turn",
+        },
+    )
+
+    bodies = []
+    for stored in (stored_earlier, stored_now):
+        wire.replies[:] = [sse_reply([_TEXT])]
+        history = [question, stored, _user("And the sky?")]
+        bodies.append(await _sent(provider, wire, history, tools=[_WEATHER_TOOL]))
+
+    request_shape = [_THINKING_BLOCK, _TOOL_SEARCH, _TOOL_SEARCH_RESULT, {"type": "text", "text": _CITED_ANSWER}]
+    assert (stored_now.provider_data or {})["claude_blocks"] == request_shape
+    # The parity goldens pin the byte order of turns earlier releases stored; this authored one has its own key order.
+    assert bodies[0] == bodies[1]
+    replayed = bodies[1]["messages"][1]["content"]
+    assert [
+        {key: value for key, value in block.items() if key != "cache_control"} for block in replayed
+    ] == request_shape
+
+
+def test_a_turn_stored_with_its_response_blocks_reads_in_request_shape_outside_a_request() -> None:
+    """The reader of stored turns gives an earlier release's turn its request shape wherever it is read."""
+    cited = {"type": "text", "text": _CITED_ANSWER, "citations": [dict(_STORED_CITATIONS["char_location_with_title"])]}
+    ran = {"type": "tool_use", "id": "toolu_ran", "name": "get_weather", "input": {"city": "Paris"}}
+    cut_off = {"type": "tool_use", "id": "toolu_cut_off", "name": "get_weather", "input": {}}
+    turn = Message(
+        role="assistant",
+        content=_CITED_ANSWER,
+        reasoning_content="Look it up.",
+        tool_calls=[{"id": "toolu_ran", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}],
+        provider_data={"content_blocks": [_THINKING_BLOCK, cited, ran, cut_off], "signature": "sig-1"},
+    )
+
+    assert replayed_blocks(turn) == [_THINKING_BLOCK, {"type": "text", "text": _CITED_ANSWER}, ran]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_stored_without_content_blocks_replays_its_tool_search_in_request_shape(tmp_path: Path) -> None:
+    """A search an older release stored only among the server-tool blocks replays as every stored search does."""
+    unanswered = {**_TOOL_SEARCH, "id": "srvtoolu_unanswered"}
+    answer = Message(
+        role="assistant",
+        content="Sunny.",
+        provider_data={
+            "server_tool_blocks": [unanswered, _TOOL_SEARCH, {**_TOOL_SEARCH_RESULT, "text": "Found 1 tool"}],
+        },
+    )
+    wire = Wire(sse_reply([_TEXT]))
+
+    body = await _sent(
+        route_provider("anthropic", tmp_path, wire),
+        wire,
+        [_user("Weather?"), answer, _user("And now?")],
+        tools=[_WEATHER_TOOL],
+    )
+
+    assert body["messages"][1]["content"] == [_TOOL_SEARCH, _TOOL_SEARCH_RESULT, {"text": "Sunny.", "type": "text"}]
+
+
 # --- Tool result order ----------------------------------------------------------------------------------------
 
 # The user message the Agno-era loop appended after a tool batch whose results carried media.
@@ -704,6 +810,37 @@ async def test_an_empty_summary_keeps_the_tool_turn_thinking(tmp_path: Path, *, 
 
 
 @pytest.mark.asyncio
+async def test_a_checkpoint_stored_with_its_response_blocks_replays_as_a_new_one_does(tmp_path: Path) -> None:
+    """Checkpoint items an earlier release kept as the response returned them replay without the citations."""
+    cited = {"type": "text", "text": _CITED_ANSWER, "citations": [dict(_STORED_CITATIONS["char_location_with_title"])]}
+    wire = Wire(sse_reply([_TEXT]))
+    provider = route_provider("anthropic", tmp_path, wire)
+    stored_now = await _recorded_reply(provider, wire, [_CHECKPOINT, cited])
+    provider_data = {key: value for key, value in (stored_now.provider_data or {}).items() if key != "claude_blocks"}
+    checkpoint = provider_data["mindroom_native_compaction"]
+    stored_earlier = replace(
+        stored_now,
+        provider_data={
+            **provider_data,
+            "content_blocks": [dict(_CHECKPOINT), copy.deepcopy(cited)],
+            "server_tool_blocks": [dict(_CHECKPOINT)],
+            "mindroom_native_compaction": {**checkpoint, "items": [dict(_CHECKPOINT), copy.deepcopy(cited)]},
+        },
+    )
+
+    bodies = []
+    for stored in (stored_earlier, stored_now):
+        wire.replies[:] = [sse_reply([_TEXT])]
+        history = [_user("Hi"), stored, _user("Continue.")]
+        bodies.append(await _sent(provider, wire, history, native_compaction=native_settings(provider)))
+
+    assert checkpoint["items"] == [_CHECKPOINT, {"type": "text", "text": _CITED_ANSWER}]
+    assert bodies[0] == bodies[1]
+    assert [block["type"] for block in bodies[1]["messages"][0]["content"]] == ["compaction", "text"]
+    assert "citations" not in json.dumps(bodies[1])
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_replay_drops_the_unsigned_thinking_after_the_checkpoint(tmp_path: Path) -> None:
     """Checkpoint items replace the stored blocks on replay, so they must drop unsigned thinking too."""
     signed = {"type": "thinking", "thinking": "", "signature": "complete"}
@@ -756,7 +893,7 @@ async def test_native_reactivation_discards_only_mismatched_thinking(tmp_path: P
     assert native_thinking in native_body["messages"][0]["content"]
     assert canonical_thinking not in [block for message in native_body["messages"] for block in message["content"]]
     assert resumed_thinking in [block for message in wire.body()["messages"] for block in message["content"]]
-    assert canonical_thinking in canonical.message.provider_data["content_blocks"]
+    assert canonical_thinking in canonical.message.provider_data["claude_blocks"]
 
 
 @pytest.mark.asyncio
@@ -777,7 +914,7 @@ async def test_switching_the_claude_model_restores_the_canonical_history(tmp_pat
 
     assert body["messages"][0]["content"][0]["text"] == "Original facts."
     assert "compaction" not in json.dumps(body["messages"])
-    assert reply.provider_data["content_blocks"][0]["type"] == "compaction"
+    assert reply.provider_data["claude_blocks"][0]["type"] == "compaction"
 
 
 @pytest.mark.asyncio
@@ -792,6 +929,9 @@ async def test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint(
     """Discarding a checkpoint must not send its signed thinking against the restored prefix."""
     thinking = {"type": "thinking", "thinking": "Internal reasoning.", "signature": "checkpoint-bound"}
     redacted = {"type": "redacted_thinking", "data": "opaque-thinking"}
+    later_thinking = {"type": "thinking", "thinking": "Later reasoning.", "signature": "later-bound"}
+    later_redacted = {"type": "redacted_thinking", "data": "later-opaque"}
+    later_text = {"type": "text", "text": "Later reply."}
     wire = Wire(sse_reply([_TEXT]))
     provider = route_provider(route, tmp_path, wire, id="claude-fable-5-1")
     anchor = await _recorded_reply(provider, wire, [_CHECKPOINT, thinking, _TEXT])
@@ -811,7 +951,14 @@ async def test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint(
             content="Later reply.",
             reasoning_content="Later reasoning.",
             redacted_reasoning_content="later-opaque",
-            provider_data={"signature": "later-bound"},
+            provider_data={"claude_blocks": [later_thinking, later_redacted, later_text]},
+        ),
+        _user("Once more."),
+        # A turn with stored blocks replays only them, even when stale thinking leaves none.
+        Message(
+            role="assistant",
+            redacted_reasoning_content="only-opaque",
+            provider_data={"claude_blocks": [{"type": "redacted_thinking", "data": "only-opaque"}]},
         ),
         _user("Finish."),
     ]
@@ -829,10 +976,9 @@ async def test_canonical_fallback_removes_the_thinking_bound_to_the_checkpoint(
         assert redacted in blocks
     else:
         assert all(block["type"] not in {"compaction", "thinking", "redacted_thinking"} for block in blocks)
-        assert {"type": "text", "text": "Original facts."} in [
-            {key: value for key, value in block.items() if key != "cache_control"} for block in blocks
-        ]
-        assert {"type": "text", "text": "Later reply."} in blocks
+        unmarked = [{key: value for key, value in block.items() if key != "cache_control"} for block in blocks]
+        assert {"type": "text", "text": "Original facts."} in unmarked
+        assert later_text in unmarked
 
 
 @pytest.mark.asyncio
@@ -1061,5 +1207,5 @@ async def test_thinking_overrides_align_the_replay_with_the_effective_mode(
     )
 
     assert provider.settings.effective_thinking() == expected_thinking
-    assert (redacted in (projected[1].provider_data or {})["content_blocks"]) is keep_thinking
-    assert (reply.provider_data or {})["content_blocks"][1] == redacted
+    assert (redacted in (projected[1].provider_data or {})["claude_blocks"]) is keep_thinking
+    assert (reply.provider_data or {})["claude_blocks"][1] == redacted

@@ -2811,6 +2811,7 @@ depends_on = [
 visibility = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
+    "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.mid_turn_compaction",
@@ -2829,7 +2830,29 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 [[modules]]
 path = "mindroom.providers.anthropic.repairs"
 depends_on = ["mindroom.providers.claude_wire_blocks"]
-visibility = ["mindroom.providers.anthropic.prompt_cache"]
+visibility = [
+    "mindroom.providers.anthropic.legacy_stored_turns",
+    "mindroom.providers.anthropic.prompt_cache",
+    "mindroom.providers.anthropic.wire",
+]
+
+[[modules]]
+path = "mindroom.providers.anthropic.legacy_stored_turns"
+depends_on = [
+    "mindroom.native_compaction",
+    "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.claude_wire_blocks",
+]
+visibility = ["mindroom.providers.anthropic.native_compaction", "mindroom.providers.anthropic.stored_turns"]
+
+[[modules]]
+path = "mindroom.providers.anthropic.stored_turns"
+depends_on = [
+    "mindroom.llm",
+    "mindroom.providers.anthropic.legacy_stored_turns",
+    "mindroom.providers.claude_wire_blocks",
+]
+visibility = ["mindroom.providers.anthropic.prompt_cache", "mindroom.providers.anthropic.wire"]
 
 [[modules]]
 path = "mindroom.providers.anthropic.wire"
@@ -2837,6 +2860,8 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_defaults",
+    "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.anthropic.stored_turns",
     "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.media_files",
 ]
@@ -2855,6 +2880,7 @@ path = "mindroom.providers.anthropic.prompt_cache"
 depends_on = [
     "mindroom.model_defaults",
     "mindroom.providers.anthropic.repairs",
+    "mindroom.providers.anthropic.stored_turns",
     "mindroom.providers.cache_ladder",
     "mindroom.providers.claude_wire_blocks",
     "mindroom.providers.names",
@@ -2863,7 +2889,12 @@ visibility = ["mindroom.history.mid_turn_compaction", "mindroom.providers.anthro
 
 [[modules]]
 path = "mindroom.providers.anthropic.native_compaction"
-depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
+depends_on = [
+    "mindroom.model_defaults",
+    "mindroom.native_compaction",
+    "mindroom.providers.anthropic.legacy_stored_turns",
+    "mindroom.providers.claude_wire_blocks",
+]
 visibility = ["mindroom.providers.anthropic.messages"]
 
 [[modules]]
