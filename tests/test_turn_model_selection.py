@@ -84,3 +84,11 @@ def test_a_team_turn_freezes_the_team_and_member_models_by_one_rule(
     for model_name, entities in overrides:
         _override(config, model_name, *entities)
     assert _team_models(config, explicit=explicit) == expected
+
+
+def test_an_ad_hoc_team_runs_its_hosts_model_without_governing_members(tmp_path: Path) -> None:
+    """A team an agent hosts runs that agent's model; the host's thread override reaches only the host as a member."""
+    config = _config(tmp_path)
+    _override(config, "mx", "a")
+    selection = resolve_team_turn_models("a", ["a", "b"], _ROOM, config, runtime_paths_for(config), thread_id=_THREAD)
+    assert (selection.team_model_name, selection.member_model_names) == ("mx", {"a": "mx", "b": "m2"})

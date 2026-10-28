@@ -9,6 +9,7 @@ import pytest
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.delegation.state import SubagentPersona
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import offered_function, source_toolkit
 from tests.identity_helpers import persist_entity_accounts
@@ -173,6 +174,11 @@ def _docker_runtime_paths(tmp_path: Path) -> RuntimePaths:
         pytest.param({"tools": ["attachments", "shell"], "worker_tools": []}, False, id="everything-in-primary"),
         # Today an explicit list counts workspace tools the agent does not have.
         pytest.param({"tools": ["attachments"], "worker_tools": ["file"]}, True, id="explicit-list-names-absent-tool"),
+        pytest.param(
+            {"tools": ["attachments", "shell"], "_persona": ("attachments",)},
+            False,
+            id="attachments-only-persona",
+        ),
     ],
 )
 def test_attachments_save_where_the_agents_workspace_tools_run(
@@ -182,6 +188,7 @@ def test_attachments_save_where_the_agents_workspace_tools_run(
 ) -> None:
     """Attachments go to the worker only when the agent's workspace-path tools run there."""
     runtime_paths = _docker_runtime_paths(tmp_path)
+    persona_tools = agent.pop("_persona", None)
     config = Config.validate_with_runtime(
         {
             "defaults": {"tools": [], "allow_self_config": False},
@@ -198,6 +205,9 @@ def test_attachments_save_where_the_agents_workspace_tools_run(
         execution_identity=_identity(room=True),
         knowledge=None,
         active_model_name=None,
+        persona=None
+        if persona_tools is None
+        else SubagentPersona(source_kind="inline", source_name="", system_prompt="Attach.", tools=persona_tools),
     )
     attachments = source_toolkit(offered_function(build, "view_file"))
     assert attachments._tools_use_worker(None) is uses_worker  # type: ignore[attr-defined, arg-type]
