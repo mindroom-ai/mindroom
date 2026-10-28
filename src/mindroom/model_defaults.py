@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
+    "AZURE_OPENAI_API_VERSION_DEFAULT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
@@ -265,6 +266,10 @@ _OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"
 
 # The public endpoints of the hosted providers; Groq's and Cerebras's are hosts their routes append an API path to.
 OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
+# The newest generally available dated Azure OpenAI data-plane API version, which a model that sets no ``api_version``
+# requests (https://github.com/Azure/azure-rest-api-specs, specification/cognitiveservices/data-plane/OpenAIInference/
+# stable, checked 2026-10-27); Azure's later GA releases are the undated v1 API.
+AZURE_OPENAI_API_VERSION_DEFAULT = "2024-10-21"
 ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 GROQ_HOST_DEFAULT = "https://api.groq.com"

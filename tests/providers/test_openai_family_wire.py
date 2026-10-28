@@ -11,6 +11,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import openai
 import pytest
 from pydantic import BaseModel
@@ -49,7 +50,7 @@ from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.pipeline import retry as retry_stage
-from tests.providers.golden_support import PacedBytes, encoded_response
+from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport
 from tests.providers.openai_family_support import (
     golden_provider,
     openai_family_adapter,
@@ -816,6 +817,51 @@ def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
 
     assert type(error) is ProviderUnavailable
     assert (str(error), error.status_code, error.retryable) == (page, 502, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "variable", "placeholder"),
+    [
+        ({"provider": "openai", "id": "gpt-4.1"}, "OPENAI_API_KEY", "your-openai-key-here"),
+        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, "OPENROUTER_API_KEY", "your-openrouter-key-here"),
+        (
+            {
+                "provider": "azure",
+                "id": "gpt-6-astra",
+                "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"},
+            },
+            "AZURE_OPENAI_API_KEY",
+            "your-azure-openai-key-here",
+        ),
+    ],
+    ids=["openai", "openrouter", "azure"],
+)
+async def test_a_starter_placeholder_key_is_a_missing_key(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    variable: str,
+    placeholder: str,
+) -> None:
+    """An unedited starter ``.env`` value is no key, so the reply says how to connect one instead of sending it."""
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(401, json={"error": {"message": "Incorrect API key provided"}})
+
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={variable: placeholder},
+    )
+    runtime = provider_runtime(paths, http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)))
+    adapter = build_provider(ModelConfig(**model_config), runtime)
+
+    with pytest.raises(AuthenticationFailed) as info:
+        await complete(adapter, ModelRequest(messages=[_user()]))
+
+    assert (info.value.code, sent) == ("missing_api_key", [])
 
 
 @pytest.mark.asyncio
