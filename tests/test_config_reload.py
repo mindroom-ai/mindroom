@@ -2127,6 +2127,23 @@ def test_config_update_plan_rebuilds_an_entity_that_changes_kind_under_the_same_
 
 
 @pytest.mark.parametrize(
+    ("section", "entity"),
+    [pytest.param("teams", "crew", id="team"), pytest.param("agents", "other", id="agent")],
+)
+def test_config_update_plan_rebuilds_a_bot_left_over_from_a_failed_removal(section: str, entity: str) -> None:
+    """Restoring an entity whose removal failed part way rebuilds its half-stopped bot instead of keeping it."""
+    removal_config = _entity_edit_config(lambda data: data[section].pop(entity))
+    plan = build_config_update_plan(
+        current_config=removal_config,
+        new_config=_entity_edit_config(),
+        bots={name: AsyncMock(running=True) for name in (ROUTER_AGENT_NAME, "helper", "other", "crew")},
+    )
+
+    assert entity in plan.restart
+    assert entity not in plan.start | plan.remove
+
+
+@pytest.mark.parametrize(
     ("change", "entity"),
     [
         pytest.param(_update_helper(instructions=["Be brief."]), "helper", id="agent"),
