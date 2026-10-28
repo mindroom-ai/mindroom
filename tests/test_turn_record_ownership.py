@@ -223,7 +223,8 @@ async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored
         TurnSinks(turn_recorder=record),
         continuation=_continuation(),
     )
-    assert await anext(stream) == "notice:the model failed"
+    # A failure's text is a bare string, not the adapter's text chunk: readers take it as a failed run's reply.
+    assert await anext(stream) == "the model failed"
     await stream.aclose()
 
     assert record.outcome == "interrupted"

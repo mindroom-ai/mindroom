@@ -1884,6 +1884,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.history.session_context",
+    "mindroom.history.turn_recorder",
     "mindroom.knowledge.utils",
     "mindroom.llm",
     "mindroom.logging_config",
@@ -2945,6 +2946,7 @@ depends_on = [
     "mindroom.llm",
 ]
 visibility = [
+    "mindroom.api.openai_compat",
     "mindroom.ai",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",

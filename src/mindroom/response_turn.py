@@ -1142,8 +1142,11 @@ async def stream_response_turn[ChunkT](
     *,
     continuation: TurnContinuationRunState,
     resume: TurnResume | None = None,
-) -> AsyncGenerator[ChunkT, None]:
-    """Own the whole response while binding context only during pulls and close."""
+) -> AsyncGenerator[ChunkT | str, None]:
+    """Own the whole response while binding context only during pulls and close.
+
+    A failed turn's reply is a bare string, the chunk delivery and the OpenAI-compatible API read as a failed run's.
+    """
     lifetime = CliTurnLifetime()
     stream = context_bound_async_stream(
         context_factory=lifetime.bind,
@@ -1172,7 +1175,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     continuation: TurnContinuationRunState,
     cli_lifetime: CliTurnLifetime,
     resume: TurnResume,
-) -> AsyncGenerator[ChunkT, None]:
+) -> AsyncGenerator[ChunkT | str, None]:
     """Run one response turn, yielding the attempt chunks as they arrive.
 
     The driver is the only writer of the turn's record: it settles the record before it yields the text that ends the
@@ -1223,7 +1226,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 if isinstance(resolution, HandledAttempt):
                     _publish_run_metadata(sinks, resolution.metadata_content)
                     await _record_interrupted(ctx, adapter, sinks, run, RunStatus.error)
-                    yield adapter.make_text_chunk(resolution.text)
+                    yield resolution.text
                     return
                 settle = _settle_completed_attempt(
                     ctx,
@@ -1255,4 +1258,4 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except Exception as e:
         failure_text = await _failed_turn_text(ctx, adapter, sinks, run, e)
         if failure_text is not None:
-            yield adapter.make_text_chunk(failure_text)
+            yield failure_text

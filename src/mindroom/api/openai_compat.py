@@ -62,6 +62,7 @@ from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
@@ -828,15 +829,17 @@ async def _non_stream_completion(
         knowledge=knowledge,
         refresh_scheduler=refresh_scheduler,
     )
+    record = TurnRecorder()
     response_text = await ai_response(
         replace(turn, show_tool_calls=False),
         runtime_paths,
         config,
-        sinks=TurnSinks(run_metadata_collector=run_metadata),
+        sinks=TurnSinks(turn_recorder=record, run_metadata_collector=run_metadata),
     )
 
-    # Detect error responses from ai_response()
-    if is_error_response(response_text):
+    # A failed attempt's error text can follow partial narration, so its record says it failed; a turn refused before
+    # any attempt ran leaves only its error text.
+    if record.outcome == "interrupted" or is_error_response(response_text):
         logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
         return error_response(500, "Agent execution failed", error_type="server_error")
 

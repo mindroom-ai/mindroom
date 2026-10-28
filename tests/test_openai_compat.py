@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from agno.run import RunContext as AgnoRunContext
+    from httpx import Response
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
@@ -1669,6 +1670,94 @@ class TestChatCompletions:
             )
 
         assert response.status_code == 500
+
+
+async def _provider_fails() -> None:
+    msg = "Connection reset by peer"
+    raise ConnectionError(msg)
+
+
+def _post_to_a_real_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: Sequence[ScriptStep],
+    *,
+    stream: bool,
+) -> Response:
+    """Post one completion that runs the real agent turn driver over ``script``."""
+    config = Config(
+        agents={"general": AgentConfig(display_name="GeneralAgent", role="General-purpose assistant", rooms=[])},
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
+    )
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([list(script)])})
+    with (
+        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
+        TestClient(app, base_url="http://localhost") as client,
+    ):
+        return client.post(
+            "/v1/chat/completions",
+            json={"model": "general", "messages": [{"role": "user", "content": "Hi"}], "stream": stream},
+        )
+
+
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "whole"])
+def test_a_turn_whose_provider_fails_before_any_text_is_a_500(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A provider failure before the first token fails the request, streamed or not."""
+    response = _post_to_a_real_turn(tmp_path, monkeypatch, [Await(_provider_fails)], stream=stream)
+
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == "Agent execution failed"
+
+
+def test_a_whole_turn_that_fails_after_partial_text_is_a_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Narration before a failure does not make the collected reply a successful completion."""
+    response = _post_to_a_real_turn(
+        tmp_path,
+        monkeypatch,
+        [TextDelta("Checking..."), Await(_provider_fails)],
+        stream=False,
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == "Agent execution failed"
+
+
+def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once text streamed, a failure is the stream's last content chunk, and nothing follows it as an answer."""
+    response = _post_to_a_real_turn(
+        tmp_path,
+        monkeypatch,
+        [TextDelta("Checking..."), Await(_provider_fails)],
+        stream=True,
+    )
+
+    assert response.status_code == 200
+    contents = [
+        delta["content"]
+        for line in response.text.strip().split("\n\n")
+        if line.startswith("data: {")
+        for delta in [json.loads(line.removeprefix("data: "))["choices"][0]["delta"]]
+        if "content" in delta
+    ]
+    assert contents[0] == "Checking..."
+    assert is_error_response(contents[-1])
 
 
 @dataclass
