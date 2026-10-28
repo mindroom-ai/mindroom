@@ -401,7 +401,7 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_gemini_sends_one_attempt_whatever_retries_the_config_authors(tmp_path: Path) -> None:
-    """The request pipeline alone retries, so authored ``http_options.retry_options`` never multiply a request."""
+    """The request pipeline retries, so authored ``http_options.retry_options`` never multiply a request."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -1378,11 +1378,14 @@ async def test_a_gemini_api_model_without_any_key_fails_as_a_missing_key(
 
 
 @pytest.mark.asyncio
-async def test_gemini_files_api_calls_send_once_whatever_retries_the_config_authors(
+async def test_a_gemini_file_lookup_sends_once_whatever_retries_the_config_authors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An attachment too large to inline makes Files API calls, which the pipeline alone retries, as generation."""
+    """The Files API lookup of a large attachment sends once, as generation does, whatever retries the config authors.
+
+    Only an upload's transfer keeps google-genai's own fixed retries, which no option turns off.
+    """
     # These files are small, so a tiny inline limit sends them through the Files API.
     monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
     audio_path = tmp_path / "voice.ogg"

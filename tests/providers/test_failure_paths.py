@@ -3,8 +3,8 @@
 Each row scripts the wire's answer to every request of one route, sends one request through the
 route's real adapter inside the production pipeline, and pins how many HTTP requests it makes before it fails,
 the normalized error it ends with, and how the error reply the user reads begins.
-A failure that is not transient is final at once. After a transient failure the pipeline, the only retry owner since
-no SDK client retries, reissues the request at most four times and only until the attempt commits, by producing
+A failure that is not transient is final at once. After a transient failure the pipeline, since the SDK clients send
+each request once, reissues the request at most four times and only until the attempt commits, by producing
 output the caller could have shown or by starting a hosted tool that acts or costs; a stall it reissues only once.
 A comment explains each other case.
 Error replies follow the typed error: a rate limit reads as one, any other transient failure as temporary

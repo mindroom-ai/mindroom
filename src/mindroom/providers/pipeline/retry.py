@@ -1,7 +1,7 @@
 """Bounded retries for transient provider failures, and the stream idle limit.
 
-This stage alone retries a model request: the SDK clients send each request once. A failed request is reissued
-here until the attempt committed: produced output the caller could have shown, or started a hosted tool that acts
+This stage retries a failed model request; the SDK clients send each request once, except that google-genai retries a
+Gemini file upload's transfer a fixed number of times on its own. A failed request is reissued here until the attempt committed: produced output the caller could have shown, or started a hosted tool that acts
 or costs, which a retry would run again. A stall is decided the same way. Earlier tool calls and their results stay
 in the conversation; only the failed request repeats.
 
