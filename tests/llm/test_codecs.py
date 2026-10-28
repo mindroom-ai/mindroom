@@ -201,9 +201,27 @@ def test_a_message_stored_with_a_malformed_call_id_loads_without_it(malformed: o
 
     assert assistant.tool_calls == [{**calls[0], "id": None}, calls[1], calls[2]]
     assert (bad.tool_call_id, good.tool_call_id) == (None, "call-2")
-    assert [(log["event"], log["message_id"]) for log in logs] == [
-        ("stored_tool_call_id_dropped", "m.call"),
-        ("stored_tool_call_id_dropped", "m.bad"),
+    assert [(log["event"], log["log_level"], log["message_id"]) for log in logs] == [
+        ("stored_tool_call_id_dropped", "debug", "m.call"),
+        ("stored_tool_call_id_dropped", "debug", "m.bad"),
+    ]
+
+
+def test_a_message_whose_result_and_call_ids_are_both_malformed_logs_one_line() -> None:
+    """Each decode of a row logs its dropped ids once, at debug level, since the row is read again on every load."""
+    stored = {
+        "id": "m.odd",
+        "role": "assistant",
+        "tool_call_id": "",
+        "tool_calls": [{"id": 7, "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+        "created_at": 1,
+    }
+
+    with capture_logs() as logs:
+        Message.from_dict(stored)
+
+    assert [(log["event"], log["log_level"], log["message_id"]) for log in logs] == [
+        ("stored_tool_call_id_dropped", "debug", "m.odd"),
     ]
 
 

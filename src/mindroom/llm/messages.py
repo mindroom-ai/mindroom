@@ -262,22 +262,25 @@ def _has_malformed_id(call: object) -> bool:
 # first delta's id unchecked; v2026.4.36 moved to Agno 2.5.13, which gives a call with an empty id a uuid4 one, and the
 # owned writers from v2026.10.499 store non-empty text. An id that is not text has no known writer: it is unversioned
 # external input, since worker code could write the Agno-era run data the storage v2 conversion read.
-# Handling: the row decodes with that id as None and a ``stored_tool_call_id_dropped`` log line naming the message, so
-# the load never fails, every wire reads a call id as text or None, and the message's other ids and calls read as
+# Handling: the row decodes with that id as None and one ``stored_tool_call_id_dropped`` debug line naming the message,
+# so the load never fails, every wire reads a call id as text or None, and the message's other ids and calls read as
 # stored.
 # Coverage: tests/llm/test_codecs.py::test_a_message_stored_with_a_malformed_call_id_loads_without_it,
+#   tests/llm/test_codecs.py::test_a_message_whose_result_and_call_ids_are_both_malformed_logs_one_line,
 #   tests/providers/test_gemini_ollama_synthetic_adapters.py::test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones,
 #   tests/session_storage/test_legacy_agno3_conversion.py::test_converted_call_ids_are_text_or_none_so_folded_calls_read
 def _stored_call_ids(data: Mapping[str, Any], message_id: str) -> tuple[Any, Any]:
     """Return a stored message's ``tool_call_id`` and ``tool_calls``, each malformed call id dropped to None."""
     tool_call_id = data.get("tool_call_id")
     tool_calls = data.get("tool_calls")
+    dropped = False
     if _is_malformed_call_id(tool_call_id):
-        logger.warning("stored_tool_call_id_dropped", message_id=message_id)
-        tool_call_id = None
+        tool_call_id, dropped = None, True
     if isinstance(tool_calls, list) and any(_has_malformed_id(call) for call in tool_calls):
-        logger.warning("stored_tool_call_id_dropped", message_id=message_id)
-        tool_calls = [{**call, "id": None} if _has_malformed_id(call) else call for call in tool_calls]
+        tool_calls, dropped = [{**call, "id": None} if _has_malformed_id(call) else call for call in tool_calls], True
+    if dropped:
+        # The row stays as stored and is read again on every load, so the line repeats and stays at debug level.
+        logger.debug("stored_tool_call_id_dropped", message_id=message_id)
     return tool_call_id, tool_calls
 
 
