@@ -778,8 +778,8 @@ def load_toolkit_class[T: type](tool_name: str, factory: Callable[[], T]) -> T:
     """Return the toolkit class ``factory`` registers as ``tool_name``, refusing one MindRoom does not run."""
     with optional_dependency_environment():
         tool_class = factory()
-    # By class name, so building or checking a tool never imports Agno's MCP module and the MCP SDK.
-    if any(base.__name__ == "MCPTools" for base in tool_class.__mro__):
+    # By module and class name, so building or checking a tool never imports Agno's MCP module and the MCP SDK.
+    if any((base.__module__, base.__name__) == ("agno.tools.mcp.mcp", "MCPTools") for base in tool_class.__mro__):
         msg = (
             f"Tool '{tool_name}' subclasses Agno MCPTools, which MindRoom does not run; "
             "configure its MCP server under mcp_servers: in config.yaml instead"
