@@ -43,12 +43,22 @@ _JOB_FAILED_TEXT = "Background tool job failed."
 # tests/test_job_tools.py::test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed;
 # tests/test_job_tools.py::test_collect_reads_a_job_saved_failed_without_error_text_as_failed
 def job_failure_text(value: Any, payload: ToolResultPayload) -> str:  # noqa: ANN401 - A consumed job's value.
-    """Return what a reader of a consumed job reports for its failure: the payload's error, else the value's text.
+    """Return the text a consumed job reports for its failure: the payload's error, else the value's text.
 
-    ``value`` and ``payload`` are what ``consume_tool_job`` returned; each reader decides which statuses fail.
+    ``value`` and ``payload`` are what ``consume_tool_job`` returned. Which outcomes fail a read of one job is
+    ``job_failure``'s rule.
     """
     text = value.content if isinstance(value, ToolValue) else value
     return str(payload.error or text or _JOB_FAILED_TEXT)
+
+
+def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> str | None:  # noqa: ANN401 - A consumed job's value.
+    """Return why a read of one consumed job fails, or None when the job completed.
+
+    Every other outcome fails with its reason, such as why an approval was denied, both for the call that started the
+    job and for a later wait on it.
+    """
+    return None if job.status == "completed" else job_failure_text(value, payload)
 
 
 @dataclass(frozen=True)

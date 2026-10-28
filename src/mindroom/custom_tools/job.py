@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from agno.tools import Toolkit
 
-from mindroom.tool_jobs.consumption import consume_tool_job, job_failure_text
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
@@ -52,13 +52,14 @@ def is_job_function(function: ToolFunction) -> bool:
 
 
 async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
-    """Return a claimed outcome as this call's own result, raising any other outcome for the call to report as failed.
+    """Return a completed job's outcome as this call's own result; every other outcome raises its reason.
 
-    Like the call that started the job, a cancelled, denied, or interrupted job fails with the reason it gives.
+    The call that started the job fails the same way (``job_failure``).
     """
     value, payload = await consume_tool_job(runtime, job, claim)
-    if job.status != "completed":
-        raise RuntimeError(job_failure_text(value, payload))
+    failure = job_failure(job, value, payload)
+    if failure is not None:
+        raise RuntimeError(failure)
     return value
 
 
