@@ -476,6 +476,14 @@ def test_search_items_replay_with_their_own_turn_not_an_identical_earlier_one() 
     ]
 
 
+def test_a_reply_without_text_or_calls_replays_as_an_empty_answer() -> None:
+    """An assistant message with neither text nor calls still replays as the turn it was, with empty text."""
+    assert _input([Message(role="user", content="Hi."), Message(role="assistant")]) == [
+        {"role": "user", "content": "Hi."},
+        {"role": "assistant", "content": ""},
+    ]
+
+
 def test_claude_server_tool_blocks_are_not_replayed_to_responses() -> None:
     """Anthropic-native server tool blocks stay out when a thread switches to a Responses model."""
     assistant = Message(
@@ -1002,7 +1010,7 @@ def test_disabled_storage_replays_explicitly_with_encrypted_reasoning(tmp_path: 
     """A stateless request never continues a stored response and asks for the reasoning it must replay."""
     adapter = responses_adapter(tmp_path, model_id="reasoning-alias", reasoning_effort="high", **storage)
     messages = [
-        Message(role="assistant", content="Earlier reply", provider_data={"response_id": "resp_1"}),
+        Message(role="assistant", content="Earlier reply", provider_data=_stored_response("resp_1")),
         Message(role="user", content="Follow up"),
     ]
 
