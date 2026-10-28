@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 # Legacy format: approval_continuations.failure_reason TEXT, the reason a failing continuation failed: the cancellation
 # codes cancelled_by_user, sync_restart_cancelled, and interrupted, the fixed text a resume a shutdown cut short
 # stored, failed for a reply rule's fence, or an error's own text.
-# Last legacy release: v2026.10.654; replacement: the next release stores failure_kind (error, user_stop, restart,
+# Last legacy release: v2026.10.655; replacement: the next release stores failure_kind (error, user_stop, restart,
 # interrupted, or shutdown) and failure_detail, the text of an error.
 # Handling: the schema upgrade adds failure_kind and failure_detail, converts each failing continuation's reason
 # (cancelled_by_user to user_stop, sync_restart_cancelled to restart, interrupted to interrupted, the shutdown text to

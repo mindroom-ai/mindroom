@@ -26,7 +26,7 @@ logger = get_logger(__name__)
 # scope again with the originating card's event; scheduled_call_approvals held its card's event, decider, and approved
 # scope; approval_action_tombstones held the events of retired cards and receipt aliases. Selected when any of those
 # tables exists.
-# Last legacy release: v2026.10.654; replacement: the next release keeps one approval_calls row per call, one
+# Last legacy release: v2026.10.655; replacement: the next release keeps one approval_calls row per call, one
 # approval_cards row per card or receipt, approval_card_events, approval_card_scopes, and trimmed approval_grants and
 # scheduled_call_approvals.
 # Handling: copies every fact a decision or a resume reads, so a card pending before the upgrade can still be answered
