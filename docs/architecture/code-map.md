@@ -95,7 +95,7 @@ Matrix sync callback
 | `loop_hooks.py` | The hooks every run or resume installs on the agent loop, composed once in the order the turn applies them; `agent_loop_hooks` and `leader_loop_hooks` name what an agent's and a team leader's run differ by, and `HookTurn` holds what every run takes from its turn |
 | `run_storage.py` | Where an agent or team run stores (`RunStorage`, taken from a scope context or bound to a turn), the terminal record it hands over and the error when it hands none, and the persist callback that keeps and stores it |
 | `response_attempt.py` | Runs one visible response attempt as its reply span's cancellable task |
-| `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `response_lifecycle.py` | Shared response lifecycle helpers, queued-notice state, and the approval holds it follows from `ApprovalSignals` |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
@@ -113,7 +113,7 @@ Matrix sync callback
 | `approval/tool_owners.py` | Recorded toolkit restoration and exact owner validation for saved approvals |
 | `approval/response.py` | Which calls of a paused run need a person: the approval plan of a paused generation and the publication of its cards |
 | `approval/continuation_rules.py` | Pure rules for what a paused reply does next: `next_step` over its continuation's state, lease or claim holder, failure kind, claim outcome, and final answer, for each trigger (dispatch, a resume's end, an unavailable owner, a minimal-mode exit) |
-| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, approval holds, and running the steps `continuation_rules` decides, including failure settlement |
+| `approval/continuation_runner.py` | `ApprovalContinuationRunner`: a reply's approval lifecycle that `ResponseRunner` delegates to: pausing for approval, resuming the approved run in its reply, minimal-mode CLI waits, and running the steps `continuation_rules` decides, including failure settlement |
 | `approval/manager.py` | Matrix-backed tool approval runtime state: card publication, clicks, deadlines, and recovery over typed card reads |
 | `approval/auto_approve_windows.py` | Durable per-conversation `!auto_approve` windows that approve one requester's gated calls without cards |
 | `oauth/credential_binding.py` | Canonical OAuth provider and worker-target bindings for browser workflows |

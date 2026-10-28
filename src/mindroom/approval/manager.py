@@ -1213,7 +1213,9 @@ class ApprovalManager:
         status: _ResolutionStatus,
         reason: str | None,
     ) -> tuple[_ApprovalStatus, str | None, bool]:
-        """Deny an approval no reviewer could see in full; the journal applies the deadline when it decides."""
+        """Expire a card past its deadline, and deny an approval no reviewer could see in full."""
+        if card.expires_at_ns is not None and card.expires_at_ns <= _now_ns():
+            return "expired", TIMEOUT_REASON, False
         if status == "approved" and not card.approvable:
             return "denied", _DEFAULT_TRUNCATED_APPROVAL_REASON, True
         return status, reason, False

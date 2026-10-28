@@ -57,7 +57,6 @@ from mindroom.constants import (
 )
 from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.delivery_gateway import (
-    DeliveryStage,
     EditTextRequest,
     FinalDeliveryRequest,
     ResponseIdentity,
@@ -1032,7 +1031,7 @@ class ApprovalContinuationRunner:
                     target=target,
                 )
             except (asyncio.CancelledError, Exception):
-                delivery = await run_coroutine_until_complete(self._final_delivery(claimed, recover=True))
+                delivery, _span_outcome = await run_coroutine_until_complete(self._read_final(claimed, recover=True))
                 if delivery is None:
                     raise
                 if delivery.acknowledged_event_id is None:
@@ -1047,7 +1046,7 @@ class ApprovalContinuationRunner:
                     return
                 progress.settle(await self._approval_outcome_from_delivery(delivery))
                 return
-            if outcome.terminal_status not in {"completed", "suspended"} and await self._final_delivery(claimed):
+            if outcome.terminal_status not in {"completed", "suspended"} and (await self._read_final(claimed))[0]:
                 outcome = FinalDeliveryOutcome(
                     terminal_status="suspended",
                     event_id=claimed.response_event_id,
@@ -1135,7 +1134,7 @@ class ApprovalContinuationRunner:
         target: MessageTarget,
     ) -> str | None:
         """Finalize an acknowledged FINAL the resume froze, as its response lifecycle would have, then finish."""
-        delivery = await self._final_delivery(continuation)
+        delivery, _span_outcome = await self._read_final(continuation)
         if delivery is None:
             return None
         recovered_outcome = await self._approval_outcome_from_delivery(delivery)
@@ -1593,10 +1592,7 @@ class ApprovalContinuationRunner:
     async def _facts(self, continuation: ApprovalContinuation, *, recover: bool) -> ContinuationFacts:
         """Read the facts the rules decide by, recovering FINAL delivery first when ``recover`` asks for it."""
         store = self.deps.replies.store
-        final, final_span_outcome = await read_final(store, continuation)
-        if recover and final is not None and final.acknowledged_event_id is None and not final.permanently_failed:
-            await self.deps.delivery_gateway.recover_deliveries()
-            final, final_span_outcome = await read_final(store, continuation)
+        final, final_span_outcome = await self._read_final(continuation, recover=recover)
         claim = None if continuation.claim_span_id is None else await store.replies.span(continuation.claim_span_id)
         return continuation_facts(
             continuation,
@@ -1638,27 +1634,23 @@ class ApprovalContinuationRunner:
                 assert_never(step)
         return None
 
-    async def _final_delivery(
+    async def _read_final(
         self,
         continuation: ApprovalContinuation,
         *,
         recover: bool = False,
-    ) -> MatrixDelivery | None:
-        """Return the continuation's frozen FINAL, optionally retrying its delivery."""
-        load = partial(
-            self.deps.delivery_gateway.deps.outbox.load_matrix_delivery,
-            delivery_id=continuation.final_delivery_id,
-            stage=DeliveryStage.FINAL,
-        )
-        delivery = await load()
-        if recover and delivery is not None and delivery.acknowledged_event_id is None:
+    ) -> tuple[MatrixDelivery | None, rl.SpanOutcome | None]:
+        """Read the continuation's FINAL and the outcome of its span, retrying an unsent one's delivery first when asked."""
+        store = self.deps.replies.store
+        final, span_outcome = await read_final(store, continuation)
+        if recover and final is not None and final.acknowledged_event_id is None and not final.permanently_failed:
             await self.deps.delivery_gateway.recover_deliveries()
-            delivery = await load()
-        return delivery
+            final, span_outcome = await read_final(store, continuation)
+        return final, span_outcome
 
     async def _answer_stands(self, continuation: ApprovalContinuation) -> bool:
         """Return whether the run's own completed answer is queued or delivered, which no failure may replace."""
-        final, span_outcome = await read_final(self.deps.replies.store, continuation)
+        final, span_outcome = await self._read_final(continuation)
         return final is not None and not final.permanently_failed and span_outcome is rl.SpanOutcome.COMPLETED
 
     async def _request_failure(

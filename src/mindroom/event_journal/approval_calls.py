@@ -33,7 +33,7 @@ type _DecisionStatus = Literal["approved", "denied", "expired"]
 
 # What a job's pending cards say once the job ends without a decision, whether it was stopped or a restart ended it.
 JOB_ENDED_REASON = "The background job asking for this approval ended before a decision."
-_JOB_RUN_PREFIX = "tool-job:"
+JOB_RUN_PREFIX = "tool-job:"
 
 
 class ApprovalDecision(StrEnum):
@@ -92,7 +92,7 @@ class BackgroundApprovalDecision:
 
 def tool_job_run_id(job_id: str) -> str:
     """Return the detached run that owns the calls one background job asks about."""
-    return _JOB_RUN_PREFIX + job_id
+    return JOB_RUN_PREFIX + job_id
 
 
 def approval_arguments_digest(tool_args: Mapping[str, object] | None) -> str:

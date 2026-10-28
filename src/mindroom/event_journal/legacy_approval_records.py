@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.logging_config import get_logger
 
-from . import approval_calls, approval_cards
+from . import approval_calls, approval_cards, scheduled_approvals
 from .approval_calls import JOB_ENDED_REASON, CallKey
 from .identity import encode_thread_id
 from .models import DURABLE_DELIVERY_ID_KEY
@@ -54,8 +54,6 @@ _DROPPED_TABLES = (
     "approval_action_tombstones",
 )
 _REPLACED_TABLES = ("approval_cards", "approval_grants", "scheduled_call_approvals")
-_JOB_RUN_PREFIX = "tool-job:"
-_SCHEDULED_RUN_PREFIX = "scheduled-task:"
 _TOMBSTONE_DELIVERY_PREFIX = "legacy-tombstone:"
 
 
@@ -263,7 +261,11 @@ class _Converted:
             initial = delivery.initial or {}
             final = delivery.final or {}
             owner_kind = (
-                "scheduled" if binding is not None else "job" if call.owner_id.startswith(_JOB_RUN_PREFIX) else "script"
+                "scheduled"
+                if binding is not None
+                else "job"
+                if call.owner_id.startswith(approval_calls.JOB_RUN_PREFIX)
+                else "script"
             )
             grant_card = grant_card_for_call.get(call)
             resolved_by = _text(final.get("resolved_by"))
@@ -390,7 +392,7 @@ class _Converted:
         for row in legacy.bindings:
             principal_id = str(row["principal_id"])
             task_id = str(row["task_id"])
-            call = CallKey.detached(_SCHEDULED_RUN_PREFIX + task_id, task_id)
+            call = CallKey.detached(scheduled_approvals.scheduled_call_run_id(task_id), task_id)
             delivery_id = str(row["delivery_id"])
             initial = legacy.delivery(principal_id, delivery_id).initial
             if (principal_id, delivery_id) not in self.cards:

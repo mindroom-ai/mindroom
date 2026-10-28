@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 async def pending_card(approvals: ApprovalStore, *, room_id: str, card_event_id: str) -> ApprovalCardView | None:
     """Return the live request card an event shows under the card principal's current membership."""
     card = await approvals.approval_card(room_id=room_id, card_event_id=card_event_id)
-    if isinstance(card, ApprovalCardView) and not card.terminal and card.current:
+    if card is not None and not card.terminal and card.current:
         return card
     return None
 
@@ -23,7 +23,7 @@ async def pending_card(approvals: ApprovalStore, *, room_id: str, card_event_id:
 async def card_is_terminal(approvals: ApprovalStore, *, room_id: str, card_event_id: str) -> bool:
     """Return whether no click on the card an event shows can decide anything."""
     card = await approvals.approval_card(room_id=room_id, card_event_id=card_event_id)
-    return card == "terminal" or (isinstance(card, ApprovalCardView) and card.terminal)
+    return card is not None and card.terminal
 
 
 async def resolve_card_event(

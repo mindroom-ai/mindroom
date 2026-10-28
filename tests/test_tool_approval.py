@@ -46,6 +46,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import DURABLE_FINAL_OUTCOME_KEY
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
 from mindroom.event_journal import (
+    TIMEOUT_REASON,
     ApprovalCall,
     ApprovalCardReservation,
     ApprovalContinuation,
@@ -2251,3 +2252,13 @@ async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_pa
         assert recovery._startup_cleanup_retry is None
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.parametrize("approvable", [True, False])
+def test_approving_a_card_past_its_deadline_reports_the_expiry(approvable: bool) -> None:
+    """A late approval expires the card, and never reports unreviewable arguments instead."""
+    card = card_view(expires_at_ns=1, approvable=approvable)
+
+    resolution = ApprovalManager._normalized_resolution_request(card, status="approved", reason=None)
+
+    assert resolution == ("expired", TIMEOUT_REASON, False)

@@ -89,11 +89,6 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - Detached waits end as soon as their decision commits.
 - Cancelling a scheduled task with a stored call is refused while the approval runtime is not ready, instead of silently leaving its approval in place.
 
-## Open decision
-
-- Minimal-mode (CLI) approvals as detached waits, the way job approvals work, would remove the in-place claim, the suspension side channel, the `cli_call` blob, `continue_cli_approval`, and the `cli_exit` rules.
-  It changes user-visible behavior (a minimal-mode call still unapproved at a restart or at the end of its 24-hour CLI lifetime would be reported as not run), so it waits for the owner's decision.
-
 ## Rejected alternatives
 
 - A stored `decided`/`finished` card state: duplicates the call decision and the outbox acknowledgement.
@@ -103,6 +98,8 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 - Settling every failed live resume from dispatch: see above.
 - Publishing signals from the store method after its write returns: a caller cancelled after the commit never publishes.
 - One notification registry per process keyed by database: only tests open a second store, and production refuses a second runtime.
+- Minimal-mode (CLI) approvals as detached waits, the way job approvals work: it would have removed the in-place claim, the suspension side channel, the `cli_call` blob, `continue_cli_approval`, and the `cli_exit` rules, but a minimal-mode call still unapproved at a restart would be reported as not run; the owner decided that a restart must not change what a user with a pending approval sees.
+- Making background-job approvals survive a restart: a job is a task inside the process, so surviving would need a second resume path that rebuilds the call from saved state; the owner kept today's behavior, and the simpler route if restarts must become invisible for jobs too is letting gated calls pause their reply.
 - Keeping the 30-second hold recheck as a safety net: with every mutation publishing through one owner it would only hide a missing publication.
 - Cancelling pending approvals at upgrade: the conversion preserves what a resume needs.
-- From the task brief, unchanged: merging `!auto_approve` windows into timed grants (different products: all tools, no config or membership fence, no receipts), storing detached calls as paused replies (null-reply branches everywhere), making job approvals survive restart (a resume path the docs deliberately leave out), and rebuilding a paused reply's request from the journal (it would rerun ingress policy).
+- From the task brief, unchanged: merging `!auto_approve` windows into timed grants (different products: all tools, no config or membership fence, no receipts), storing detached calls as paused replies (null-reply branches everywhere), and rebuilding a paused reply's request from the journal (it would rerun ingress policy).
