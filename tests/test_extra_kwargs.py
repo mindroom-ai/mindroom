@@ -26,6 +26,7 @@ from mindroom.providers.extra_kwargs import settings_params
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.ollama.settings import OllamaSettings
+from mindroom.providers.openai.build import accepted_extra_kwargs
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.providers.registry import build_model_provider
@@ -920,6 +921,28 @@ def test_a_retired_max_retries_fails_config_load_with_its_reason(tmp_path: Path,
         f"models.default: Unsupported extra_kwargs for provider '{provider}': max_retries was removed; "
         "MindRoom retries a failed model request itself, so remove the setting."
     )
+
+
+_MODELS_DOC = Path(__file__).resolve().parents[1] / "docs" / "configuration" / "models.md"
+
+
+@pytest.mark.parametrize(
+    ("row", "provider"),
+    [
+        ("`openai` with Chat Completions, `zai`, `llama_cpp`", "llama_cpp"),
+        ("`groq`", "groq"),
+        ("`cerebras`", "cerebras"),
+    ],
+    ids=["chat", "groq", "cerebras"],
+)
+def test_the_models_page_lists_the_keys_each_chat_route_accepts(tmp_path: Path, row: str, provider: str) -> None:
+    """The accepted-keys table of the models page names exactly the ``extra_kwargs`` keys the route accepts."""
+    lines = _MODELS_DOC.read_text(encoding="utf-8").splitlines()
+    [cell] = [line.split("|")[2] for line in lines if line.startswith(f"| {row} |")]
+
+    documented = {key.strip().strip("`") for key in cell.split(",")}
+
+    assert documented == accepted_extra_kwargs(ModelConfig(provider=provider, id="m"), _runtime_paths(tmp_path))
 
 
 _NOT_A_MAPPING = "extra_kwargs.client_params must be a mapping, not str"

@@ -33,10 +33,12 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },

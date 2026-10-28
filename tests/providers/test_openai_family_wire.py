@@ -73,7 +73,7 @@ _RESPONSE_USAGE = {"input_tokens": 42, "output_tokens": 12, "total_tokens": 54}
 _OPENAI_CHAT = {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra", "api_key": "test-key"}
 _OPENAI_RESPONSES = {"provider": "openai", "api": "responses", "id": "gpt-6-astra", "api_key": "test-key"}
 _CALL = {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}}
-# A new id a Chat turn stores a call under: when its server sent none, or on the ``openai`` dialect one it rewrites.
+# A new id a Chat turn stores a call under: when its server sent none, or one outside the id rule Chat requests keep.
 _NEW_CHAT_ID = r"call_[0-9a-f]{32}"
 
 
@@ -223,6 +223,25 @@ async def test_chat_stream_tolerates_sparse_tool_call_indexes(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_places_calls_streamed_without_an_index_by_their_position(tmp_path: Path) -> None:
+    """A server that sends no index keeps parallel calls apart by their place in the delta, and continues each there."""
+    calls = [
+        {"id": f"call_{city}", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": '}}
+        for city in ("paris", "rome")
+    ]
+    more = {"tool_calls": [{"function": {"arguments": f'"{city}"}}'}} for city in ("Paris", "Rome")]}
+    reply = _chat_reply(_chunk({"tool_calls": calls}), _chunk(more, finish_reason="tool_calls"))
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+
+    turn = await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert [(call["id"], call["function"]["arguments"]) for call in turn.tool_calls] == [
+        ("call_paris", '{"city": "Paris"}'),
+        ("call_rome", '{"city": "Rome"}'),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("finish_reason", "stop"), [("length", "output_limit"), ("content_filter", "content_filter")])
 async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_reason: str, stop: str) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "cut"}, finish_reason=finish_reason)))
@@ -265,7 +284,8 @@ async def test_a_chat_stream_moves_a_leading_think_block_to_reasoning(tmp_path: 
         ("llama_cpp", "Rain.</think>Pack a coat.", ("Rain.</think>Pack a coat.", None)),
         ("llama_cpp", "Pack a coat. <think>Rain.</think>", ("Pack a coat. <think>Rain.</think>", None)),
         ("llama_cpp", "<think>Rain, cut off at </th", (None, "Rain, cut off at </th")),
-        ("groq", "<think>Rain.</think>Pack a coat.", ("<think>Rain.</think>Pack a coat.", None)),
+        ("groq", "<think>Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
+        ("cerebras", "<think>Rain.</think>Pack a coat.", ("Pack a coat.", "Rain.")),
     ],
     ids=[
         "leading-whitespace",
@@ -273,7 +293,8 @@ async def test_a_chat_stream_moves_a_leading_think_block_to_reasoning(tmp_path: 
         "no-opening-tag-kept",
         "later-tag-kept",
         "unclosed-reasoning",
-        "groq-keeps-the-tags",
+        "groq",
+        "cerebras",
     ],
 )
 async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
@@ -282,10 +303,7 @@ async def test_a_chat_stream_splits_only_a_think_block_that_opens_the_reply(
     content: str,
     expected: tuple[str | None, str | None],
 ) -> None:
-    """Only a reply that opens with ``<think>`` streams reasoning, and a block the reply never closes is all reasoning.
-
-    Groq and Cerebras replies keep the tags as text.
-    """
+    """Only a reply that opens with ``<think>`` streams reasoning, and a block the reply never closes is all reasoning."""
     reply = _chat_reply(_chunk({"content": content}, finish_reason="stop"))
     built = _Built(tmp_path, {"provider": provider, "id": "qwen", "api_key": "k"}, reply)
 
@@ -312,6 +330,7 @@ async def test_text_a_chat_stream_holds_until_its_end_is_still_its_first_output(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["llama_cpp", "groq", "cerebras"])
 @pytest.mark.parametrize(
     ("server_id", "stored"),
     [
@@ -324,15 +343,16 @@ async def test_text_a_chat_stream_holds_until_its_end_is_still_its_first_output(
 )
 async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchanged(
     tmp_path: Path,
+    provider: str,
     server_id: str | None,
     stored: str,
 ) -> None:
-    """On the ``openai`` dialect, a call without an id or with one outside the Chat rule gets a new id that fits it.
+    """A call without an id or with one outside the Chat rule gets a new id that fits it, on every Chat route.
 
-    That dialect's requests rewrite an id that is not ``call_`` and at most 40 characters, so the call is stored under
-    one they send unchanged.
+    Chat requests rewrite an id that is not ``call_`` and at most 40 characters, so the call is stored under one they
+    send unchanged.
     """
-    built = _Built(tmp_path, {"provider": "llama_cpp", "id": "qwen"}, _tool_call_reply(server_id))
+    built = _Built(tmp_path, {"provider": provider, "id": "qwen", "api_key": "k"}, _tool_call_reply(server_id))
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 
@@ -340,31 +360,28 @@ async def test_a_chat_call_keeps_only_a_server_id_that_chat_requests_send_unchan
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("route", "server_id", "stored"),
-    [
-        ("groq", "functions.get_weather:0", re.escape("functions.get_weather:0")),
-        ("cerebras", "functions.get_weather:0", re.escape("functions.get_weather:0")),
-        ("groq", None, _NEW_CHAT_ID),
-    ],
-    ids=["groq", "cerebras", "groq-omitted"],
-)
-async def test_a_groq_or_cerebras_call_keeps_the_id_its_server_sent(
-    tmp_path: Path,
-    route: str,
-    server_id: str | None,
-    stored: str,
-) -> None:
-    """Groq and Cerebras requests send stored ids unchanged, so a call keeps its server's id, even outside the Chat rule.
+@pytest.mark.parametrize("provider", ["groq", "cerebras"])
+async def test_groq_and_cerebras_streams_record_their_reasoning(tmp_path: Path, provider: str) -> None:
+    """The reasoning these routes stream in ``reasoning`` reaches the turn, as on every other Chat route."""
+    reply = _chat_reply(
+        _chunk({"reasoning": "Rain is likely"}),
+        _chunk({"reasoning": " this afternoon."}),
+        _chunk({"content": "Pack a coat."}, finish_reason="stop"),
+    )
+    built = _Built(tmp_path, {"provider": provider, "id": "gpt-oss-120b", "api_key": "k"}, reply)
 
-    Only a call its server sent without an id gets a new one.
-    """
-    built = _Built(tmp_path, _DECISION_ROUTES[route][0], _tool_call_reply(server_id))
+    events = [event async for event in built.provider.stream(ModelRequest(messages=[_user()]))]
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
-
-    [call] = turn.tool_calls
-    assert re.fullmatch(stored, call["id"])
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.message.content, completed.message.reasoning_content) == (
+        "Pack a coat.",
+        "Rain is likely this afternoon.",
+    )
+    assert [event.text for event in events if isinstance(event, ReasoningDelta)] == [
+        "Rain is likely",
+        " this afternoon.",
+    ]
 
 
 class _Packing(BaseModel):
@@ -1812,6 +1829,25 @@ _AZURE_CLIENT = {
     "default_headers": {"X-Origin": "configured"},
     "organization": "org-configured",
 }
+
+
+@pytest.mark.asyncio
+async def test_client_options_set_in_extra_kwargs_reach_the_client(tmp_path: Path) -> None:
+    """The endpoint, headers, and organization a Chat model sets directly in ``extra_kwargs`` reach the SDK client."""
+    built = _Built(
+        tmp_path,
+        {**_OPENAI_CHAT, "extra_kwargs": _CONFIGURED_CLIENT},
+        _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+    )
+
+    await _turn(built, ModelRequest(messages=[_user()]))
+
+    request = built.requests[0]
+    assert (str(request.url), request.headers["x-origin"], request.headers["openai-organization"]) == (
+        "http://configured.test/v1/chat/completions",
+        "configured",
+        "org-configured",
+    )
 
 
 @pytest.mark.asyncio

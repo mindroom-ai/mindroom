@@ -126,10 +126,12 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
+        "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-oss-120b",
           "provider": "Cerebras"
-        }
+        },
+        "system_fingerprint": "fp_parity"
       },
       "role": "assistant"
     },
@@ -155,35 +157,35 @@
         },
         {
           "role": "assistant",
-          "content": "",
           "tool_calls": [
             {
-              "id": "call_parity_weather",
-              "type": "function",
               "function": {
-                "name": "get_weather",
-                "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}"
-              }
+                "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}",
+                "name": "get_weather"
+              },
+              "id": "call_parity_weather",
+              "type": "function"
             },
             {
-              "id": "call_parity_notes",
-              "type": "function",
               "function": {
-                "name": "search_notes",
-                "arguments": "{\"query\": \"Paris packing list\"}"
-              }
+                "arguments": "{\"query\": \"Paris packing list\"}",
+                "name": "search_notes"
+              },
+              "id": "call_parity_notes",
+              "type": "function"
             }
-          ]
+          ],
+          "content": ""
         },
         {
           "role": "tool",
-          "tool_call_id": "call_parity_weather",
-          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}"
+          "content": "{\"city\": \"Paris\", \"forecast\": \"light rain\", \"high_c\": 14}",
+          "tool_call_id": "call_parity_weather"
         },
         {
           "role": "tool",
-          "tool_call_id": "call_parity_notes",
-          "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]"
+          "content": "[{\"title\": \"Paris 2025\", \"text\": \"Bring the blue scarf.\"}]",
+          "tool_call_id": "call_parity_notes"
         }
       ],
       "tools": [

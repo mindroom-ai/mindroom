@@ -33,7 +33,7 @@ from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.llm.runs import RunRecord
 from mindroom.media_inputs import MediaInputs
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
-from mindroom.providers.openai.build import build_provider
+from mindroom.providers.openai.build import accepted_extra_kwargs, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
@@ -1292,7 +1292,7 @@ def test_the_strict_schema_keeps_closed_objects_and_open_maps() -> None:
 
 def _chat_usage(adapter: ChatAdapter, usage: dict[str, Any]) -> MessageMetrics | None:
     """Return the usage a Chat stream reports in its usage chunk, where Groq streams it in its own extension."""
-    report = {"x_groq": {"usage": usage}} if adapter.wire.dialect == "groq" else {"usage": usage}
+    report = {"x_groq": {"usage": usage}} if adapter.wire.route == "groq" else {"usage": usage}
     chunk = {"id": "chatcmpl_test", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": []}
     stream = ChatStream(adapter.wire)
     stream.add(ChatCompletionChunk.model_validate({**chunk, **report}))
@@ -1379,6 +1379,21 @@ def test_groq_and_cerebras_usage_keeps_cached_input_and_reasoning(tmp_path: Path
     assert (usage.tokens.cache_read_tokens, usage.tokens.reasoning_tokens) == (4608, 120)
 
 
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_a_chat_reply_keeps_the_token_total_its_route_reports(tmp_path: Path, provider: str) -> None:
+    """The stored total is the one the route reports, not input plus output."""
+    adapter = build_provider(
+        ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
+        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+    )
+    assert isinstance(adapter, ChatAdapter)
+
+    usage = _chat_usage(adapter, {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 57})
+
+    assert usage is not None
+    assert (usage.tokens.input_tokens, usage.tokens.output_tokens, usage.tokens.total_tokens) == (40, 10, 57)
+
+
 # A value for every Chat request setting that travels in the request body.
 _CHAT_BODY_VALUES: dict[str, Any] = {
     "store": True,
@@ -1405,32 +1420,20 @@ _CHAT_BODY_VALUES: dict[str, Any] = {
 _CHAT_NON_BODY_FIELDS = frozenset({"extra_headers", "extra_query", "extra_body", "response_format"})
 
 
-@pytest.mark.parametrize(
-    ("provider", "request_fields"),
-    [
-        ("openai", tuple(ChatSettings().openai_request_fields())),
-        ("groq", tuple(ChatSettings().groq_request_fields())),
-        ("cerebras", tuple(ChatSettings().cerebras_request_fields())),
-    ],
-)
-def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
-    provider: str,
-    request_fields: tuple[str, ...],
-    tmp_path: Path,
-) -> None:
-    """A request setting the dialect's routes accept is sent in the body, so no accepted setting is dropped."""
-    body_fields = [name for name in request_fields if name not in _CHAT_NON_BODY_FIELDS]
-    authored = {name: _CHAT_BODY_VALUES[name] for name in body_fields}
-    adapter = build_provider(
-        ModelConfig(
-            provider=provider,
-            id="m",
-            api="chat_completions" if provider == "openai" else None,
-            api_key="test-key",
-            extra_kwargs=authored,
-        ),
-        provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),
+@pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
+def test_every_request_setting_a_chat_route_accepts_reaches_its_body(provider: str, tmp_path: Path) -> None:
+    """A request setting a route accepts is sent in the body, so no accepted setting is dropped."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    config = ModelConfig(
+        provider=provider,
+        id="m",
+        api="chat_completions" if provider == "openai" else None,
+        api_key="test-key",
     )
+    accepted = accepted_extra_kwargs(config, runtime_paths)
+    authored = {name: value for name, value in _CHAT_BODY_VALUES.items() if name in accepted}
+    assert set(_CHAT_BODY_VALUES) == set(ChatSettings().request_fields()) - _CHAT_NON_BODY_FIELDS
+    adapter = build_provider(config.model_copy(update={"extra_kwargs": authored}), provider_runtime(runtime_paths))
     assert isinstance(adapter, ChatAdapter)
 
     kwargs = chat_request_kwargs(
@@ -1446,12 +1449,12 @@ def test_every_request_setting_a_chat_dialect_accepts_reaches_its_body(
     )
 
     body = {**kwargs.pop("extra_body", {}), **kwargs}
-    assert {name: body.get(name) for name in body_fields} == authored
+    assert {name: body.get(name) for name in authored} == authored
 
 
 @pytest.mark.parametrize("provider", ["openai", "groq", "cerebras"])
 def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path: Path) -> None:
-    """Every Chat dialect leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
+    """Every Chat route leaves ``tools`` out of a request that offers none, rather than sending an empty list."""
     adapter = build_provider(
         ModelConfig(provider=provider, id="m", api="chat_completions" if provider == "openai" else None, api_key="k"),
         provider_runtime(resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})),

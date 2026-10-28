@@ -1,15 +1,14 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Chat Completions request bodies and response parsing for every OpenAI-compatible route.
 
-Three dialects shape the request bodies: ``openai`` (OpenAI, Azure, OpenRouter, DeepSeek, Z.ai, llama.cpp,
-Kimi), ``groq``, and ``cerebras``. Functions here are pure: they build the SDK
-call from canonical messages and fold SDK chunks into one finished turn.
+Every route shapes its requests and reads its replies by the same rules, plus the few its API differs by, which the
+route name selects. Functions here are pure: they build the SDK call from canonical messages and fold SDK chunks into
+one finished turn.
 """
 
 from __future__ import annotations
 
 import inspect
-import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -36,7 +35,6 @@ from mindroom.providers.tool_policy import disable_tool_selection, disables_tool
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from openai.types import CompletionUsage
     from openai.types.chat import ChatCompletionChunk
     from pydantic import BaseModel
 
@@ -45,7 +43,6 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ChatSettings
 
 __all__ = [
-    "ChatDialect",
     "ChatStream",
     "ChatTurnParts",
     "ChatWire",
@@ -56,7 +53,6 @@ __all__ = [
     "sdk_call_kwargs",
 ]
 
-type ChatDialect = Literal["openai", "groq", "cerebras"]
 # The two SDK endpoints the OpenAI family calls: ``chat.completions.create`` and ``responses.create``.
 type _SDKEndpoint = Literal["chat", "responses"]
 
@@ -64,6 +60,8 @@ type _SDKEndpoint = Literal["chat", "responses"]
 _GROQ_COMPOUND_MODELS = frozenset({"groq/compound", "groq/compound-mini", "compound-beta", "compound-beta-mini"})
 # Cerebras rejects parallel tool calls on this model.
 _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
+# Routes that stream usage in the last chunk unasked; Cerebras does not take the ``stream_options`` that ask for it.
+_UNASKED_STREAM_USAGE_ROUTES = frozenset({"groq", "cerebras"})
 _SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
 _CHAT_STOP_REASONS: dict[str, StopReason] = {
     "stop": "end",
@@ -78,16 +76,12 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
 class ChatWire:
     """How one route shapes Chat Completions requests and reads responses.
 
-    Besides its dialect, the route selects rules of its own, such as ``openai`` sending the system prompt as
-    ``developer`` and ``deepseek`` and ``openrouter`` replaying their reasoning fields.
+    The route selects the rules its API differs by, such as ``openai`` sending the system prompt as ``developer``,
+    ``deepseek`` and ``openrouter`` replaying their reasoning fields, and ``groq`` streaming its usage in its own chunk
+    extension.
     """
 
     route: str
-    # TODO(simplify): the ``groq`` and ``cerebras`` dialects format messages, tools, parameters, and usage by rules of
-    # their own, and neither reads reasoning. Collapse them into ``openai``, with per-route data for real API
-    # differences (#3113). Models would notice changed Groq and Cerebras request bodies, and stored runs would record
-    # their reasoning.
-    dialect: ChatDialect
 
 
 @dataclass(slots=True, kw_only=True)
@@ -117,7 +111,7 @@ def _message_content(message: Message) -> str | list[Any] | None:
     return tool_result_view(message).content if message.role == "tool" else message.content
 
 
-def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str], provider: str) -> dict[str, Any]:
+def _chat_message(message: Message, wire: ChatWire, role_map: Mapping[str, str], provider: str) -> dict[str, Any]:
     values: dict[str, Any] = {
         "role": role_map.get(message.role, message.role),
         "content": _message_content(message),
@@ -156,61 +150,15 @@ def _openai_message(message: Message, wire: ChatWire, role_map: Mapping[str, str
     return formatted
 
 
-def _groq_message(message: Message, provider: str) -> dict[str, Any]:
-    values = {
-        "role": message.role,
-        "content": _message_content(message),
-        "name": message.name,
-        "tool_call_id": message.tool_call_id,
-        "tool_calls": message.tool_calls,
-    }
-    formatted = {key: value for key, value in values.items() if value is not None}
-    if message.images and isinstance(message.content, str):
-        formatted["content"] = [
-            {"type": "text", "text": message.content},
-            *(part for image in message.images if (part := chat_image_part(image, provider=provider)) is not None),
-        ]
-    return formatted
-
-
-def _cerebras_message(message: Message) -> dict[str, Any]:
-    content = _message_content(message)
-    if message.role == "tool" and message.tool_call_id:
-        return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
-    formatted: dict[str, Any] = {"role": message.role, "content": "" if content is None else content}
-    if message.name:
-        formatted["name"] = message.name
-    if message.tool_calls:
-        formatted["tool_calls"] = [
-            {
-                "id": call["id"],
-                "type": call["type"],
-                "function": {
-                    "name": call["function"]["name"],
-                    "arguments": json.dumps(call["function"]["arguments"])
-                    if isinstance(call["function"]["arguments"], dict | list)
-                    else call["function"]["arguments"],
-                },
-            }
-            for call in message.tool_calls
-        ]
-    return {key: value for key, value in formatted.items() if value is not None}
-
-
 def _chat_messages(
     messages: Sequence[Message],
     wire: ChatWire,
     settings: ChatSettings,
     provider: str,
 ) -> list[dict[str, Any]]:
-    messages = with_joined_system(messages)
-    if wire.dialect == "groq":
-        return [_groq_message(message, provider) for message in messages]
-    if wire.dialect == "cerebras":
-        return [_cerebras_message(message) for message in messages]
     role_map = settings.role_map or {"system": "developer" if wire.route == "openai" else "system"}
-    canonical = reformat_tool_call_ids(messages, "chat")
-    return [_openai_message(message, wire, role_map, provider) for message in canonical]
+    canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
+    return [_chat_message(message, wire, role_map, provider) for message in canonical]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
@@ -224,24 +172,9 @@ def function_definition(tool: ToolSpec) -> dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
-def _chat_tools(tools: Sequence[ToolSpec], wire: ChatWire) -> list[dict[str, Any]]:
+def _chat_tools(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
     """Return tool definitions sorted by name, the order every cached prompt prefix depends on."""
-    formatted: list[dict[str, Any]]
-    if wire.dialect == "cerebras":
-        # Cerebras takes the function shape without the approval flags or strict; a missing description is left out.
-        formatted = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    **({} if tool.description is None else {"description": tool.description}),
-                    "parameters": deepcopy(dict(tool.parameters)),
-                },
-            }
-            for tool in tools
-        ]
-    else:
-        formatted = [{"type": "function", "function": function_definition(tool)} for tool in tools]
+    formatted = [{"type": "function", "function": function_definition(tool)} for tool in tools]
     return sorted(formatted, key=lambda tool: tool["function"]["name"])
 
 
@@ -312,20 +245,16 @@ def _deepseek_thinking(params: dict[str, Any], settings: ChatSettings) -> None:
     params["extra_body"] = {"thinking": switch, **(params.get("extra_body") or {})}
 
 
-def _reject_native_search(params: Mapping[str, Any], model_id: str, wire: ChatWire) -> None:
-    """Fail a no-tools decision on routes whose hosted search runs regardless of ``tool_choice``."""
+def _reject_native_search(params: Mapping[str, Any], model_id: str) -> None:
+    """Fail a no-tools decision whose model or request runs hosted search or tools regardless of ``tool_choice``."""
     extra_body = params.get("extra_body")
     sources = [params, extra_body] if isinstance(extra_body, Mapping) else [params]
     model_ids = [model_id, *(str(source.get("model", "")) for source in sources)]
-    if wire.dialect == "groq":
-        if any(candidate.casefold() in _GROQ_COMPOUND_MODELS for candidate in model_ids) or any(
-            source.get("compound_custom") is not None for source in sources
-        ):
-            msg = "Participation decisions cannot disable native Groq Compound tools"
-            raise ValueError(msg)
-        return
-    if wire.dialect != "openai":
-        return
+    if any(candidate.casefold() in _GROQ_COMPOUND_MODELS for candidate in model_ids) or any(
+        source.get("compound_custom") is not None for source in sources
+    ):
+        msg = "Participation decisions cannot disable native Groq Compound tools"
+        raise ValueError(msg)
     model_ids.extend(str(candidate) for source in sources for candidate in source.get("models") or [])
     if any(source.get("web_search_options") is not None for source in sources) or any(
         marker in candidate.casefold() for candidate in model_ids for marker in ("-search-api", "-search-preview")
@@ -343,37 +272,19 @@ def _reject_native_search(params: Mapping[str, Any], model_id: str, wire: ChatWi
         raise ValueError(msg)
 
 
-def _dialect_params(
-    settings: ChatSettings,
-    wire: ChatWire,
-    response_format: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Return the route dialect's request parameters that are set, structured output included."""
-    if wire.dialect == "groq":
-        fields = settings.groq_request_fields()
-    elif wire.dialect == "cerebras":
-        fields = settings.cerebras_request_fields()
-    else:
-        fields = settings.openai_request_fields()
-    return {key: value for key, value in {**fields, "response_format": response_format}.items() if value is not None}
-
-
 def _add_tools(
     params: dict[str, Any],
     tool_dicts: list[dict[str, Any]],
-    tool_choice: ToolChoice | None,
     *,
     model_id: str,
     settings: ChatSettings,
     wire: ChatWire,
 ) -> None:
+    """Add the tools and their parallel-call setting; a decision's ``tool_choice`` is set last, for every tool list."""
     if not tool_dicts:
         return
     params["tools"] = tool_dicts
-    if wire.dialect != "cerebras":
-        if tool_choice is not None:
-            params["tool_choice"] = tool_choice
-    elif model_id == _CEREBRAS_SERIAL_TOOL_MODEL:
+    if wire.route == "cerebras" and model_id == _CEREBRAS_SERIAL_TOOL_MODEL:
         params["parallel_tool_calls"] = False
     elif settings.parallel_tool_calls is not None:
         params["parallel_tool_calls"] = settings.parallel_tool_calls
@@ -396,7 +307,7 @@ def _add_route_params(
     if wire.route == "kimi" and settings.prompt_cache_key:
         params.setdefault("prompt_cache_key", settings.prompt_cache_key)
     if disables_tools(tool_choice):
-        _reject_native_search(params, model_id, wire)
+        _reject_native_search(params, model_id)
 
 
 @cache
@@ -448,12 +359,12 @@ def chat_request_kwargs(
     names the adapter in the error for an attachment file that cannot be read.
     """
     response_format = _response_format(output_schema, structured_output, strict=settings.strict_output)
-    params = _dialect_params(settings, wire, response_format)
+    fields = {**settings.request_fields(), "response_format": response_format}
+    params = {key: value for key, value in fields.items() if value is not None}
     output_tool = structured_output_tools(structured_output, output_schema)
     _add_tools(
         params,
-        _chat_tools((*tools, *output_tool), wire),
-        tool_choice,
+        _chat_tools((*tools, *output_tool)),
         model_id=model_id,
         settings=settings,
         wire=wire,
@@ -467,7 +378,7 @@ def chat_request_kwargs(
         **disable_tool_selection(params, tool_choice),
     }
     params["stream"] = True
-    if wire.dialect == "openai":
+    if wire.route not in _UNASKED_STREAM_USAGE_ROUTES:
         params["stream_options"] = {"include_usage": True}
     return sdk_call_kwargs(params, "chat")
 
@@ -479,49 +390,37 @@ def _extra(model: BaseModel | None) -> dict[str, Any]:
     return dict(model.model_extra or {}) if model is not None else {}
 
 
-def _openai_usage(usage: CompletionUsage) -> MessageMetrics:
-    details, completion_details = usage.prompt_tokens_details, usage.completion_tokens_details
-    counts = TokenCounts(
-        input_tokens=usage.prompt_tokens or 0,
-        output_tokens=usage.completion_tokens or 0,
-        cache_read_tokens=(details.cached_tokens or 0) if details else 0,
-        cache_write_tokens=(details.cache_write_tokens or 0) if details else 0,
-        reasoning_tokens=(completion_details.reasoning_tokens or 0) if completion_details else 0,
-        audio_input_tokens=(details.audio_tokens or 0) if details else 0,
-        audio_output_tokens=(completion_details.audio_tokens or 0) if completion_details else 0,
-    ).with_totals()
-    cost = _extra(usage).get("cost")
-    # ``with_totals`` derives the audio total; the token total is the one the provider reports.
-    return MessageMetrics(
-        tokens=replace(counts, total_tokens=usage.total_tokens or 0),
-        cost=cost if isinstance(cost, int | float) else None,
-    )
-
-
 def _detail(usage: Mapping[str, Any], section: str, name: str) -> int:
     details = usage.get(section)
     value = details.get(name) if isinstance(details, Mapping) else None
     return value if isinstance(value, int) else 0
 
 
-def _counted_usage(usage: Mapping[str, Any], dialect: Literal["groq", "cerebras"]) -> MessageMetrics:
-    """Read Groq and Cerebras usage: totals recomputed and timing counters kept as provider metrics.
-
-    Cerebras keeps its zero counters; Groq keeps only the counters that are set.
-    """
-    if dialect == "cerebras":
-        timings = {key: usage[key] for key in ("time_system", "time_prompt") if usage.get(key) is not None}
-    else:
-        timings = {
-            key: usage[key] for key in ("completion_time", "prompt_time", "queue_time", "total_time") if usage.get(key)
-        }
+def _usage_metrics(usage: Mapping[str, Any]) -> MessageMetrics:
     counts = TokenCounts(
         input_tokens=usage.get("prompt_tokens") or 0,
         output_tokens=usage.get("completion_tokens") or 0,
         cache_read_tokens=_detail(usage, "prompt_tokens_details", "cached_tokens"),
+        cache_write_tokens=_detail(usage, "prompt_tokens_details", "cache_write_tokens"),
         reasoning_tokens=_detail(usage, "completion_tokens_details", "reasoning_tokens"),
+        audio_input_tokens=_detail(usage, "prompt_tokens_details", "audio_tokens"),
+        audio_output_tokens=_detail(usage, "completion_tokens_details", "audio_tokens"),
+    ).with_totals()
+    cost = usage.get("cost")
+    # ``with_totals`` derives the audio total; the token total is the one the provider reports.
+    return MessageMetrics(
+        tokens=replace(counts, total_tokens=usage.get("total_tokens") or 0),
+        cost=cost if isinstance(cost, int | float) else None,
     )
-    return MessageMetrics(tokens=counts.with_totals(), provider_metrics=timings or None)
+
+
+def _chunk_usage(chunk: ChatCompletionChunk, wire: ChatWire) -> Mapping[str, Any] | None:
+    """Return the usage a chunk reports; Groq streams its usage in its own chunk extension."""
+    if wire.route == "groq":
+        groq = _extra(chunk).get("x_groq")
+        usage = groq.get("usage") if isinstance(groq, Mapping) else None
+        return usage if isinstance(usage, Mapping) else None
+    return None if chunk.usage is None else chunk.usage.model_dump()
 
 
 def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:
@@ -534,16 +433,14 @@ def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> N
             target[key] = value
 
 
-def _completed_tool_calls(calls: list[dict[str, Any]], dialect: ChatDialect) -> list[dict[str, Any]]:
+def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Store each call under the id its later requests send, so its result and approval receipt name that id.
 
-    The ``openai`` dialect's requests rewrite an id outside the Chat rule, so there a call whose server sent such an
-    id, or none, gets a new id that fits the rule. Groq and Cerebras requests send stored ids unchanged, so there a
-    call keeps its server's id and only an id-less call gets a new one.
+    Requests rewrite an id outside the Chat rule, so a call whose server sent such an id, or none, gets a new id that
+    fits the rule.
     """
     for call in calls:
-        if dialect == "openai" or not call.get("id"):
-            call["id"] = chat_call_id(call.get("id"))
+        call["id"] = chat_call_id(call.get("id"))
     return calls
 
 
@@ -565,18 +462,12 @@ def _reasoning_field(fields: Mapping[str, Any]) -> object:
     return fields.get("reasoning") if reasoning is None else reasoning
 
 
-def _usage_metrics(usage: CompletionUsage, wire: ChatWire) -> MessageMetrics:
-    if wire.dialect == "openai":
-        return _openai_usage(usage)
-    return _counted_usage(usage.model_dump(), wire.dialect)
-
-
 @dataclass(slots=True)
 class ChatStream:
     """Fold streamed Chat Completions chunks into deltas and one finished turn.
 
-    The ``openai`` dialect also moves reasoning a model writes inline as a leading ``<think>`` block out of the
-    reply text (``ThinkTagSplitter``), as servers without a reasoning parser send it.
+    Reasoning a model writes inline as a leading ``<think>`` block also moves out of the reply text
+    (``ThinkTagSplitter``), as servers without a reasoning parser send it.
     """
 
     wire: ChatWire
@@ -600,17 +491,12 @@ class ChatStream:
                 events.extend(self._add_content(chunk, delta.content))
                 for position, call in enumerate(delta.tool_calls or ()):
                     self._add_call_delta(call, position)
-                if self.wire.dialect == "openai":
-                    events.extend(self._add_reasoning(_extra(delta)))
+                events.extend(self._add_reasoning(_extra(delta)))
         return events
 
     def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
-        # Cerebras skips empty content deltas; the other dialects keep them, with their reply metadata.
-        if content is None or (not content and self.wire.dialect == "cerebras"):
+        if content is None:
             return []
-        if self.wire.dialect != "openai":
-            self._content.append(content)
-            return [TextDelta(content)] if content else []
         _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
         return self._add_text(self._think.add(content))
 
@@ -630,22 +516,12 @@ class ChatStream:
         return [ReasoningDelta(reasoning)] if reasoning else []
 
     def _add_call_delta(self, call: Any, position: int) -> None:  # noqa: ANN401 - SDK tool-call delta model
+        """Fold one call delta into the call at its index; a server that sends no index places it by its position."""
         function = call.function
         name = function.name if function is not None else None
         arguments = function.arguments if function is not None else None
-        if self.wire.dialect == "cerebras":
-            index = call.index if call.index is not None else position
-            entry = self._calls.setdefault(index, {"id": None, "type": None, "function": {"name": "", "arguments": ""}})
-        else:
-            index = call.index or 0
-            if index not in self._calls:
-                self._calls[index] = {
-                    "id": call.id,
-                    "type": call.type,
-                    "function": {"name": name or "", "arguments": arguments or ""},
-                }
-                return
-            entry = self._calls[index]
+        index = call.index if call.index is not None else position
+        entry = self._calls.setdefault(index, {"id": None, "type": None, "function": {"name": "", "arguments": ""}})
         if name:
             entry["function"]["name"] = name
         if arguments:
@@ -656,15 +532,9 @@ class ChatStream:
             entry["type"] = call.type
 
     def _add_usage(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
-        if self.wire.dialect == "groq":
-            # Groq streams its usage in its own chunk extension.
-            groq = _extra(chunk).get("x_groq")
-            usage = groq.get("usage") if isinstance(groq, Mapping) else None
-            metrics = _counted_usage(usage, "groq") if isinstance(usage, Mapping) else None
-        else:
-            metrics = _usage_metrics(chunk.usage, self.wire) if chunk.usage is not None else None
-        if metrics is None:
+        if (usage := _chunk_usage(chunk, self.wire)) is None:
             return []
+        metrics = _usage_metrics(usage)
         self.parts.usage = metrics if self.parts.usage is None else self.parts.usage + metrics
         return [UsageReported(self.parts.usage, final=False)]
 
@@ -674,7 +544,5 @@ class ChatStream:
         self.parts.content = "".join(self._content) or None
         self.parts.reasoning = "".join(self._reasoning) or None
         calls = [self._calls[index] for index in sorted(self._calls)]
-        if self.wire.dialect == "cerebras":
-            calls = [call for call in calls if call.get("id") and call["function"].get("name")]
-        self.parts.tool_calls = _completed_tool_calls(calls, self.wire.dialect)
+        self.parts.tool_calls = _completed_tool_calls(calls)
         return events

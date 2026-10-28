@@ -90,8 +90,11 @@ class ChatSettings:
     kimi_home: str | None = None
     prompt_cache_key: str | None = None
 
-    def openai_request_fields(self) -> dict[str, Any]:
-        """Return the request fields the ``openai`` Chat dialect sends from these settings, unset ones as None."""
+    def request_fields(self) -> dict[str, Any]:
+        """Return the request fields a Chat request sends from these settings, unset ones as None.
+
+        Each route accepts only the settings its API takes, so the others stay unset.
+        """
         return {
             "store": self.store,
             "reasoning_effort": self.reasoning_effort,
@@ -113,37 +116,8 @@ class ChatSettings:
             "extra_body": self.extra_body,
             "metadata": self.metadata,
             "service_tier": self.service_tier,
-        }
-
-    def groq_request_fields(self) -> dict[str, Any]:
-        """Return the request fields the ``groq`` dialect sends from these settings, unset ones as None."""
-        return {
-            "frequency_penalty": self.frequency_penalty,
-            "logit_bias": self.logit_bias,
-            "logprobs": self.logprobs,
-            "max_tokens": self.max_tokens,
-            "presence_penalty": self.presence_penalty,
-            "seed": self.seed,
-            "stop": self.stop,
-            "temperature": self.temperature,
-            "top_logprobs": self.top_logprobs,
-            "top_p": self.top_p,
-            "user": self.user,
-            "extra_headers": self.extra_headers,
-            "extra_query": self.extra_query,
-        }
-
-    def cerebras_request_fields(self) -> dict[str, Any]:
-        """Return the request fields the ``cerebras`` dialect sends from these settings, unset ones as None."""
-        return {
-            "max_completion_tokens": self.max_completion_tokens,
             "repetition_penalty": self.repetition_penalty,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
             "top_k": self.top_k,
-            "extra_headers": self.extra_headers,
-            "extra_query": self.extra_query,
-            "extra_body": self.extra_body,
         }
 
 
@@ -209,11 +183,36 @@ class ResponsesSettings:
         }
 
 
-# Each route accepts the request fields its wire sends and the settings the wire or client reads otherwise.
-CHAT_FIELDS = _CLIENT_FIELDS | {*ChatSettings().openai_request_fields(), "strict_output", "request_params", "role_map"}
-GROQ_FIELDS = _CLIENT_FIELDS - {"organization"} | {*ChatSettings().groq_request_fields(), "request_params"}
+# Each route accepts the request fields its API takes and the settings the wire or client reads otherwise.
+CHAT_FIELDS = _CLIENT_FIELDS | {*ChatSettings().request_fields(), "strict_output", "request_params", "role_map"} - {
+    "repetition_penalty",
+    "top_k",
+}
+GROQ_FIELDS = _CLIENT_FIELDS - {"organization"} | {
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_tokens",
+    "presence_penalty",
+    "seed",
+    "stop",
+    "temperature",
+    "top_logprobs",
+    "top_p",
+    "user",
+    "extra_headers",
+    "extra_query",
+    "request_params",
+}
 CEREBRAS_FIELDS = _CLIENT_FIELDS - {"organization"} | {
-    *ChatSettings().cerebras_request_fields(),
+    "max_completion_tokens",
+    "repetition_penalty",
+    "temperature",
+    "top_p",
+    "top_k",
+    "extra_headers",
+    "extra_query",
+    "extra_body",
     "parallel_tool_calls",
     "strict_output",
     "request_params",
