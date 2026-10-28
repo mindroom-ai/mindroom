@@ -35,10 +35,11 @@ _TEAM_PAUSED_NOTICE_HEADER = "Team run paused. The following require input:\n"
 # wrote for both. A paused run held it, and so did the run's later row when its resume wrote no text.
 # Last legacy release: v2026.10.643, whose ``paused_content`` (``agent_loop/run.py``) and ``team_paused_content``
 # (``teams/runtime.py``) wrote it, as the Agno runtime did before them; replacement: the next release, whose paused
-# runs store no content of their own and whose resumes start the content afresh.
+# runs store only the text their model wrote, never a notice, and whose resumes append what the model writes after the
+# approval to that text.
 # Handling: the content reads as none, so neither a resume nor a delegation's settlement hands the notice to a team
 # leader or a delegating parent, and a row written back stores none.
-# Coverage: tests/llm/test_legacy_run_content.py::test_paused_rows_main_wrote_read_without_their_notices,
+# Coverage: tests/llm/test_legacy_run_content.py::test_paused_rows_earlier_releases_stored_read_without_their_notices,
 #   tests/llm/test_legacy_run_content.py::test_a_completed_row_that_carried_the_notice_hands_over_none,
 #   tests/llm/test_legacy_run_content.py::test_every_other_wording_agno_wrote_reads_as_no_content,
 #   tests/llm/test_legacy_run_content.py::test_a_reply_that_only_opens_like_a_notice_keeps_its_content
@@ -55,14 +56,16 @@ def stored_content(data: Mapping[str, Any]) -> str | None:
 # LEGACY_COMPAT: Failed runs that store their failure text as their content.
 # Legacy format: an ``ERROR`` run dict without an ``error`` key. The loop's ``_store_interrupted`` stored the
 # unredacted text of the failure as ``content`` when the model wrote nothing, else the model's text and no reason;
-# delegation recovery's ``interrupt_child`` stored its recovery reason, a fixed sentence holding no credentials, as
-# ``content`` in place of whatever the child had written.
+# delegation recovery's ``interrupt_child`` stored its reason as ``content`` in place of whatever the child had written:
+# a fixed sentence, the child's failure text with credentials redacted, or, for a delegation it refused, the
+# authorization result.
 # Last legacy release: v2026.10.643, whose ``_store_interrupted`` (``agent_loop/run.py``) and ``interrupt_child``
 # (``delegation/recovery.py``) wrote it, as the Agno runtime did before them; replacement: the next release, which
 # stores the redacted failure text under ``error`` and keeps ``content`` for the model's text.
 # Handling: such a run hands over its content, credentials redacted, as its failure, which is what those releases
 # handed over for it, so a delegation settled from such a row still reports why the run failed.
-# Coverage: tests/llm/test_legacy_run_content.py::test_a_failed_row_main_wrote_hands_over_its_content_redacted,
+# Coverage:
+#   tests/llm/test_legacy_run_content.py::test_a_failed_row_an_earlier_release_stored_hands_over_its_content_redacted,
 #   tests/test_delegation_audit.py::test_a_child_row_an_earlier_recovery_stopped_still_settles_with_its_reason
 def legacy_failure_text(content: str | None) -> str | None:
     """Return what a failed run stored without an ``error`` hands over: its content, credentials redacted."""

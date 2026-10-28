@@ -22,7 +22,7 @@ _ROWS: dict[str, dict[str, Any]] = json.loads(
 
 
 @pytest.mark.parametrize("name", ["agent_paused", "member_paused", "team_paused"])
-def test_paused_rows_main_wrote_read_without_their_notices(name: str) -> None:
+def test_paused_rows_earlier_releases_stored_read_without_their_notices(name: str) -> None:
     """A paused agent, member, or team row reads with no content, its pause kept in its requirements."""
     stored = _ROWS[name]
     assert str(stored["content"]).startswith(("I have tools to execute, but ", "Team run paused."))
@@ -79,7 +79,7 @@ def test_a_completed_row_that_carried_the_notice_hands_over_none() -> None:
     assert run.handover_content is None
 
 
-def test_a_failed_row_main_wrote_hands_over_its_content_redacted() -> None:
+def test_a_failed_row_an_earlier_release_stored_hands_over_its_content_redacted() -> None:
     """A failed row stored without an error hands over its content, credentials redacted, and writes back unchanged."""
     stored = _ROWS["agent_failed"]
     assert (stored["content"], "error" in stored) == ("provider down: api_key=unit-test-secret", False)
