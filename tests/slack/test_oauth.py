@@ -16,7 +16,7 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError
 from mindroom.oauth.registry import load_oauth_providers
 from mindroom.slack import app as slack_app
 from mindroom.slack import oauth as slack_oauth
@@ -182,7 +182,8 @@ def test_parse_rejects_other_team(tmp_path: Path) -> None:
     _configure(runtime_paths)
     _cache_bot_identity()
 
-    with pytest.raises(OAuthProviderError, match="This Slack account belongs to another workspace"):
+    # A claim validation error is the kind the OAuth callback shows the person as it is.
+    with pytest.raises(OAuthClaimValidationError, match="This Slack account belongs to another workspace"):
         _parse(runtime_paths, _OTHER_TEAM_BODY)
 
 
@@ -253,7 +254,7 @@ def test_runtime_endpoints_reject_an_unreachable_slack(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(slack_oauth, "slack_http_client", lambda: _mock_client(unreachable))
 
-    with pytest.raises(OAuthProviderError, match="The MindRoom Slack app is not configured"):
+    with pytest.raises(OAuthProviderError, match="Slack could not be reached; try again"):
         asyncio.run(slack_oauth_provider().runtime_endpoints(runtime_paths))
 
 
@@ -305,7 +306,7 @@ def test_full_exchange_rejects_other_team(tmp_path: Path) -> None:
             "authlib.integrations.httpx_client.AsyncOAuth2Client.fetch_token",
             new=AsyncMock(return_value=_OTHER_TEAM_BODY),
         ),
-        pytest.raises(OAuthProviderError, match="This Slack account belongs to another workspace"),
+        pytest.raises(OAuthClaimValidationError, match="This Slack account belongs to another workspace"),
     ):
         _exchange(runtime_paths)
 

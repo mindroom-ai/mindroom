@@ -8,8 +8,14 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRuntimeEndpoints, OAuthTokenResult
-from mindroom.slack.api import SlackApiError, slack_http_client
+from mindroom.oauth.providers import (
+    OAuthClaimValidationError,
+    OAuthProvider,
+    OAuthProviderError,
+    OAuthRuntimeEndpoints,
+    OAuthTokenResult,
+)
+from mindroom.slack.api import SLACK_UNREACHABLE, SlackApiError, slack_http_client
 from mindroom.slack.app import (
     SLACK_APP_NOT_CONFIGURED,
     SlackAppCredentials,
@@ -63,8 +69,10 @@ async def _slack_runtime_endpoints(provider: OAuthProvider, runtime_paths: Runti
     try:
         async with slack_http_client() as client:
             await slack_bot_identity(client, app)
-    except (SlackApiError, httpx.HTTPError) as exc:
+    except SlackApiError as exc:
         raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED) from exc
+    except httpx.HTTPError as exc:
+        raise OAuthProviderError(SLACK_UNREACHABLE) from exc
     return OAuthRuntimeEndpoints(
         authorization_url=provider.authorization_url,
         token_url=provider.token_url,
@@ -101,8 +109,9 @@ def _parse_slack_token(
         raise OAuthProviderError(SLACK_APP_NOT_CONFIGURED)
     team_id = _text(_object(payload, "team"), "id")
     if team_id != identity.team_id:
+        # A claim validation error is the one the OAuth callback shows the person as it is.
         msg = "This Slack account belongs to another workspace"
-        raise OAuthProviderError(msg)
+        raise OAuthClaimValidationError(msg)
     scope = _text(authed_user, "scope") or ""
     return OAuthTokenResult(
         token_data={"token": token, "scopes": [part.strip() for part in scope.split(",") if part.strip()]},

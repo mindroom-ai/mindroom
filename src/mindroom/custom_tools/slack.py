@@ -34,6 +34,7 @@ from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQ
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.slack.api import (
+    SLACK_UNREACHABLE,
     SlackApiError,
     neutralize_broadcasts,
     parse_slack_target,
@@ -91,7 +92,6 @@ _AUTH_ERRORS = frozenset({"account_inactive", "invalid_auth", "not_authed", "tok
 _NOT_PROJECT_CHANNEL = "Not one of this agent's Slack channels"
 _FILE_NOT_IN_PROJECT = "This file is not in one of this agent's Slack channels"
 _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connection"
-_UNREACHABLE = "Slack could not be reached; try again"
 # Slack may have received the write before the connection failed, so a blind retry could post twice.
 _WRITE_UNANSWERED = "Slack did not answer; the message may have been sent, so check with slack_read before retrying"
 _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
@@ -421,7 +421,7 @@ class SlackTools(Toolkit):
                 return custom_tool_payload(_TOOL_NAME, "error", **oauth_connection_required_payload(required))
             return _error(_api_error_text(exc, personal=personal))
         except httpx.HTTPError:
-            return _error(_WRITE_UNANSWERED if write else _UNREACHABLE)
+            return _error(_WRITE_UNANSWERED if write else SLACK_UNREACHABLE)
         return custom_tool_payload(_TOOL_NAME, "ok", **fields)
 
     async def _require_project_channel(self, session: _Session, channel_id: str) -> None:

@@ -20,6 +20,7 @@ _TS_RE = re.compile(r"\d{10}\.\d{6}")
 _CONVERSATION_TS_RE = re.compile(rf"({_CONVERSATION_ID}):(\d{{10}}\.\d{{6}})")
 _PERMALINK_PATH_RE = re.compile(rf"/archives/({_CONVERSATION_ID})/p(\d{{10}})(\d{{6}})")
 _INVALID_TARGET = "Use a Slack conversation ID, <conversation>:<ts>, a message link, or a user ID"
+SLACK_UNREACHABLE = "Slack could not be reached; try again"
 
 
 class SlackApiError(Exception):
