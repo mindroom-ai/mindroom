@@ -839,17 +839,30 @@ def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
     ],
     ids=["codex", "kimi"],
 )
+@pytest.mark.parametrize("authored", [False, True], ids=["env-file", "authored-wins"])
 async def test_a_cli_login_home_set_in_the_env_file_is_read(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     model_config: dict[str, Any],
     variable: str,
     reply: dict[str, Any],
     authorization: str,
+    *,
+    authored: bool,
 ) -> None:
-    """``CODEX_HOME`` and ``KIMI_CODE_HOME`` in the ``.env`` beside the config locate the CLI's saved login."""
-    homes = {"CODEX_HOME": "<codex_home>", "KIMI_CODE_HOME": "<kimi_home>"}
-    login_home = write_cli_logins(tmp_path)[homes[variable]]
-    (tmp_path / ".env").write_text(f"{variable}={login_home}\n", encoding="utf-8")
+    """``CODEX_HOME`` and ``KIMI_CODE_HOME`` in the ``.env`` beside the config locate the CLI's saved login.
+
+    A home the model authors wins, and the user's own home holds no login, so neither test can find one there.
+    """
+    monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    homes = {"CODEX_HOME": ("<codex_home>", "codex_home"), "KIMI_CODE_HOME": ("<kimi_home>", "kimi_home")}
+    placeholder, setting = homes[variable]
+    login_home = write_cli_logins(tmp_path)[placeholder]
+    if authored:
+        model_config = {**model_config, "extra_kwargs": {setting: login_home}}
+    env_home = tmp_path / "no-login" if authored else login_home
+    (tmp_path / ".env").write_text(f"{variable}={env_home}\n", encoding="utf-8")
     sent: list[httpx2.Request] = []
 
     def respond(request: httpx2.Request) -> httpx.Response:
