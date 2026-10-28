@@ -267,13 +267,13 @@ def downloaded_media_fields(
         and media_format is None
         and kept.get("format") not in _AUDIO_SUFFIX_FORMATS
         and not suffix_type.startswith("audio/")
-        and (named_format := audio_format(mime_type or kept.get("mime_type")))
+        and (named_format := _audio_format(mime_type or kept.get("mime_type")))
     ):
         kept["format"] = named_format
     return kept
 
 
-def audio_format(mime_type: str | None) -> str | None:
+def _audio_format(mime_type: str | None) -> str | None:
     """Return the audio format, such as ``mp3``, that ``mime_type`` means, or None for a type with no such format."""
     return _AUDIO_FORMATS.get(canonical_mime_type(mime_type) or "")
 
@@ -362,7 +362,6 @@ __all__ = [
     "File",
     "Image",
     "Video",
-    "audio_format",
     "canonical_mime_type",
     "downloaded_media_fields",
     "image_format",
