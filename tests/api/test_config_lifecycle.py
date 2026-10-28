@@ -24,6 +24,9 @@ from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from tests.conftest import test_runtime_paths
+from tests.test_generated_agents import BASE as GENERATED_BASE
+from tests.test_generated_agents import _created as created_entry
+from tests.test_generated_agents import _load as load_generated
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -177,6 +180,25 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     }
     with pytest.raises((ConfigRuntimeValidationError, HTTPException), match=r"agents\.mind_alice_smith collides"):
         writers[writer]()
+
+    assert paths.config_path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("section", ["agents", "teams"])
+def test_save_refuses_a_created_agent_name(tmp_path: Path, section: str) -> None:
+    """An authored agent or team under a created agent's name would take over its Matrix account, so saving it fails."""
+    paths = test_runtime_paths(tmp_path)
+    load_generated(tmp_path, created=[created_entry()])
+    _write_config(paths.config_path, GENERATED_BASE)
+    saved = paths.config_path.read_bytes()
+    payload = copy.deepcopy(GENERATED_BASE)
+    authored = {"display_name": "Authored", "role": "Takes the name", "agents": ["creator"]}
+    payload.setdefault(section, {})["creator_research"] = (
+        authored if section == "teams" else {"display_name": "Authored"}
+    )
+
+    with pytest.raises(ConfigRuntimeValidationError, match=rf"{section}\.creator_research collides"):
+        config_lifecycle.validate_and_persist_config_payload(payload, paths)
 
     assert paths.config_path.read_bytes() == saved
 

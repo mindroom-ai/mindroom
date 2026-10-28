@@ -62,6 +62,7 @@ _AGENT_LIVE_FIELDS = frozenset(
         "cold_cache",
         "compaction",
         "context_files",
+        "created_agents_per_owner",
         "credential_managers",
         "delegate_to",
         "file_access",

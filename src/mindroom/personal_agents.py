@@ -1,15 +1,21 @@
-"""Give one user their personal agent: reserve it in the roster, register its Matrix account, then activate it."""
+"""Provision personal agents, and create, update and delete generated agents for their owners."""
 
 from __future__ import annotations
 
+import re
+from functools import partial
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
+from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.config.agent import AgentConfig
 from mindroom.config.personal_agents import (
+    CreatedAgentEntry,
+    GeneratedAgentEdits,
+    PersonalAgentRoster,
     PersonalAgentRosterEntry,
     personal_agent_data,
     personal_agent_display_name,
@@ -17,6 +23,7 @@ from mindroom.config.personal_agents import (
     personal_agent_roster_path,
     personal_agent_username,
     read_personal_agent_roster,
+    read_personal_agent_roster_file,
 )
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.constants import RESERVED_ENTITY_NAMES, runtime_matrix_homeserver
@@ -30,7 +37,7 @@ from mindroom.matrix.users import (
     preflight_managed_account_provisioning,
 )
 from mindroom.matrix_identifiers import agent_username_localpart, namespaced_username_localpart
-from mindroom.requester_identity import runtime_matrix_domain
+from mindroom.requester_identity import resolve_human_requester_alias, runtime_matrix_domain
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
@@ -40,27 +47,75 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.state import MatrixAccount
 
+type _RosterEntry = PersonalAgentRosterEntry | CreatedAgentEntry
 
-def _write_personal_agent_roster(runtime_paths: RuntimePaths, roster: list[PersonalAgentRosterEntry]) -> None:
-    payload = {"entries": [entry.model_dump(mode="json") for entry in roster]}
+_EDIT_FIELDS = tuple(GeneratedAgentEdits.model_fields)
+# Created agents this runtime is registering, changed only under the roster lock.
+# The primary runtime is the roster's only writer, so any other pending created entry was left by a crash.
+_REGISTERING: set[str] = set()
+
+
+class _GeneratedAgentError(ValueError):
+    """Why a change to a generated agent was refused; the message is shown to the requester as is."""
+
+
+def _write_personal_agent_roster(runtime_paths: RuntimePaths, roster: PersonalAgentRoster) -> None:
+    payload = roster.model_dump(mode="json")
     write_json_file_durable(personal_agent_roster_path(runtime_paths), payload, strict_atomic_replace=True)
+
+
+def _refuse_unloadable(config: Config, runtime_paths: RuntimePaths, roster: PersonalAgentRoster) -> None:
+    """Refuse a roster the next load would reject, because that load would leave out every generated agent."""
+    try:
+        authored = config.authored_model_dump()
+        config.validate_with_runtime(authored, runtime_paths, tolerate_plugin_load_errors=True, roster=roster)
+    except ValueError as exc:  # Pydantic and runtime validation errors are both ValueErrors.
+        msg = f"The agent would not load with this change, so nothing was stored: {exc}"
+        raise _GeneratedAgentError(msg) from exc
+
+
+def _replace_roster_entry(
+    runtime_paths: RuntimePaths,
+    entry: _RosterEntry,
+    replacement: _RosterEntry | None,
+    config: Config | None = None,
+) -> None:
+    """Write the roster with one entry swapped for its replacement, or removed; the caller holds the lock.
+
+    Given the live config, it first refuses a roster the next load would reject.
+    """
+    roster = read_personal_agent_roster_file(runtime_paths)
+    field = "created" if isinstance(entry, CreatedAgentEntry) else "entries"
+    kept = [replacement if other == entry else other for other in getattr(roster, field)]
+    roster = roster.model_copy(update={field: [other for other in kept if other is not None]})
+    if config is not None:
+        _refuse_unloadable(config, runtime_paths, roster)
+    _write_personal_agent_roster(runtime_paths, roster)
 
 
 def _append_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:
     """Append one entry durably in place of the user's earlier one from that template; the caller holds the lock."""
     key = (entry.template, entry.user_id)
-    roster = [other for other in read_personal_agent_roster(runtime_paths) if (other.template, other.user_id) != key]
-    _write_personal_agent_roster(runtime_paths, [*roster, entry])
+    roster = read_personal_agent_roster_file(runtime_paths)
+    entries = [other for other in roster.entries if (other.template, other.user_id) != key]
+    _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"entries": [*entries, entry]}))
 
 
-def _activate_personal_agent_roster_entry(runtime_paths: RuntimePaths, entry: PersonalAgentRosterEntry) -> None:
-    """Rewrite the pending entry this provisioning reserved durably as active, under the roster lock."""
+def _settle_roster_entry(runtime_paths: RuntimePaths, entry: _RosterEntry, replacement: _RosterEntry | None) -> None:
+    """Rewrite the pending entry a provisioning reserved durably as its active copy, or remove it, under the lock."""
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
-        roster = [
-            other.model_copy(update={"pending": False}) if other == entry else other
-            for other in read_personal_agent_roster(runtime_paths)
-        ]
-        _write_personal_agent_roster(runtime_paths, roster)
+        try:
+            _replace_roster_entry(runtime_paths, entry, replacement)
+        finally:
+            # A created entry this write failed to settle stays pending, and the next creation removes it.
+            _REGISTERING.discard(entry.agent_name)
+
+
+def _refuse_bracketed_owner(user_id: str) -> None:
+    if "[" in user_id or "]" in user_id:
+        # access.users entries are globs, so brackets would keep the owner out of their own agent.
+        msg = f"{user_id} cannot own an agent: brackets in a Matrix ID are not supported"
+        raise _GeneratedAgentError(msg)
 
 
 def _personal_agent_user_id(
@@ -112,10 +167,24 @@ def _localpart_taken(agent_name: str, matrix_username: str | None, runtime_paths
     return False
 
 
+def _taken_agent_names(config: Config, runtime_paths: RuntimePaths, roster: PersonalAgentRoster) -> set[str]:
+    """Return the names a new generated agent would collide with at the next load, including those saved but not loaded."""
+    saved, _ = load_yaml_config_source(runtime_paths.config_path)
+    sections = (saved.get("agents"), saved.get("teams"), saved.get("personal_agents"))
+    return {
+        *config.agents,
+        *config.teams,
+        *config.personal_agents,
+        *RESERVED_ENTITY_NAMES,
+        *(name for section in sections if isinstance(section, dict) for name in section),
+        *(entry.agent_name for entry in [*roster.entries, *roster.created]),
+    }
+
+
 def _new_roster_entry(
     config: Config,
     runtime_paths: RuntimePaths,
-    roster: list[PersonalAgentRosterEntry],
+    roster: PersonalAgentRoster,
     *,
     template: str,
     user_id: str,
@@ -125,18 +194,7 @@ def _new_roster_entry(
 ) -> PersonalAgentRosterEntry:
     """Pick the first free name, the plain slug and then the hashed one, for a user's new pending agent."""
     template_config = config.personal_agents[template]
-    # An agent, team, or template saved but not reloaded yet would collide with this name at the next load.
-    saved, _ = load_yaml_config_source(runtime_paths.config_path)
-    sections = (saved.get("agents"), saved.get("teams"), saved.get("personal_agents"))
-    saved_sections = [section for section in sections if isinstance(section, dict)]
-    taken_names = {
-        *config.agents,
-        *config.teams,
-        *config.personal_agents,
-        *RESERVED_ENTITY_NAMES,
-        *(name for section in saved_sections for name in section),
-        *(entry.agent_name for entry in roster),
-    }
+    taken_names = _taken_agent_names(config, runtime_paths, roster)
     slug = personal_agent_username(user_id)
     hashed = f"{slug}_{sha256(user_id.encode()).hexdigest()[:6]}"
     # Someone on another server must not claim a local person's plain name first.
@@ -177,15 +235,16 @@ def _reserve_personal_agent(
     to check their names against the roster, so neither can miss the other's write.
     """
     with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
-        roster = read_personal_agent_roster(runtime_paths)
-        existing = next((entry for entry in roster if entry.template == template and entry.user_id == user_id), None)
+        roster = read_personal_agent_roster_file(runtime_paths)
+        key = (template, user_id)
+        existing = next((entry for entry in roster.entries if (entry.template, entry.user_id) == key), None)
         if existing is not None and not existing.pending:
             return existing, None
         entry = existing
         accounts = matrix_state_for_runtime(runtime_paths).accounts
         if entry is None or managed_account_key(entry.agent_name) not in accounts:
             # Only a registration that saved its account resumes; a failed one picks names from the current template.
-            roster = [other for other in roster if other is not existing]
+            roster = roster.model_copy(update={"entries": [other for other in roster.entries if other is not existing]})
             # A new agent's account can join an onboarding room before the reload that makes it known.
             if is_mindroom_account_id(user_id, runtime_paths):
                 msg = f"{user_id} is a MindRoom account and cannot own a personal agent"
@@ -231,10 +290,7 @@ async def provision_personal_agent(
     the registration. Calling again for a user whose entry is active returns
     that agent's name.
     """
-    if "[" in user_id or "]" in user_id:
-        # access.users entries are globs, so brackets would keep the owner out of their own agent.
-        msg = f"{user_id} cannot own a personal agent: brackets in a Matrix ID are not supported"
-        raise ValueError(msg)
+    _refuse_bracketed_owner(user_id)
     entry, display_name = await run_blocking_until_complete(
         _reserve_personal_agent,
         config,
@@ -255,5 +311,167 @@ async def provision_personal_agent(
         runtime_paths,
         username=entry.matrix_username,
     )
-    await run_blocking_until_complete(_activate_personal_agent_roster_entry, runtime_paths, entry)
+    active = entry.model_copy(update={"pending": False})
+    await run_blocking_until_complete(_settle_roster_entry, runtime_paths, entry, active)
     return entry.agent_name, True
+
+
+def _refuse_owners(owners: list[str], runtime_paths: RuntimePaths) -> None:
+    """Refuse owners that would make the next load invalid, or that are agents rather than people."""
+    validate_concrete_matrix_user_ids(owners, field_name="owners")
+    for owner in owners:
+        _refuse_bracketed_owner(owner)
+        if is_mindroom_account_id(owner, runtime_paths):
+            msg = f"{owner} is a MindRoom account and cannot own an agent"
+            raise _GeneratedAgentError(msg)
+
+
+def _refuse_tools(tools: list[str] | None, allowed: tuple[str, ...]) -> None:
+    if outside := [name for name in tools or () if name not in allowed]:
+        msg = f"Not among the tools this agent may use: {', '.join(outside)}; allowed: {', '.join(allowed)}"
+        raise _GeneratedAgentError(msg)
+
+
+def _owned_entry(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    requester_id: str,
+) -> tuple[_RosterEntry, str]:
+    """Return a loaded generated agent's roster entry and the resolved requester, refusing anyone but its owners."""
+    roster = read_personal_agent_roster_file(runtime_paths)
+    entry = next((other for other in [*roster.entries, *roster.created] if other.agent_name == agent_name), None)
+    if entry is None or config.generated_agent(agent_name) is None:
+        msg = f"{agent_name} is not a generated agent"
+        raise _GeneratedAgentError(msg)
+    owners = entry.owners
+    requester = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    if requester not in owners:
+        msg = f"Only {' or '.join(owners)} may change {agent_name}"
+        raise _GeneratedAgentError(msg)
+    return entry, requester
+
+
+def generated_agent_settings(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    *,
+    requester_id: str,
+) -> dict[str, Any]:
+    """Return the current values an owner may edit, the tools they may choose from and, if created, the owners."""
+    entry, _ = _owned_entry(config, runtime_paths, agent_name, requester_id)
+    current = config.agents[agent_name].model_dump(include={"display_name", "role", "instructions"})
+    current["tools"] = [tool.name for tool in config.resolve_entity(agent_name).authored_tool_configs]
+    settings = {"agent_name": agent_name, "edits": current, "allowed_tools": list(config.tool_ceiling(agent_name))}
+    if isinstance(entry, CreatedAgentEntry):
+        settings |= {"owner": entry.owner, "co_owners": entry.co_owners}
+    return settings
+
+
+def update_generated_agent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    agent_name: str,
+    requester_id: str,
+    changes: Mapping[str, object],
+) -> None:
+    """Store an owner's changes to a generated agent, None restoring the base's value; blocking, under the lock."""
+    with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
+        entry, requester = _owned_entry(config, runtime_paths, agent_name, requester_id)
+        editable = [*_EDIT_FIELDS, "co_owners"] if isinstance(entry, CreatedAgentEntry) else list(_EDIT_FIELDS)
+        if unknown := [field for field in changes if field not in editable]:
+            msg = f"{', '.join(unknown)} cannot be changed; allowed: {', '.join(editable)}"
+            raise _GeneratedAgentError(msg)
+        if isinstance(entry, CreatedAgentEntry) and "co_owners" in changes and requester != entry.owner:
+            msg = f"Only {entry.owner} may change co_owners of {agent_name}"
+            raise _GeneratedAgentError(msg)
+        data = entry.model_dump()
+        data["edits"] = (data["edits"] or {}) | {field: changes[field] for field in _EDIT_FIELDS if field in changes}
+        if "co_owners" in changes:
+            data["co_owners"] = changes["co_owners"] or []
+        updated = type(entry).model_validate(data)
+        if updated.edits is not None and "tools" in changes:
+            _refuse_tools(updated.edits.tools, config.tool_ceiling(agent_name))
+        if isinstance(updated, CreatedAgentEntry):
+            # A bridge alias is stored as its person, so it matches the resolved requester.
+            co_owners = [resolve_human_requester_alias(user_id, config, runtime_paths) for user_id in updated.co_owners]
+            updated = updated.model_copy(update={"co_owners": co_owners})
+            _refuse_owners(updated.owners, runtime_paths)
+        _replace_roster_entry(runtime_paths, entry, updated, config)
+
+
+def delete_created_agent(config: Config, runtime_paths: RuntimePaths, *, agent_name: str, requester_id: str) -> None:
+    """Remove a created agent for its owner; its Matrix account stays, so its name stays taken. Blocking."""
+    with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
+        entry, requester = _owned_entry(config, runtime_paths, agent_name, requester_id)
+        if not isinstance(entry, CreatedAgentEntry):
+            msg = f"{agent_name} is a personal agent and cannot be deleted"
+            raise _GeneratedAgentError(msg)
+        if requester != entry.owner:
+            msg = f"Only {entry.owner} may delete {agent_name}"
+            raise _GeneratedAgentError(msg)
+        _replace_roster_entry(runtime_paths, entry, None)
+
+
+def _reserve_created_agent(config: Config, runtime_paths: RuntimePaths, entry: CreatedAgentEntry) -> None:
+    """Record a pending created agent, refusing an owner at the creator's cap or a taken name; runs in a worker thread."""
+    cap = config.agents[entry.creator].created_agents_per_owner
+    with advisory_file_lock(personal_agent_roster_lock_path(runtime_paths)):
+        _refuse_owners([entry.owner], runtime_paths)
+        roster = read_personal_agent_roster_file(runtime_paths)
+        # A crash left the pending entries nobody here is registering; the others count, so two creations cannot
+        # both pass the cap.
+        created = [other for other in roster.created if not other.pending or other.agent_name in _REGISTERING]
+        roster = roster.model_copy(update={"created": created})
+        count = sum((other.creator, other.owner) == (entry.creator, entry.owner) for other in roster.created)
+        if count >= cap:
+            msg = f"{entry.owner} already has {count} agents from {entry.creator}, which may create {cap} per owner"
+            raise _GeneratedAgentError(msg)
+        name = entry.agent_name
+        if name in _taken_agent_names(config, runtime_paths, roster) or _localpart_taken(name, None, runtime_paths):
+            msg = f"{name} is taken; choose another name"
+            raise _GeneratedAgentError(msg)
+        active = entry.model_copy(update={"pending": False})
+        _refuse_unloadable(config, runtime_paths, roster.model_copy(update={"created": [*roster.created, active]}))
+        _write_personal_agent_roster(runtime_paths, roster.model_copy(update={"created": [*roster.created, entry]}))
+        _REGISTERING.add(name)
+
+
+async def provision_created_agent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    creator: str,
+    requester_id: str,
+    name: str,
+    display_name: str,
+    role: str,
+    instructions: list[str] | None,
+    tools: list[str] | None,
+) -> str:
+    """Create an agent from `creator` for the requester and return its Matrix ID, registering it as personal agents are."""
+    slug = re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")[:30]
+    if not slug:
+        msg = f"{name!r} has no letters or digits to name the agent by; choose another name"
+        raise _GeneratedAgentError(msg)
+    _refuse_tools(tools, config.tool_ceiling(creator))
+    owner = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    edits = GeneratedAgentEdits(display_name=display_name, role=role, instructions=instructions, tools=tools)
+    entry = CreatedAgentEntry(agent_name=f"{creator}_{slug}", creator=creator, owner=owner, edits=edits, pending=True)
+    homeserver = runtime_matrix_homeserver(runtime_paths)
+    # A failed or cancelled creation must hold neither the name nor a place under the cap.
+    remove = partial(_settle_roster_entry, runtime_paths, entry, None)
+    await run_blocking_or_compensate(partial(_reserve_created_agent, config, runtime_paths, entry), lambda _: remove())
+    try:
+        user = await create_agent_user(homeserver, entry.agent_name, display_name, runtime_paths)
+    except BaseException as exc:
+        await run_blocking_until_complete(remove)
+        if isinstance(exc, Exception):
+            msg = f"Registering {entry.agent_name} failed: {exc}"
+            raise _GeneratedAgentError(msg) from exc
+        raise
+    active = entry.model_copy(update={"pending": False})
+    await run_blocking_until_complete(_settle_roster_entry, runtime_paths, entry, active)
+    return user.user_id

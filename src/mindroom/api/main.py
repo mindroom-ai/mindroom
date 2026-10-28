@@ -952,7 +952,8 @@ async def get_personal_agents(
             user_id=entry.user_id,
             agent_name=entry.agent_name,
             matrix_user_id=matrix_user_id,
-            display_name=(
+            display_name=(entry.edits.display_name if entry.edits is not None else None)
+            or (
                 personal_agent_data(templates[entry.template], entry).get("display_name")
                 if entry.template in templates
                 else None

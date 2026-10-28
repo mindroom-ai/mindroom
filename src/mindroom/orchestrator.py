@@ -109,6 +109,7 @@ from mindroom.tool_system.plugins import (
     reload_plugins,
 )
 from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.workers.backends.docker_projection import publish_generated_agents
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 from mindroom.workers.runtime import (
     clear_worker_validation_snapshot_cache,
@@ -953,6 +954,11 @@ class _MultiAgentOrchestrator:
         except (DuplicateManagedEntityIdentityError, MissingManagedEntityAccountError) as exc:
             raise PermanentStartupError(str(exc)) from exc
 
+    def _commit_config(self, config: Config) -> None:
+        """Run on `config` from now on, and give Docker worker configs the generated agents it built."""
+        self.config = config
+        publish_generated_agents(self.runtime_paths, config.generated_agent_data())
+
     def _preflight_account_provisioning(
         self,
         config: Config,
@@ -1145,7 +1151,7 @@ class _MultiAgentOrchestrator:
     def _publish_config(self, plan: ConfigUpdatePlan, commit_plugins: Callable[[], HookRegistry] | None) -> None:
         """Make the new config, its plugins, and its hook registry live in one step."""
         new_config = plan.new_config
-        self.config = new_config
+        self._commit_config(new_config)
         if plan.reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         if commit_plugins is None:
@@ -1185,7 +1191,7 @@ class _MultiAgentOrchestrator:
         self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
         await self._prepare_user_account(config, update_runtime_state=True)
         entity_users = await self._prepare_entity_accounts(config, entity_names)
-        self.config = config
+        self._commit_config(config)
         warn_about_config_risks(config, self.runtime_paths)
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
