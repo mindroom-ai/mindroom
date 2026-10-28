@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.llm.media import File, Image
+from mindroom.llm.media import Audio, File, Image
 from mindroom.tool_jobs import results
 from mindroom.tool_jobs.results import (
     ToolResultPayload,
@@ -33,6 +33,8 @@ def _saved(payload: ToolResultPayload) -> ToolResultPayload:
 
 
 _LEGACY_PAYLOADS = Path(__file__).parent / "fixtures" / "tool_jobs" / "agno_executor_payloads.json"
+# A payload as releases through v2026.10.634 saved it, with its tool value tagged `ToolResult`.
+_TOOL_RESULT_TAGGED = Path(__file__).parent / "fixtures" / "tool_jobs" / "tool_result_tagged_payload.json"
 
 
 def test_payload_round_trips_every_field_with_exact_types() -> None:
@@ -58,6 +60,28 @@ def test_a_payload_the_agno_executor_saved_decodes_to_its_text_and_media() -> No
     assert payload == ToolResultPayload(
         value=ToolValue(content="streamed tail", images=(Image(id="image-1", content=b"\x00\xff"),)),
         state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
+    )
+
+
+def test_a_tool_value_is_saved_under_its_own_tag() -> None:
+    """A job's tool value is saved tagged ``ToolValue``, the name of the type it decodes to."""
+    encoded = encode_result_payload(ToolResultPayload(value=ToolValue(content="drawn")))
+
+    assert encoded["value"]["value"]["value"]["type"] == "ToolValue"
+
+
+def test_a_tool_value_saved_under_its_earlier_tag_decodes_as_before() -> None:
+    """A job saved with its tool value tagged ``ToolResult`` is consumed with the same text, media, and state."""
+    saved = json.loads(_TOOL_RESULT_TAGGED.read_text())
+
+    assert _decode_result_payload(saved) == ToolResultPayload(
+        value=ToolValue(
+            content="drawn",
+            images=(Image(id="image-1", content=b"\x89PNG", mime_type="image/png"),),
+            audios=(Audio(id="audio-1", url="https://example.org/a.mp3"),),
+            files=(File(id="file-1", content=b"a,b", mime_type="text/csv", filename="t.csv"),),
+        ),
+        state_delta={"counter": {"before_present": False, "present": True, "value": 1}},
     )
 
 

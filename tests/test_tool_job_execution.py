@@ -14,7 +14,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Never
 
 import pytest
+from agno.media import Image as AgnoImage
 from agno.run import RunContext  # noqa: TC002 - Agno resolves tool parameter annotations at runtime.
+from agno.tools.function import ToolResult
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -57,7 +59,7 @@ from mindroom.tool_jobs.runtime import (
     job_summary,
     register_background_runtime,
 )
-from mindroom.tool_system.agno_toolkits import AgnoImage, Toolkit, ToolResult
+from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name

@@ -25,7 +25,8 @@ if TYPE_CHECKING:
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
-    from mindroom.tool_system.agno_toolkits import Toolkit, ToolResult
+    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.tool_function import ToolValue
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
 # Toolkit construction, connect, and close, synchronous tool bodies, and the worker proxy requests of
@@ -136,7 +137,7 @@ class _GatewayMCPToolkit(MindRoomMCPToolkit):
         if self.require_current_access is not None:
             await run_gateway_sync(self.require_current_access)
 
-    async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolResult:
+    async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolValue:
         if self.manager is None:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
         return await self.manager.call_tool(

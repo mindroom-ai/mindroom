@@ -18,13 +18,12 @@ from mindroom.tool_system.filters import tool_name_allowed
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
 
-    from agno.tools.function import ToolResult
-
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.manager import MCPServerManager
     from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
+    from mindroom.tool_system.tool_function import ToolValue
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
@@ -245,14 +244,14 @@ class MindRoomMCPToolkit(Toolkit):
             return self._oauth_payload(exc)
         return json.dumps(self._catalog_payload(catalog))
 
-    async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolResult | str:
+    async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolValue | str:
         return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
 
     async def _call_tool_with_error_payload(
         self,
         tool_name: str,
         arguments: dict[str, object],
-    ) -> ToolResult | str:
+    ) -> ToolValue | str:
         """Call one manager-owned tool and preserve structured reconnect/catalog errors."""
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
@@ -279,7 +278,7 @@ class MindRoomMCPToolkit(Toolkit):
             )
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Function:
-        async def _call_tool(**kwargs: object) -> ToolResult | str:
+        async def _call_tool(**kwargs: object) -> ToolValue | str:
             return await self._call_tool_with_error_payload(tool.remote_name, dict(kwargs))
 
         return Function(

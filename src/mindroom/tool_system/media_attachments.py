@@ -3,32 +3,31 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.attachments.storage import register_bytes_attachment
 from mindroom.providers.registry import model_capabilities
-from mindroom.tool_system.agno_toolkits import ToolResult
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolValue
 
 
-def _ready_receipt(result: ToolResult) -> dict[str, Any] | None:
+def _ready_receipt(result: ToolValue) -> dict[str, Any] | None:
     """Return the JSON receipt of a ready image view, or None when ``result`` is not one."""
-    if not isinstance(result.content, str):
-        return None
     try:
         receipt = json.loads(result.content)
-    except (ValueError, TypeError):
+    except ValueError:
         return None
     return receipt if isinstance(receipt, dict) and receipt.get("view_status") == "ready" else None
 
 
-def _retain_tool_media(result: ToolResult, context: ToolRuntimeContext) -> ToolResult:
+def _retain_tool_media(result: ToolValue, context: ToolRuntimeContext) -> ToolValue:
     """Keep delivered bytes for reuse; never resolve paths supplied by a worker."""
-    images = result.images or []
+    images = result.images
     if context.storage_path is None or len(images) != 1:
         return result
     metadata = _ready_receipt(result)
@@ -56,7 +55,7 @@ def _retain_tool_media(result: ToolResult, context: ToolRuntimeContext) -> ToolR
         append_tool_runtime_attachment_id(record.attachment_id)
         metadata["attachment_id"] = record.attachment_id
         metadata["attachment_is_viewed_copy"] = True
-    return ToolResult(content=json.dumps(metadata, sort_keys=True), images=result.images)
+    return replace(result, content=json.dumps(metadata, sort_keys=True))
 
 
 def _active_model_omits_images(context: ToolRuntimeContext) -> bool:
@@ -68,19 +67,19 @@ def _active_model_omits_images(context: ToolRuntimeContext) -> bool:
     return "image" in model_capabilities(config, context.runtime_paths, model_name).omitted_media
 
 
-def _image_marked_unsupported(result: ToolResult, context: ToolRuntimeContext) -> ToolResult:
+def _image_marked_unsupported(result: ToolValue, context: ToolRuntimeContext) -> ToolValue:
     """Turn a ready image view into an explicit unsupported result when the active model cannot see it."""
     receipt = _ready_receipt(result) if _active_model_omits_images(context) else None
     if receipt is None:
         return result
     receipt["view_status"] = "unsupported"
     receipt["message"] = "The active model adapter does not support viewed image tool results."
-    return result.model_copy(update={"content": json.dumps(receipt, sort_keys=True), "images": None})
+    return replace(result, content=json.dumps(receipt, sort_keys=True), images=())
 
 
-def finalize_tool_media(result: object) -> object:
+def finalize_tool_media(result: ToolValue) -> ToolValue:
     """Retain artifacts before reporting a known model-adapter limitation."""
     context = get_tool_runtime_context()
-    if context is None or not isinstance(result, ToolResult) or not result.images:
+    if context is None or not result.images:
         return result
     return _image_marked_unsupported(_retain_tool_media(result, context), context)

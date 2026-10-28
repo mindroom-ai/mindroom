@@ -8,16 +8,17 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from agno.media import Image
-from agno.tools.function import Function, ToolResult
+from agno.tools.function import Function
 from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+from mindroom.llm.media import Image
 from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 
@@ -145,10 +146,10 @@ def test_catalog_drift_fails_closed() -> None:
 
 
 def test_image_result_roundtrip() -> None:
-    """JSON transport preserves real Agno inline image bytes."""
-    result = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    """JSON transport preserves inline image bytes."""
+    result = ToolValue(content="screen", images=(Image(content=b"png", mime_type="image/png"),))
     decoded = decode_media_result(json.loads(json.dumps(encode_media_result(result))))
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.content == "screen"
     assert decoded.images[0].content == b"png"
     assert decoded.images[0].mime_type == "image/png"
@@ -196,10 +197,10 @@ def test_invalid_images_fail(mime: str, data: str) -> None:
 async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool, path: str | None) -> None:
     """Text receipts and explicit media redirect errors keep established workspace semantics."""
 
-    async def result() -> ToolResult:
-        return ToolResult(
+    async def result() -> ToolValue:
+        return ToolValue(
             content="native text",
-            images=[Image(content=b"image", mime_type="image/png")] if media else None,
+            images=(Image(content=b"image", mime_type="image/png"),) if media else (),
         )
 
     function = Function(name="browser_snapshot", entrypoint=result)
@@ -207,7 +208,7 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
     output = await function.entrypoint(mindroom_output_path=path)
     decoded = decode_media_result(encode_media_result(output))
     if media and path is None:
-        assert isinstance(decoded, ToolResult)
+        assert isinstance(decoded, ToolValue)
         assert decoded.images[0].content == b"image"
         assert not list(tmp_path.iterdir())
     else:
@@ -371,9 +372,9 @@ def small_image_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("contents", [[b"abcd", b"efgh"], [b"x"] * 8, [b"abc", b"def", b"gh"]])
 def test_independently_padded_images_roundtrip_at_aggregate_limit(contents: list[bytes]) -> None:
     """All eight allowed raw bytes survive transport despite independent padding."""
-    result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
+    result = ToolValue(content="screens", images=tuple(Image(content=data, mime_type="image/png") for data in contents))
     decoded = decode_media_result(json.loads(json.dumps(encode_media_result(result))))
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.content == "screens"
     assert [image.content for image in decoded.images] == contents
     assert all(image.mime_type == "image/png" for image in decoded.images)
@@ -384,7 +385,7 @@ def test_independently_padded_images_roundtrip_at_aggregate_limit(contents: list
 @pytest.mark.parametrize("operation", ["encode", "decode"])
 def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], operation: str) -> None:
     """Padding allowance never widens raw aggregate, per-image or count limits."""
-    result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
+    result = ToolValue(content="screens", images=tuple(Image(content=data, mime_type="image/png") for data in contents))
     if operation == "encode":
         with pytest.raises(ValueError, match="worker tool result"):
             encode_media_result(result)

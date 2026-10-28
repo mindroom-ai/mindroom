@@ -455,6 +455,24 @@ async def test_gemini_settings_and_overrides_shape_the_generation_config(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_gemini_dedicated_settings_replace_authored_generation_config_keys_only_when_set(tmp_path: Path) -> None:
+    """An authored ``generation_config`` key is sent unless its dedicated setting or an override replaces it."""
+    authored_keys = {"temperature": 0.2, "top_k": 5, "seed": 3}
+    config = _config(GEMINI, generation_config=authored_keys, generative_model_kwargs={"top_p": 0.4}, seed=9)
+
+    authored, _ = await run_adapter(config, _request(), tmp_path, gemini_sse(_gemini_chunk({"text": "ok"})))
+    overridden, _ = await run_adapter(
+        config,
+        _request(overrides=RequestOverrides(temperature=0.7)),
+        tmp_path,
+        gemini_sse(_gemini_chunk({"text": "ok"})),
+    )
+
+    assert authored["body"]["generationConfig"] == {"temperature": 0.2, "topK": 5, "topP": 0.4, "seed": 9}
+    assert overridden["body"]["generationConfig"] == {"temperature": 0.7, "topK": 5, "topP": 0.4, "seed": 9}
+
+
+@pytest.mark.asyncio
 async def test_gemini_tool_history_keeps_valid_call_ids_and_drops_invalid_ones(tmp_path: Path) -> None:
     """Gemini matches each result to its call by id, so malformed ids are left out without shifting valid ones."""
     messages = (
@@ -553,16 +571,19 @@ async def test_gemini_replays_undecodable_tool_arguments_as_empty(tmp_path: Path
 @pytest.mark.asyncio
 async def test_gemini_default_sampling_models_omit_sampling_controls(tmp_path: Path) -> None:
     """Models that require their provider's sampling defaults never receive temperature, top_p, or top_k."""
-    config = _config({**GEMINI, "id": "gemini-3.8-flash"}, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+    model = {**GEMINI, "id": "gemini-3.8-flash"}
+    dedicated = _config(model, temperature=0.2, top_p=0.9, top_k=40, seed=7)
+    authored = _config(model, generation_config={"temperature": 0.2, "top_p": 0.9, "top_k": 40, "seed": 7})
 
-    request, _ = await run_adapter(
-        config,
-        _request(overrides=RequestOverrides(temperature=0.5)),
-        tmp_path,
-        gemini_sse(_gemini_chunk({"text": "ok"})),
-    )
+    for config in (dedicated, authored):
+        request, _ = await run_adapter(
+            config,
+            _request(overrides=RequestOverrides(temperature=0.5)),
+            tmp_path,
+            gemini_sse(_gemini_chunk({"text": "ok"})),
+        )
 
-    assert request["body"]["generationConfig"] == {"seed": 7}
+        assert request["body"]["generationConfig"] == {"seed": 7}
 
 
 @pytest.mark.asyncio
@@ -2029,6 +2050,17 @@ async def test_synthetic_waits_for_each_chunk_at_the_configured_rate(
     _completed([event async for event in provider.stream(_request())])
 
     assert sleeps == [2.0, 2.0, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_synthetic_times_its_turn_from_its_first_text(tmp_path: Path) -> None:
+    """The synthetic model's time to first token runs from the request to its first text, within its duration."""
+    provider = build_synthetic_provider(_synthetic_config(chars_per_second=0), runtime_paths_for(tmp_path))
+
+    metrics = _completed([event async for event in provider.stream(_request())]).message.metrics
+
+    assert metrics.time_to_first_token is not None
+    assert 0 <= metrics.time_to_first_token <= metrics.duration
 
 
 @pytest.mark.parametrize(
