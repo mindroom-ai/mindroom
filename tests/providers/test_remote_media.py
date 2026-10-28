@@ -11,17 +11,25 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 import pytest
 
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.providers import model_http_client
 from mindroom.providers.pipeline import remote_media
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
-from tests.providers.golden_support import Wire, hide_provider_environment, pipeline_provider, sse_response
+from tests.providers.golden_support import (
+    Wire,
+    hide_provider_environment,
+    httpx2_transport,
+    pipeline_provider,
+    sse_response,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,15 +53,18 @@ def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _media_server(monkeypatch: pytest.MonkeyPatch, responses: dict[str, httpx.Response]) -> list[str]:
-    """Answer the pipeline's downloads from ``responses`` by URL and return the URLs it downloaded."""
+    """Answer the pipeline's downloads, which go through the model HTTP client, from ``responses`` by URL.
+
+    Returns the URLs downloaded.
+    """
     downloaded: list[str] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx.Response:
         downloaded.append(str(request.url))
         return responses.get(str(request.url), httpx.Response(404))
 
-    transport = httpx.MockTransport(respond)
-    monkeypatch.setattr(remote_media, "_http_client", lambda: httpx.AsyncClient(transport=transport))
+    pool = httpx2.AsyncClient(transport=httpx2_transport(respond), follow_redirects=True)
+    monkeypatch.setattr(model_http_client, "_loop_client", lambda: pool)
     return downloaded
 
 
@@ -385,3 +396,26 @@ async def test_a_downloaded_file_the_server_calls_octet_stream_is_typed_and_name
         "type": "file",
         "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{_b64(_PDF)}"},
     }
+
+
+@pytest.mark.asyncio
+async def test_media_downloads_go_through_the_model_http_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Downloads share the model requests' client, so they trust the same certificates and proxies."""
+    downloaded: list[str] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        downloaded.append(str(request.url))
+        return httpx.Response(200, content=_PNG)
+
+    pool = httpx2.AsyncClient(transport=httpx2_transport(respond), follow_redirects=True)
+    monkeypatch.setattr(model_http_client, "_loop_client", lambda: pool)
+    wire = Wire(FAMILIES["ollama"].reply())
+    message = Message(role="user", content="Look", images=[Image(url="https://media.test/generated")])
+
+    await complete(_provider("ollama", tmp_path, wire), ModelRequest(messages=[message]))
+
+    assert downloaded == ["https://media.test/generated"]
+    assert wire.body()["messages"][-1]["images"] == [_b64(_PNG)]

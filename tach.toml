@@ -6159,6 +6159,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",
+    "mindroom.providers.model_http_client",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
 ]

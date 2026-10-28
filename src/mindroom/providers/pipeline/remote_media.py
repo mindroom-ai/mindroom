@@ -11,12 +11,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-import httpx
+import httpx2
 
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, downloaded_media_fields, url_file_name
 from mindroom.logging_config import get_logger
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -87,21 +88,18 @@ async def _downloaded[T: (Image, Audio, Video, File)](item: T, kind: MediaKind, 
     return replace(item, url=None, content=data, **kept)
 
 
-def _http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(follow_redirects=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
-
-
 async def _download(url: str, kind: MediaKind, provider: str) -> tuple[bytes, str | None]:
-    """Return the bytes at ``url`` and the MIME type the server declared, reading at most the download limit."""
+    """Return the bytes at ``url`` and the MIME type the server declared, reading at most the download limit.
+
+    The download goes through the model requests' client, so it trusts the same certificates, uses the same proxies,
+    and follows redirects.
+    """
     try:
-        async with (
-            _http_client() as client,
-            client.stream("GET", url) as response,
-        ):
+        async with MODEL_HTTP_CLIENT.stream("GET", url, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
             response.raise_for_status()
             data = await collect_bounded_bytes(response.aiter_bytes(), max_bytes=_DOWNLOAD_LIMIT_BYTES)
             declared = canonical_mime_type(response.headers.get("content-type"))
-    except (httpx.HTTPError, httpx.InvalidURL, ByteLimitExceededError) as error:
+    except (httpx2.HTTPError, httpx2.InvalidURL, ByteLimitExceededError) as error:
         logger.warning("remote_media_unavailable", kind=kind, url=url, error=str(error))
         msg = f"The {kind} at a remote URL could not be downloaded for the model"
         raise InvalidRequest(msg, provider=provider) from error
