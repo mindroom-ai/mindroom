@@ -24,8 +24,6 @@ from mindroom.workers.backend import (
     effective_idle_status,
     filter_and_sort_worker_handles,
     mirrored_credential_services,
-    required_launch,
-    resolve_launch,
 )
 from mindroom.workers.backends._dedicated_worker_common import (
     ScopedWorkspaceMount,
@@ -101,6 +99,8 @@ class _ProgressReporterState:
 @dataclass(frozen=True, slots=True)
 class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
+    # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
+    launch_digest: str
     handle: WorkerHandle
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
@@ -469,19 +469,24 @@ class KubernetesWorkerBackend:
             self._register_progress_sink(worker_key, progress_sink)
         try:
             with self._worker_lock(worker_key):
-                spec, _launch = resolve_launch(spec, self._current_launch)
+                launch = self._current_launch()
                 timestamp = time.time() if now is None else now
-                cached_handle = self._reuse_cached_ready_worker(spec, now=timestamp)
+                cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
                 if cached_handle is not None:
                     return cached_handle
-                return self._provision_worker_locked(spec, timestamp=timestamp)
+                return self._provision_worker_locked(spec, launch, timestamp=timestamp)
         finally:
             if progress_sink is not None:
                 self._unregister_progress_sink(worker_key, progress_sink)
 
-    def _provision_worker_locked(self, spec: WorkerSpec, *, timestamp: float) -> WorkerHandle:  # noqa: PLR0915
+    def _provision_worker_locked(  # noqa: PLR0915
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        timestamp: float,
+    ) -> WorkerHandle:
         """Apply the worker's resources and wait until it is ready and speaks this runtime's protocol."""
-        launch = required_launch(spec)
         worker_key = spec.worker_key
         worker_id = self._worker_id(worker_key)
         state_subpath = self._state_subpath(worker_key)
@@ -518,8 +523,8 @@ class KubernetesWorkerBackend:
             get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
             # kubelet creates missing subPath sources as root, so shared workspaces exist first;
             # the cache keeps these mounts to notice a workspace that appears after planning.
-            workspace_mounts = self._plan_workspace_mounts(spec, create_shared=True)
-            shared_directory_mounts = self._plan_shared_directory_mounts(spec)
+            workspace_mounts = self._plan_workspace_mounts(spec, launch, create_shared=True)
+            shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
             self._resources.apply_auth_secret(worker_key=worker_key, worker_id=worker_id)
             auth_secret_applied = True
             replacing_stale_worker = False
@@ -553,7 +558,7 @@ class KubernetesWorkerBackend:
                         state=lifecycle,
                     )
                     self._resources.patch_deployment(worker_id, annotations=annotations)
-                self._sync_shared_credentials(spec)
+                self._sync_shared_credentials(spec, launch)
                 self._resources.apply_service(worker_id)
                 deployment = self._resources.wait_for_ready(
                     worker_id,
@@ -602,6 +607,7 @@ class KubernetesWorkerBackend:
         self._store_ready_worker(
             spec,
             handle,
+            launch_digest=launch.digest,
             validated_at=timestamp,
             workspace_mounts=workspace_mounts,
             shared_directory_mounts=shared_directory_mounts,
@@ -955,49 +961,69 @@ class KubernetesWorkerBackend:
             replicas_override=0,
         )
 
-    def _sync_shared_credentials(self, spec: WorkerSpec) -> None:
+    def _sync_shared_credentials(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> None:
         sync_shared_credentials_to_worker(
             spec.worker_key,
-            allowed_services=mirrored_credential_services(spec),
+            allowed_services=mirrored_credential_services(spec, launch),
             credentials_manager=get_runtime_credentials_manager(self.runtime_paths),
         )
 
-    def _plan_workspace_mounts(self, spec: WorkerSpec, *, create_shared: bool) -> tuple[ScopedWorkspaceMount, ...]:
+    def _plan_workspace_mounts(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        create_shared: bool,
+    ) -> tuple[ScopedWorkspaceMount, ...]:
         return plan_scoped_workspace_mounts(
             worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
             local_shared_storage_root=self._resources.storage_root,
             worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
             private_agent_names=spec.private_agent_names,
-            resolved_agent_policies=required_launch(spec).agent_policies,
+            resolved_agent_policies=launch.agent_policies,
             create_shared=create_shared,
         )
 
-    def _plan_shared_directory_mounts(self, spec: WorkerSpec) -> tuple[SharedDirectoryMount, ...]:
+    def _plan_shared_directory_mounts(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+    ) -> tuple[SharedDirectoryMount, ...]:
         return self._resources.plan_shared_directory_mounts(
             spec.worker_key,
             state_scope_worker_key=spec.state_scope_worker_key,
-            agent_policies=required_launch(spec).agent_policies,
+            agent_policies=launch.agent_policies,
         )
 
-    def _reuse_cached_ready_worker(self, spec: WorkerSpec, *, now: float) -> WorkerHandle | None:
-        entry = self._cached_ready_worker(spec.worker_key, spec=spec, now=now)
+    def _reuse_cached_ready_worker(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        now: float,
+    ) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(spec.worker_key, spec=spec, launch=launch, now=now)
         if entry is None:
             return None
         # Only user workers and workers whose plan mounted nothing can gain a workspace while running.
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
-        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(spec, create_shared=False):
+        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(
+            spec,
+            launch,
+            create_shared=False,
+        ):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         # Shared directories change at runtime, so the Deployment is re-applied whenever their mounts differ.
-        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec):
+        if entry.shared_directory_mounts != self._plan_shared_directory_mounts(spec, launch):
             self._invalidate_ready_worker(spec.worker_key)
             return None
         try:
             handle = self._patch_cached_worker_usage(entry, now=now)
             if handle is None:
                 return None
-            self._sync_shared_credentials(spec)
+            self._sync_shared_credentials(spec, launch)
         except WorkerBackendError:
             self._invalidate_ready_worker(spec.worker_key)
             raise
@@ -1011,12 +1037,14 @@ class KubernetesWorkerBackend:
         spec: WorkerSpec,
         handle: WorkerHandle,
         *,
+        launch_digest: str,
         validated_at: float,
         workspace_mounts: tuple[ScopedWorkspaceMount, ...],
         shared_directory_mounts: tuple[SharedDirectoryMount, ...],
     ) -> None:
         entry = _ReadyWorkerCacheEntry(
             spec=spec,
+            launch_digest=launch_digest,
             handle=handle,
             validated_at=validated_at,
             workspace_mounts=workspace_mounts,
@@ -1034,6 +1062,7 @@ class KubernetesWorkerBackend:
         worker_key: str,
         *,
         spec: WorkerSpec | None = None,
+        launch: WorkerLaunchConfig | None = None,
         now: float,
     ) -> _ReadyWorkerCacheEntry | None:
         with self._ready_workers_lock:
@@ -1042,6 +1071,7 @@ class KubernetesWorkerBackend:
                 return None
             cache_invalid = (
                 (spec is not None and entry.spec != spec)
+                or (launch is not None and entry.launch_digest != launch.digest)
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
                 or now - entry.handle.last_used_at >= self.idle_timeout_seconds
             )
@@ -1073,6 +1103,7 @@ class KubernetesWorkerBackend:
         self._store_ready_worker(
             entry.spec,
             handle,
+            launch_digest=entry.launch_digest,
             validated_at=entry.validated_at,
             workspace_mounts=entry.workspace_mounts,
             shared_directory_mounts=entry.shared_directory_mounts,

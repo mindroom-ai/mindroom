@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from mindroom.workers.models import WorkerMaintenanceResult
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerLaunchConfig, WorkerSpec, WorkerStatus
 
 
@@ -17,30 +14,9 @@ class WorkerBackendError(RuntimeError):
     """Raised when a worker backend cannot satisfy a request."""
 
 
-def resolve_launch(
-    spec: WorkerSpec,
-    current_launch: Callable[[], WorkerLaunchConfig],
-) -> tuple[WorkerSpec, WorkerLaunchConfig]:
-    """Return ``spec`` carrying the launch its worker is provisioned with, the applied one read now, and that launch.
-
-    A dedicated backend calls this once inside the worker's lock and provisions from the result, so a request
-    that waited for the lock never restores an older launch.
-    """
-    launch = current_launch()
-    return replace(spec, launch=launch), launch
-
-
-def required_launch(spec: WorkerSpec) -> WorkerLaunchConfig:
-    """Return the launch config a dedicated backend needs, refusing a spec built without one."""
-    if spec.launch is None:
-        msg = "A dedicated worker needs the launch config of the applied config."
-        raise WorkerBackendError(msg)
-    return spec.launch
-
-
-def mirrored_credential_services(spec: WorkerSpec) -> frozenset[str]:
-    """Return the shared credential services mirrored into the spec's dedicated worker."""
-    return required_launch(spec).grantable_credentials if spec.mirror_grantable_credentials else frozenset()
+def mirrored_credential_services(spec: WorkerSpec, launch: WorkerLaunchConfig) -> frozenset[str]:
+    """Return the shared credential services mirrored into the spec's dedicated worker launched from ``launch``."""
+    return launch.grantable_credentials if spec.mirror_grantable_credentials else frozenset()
 
 
 def effective_idle_status(

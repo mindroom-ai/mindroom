@@ -46,8 +46,6 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.backend import (
     WorkerBackendError,
     mirrored_credential_services,
-    required_launch,
-    resolve_launch,
 )
 from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
@@ -454,10 +452,12 @@ def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_Dock
 
 @dataclass(frozen=True, slots=True)
 class _DockerLaunchConfig:
+    """One provisioning's launch: the applied launch read inside the worker's lock and the image it starts."""
+
+    launch: WorkerLaunchConfig
     image_reference: str
     launch_config_hash: str
     image_resolved: bool
-    tool_snapshot_digest: str
 
 
 class DockerWorkerBackend:
@@ -606,7 +606,7 @@ class DockerWorkerBackend:
             )
 
         with self._worker_lock(spec.worker_key):
-            spec, launch = resolve_launch(spec, self._current_launch)
+            launch = self._current_launch()
             # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
             plan_scoped_workspace_mounts(
                 worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
@@ -644,7 +644,7 @@ class DockerWorkerBackend:
 
             sync_shared_credentials_to_worker(
                 spec.worker_key,
-                allowed_services=mirrored_credential_services(spec),
+                allowed_services=mirrored_credential_services(spec, launch),
                 credentials_manager=self._credentials_manager,
             )
 
@@ -1088,10 +1088,11 @@ class DockerWorkerBackend:
         ):
             return None
 
-        storage_mounts = self._scoped_storage_mount_specs(spec)
+        launch = launch_config.launch
+        storage_mounts = self._scoped_storage_mount_specs(spec, launch)
         config_mount_specs, projection = self._projection_manager.config_mount_specs(
             paths.state,
-            launch=required_launch(spec),
+            launch=launch,
             worker_key=metadata.worker_key,
             materialize_projection=False,
             storage_mounts=storage_mounts,
@@ -1102,7 +1103,7 @@ class DockerWorkerBackend:
         if not self._container_env_matches(
             container,
             expected_env=self._container_env(metadata.worker_key),
-        ) or metadata.startup_manifest_hash != self._startup_manifest_hash(spec):
+        ) or metadata.startup_manifest_hash != self._startup_manifest_hash(spec, launch):
             return None
 
         mount_checks = list(self._worker_root_mount_specs(paths.state))
@@ -1157,8 +1158,8 @@ class DockerWorkerBackend:
                     raise WorkerBackendError(msg) from exc
 
         if container is None:
-            metadata.startup_manifest_hash = self._write_startup_manifest(paths, spec=spec)
-            volumes = self._container_volumes(paths, spec=spec)
+            metadata.startup_manifest_hash = self._write_startup_manifest(paths, spec=spec, launch=launch_config.launch)
+            volumes = self._container_volumes(paths, spec=spec, launch=launch_config.launch)
             self._prepare_nested_storage_mount_targets(paths, (volume.rsplit(":", 2)[1] for volume in volumes))
             security_kwargs = (
                 {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
@@ -1213,9 +1214,9 @@ class DockerWorkerBackend:
                 msg = f"{mismatch.error} Pulling '{self.config.image}' failed: {exc}"
                 raise WorkerBackendError(msg) from exc
             launch_config = self._launch_config_from_image_identity(
+                launch_config.launch,
                 pulled_image.id,
                 image_resolved=True,
-                tool_snapshot_digest=launch_config.tool_snapshot_digest,
             )
             metadata.launch_config_hash = launch_config.launch_config_hash
             self._save_metadata(paths, metadata)
@@ -1317,10 +1318,16 @@ class DockerWorkerBackend:
         # Operator env never replaces a backend-owned variable; the config rejects the names it could collide on.
         return {**self.config.extra_env, **env}
 
-    def _write_startup_manifest(self, paths: _DockerWorkerPaths, *, spec: WorkerSpec) -> str:
+    def _write_startup_manifest(
+        self,
+        paths: _DockerWorkerPaths,
+        *,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+    ) -> str:
         """Persist primary validation state before creating one Docker worker, and return the manifest's hash."""
         runtime_paths = self._worker_runtime_paths(spec.worker_key)
-        tool_validation_snapshot = required_launch(spec).tool_validation_snapshot
+        tool_validation_snapshot = launch.tool_validation_snapshot
         write_startup_manifest(
             paths.state.root,
             runtime_paths,
@@ -1333,11 +1340,11 @@ class DockerWorkerBackend:
             public_runtime=True,
         )
 
-    def _startup_manifest_hash(self, spec: WorkerSpec) -> str:
+    def _startup_manifest_hash(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> str:
         """Return the hash of the startup manifest a worker created now for ``spec`` would boot from."""
         return startup_manifest_sha256(
             self._worker_runtime_paths(spec.worker_key),
-            tool_validation_snapshot=required_launch(spec).tool_validation_snapshot,
+            tool_validation_snapshot=launch.tool_validation_snapshot,
             public_runtime=True,
         )
 
@@ -1412,11 +1419,17 @@ class DockerWorkerBackend:
             ),
         ]
 
-    def _container_volumes(self, paths: _DockerWorkerPaths, *, spec: WorkerSpec) -> list[str]:
-        storage_mounts = self._scoped_storage_mount_specs(spec)
+    def _container_volumes(
+        self,
+        paths: _DockerWorkerPaths,
+        *,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+    ) -> list[str]:
+        storage_mounts = self._scoped_storage_mount_specs(spec, launch)
         config_mounts, _projection = self._projection_manager.config_mount_specs(
             paths.state,
-            launch=required_launch(spec),
+            launch=launch,
             worker_key=spec.worker_key,
             storage_mounts=storage_mounts,
         )
@@ -1452,8 +1465,8 @@ class DockerWorkerBackend:
                 msg = f"Docker worker mount target must be a real directory: {paths.state.root / relative_path}"
                 raise WorkerBackendError(msg) from exc
 
-    def _scoped_storage_mount_specs(self, spec: WorkerSpec) -> list[tuple[Path, str, bool]]:
-        resolved_agent_policies = required_launch(spec).agent_policies
+    def _scoped_storage_mount_specs(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> list[tuple[Path, str, bool]]:
+        resolved_agent_policies = launch.agent_policies
         state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         mount_specs = [
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
@@ -1499,9 +1512,10 @@ class DockerWorkerBackend:
         labels.update(self.config.extra_labels)
         return labels
 
-    def _compute_launch_config_hash(self, *, image_identity: str, tool_snapshot_digest: str) -> str:
-        # The worker's own projected config and assets restart it through the projection mount it compares,
-        # so config edits that other workers or only the primary see never restart this one.
+    def _compute_launch_config_hash(self, *, image_identity: str) -> str:
+        # The worker's own projected config and assets restart it through the projection mount it compares, and the
+        # tool snapshot through the startup manifest hash, so edits other workers or only the primary see never
+        # restart this one.
         config_payload: dict[str, object] = {
             "auth_token": self.auth_token or "",
             "config_path": self.config.config_path,
@@ -1513,7 +1527,6 @@ class DockerWorkerBackend:
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,
-            "tool_snapshot_digest": tool_snapshot_digest,
             "workers_root": str(self._workers_root),
             "user": self.config.user or "",
             "worker_port": self.config.worker_port,
@@ -1531,27 +1544,20 @@ class DockerWorkerBackend:
             client=self._client,
             docker_errors=self._docker_errors,
         )
-        return self._launch_config_from_image_identity(
-            image_identity,
-            image_resolved=image_resolved,
-            tool_snapshot_digest=launch.tool_snapshot_digest,
-        )
+        return self._launch_config_from_image_identity(launch, image_identity, image_resolved=image_resolved)
 
     def _launch_config_from_image_identity(
         self,
+        launch: WorkerLaunchConfig,
         image_identity: str,
         *,
         image_resolved: bool,
-        tool_snapshot_digest: str,
     ) -> _DockerLaunchConfig:
         return _DockerLaunchConfig(
+            launch=launch,
             image_reference=image_identity if image_resolved else self.config.image,
-            launch_config_hash=self._compute_launch_config_hash(
-                image_identity=image_identity,
-                tool_snapshot_digest=tool_snapshot_digest,
-            ),
+            launch_config_hash=self._compute_launch_config_hash(image_identity=image_identity),
             image_resolved=image_resolved,
-            tool_snapshot_digest=tool_snapshot_digest,
         )
 
     def _container_config_labels(self, container: _DockerContainer) -> dict[str, str]:
@@ -1604,19 +1610,13 @@ class DockerWorkerBackend:
 
         if not launch_config.image_resolved:
             compatible_hashes.add(
-                self._compute_launch_config_hash(
-                    image_identity=container_image_identity,
-                    tool_snapshot_digest=launch_config.tool_snapshot_digest,
-                ),
+                self._compute_launch_config_hash(image_identity=container_image_identity),
             )
             return compatible_hashes
 
         if container_image_identity == current_image_identity:
             compatible_hashes.add(
-                self._compute_launch_config_hash(
-                    image_identity=self.config.image,
-                    tool_snapshot_digest=launch_config.tool_snapshot_digest,
-                ),
+                self._compute_launch_config_hash(image_identity=self.config.image),
             )
         return compatible_hashes
 

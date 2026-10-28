@@ -17,7 +17,7 @@ from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from mindroom.workers.backend import WorkerBackendError, resolve_launch
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerSpec
 from mindroom.workers.runtime import bind_worker_launch_config_source
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -70,6 +70,7 @@ class _FakeBackend:
     builds: list[str]
     shutdowns: list[str]
     specs: list[WorkerSpec]
+    launches: list[WorkerLaunchConfig]
     cleanup_locator: str | None = None
     idle_timeout_seconds = 60.0
 
@@ -86,7 +87,7 @@ class _FakeBackend:
     ) -> WorkerHandle:
         del now, progress_sink
         # As the real dedicated backends do inside the worker's lock.
-        spec, _launch = resolve_launch(spec, self._current_launch)
+        type(self).launches.append(self._current_launch())
         type(self).specs.append(spec)
         return WorkerHandle(
             worker_id="worker-1",
@@ -115,6 +116,7 @@ def _install_fake_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> type
         builds: list[str] = []  # noqa: RUF012
         shutdowns: list[str] = []  # noqa: RUF012
         specs: list[WorkerSpec] = []  # noqa: RUF012
+        launches: list[WorkerLaunchConfig] = []  # noqa: RUF012
 
         @classmethod
         def from_runtime(
@@ -242,9 +244,9 @@ def test_calls_outside_a_matrix_turn_share_the_worker_manager_of_calls_inside_on
     assert recorded.builds == [backend]
     assert recorded.shutdowns == []
     assert len(recorded.specs) == 3
-    launches = [spec.launch for spec in recorded.specs]
-    assert all(launch is not None and launch.config is config for launch in launches)
-    assert {launch.grantable_credentials for launch in launches if launch is not None} == {
+    launches = recorded.launches
+    assert all(launch.config is config for launch in launches)
+    assert {launch.grantable_credentials for launch in launches} == {
         frozenset({"github_private"}),
     }
     assert all(spec.mirror_grantable_credentials for spec in recorded.specs)
@@ -282,8 +284,8 @@ def test_a_turn_built_before_a_reload_launches_its_worker_from_the_applied_confi
         assert old_turn_add(1, 2) == "sandbox-result"
         assert _calculator_add(runtime_paths, new_config)(1, 2) == "sandbox-result"
 
-    launches = [spec.launch for spec in recorded.specs]
-    assert [launch.config if launch is not None else None for launch in launches] == [
+    launches = recorded.launches
+    assert [launch.config for launch in launches] == [
         old_config,
         new_config,
         new_config,

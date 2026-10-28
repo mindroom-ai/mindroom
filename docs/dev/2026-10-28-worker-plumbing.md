@@ -23,7 +23,7 @@ Rejected: pinning the launch a run read and refusing it at ensure when the appli
 Accepted limit: the tool validation snapshot reflects the tool registry loaded when a launch is derived, so a launch derived while a plugin reload is in flight can carry the new registry with the previously applied config; the next derivation after the reload, or after its recovery, corrects it at the cost of one more Docker restart.
 The snapshot is validation metadata the trusted primary sends and grants a worker nothing.
 
-A Docker worker's launch hash covers only what that worker sees (its projected config and assets, the tool snapshot, and its startup manifest), because a hash over the whole config restarted every worker, ending its background shells, on edits it cannot observe.
+A Docker worker is replaced only when what it sees changes (its projected config and assets, and its startup manifest, which carries the tool snapshot), because a hash over the whole config restarted every worker, ending its background shells, on edits it cannot observe.
 
 ## One typed wire protocol
 

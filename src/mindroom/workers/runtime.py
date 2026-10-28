@@ -267,7 +267,6 @@ def build_worker_launch_config(
         agent_policies=config.get_agent_policies(),
         tool_validation_snapshot=tool_validation_snapshot,
         grantable_credentials=config.get_worker_grantable_credentials(),
-        tool_snapshot_digest=tool_snapshot_digest,
         digest=_stable_json_digest({"config": config_data, "tools": tool_snapshot_digest}),
     )
 

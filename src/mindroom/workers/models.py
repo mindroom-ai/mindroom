@@ -31,7 +31,6 @@ class WorkerLaunchConfig:
     agent_policies: Mapping[str, ResolvedAgentPolicy] = field(compare=False, repr=False)
     tool_validation_snapshot: Mapping[str, Mapping[str, object]] = field(compare=False, repr=False)
     grantable_credentials: frozenset[str] = field(compare=False)
-    tool_snapshot_digest: str = field(compare=False)
     digest: str
 
 
@@ -39,14 +38,12 @@ class WorkerLaunchConfig:
 class WorkerSpec:
     """Stable worker request resolved from worker-routing semantics.
 
-    A dedicated backend provisions from the applied launch it reads inside the worker's lock and records it in
-    ``launch``; callers leave it unset, and the shared runner ignores it.
+    A dedicated backend provisions it from the applied launch it reads inside the worker's lock.
     ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
     """
 
     worker_key: str
     private_agent_names: frozenset[str] | None = None
-    launch: WorkerLaunchConfig | None = None
     mirror_grantable_credentials: bool = True
     state_scope_worker_key: str | None = None
     resource_profile: ScriptResourceProfileName | None = None

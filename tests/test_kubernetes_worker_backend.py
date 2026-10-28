@@ -3957,20 +3957,6 @@ def test_kubernetes_backend_refuses_to_provision_before_a_config_is_applied(tmp_
     assert len(apps_api.read_names) == deployment_reads
 
 
-def test_kubernetes_backend_provisions_from_the_applied_launch_whatever_the_spec_carries(tmp_path: Path) -> None:
-    """A launch a caller put on the spec never replaces the applied one the backend reads inside the worker's lock."""
-    runtime_paths = _write_two_shared_agents_config(tmp_path, research_scope="shared")
-    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
-    superseded = _launch_of(backend)
-    _BACKEND_LAUNCHES[backend] = _launch(_write_two_shared_agents_config(tmp_path, research_scope="user"))
-
-    assert backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A, launch=superseded), now=10.0).status == "ready"
-    # Cached as provisioned from the applied launch, so the next request reuses it without reading its Deployment.
-    deployment_reads = len(apps_api.read_names)
-    assert backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=20.0).status == "ready"
-    assert len(apps_api.read_names) == deployment_reads
-
-
 def test_kubernetes_backend_provisions_a_waiting_request_from_the_launch_applied_when_it_gets_the_lock(
     tmp_path: Path,
 ) -> None:
