@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
+from functools import partial
 from itertools import batched
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
@@ -2233,7 +2234,13 @@ def _install_room_history_recovery_chunk(
             membership_epoch=expected_membership_epoch,
         )
         if tombstoned is not None:
-            replies.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
+            replies.end_replies_of_deleted_source(
+                transaction,
+                principal_id,
+                room_id=event.room_id,
+                event_id=tombstoned,
+                redacted=partial(tombstoned_event_ids, transaction, principal_id, event.room_id),
+            )
     return True
 
 
@@ -2286,7 +2293,13 @@ def _install_hydration_chunk(
             membership_epoch=expected_membership_epoch,
         )
         if tombstoned is not None:
-            replies.end_replies_of_deleted_source(transaction, principal_id, room_id=event.room_id, event_id=tombstoned)
+            replies.end_replies_of_deleted_source(
+                transaction,
+                principal_id,
+                room_id=event.room_id,
+                event_id=tombstoned,
+                redacted=partial(tombstoned_event_ids, transaction, principal_id, event.room_id),
+            )
     return True
 
 
