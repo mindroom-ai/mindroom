@@ -225,7 +225,7 @@ def _gateway(
             runtime=SimpleNamespace(
                 client=client,
                 config=config,
-                enable_streaming=True,
+                enable_streaming=config.defaults.enable_streaming,
                 orchestrator=None,
             ),
             runtime_paths=runtime_paths_for(config),

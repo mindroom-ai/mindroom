@@ -551,7 +551,6 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
     bot.config = config
-    bot.enable_streaming = config.defaults.enable_streaming
     bot._set_presence_with_model_info = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot

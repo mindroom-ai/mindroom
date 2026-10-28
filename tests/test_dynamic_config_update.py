@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
 
-def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMock:
+def _mock_agent_bot(config: Config) -> MagicMock:
     """Build a bot-shaped mock with the runtime state expected by config reloads."""
     bot = MagicMock(spec=AgentBot)
     bot.pending_response_owner_count = 0
@@ -39,7 +39,6 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
     bot.deferred_stop_required = False
     bot.config = config
     bot.client = None
-    bot.enable_streaming = enable_streaming
     bot.running = True
     bot._matrix_ingestion_quiesce_requested = False
     bot._quiesce_matrix_ingestion = AsyncMock()
@@ -48,7 +47,6 @@ def _mock_agent_bot(config: Config, *, enable_streaming: bool = True) -> MagicMo
         config=config,
         runtime_paths=orchestrator_runtime_paths(Path(tempfile.mkdtemp())),
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=enable_streaming,
         orchestrator=None,
     )
     return bot
@@ -334,9 +332,9 @@ class TestDynamicConfigUpdate:
         # No entities restarted, but existing bots still receive new defaults.
         assert updated is False
         assert mock_bot.config == updated_config
-        assert mock_bot.enable_streaming is False
+        assert mock_bot.config.defaults.enable_streaming is False
         assert router_bot.config == updated_config
-        assert router_bot.enable_streaming is False
+        assert router_bot.config.defaults.enable_streaming is False
 
     @pytest.mark.asyncio
     async def test_thread_summary_threshold_defaults_update_existing_bots_without_restart(

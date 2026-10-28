@@ -167,18 +167,6 @@ class TestAgentBot(AgentBotTestBase):
         assert bot.agent_name == "calculator"
         assert bot.rooms == ["!test:localhost"]
         assert not bot.running
-        assert bot.enable_streaming is True  # Default value
-
-        # Test with streaming disabled
-        bot_no_stream = make_test_agent_bot(
-            mock_agent_user,
-            tmp_path,
-            rooms=["!test:localhost"],
-            enable_streaming=False,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        assert bot_no_stream.enable_streaming is False
 
     def test_journal_admission_is_given_a_matrix_id_not_a_journal_principal(
         self,
@@ -1057,6 +1045,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_should_use_streaming.return_value = enable_streaming
 
         config = self._config_for_storage(tmp_path)
+        config.defaults.enable_streaming = enable_streaming
         mention_id = f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))}"
         agent_user = AgentMatrixUser(
             agent_name="calculator",
@@ -1069,7 +1058,6 @@ class TestAgentBot(AgentBotTestBase):
             agent_user,
             tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=enable_streaming,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -1530,6 +1518,7 @@ class TestAgentBot(AgentBotTestBase):
         """Test agent bot thread response behavior based on agent participation."""
         # Use the helper method to create mock config
         config = self._config_for_storage(tmp_path)
+        config.defaults.enable_streaming = enable_streaming
         mock_load_config.return_value = config
 
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
@@ -1546,7 +1535,6 @@ class TestAgentBot(AgentBotTestBase):
             config,
             runtime_paths_for(config),
             rooms=["!test:localhost"],
-            enable_streaming=enable_streaming,
         )
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()

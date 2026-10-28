@@ -4939,13 +4939,12 @@ class TestMultiAgentOrchestrator:
         first_bot = _mock_managed_bot(old_config)
         second_bot = _mock_managed_bot(old_config)
         install_bots(orchestrator, {"first": first_bot, "second": second_bot})
-        second_bot_state_at_first_await: list[tuple[bool, bool, bool]] = []
+        second_bot_state_at_first_await: list[tuple[bool, bool]] = []
 
         async def fail_first_presence_update() -> None:
             second_bot_state_at_first_await.append(
                 (
                     second_bot.config is new_config,
-                    second_bot.enable_streaming is False,
                     second_bot.hook_registry is new_hook_registry,
                 ),
             )
@@ -4958,9 +4957,8 @@ class TestMultiAgentOrchestrator:
             await orchestrator._update_unchanged_bots(new_config)
 
         assert first_bot.config is new_config
-        assert first_bot.enable_streaming is False
         assert first_bot.hook_registry is new_hook_registry
-        assert second_bot_state_at_first_await == [(True, True, True)]
+        assert second_bot_state_at_first_await == [(True, True)]
         first_bot._set_presence_with_model_info.assert_awaited_once_with()
         second_bot._set_presence_with_model_info.assert_awaited_once_with()
         mock_log_exception.assert_called_once_with("bot_presence_update_failed", agent="first")
@@ -4975,7 +4973,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.config = current_config
-        router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
         install_bots(orchestrator, {"router": router_bot})
 
@@ -5000,7 +4997,6 @@ class TestMultiAgentOrchestrator:
         orchestrator.running = True
         router_bot = MagicMock()
         router_bot.config = current_config
-        router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
         router_bot.reconcile_pending_invites = AsyncMock(side_effect=RuntimeError("join failed"))
         router_bot.schedule_pending_invite_reconciliation = MagicMock()
@@ -5064,7 +5060,6 @@ class TestMultiAgentOrchestrator:
         # The same journal, because a *changed* one is refused before the
         # reload reaches the support-only apply path under test here.
         new_config.event_journal = current_config.event_journal
-        new_config.defaults.enable_streaming = True
 
         orchestrator = _MultiAgentOrchestrator(
             runtime_paths=resolve_runtime_paths(
@@ -5496,12 +5491,10 @@ class TestMultiAgentOrchestrator:
 
         router_bot = MagicMock()
         router_bot.config = old_config
-        router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
         general_bot.config = old_config
-        general_bot.enable_streaming = True
         general_bot._set_presence_with_model_info = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
@@ -5590,12 +5583,10 @@ class TestMultiAgentOrchestrator:
 
         router_bot = MagicMock()
         router_bot.config = old_config
-        router_bot.enable_streaming = True
         router_bot._set_presence_with_model_info = AsyncMock()
         router_bot.recover_pending_turn_journal_events = AsyncMock()
         general_bot = MagicMock()
         general_bot.config = old_config
-        general_bot.enable_streaming = True
         general_bot._set_presence_with_model_info = AsyncMock()
         install_bots(orchestrator, {"router": router_bot, "general": general_bot})
 
@@ -5698,10 +5689,9 @@ class TestMultiAgentOrchestrator:
             orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
             await orchestrator.initialize(mock_config)
 
-            # All bots should have streaming disabled except teams (which never stream)
+            assert orchestrator.agent_bots
             for bot in orchestrator.agent_bots.values():
-                if hasattr(bot, "enable_streaming"):
-                    assert bot.enable_streaming is False
+                assert bot._runtime_view.enable_streaming is False
 
 
 @pytest.mark.asyncio

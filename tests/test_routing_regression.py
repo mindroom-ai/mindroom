@@ -115,10 +115,9 @@ def setup_test_bot(
     agent: AgentMatrixUser,
     storage_path: Path,
     room_id: str,
-    enable_streaming: bool = False,
     config: Config | None = None,
 ) -> AgentBot:
-    """Set up a test bot with all required mocks."""
+    """Set up a non-streaming test bot with all required mocks."""
     if config is None:
         agents: dict[str, AgentConfig] = {}
         if agent.agent_name != "router":
@@ -154,6 +153,7 @@ def setup_test_bot(
         if account_key not in state.accounts:
             usernames[agent.agent_name] = MatrixID.parse(agent.user_id).username
     persist_entity_accounts(config, runtime_paths, usernames=usernames)
+    config.defaults.enable_streaming = False
 
     bot = make_test_agent_bot(
         agent,
@@ -161,7 +161,6 @@ def setup_test_bot(
         config=config,
         runtime_paths=runtime_paths,
         rooms=[room_id],
-        enable_streaming=enable_streaming,
     )
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id=agent.user_id)

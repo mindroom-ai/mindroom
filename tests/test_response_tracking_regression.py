@@ -81,13 +81,13 @@ class TestResponseTrackingRegression:
         """
         test_room_id = "!test:localhost"
 
+        mock_config.defaults.enable_streaming = False
         # Set up router bot (only router handles commands)
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
-            enable_streaming=False,
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
@@ -171,13 +171,13 @@ class TestResponseTrackingRegression:
         """
         test_room_id = "!test:localhost"
 
+        mock_config.defaults.enable_streaming = False
         # Set up router bot
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
-            enable_streaming=False,
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)
@@ -254,13 +254,13 @@ class TestResponseTrackingRegression:
         """
         test_room_id = "!test:localhost"
 
+        mock_config.defaults.enable_streaming = False
         # Set up router bot
         bot = make_test_agent_bot(
             agent_user=mock_router_agent,
             config=mock_config,
             storage_path=tmp_path,
             runtime_paths=runtime_paths_for(mock_config),
-            enable_streaming=False,
             rooms=[test_room_id],
         )
         wrap_extracted_collaborators(bot)

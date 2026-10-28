@@ -175,13 +175,13 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         display_name="Team One",
         password="p",  # noqa: S106
     )
+    config_with_team.defaults.enable_streaming = False
     bot = make_test_team_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        enable_streaming=False,
     )
     install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
@@ -242,13 +242,13 @@ async def _team_memory_saves(
         password="p",  # noqa: S106
     )
     make_bot = make_test_team_bot if entity_name in config.teams else make_test_agent_bot
+    config.defaults.enable_streaming = False
     bot = make_bot(
         agent_user=user,
         storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
@@ -405,13 +405,13 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         display_name="Team One",
         password="p",  # noqa: S106
     )
+    config_with_team.defaults.enable_streaming = False
     bot = make_test_team_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        enable_streaming=False,
     )
     install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
@@ -474,13 +474,13 @@ async def test_preformed_team_plain_reply_does_not_continue_existing_thread_root
         display_name="Team One",
         password="p",  # noqa: S106
     )
+    config_with_team.defaults.enable_streaming = False
     bot = make_test_team_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
@@ -545,13 +545,13 @@ async def test_team_does_not_respond_to_different_domain_mention(config_with_tea
         display_name="Team One",
         password="p",  # noqa: S106
     )
+    config_with_team.defaults.enable_streaming = False
     bot = make_test_team_bot(
         agent_user=team_user,
         storage_path=tmp_path,
         config=config_with_team,
         runtime_paths=runtime_paths,
         rooms=["!room:localhost"],
-        enable_streaming=False,
     )
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)

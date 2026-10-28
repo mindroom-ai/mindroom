@@ -53,12 +53,16 @@ class BotRuntimeState:
     config: Config
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
-    enable_streaming: bool
     orchestrator: OrchestratorRuntime | None
     # Orchestrator-owned and shared across bots. Lives here, not on ResponseRunner,
     # so it survives the runtime rebuild after a login identity change.
     response_admission_gate: ResponseAdmissionGate = field(default_factory=ResponseAdmissionGate)
     runtime_started_at: float = field(default_factory=time.time)
+
+    @property
+    def enable_streaming(self) -> bool:
+        """Return whether the live config enables streaming replies."""
+        return self.config.defaults.enable_streaming
 
     def mark_runtime_started(self) -> None:
         """Record the runtime start time for this bot start."""

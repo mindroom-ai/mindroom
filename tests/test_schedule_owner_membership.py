@@ -836,12 +836,12 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False) if managed_runtime else None
     if orchestrator is not None:
         orchestrator.config = config
+    config.defaults.enable_streaming = False
     live_runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
         orchestrator=orchestrator,
     )
     alias_lookup_started = asyncio.Event()

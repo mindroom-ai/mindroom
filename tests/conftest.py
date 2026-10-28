@@ -2706,7 +2706,6 @@ def sync_bot_runtime_state(bot: RuntimeBot) -> None:
         client.user_id = bot.matrix_id.full_id
     runtime.client = bot.client
     runtime.config = bot.config
-    runtime.enable_streaming = bot.enable_streaming
     runtime.orchestrator = bot.orchestrator
 
 

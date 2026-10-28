@@ -2298,7 +2298,6 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
         config=MagicMock(spec=Config),
         runtime_paths=_fake_runtime_paths(),
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=True,
         orchestrator=None,
     )
     # This bot is hand-built with object.__new__, so it only has what the test

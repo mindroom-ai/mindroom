@@ -263,7 +263,6 @@ def _build_response_runner(
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
     knowledge_access_support: SimpleNamespace | None = None,
-    enable_streaming: bool = True,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
@@ -271,7 +270,6 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.enable_streaming = enable_streaming
     bot.orchestrator = orchestrator
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
@@ -320,7 +318,7 @@ def _build_response_runner(
         client=bot.client,
         config=config,
         agent_reply_memberships=agent_reply_memberships,
-        enable_streaming=bot.enable_streaming,
+        enable_streaming=config.defaults.enable_streaming,
         orchestrator=bot.orchestrator,
         response_admission_gate=bot.admission_gate,
         runtime_started_at=0.0,

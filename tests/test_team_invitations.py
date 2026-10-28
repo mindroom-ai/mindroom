@@ -69,13 +69,13 @@ class TestTeamRoomMembership:
 
         # Create the team bot with configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
+        config.defaults.enable_streaming = False
         bot = make_test_team_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=["!test_room:localhost"],
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
 
@@ -125,13 +125,13 @@ class TestTeamRoomMembership:
 
         # Create the team bot with no configured rooms
         config = _bind_runtime_paths(Config(router=RouterConfig(model="default")), tmp_path)
+        config.defaults.enable_streaming = False
         bot = make_test_team_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=[],  # No configured rooms
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
 
@@ -195,12 +195,12 @@ class TestTeamRoomMembership:
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
         bot = make_test_team_bot(
             agent_user=team_user,
             storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
         bot.client = AsyncMock()

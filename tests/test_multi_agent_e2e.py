@@ -317,6 +317,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
         config = _make_config(tmp_path)
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
@@ -324,7 +325,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
-            enable_streaming=False,
         )
         install_direct_response_admission(bot)
         install_runtime_journal_support(bot)

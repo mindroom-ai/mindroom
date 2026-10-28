@@ -194,12 +194,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -289,12 +289,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -384,12 +384,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -458,12 +458,12 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )

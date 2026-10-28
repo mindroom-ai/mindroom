@@ -298,7 +298,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
             runtime=SimpleNamespace(
                 client=AsyncMock(),
                 config=config,
-                enable_streaming=True,
+                enable_streaming=config.defaults.enable_streaming,
                 orchestrator=None,
             ),
             runtime_paths=runtime_paths,

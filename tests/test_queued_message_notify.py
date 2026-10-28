@@ -887,12 +887,12 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
+    config.defaults.enable_streaming = False
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
         orchestrator=None,
     )
     membership = make_membership_stub()
@@ -964,12 +964,12 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         start="",
         end=None,
     )
+    config.defaults.enable_streaming = False
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
         orchestrator=None,
     )
     conversation_reader = make_conversation_reader_mock()
@@ -1078,12 +1078,12 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
+    config.defaults.enable_streaming = False
     runtime = BotRuntimeState(
         client=client,
         config=config,
         runtime_paths=runtime_paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
         orchestrator=None,
     )
     conversation_reader = make_conversation_reader_mock()

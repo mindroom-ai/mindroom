@@ -284,7 +284,6 @@ def create_bot_for_entity(
         Bot instance or None if entity not found in config
 
     """
-    enable_streaming = config.defaults.enable_streaming
     if entity_name == ROUTER_AGENT_NAME:
         if agent_reply_membership_sync is None:
             msg = "The managed router requires the orchestrator-owned reply-membership sync coordinator."
@@ -298,7 +297,6 @@ def create_bot_for_entity(
             runtime_paths,
             rooms,
             config_path=config_path,
-            enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
             agent_reply_membership_sync=agent_reply_membership_sync,
@@ -315,7 +313,6 @@ def create_bot_for_entity(
             runtime_paths=runtime_paths,
             rooms=rooms,
             config_path=config_path,
-            enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
             room_activity_observer=room_activity_observer,
@@ -331,7 +328,6 @@ def create_bot_for_entity(
             runtime_paths,
             rooms,
             config_path=config_path,
-            enable_streaming=enable_streaming,
             journal_store=journal_store,
             agent_reply_memberships=agent_reply_memberships,
             room_activity_observer=room_activity_observer,
@@ -407,7 +403,6 @@ class AgentBot:
         runtime_paths: RuntimePaths,
         rooms: list[str] | None = None,
         config_path: Path | None = None,
-        enable_streaming: bool = True,
         journal_store: EventJournalStore | None = None,
         *,
         agent_reply_memberships: AgentReplyMembershipIndex,
@@ -472,7 +467,6 @@ class AgentBot:
             config=config,
             runtime_paths=self.runtime_paths,
             agent_reply_memberships=agent_reply_memberships,
-            enable_streaming=enable_streaming,
             orchestrator=None,
         )
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
@@ -1026,16 +1020,6 @@ class AgentBot:
         self._personal_room_lifecycle.config_changed()
         if self._call_manager is not None:
             self._call_manager.update_config(value)
-
-    @property
-    def enable_streaming(self) -> bool:
-        """Return whether streaming is enabled for this bot."""
-        return self._runtime_view.enable_streaming
-
-    @enable_streaming.setter
-    def enable_streaming(self, value: bool) -> None:
-        """Update whether streaming is enabled for this bot."""
-        self._runtime_view.enable_streaming = value
 
     @property
     def orchestrator(self) -> OrchestratorRuntime | None:

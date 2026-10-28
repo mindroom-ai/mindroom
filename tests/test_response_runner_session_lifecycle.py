@@ -145,6 +145,7 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
     """Blank prompts should emit one canonical message:cancelled hook through lifecycle finalization."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
+    config.defaults.enable_streaming = use_streaming
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     if use_streaming:
         _mark_requester_online(bot.client, "@alice:localhost")
@@ -156,7 +157,6 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
             requester_id="@alice:localhost",
-            enable_streaming=use_streaming,
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
@@ -312,6 +312,7 @@ def _session_runner(
     config = bind_runtime_paths(_config(), runtime_paths)
     config.agents["general"].show_tool_calls = False
     config.memory.backend = "none"
+    config.defaults.enable_streaming = streaming
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     if streaming:
         _mark_requester_online(bot.client, "@alice:localhost")
@@ -336,7 +337,6 @@ def _session_runner(
             ),
             budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         ),
-        enable_streaming=streaming,
     )
     # Each reply shows its own events, as a homeserver names them.
     unique_room_send_responses(bot.client)
@@ -992,6 +992,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
         ),
         runtime_paths,
     )
+    config.defaults.enable_streaming = False
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     target = MessageTarget.resolve("!test:localhost", None, "$external-trigger", room_mode=True)
 
@@ -1006,7 +1007,6 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             storage_path=tmp_path,
             requester_id="@owner:localhost",
             message_target=target,
-            enable_streaming=False,
         )
         build_calls: list[dict[str, object]] = []
         original_build_execution_identity = coordinator.deps.tool_runtime.build_execution_identity

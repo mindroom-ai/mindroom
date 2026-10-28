@@ -499,7 +499,6 @@ def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntim
         config=config,
         runtime_paths=runtime_paths_for(config),
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=True,
         orchestrator=None,
     )
 
@@ -538,12 +537,12 @@ class ThreadingBehaviorTestBase:
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False  # Disable streaming for simpler testing
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
             storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,  # Disable streaming for simpler testing
             config=config,
             runtime_paths=runtime_paths_for(config),
         )

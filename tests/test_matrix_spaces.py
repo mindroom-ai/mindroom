@@ -840,13 +840,11 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
 
     general_bot = MagicMock()
     general_bot.config = initial_config
-    general_bot.enable_streaming = True
     general_bot._set_presence_with_model_info = AsyncMock()
     orchestrator.fleet.add("general", general_bot)
 
     router_bot = MagicMock()
     router_bot.config = initial_config
-    router_bot.enable_streaming = True
     router_bot.running = True
     router_bot._set_presence_with_model_info = AsyncMock()
     router_bot.recover_pending_turn_journal_events = AsyncMock()

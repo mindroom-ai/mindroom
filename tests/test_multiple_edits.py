@@ -61,12 +61,12 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         ),
         test_runtime_paths(tmp_path),
     )
+    config.defaults.enable_streaming = False
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
         storage_path=tmp_path,
         rooms=["!test:localhost"],
-        enable_streaming=False,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )

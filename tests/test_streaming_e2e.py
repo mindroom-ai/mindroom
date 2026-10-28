@@ -382,7 +382,7 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         calc_bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
 
         # Ensure calculator bot has streaming disabled for this test
-        calc_bot.enable_streaming = False
+        calc_bot.config.defaults.enable_streaming = False
 
         # Simulate user mentioning helper
         user_event = MagicMock(spec=nio.RoomMessageText)
@@ -600,6 +600,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             ),
             orchestrator_runtime_paths(tmp_path),
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             calc_user,
@@ -607,7 +608,6 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
             config,
             runtime_paths_for(config),
             rooms=["!test:localhost"],
-            enable_streaming=False,
         )
         install_runtime_journal_support(bot)
         await bot.start()

@@ -147,7 +147,6 @@ def _echo_harness(
         config=config,
         runtime_paths=runtime_paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=True,
         orchestrator=cast("OrchestratorRuntime", _RouterReadiness(router_ready)),
     )
     router_user_id = entity_identity_registry(config, runtime_paths).current_id(ROUTER_AGENT_NAME).full_id

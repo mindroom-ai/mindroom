@@ -365,12 +365,12 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         for requester_id in ("@alice:localhost", "@mallory:localhost", None):
             await coordinator._send_poke("secret", "!room:localhost", "@secret Todo work is ready.", None, requester_id)
 
+    config.defaults.enable_streaming = False
     runtime = BotRuntimeState(
         client=None,
         config=config,
         runtime_paths=runtime_paths,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
         orchestrator=None,
     )
     turn_store = MagicMock()
