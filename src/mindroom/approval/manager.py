@@ -511,9 +511,9 @@ class ApprovalManager:
         )
 
     async def withdraw_scheduled_call_approval(self, task_id: str, *, reason: str) -> None:
-        """Withdraw a cancelled task's approval and deny its card if it is still pending."""
+        """Withdraw a cancelled task's approval and deny its card if it is still pending, or raise while it cannot."""
         if self.cards is None:
-            return
+            raise RuntimeError(RUNTIME_NOT_READY_REASON)
         await self._flush_decided(
             await self.cards.approvals.withdraw_scheduled_call_approval(task_id=task_id, reason=reason),
         )
