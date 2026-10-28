@@ -688,9 +688,8 @@ def _raise_if_process_shutdown() -> None:
 
 @dataclass(frozen=True)
 class _TeamResponseRequest:
-    """Typed carrier for one team response request plus team-specific inputs."""
+    """The team-specific inputs of one team response request."""
 
-    request: ResponseRequest
     member_names: tuple[str, ...]
     team_mode: str
     reason_prefix: str = "Team request"
@@ -3700,7 +3699,6 @@ class ResponseRunner:
     ) -> str | None:
         """Generate a team response of ``member_names`` with lifecycle locking and queued-message state."""
         team_request = _TeamResponseRequest(
-            request=request,
             member_names=tuple(member_names),
             team_mode=team_mode,
             reason_prefix=reason_prefix,
@@ -3709,12 +3707,12 @@ class ResponseRunner:
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="team",
-            locked_operation=lambda resolved_target, early_placeholder_state: (
-                self._generate_team_response_helper_locked(
-                    team_request,
-                    resolved_target=resolved_target,
-                    early_placeholder_state=early_placeholder_state,
-                )
+            locked_operation=lambda resolved_target, early_placeholder_state: self._run_locked_turn(
+                request,
+                team=team_request,
+                resolved_target=resolved_target,
+                early_placeholder_state=early_placeholder_state,
+                participation=None,
             ),
         )
 
@@ -3733,22 +3731,6 @@ class ResponseRunner:
                 resolved_target=resolved_target,
                 response_kind=response_kind,
             ),
-        )
-
-    async def _generate_team_response_helper_locked(
-        self,
-        team_request: _TeamResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState,
-    ) -> str | None:
-        """Generate a team response once the per-thread lifecycle lock is held."""
-        return await self._run_locked_turn(
-            team_request.request,
-            team=team_request,
-            resolved_target=resolved_target,
-            early_placeholder_state=early_placeholder_state,
-            participation=None,
         )
 
     async def _run_locked_turn(

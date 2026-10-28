@@ -1,21 +1,18 @@
-"""Shared response-turn drivers for the agent and team envelopes.
+"""The response-turn driver behind agent and team turns.
 
-One inbound response turn has the same lifecycle regardless of which entity
-answers it: load the scope session, run prepared attempts, decide whether the
-turn continues after a model switch or a discarded empty run, record the
-outcome on the turn recorder, and persist an interrupted replay when the turn
-is cancelled without a recorder.
-This module owns that lifecycle exactly once; ``mindroom.ai`` and
-``mindroom.teams`` supply thin adapters carrying the entity-specific attempt
-bodies as injected callables.
+One reply turn has the same lifecycle whichever entity answers it: load the
+scope session, run prepared attempts, decide whether the turn continues after a
+model switch or a discarded empty run, and settle the turn's record, storing an
+interrupted turn once in the scope its runs are stored in.
+This module owns that lifecycle once; ``mindroom.ai`` and ``mindroom.teams``
+supply adapters carrying the entity's attempt bodies, and blocking callers read
+the same stream through ``collect_streamed_response_content``.
 It also builds the run metadata and the request-log context a turn binds around
 its provider requests and stream pulls.
 
-``ResponseTurnContext`` is the per-turn identity carrier built once by the
-caller that owns the turn: the drivers consume its Matrix-identity fields,
-while ``active_event_ids`` and enrichment items ride along for the entity
-prepare chains. Mutable per-turn state (collectors, recorders, callbacks) stays
-out of it and crosses via ``TurnSinks`` or the adapters.
+``ResponseTurnContext`` holds one turn's inputs, built once by the caller that
+owns the turn. The collectors and callbacks a turn reports to cross via
+``TurnSinks``, and a resumed attempt via ``TurnResume``.
 """
 
 from __future__ import annotations

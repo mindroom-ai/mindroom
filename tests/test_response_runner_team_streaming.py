@@ -1050,6 +1050,58 @@ async def test_generate_team_response_helper_streaming_delivery_carries_live_met
 
 
 @pytest.mark.asyncio
+async def test_a_team_regeneration_of_an_answered_reply_streams_like_an_agent_s(tmp_path: Path) -> None:
+    """An edited request regenerates a team's answered reply as a stream when streaming applies, as it does an agent's."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = MagicMock(spec=AgentBot)
+    bot.logger = MagicMock()
+    bot.client = AsyncMock()
+    bot.agent_name = "ultimate"
+    bot.storage_path = tmp_path
+    bot.config = config
+    bot.runtime_paths = runtime_paths
+    bot._knowledge_access_support = _knowledge_access_support()
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
+        patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=team_orchestrator(config, runtime_paths),
+        )
+
+        async def consume_delivery(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
+            async for _chunk in request.response_stream:
+                pass
+            return _streamed("$answer", "Team hello again")
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        async def fake_stream() -> AsyncIterator[str]:
+            yield "Team hello again"
+
+        mock_team_stream.side_effect = lambda *_args, **_kwargs: fake_stream()
+
+        await coordinator.generate_team_response_helper(
+            replace(
+                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                existing_event_id="$answer",
+            ),
+            member_names=["general"],
+            team_mode="coordinate",
+        )
+
+    coordinator.deps.delivery_gateway.deliver_stream.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_generate_team_response_helper_persists_interrupted_history_when_stream_delivery_fails(
     tmp_path: Path,
 ) -> None:

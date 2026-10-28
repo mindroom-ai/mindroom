@@ -231,17 +231,15 @@ class _PreparedAgentRun:
 
 @dataclass(frozen=True)
 class _AgentAttempt:
-    """Inputs and identity for one agent run attempt, and the partial output a streamed one has shown."""
+    """Inputs and identity for one agent run attempt, and the partial output it has shown."""
 
     run_input: list[Message]
     run_id: str
-    stream_state: _StreamingAttemptState | None = None
+    stream_state: _StreamingAttemptState
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return what an interruption records of this attempt: a streamed one's partial output, and its run id."""
+        """Return what an interruption records of this attempt: its partial output, and its run id."""
         state = self.stream_state
-        if state is None:
-            return TurnPartialSnapshot(attempt_run_id=self.run_id)
         return TurnPartialSnapshot(
             assistant_text=state.assistant_text,
             completed_tools=tuple(state.completed_tools),
@@ -459,7 +457,7 @@ def _begin_attempt(
     continuation: TurnContinuationRunState,
     media: MediaInputs,
     *,
-    stream_state: _StreamingAttemptState | None = None,
+    stream_state: _StreamingAttemptState,
 ) -> tuple[RunStorage, _AgentAttempt]:
     """Record one prepared attempt on the turn's run state and recorder, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run

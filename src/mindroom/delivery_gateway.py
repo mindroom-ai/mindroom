@@ -158,13 +158,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 _BEFORE_RESPONSE_HOOK_FAILURE_TEXT = "Response failed. Please retry."
-_PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
-    {
-        "delivery_failed",
-        "terminal_update_cancelled",
-        "terminal_update_failed",
-    },
-)
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
 
 

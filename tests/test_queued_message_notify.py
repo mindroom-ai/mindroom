@@ -1975,7 +1975,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     try:
         with patch.object(
             ResponseRunner,
-            "_generate_team_response_helper_locked",
+            "_run_locked_turn",
             new=AsyncMock(return_value="$team-response"),
         ) as mock_locked:
             task = asyncio.create_task(
@@ -2104,7 +2104,7 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseRunner, "_generate_team_response_helper_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "_run_locked_turn", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
