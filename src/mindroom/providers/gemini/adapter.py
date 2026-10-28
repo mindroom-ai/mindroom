@@ -174,9 +174,9 @@ class GeminiProvider:
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}
-        if overrides.caller_retries:
-            # The SDK retries only as ``http_options.retry_options`` authors it; one attempt overrides that here.
-            config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
+        # The request pipeline alone retries a failed request, so one attempt overrides any SDK retries that
+        # ``http_options.retry_options`` authors on the client or in the generation config.
+        config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
         if disables_tools(request.tool_choice):
             return self._decision_config(config)
         return config

@@ -391,8 +391,8 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itself(tmp_path: Path) -> None:
-    """The SDK retries only as ``http_options.retry_options`` authors it, and a summary's request gets one attempt."""
+async def test_gemini_sends_one_attempt_whatever_retries_the_config_authors(tmp_path: Path) -> None:
+    """The request pipeline alone retries, so authored ``http_options.retry_options`` never multiply a request."""
     sent: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -413,7 +413,7 @@ async def test_gemini_retries_as_authored_except_for_a_caller_that_retries_itsel
             await anext(adapter.stream(_request(overrides=overrides)))
         attempts.append(len(sent))
 
-    assert attempts == [3, 1]
+    assert attempts == [1, 1]
 
 
 @pytest.mark.asyncio
