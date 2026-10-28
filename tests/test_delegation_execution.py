@@ -385,6 +385,64 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("before_the_pause", [None, "I will write the report."], ids=["no-text", "own-text"])
+async def test_a_child_that_ends_without_text_after_its_approval_hands_its_parent_the_completion_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before_the_pause: str | None,
+) -> None:
+    """A resumed child that ran its approved call and then wrote nothing hands over the completion note.
+
+    Neither a paused notice nor what the child wrote before the pause reaches the parent after the call ran.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "same-call"), content=before_the_pause), answer("")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        result = await resume(
+            approval_executor(config, paths),
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+            approval_id="card-0",
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written"]
+    resumed = _parent_record(config, paths, identity, "parent-run")
+    handed_over = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(handed_over, str)
+    assert "Agent completed the task but returned no content." in handed_over
+    assert "I have tools to execute" not in handed_over
+    assert "I will write the report." not in handed_over
+
+
+@pytest.mark.asyncio
 async def test_a_reply_whose_continuation_fails_records_every_delegation_it_answered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -487,8 +545,7 @@ async def test_an_approval_resume_that_pauses_on_a_call_nothing_answers_fails(
     stored = create_session_storage("code", config, paths, identity).get_run("run")
     assert stored is not None
     assert stored.status is RunStatus.paused
-    # The resume fails naming the waiting call before the reply's continuation runs, not with the run's stale
-    # pause notice ("I have tools to execute, but I need confirmation.").
+    # The resume fails naming the waiting call before the reply's continuation runs.
     assert str(raised.value) == "agent run 'run' paused on ['hand_off'] without an approval to ask for"
 
 

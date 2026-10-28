@@ -1,4 +1,8 @@
-"""What the owned codecs write for a dict Agno stored: the same dict minus the keys the owned types dropped."""
+"""What the owned codecs write for a dict Agno stored: the same dict minus the keys the owned types dropped.
+
+A run's content that is a paused notice, as Agno and the owned runtime up to v2026.10.627 stored for a run paused
+without text, goes too, since the owned reader reads it as no content (``mindroom.llm.legacy_run_content``).
+"""
 
 from __future__ import annotations
 
@@ -50,14 +54,20 @@ DROPPED_RUN_KEYS = frozenset(
 )
 
 
+# How every paused notice a stored run's content held begins: an agent run's, then a team run's.
+PAUSED_NOTICE_OPENINGS = ("I have tools to execute, but ", "Team run paused.")
+
+
 def without(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
     """Return ``data`` without ``keys``."""
     return {key: value for key, value in data.items() if key not in keys}
 
 
 def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """Agno's run dict minus dropped keys, recursively over metrics, tools, requirements, and member runs."""
+    """Agno's run dict minus dropped keys and paused notices, recursively over metrics, tools, requirements, and members."""
     result = without(data, DROPPED_RUN_KEYS)
+    if isinstance(result.get("content"), str) and result["content"].startswith(PAUSED_NOTICE_OPENINGS):
+        del result["content"]
     if isinstance(result.get("metrics"), dict):
         result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
     if "tools" in result:

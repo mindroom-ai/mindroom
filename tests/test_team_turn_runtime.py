@@ -792,12 +792,8 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.paused, RunStatus.paused)
     assert record.member_responses[0].run_id == member.run_id
-    assert record.content == "Team run paused. The following require input:\n- Checker: touch requires confirmation"
+    assert record.content is None
     assert team.recorder.outcome == "suspended"
-
-
-_MEMBER_PAUSED = "I have tools to execute, but I need confirmation."
-_TEAM_PAUSED = "Team run paused. The following require input:\n- Checker: touch requires confirmation"
 
 
 @pytest.mark.asyncio
@@ -828,8 +824,8 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
 ) -> None:
     """A blocking pause shows the document its run's events built, as a streamed pause does.
 
-    The member and the leader paused without text of their own, so their runs hold the paused notices, which the
-    pause does not show. The snapshot the resume continues holds the same slots.
+    The member and the leader paused without text of their own, so their runs hold no content and the pause shows no
+    notice. The snapshot the resume continues holds the same slots.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch, stream=stream, show_tool_calls=show_tool_calls)
 
@@ -843,7 +839,7 @@ async def test_a_team_pause_shows_the_document_its_events_built_without_paused_n
     assert [member["content"] for member in state["members"]] == ["", checker_slot]
     assert state["consensus"] == consensus_slot
     record, [member] = team.stored_runs()
-    assert (record.content, member.content) == (_TEAM_PAUSED, _MEMBER_PAUSED)
+    assert (record.content, member.content) == (None, None)
     assert team.recorder.outcome == "suspended"
 
 
@@ -1902,7 +1898,7 @@ async def test_a_failed_resume_stores_the_error_over_the_paused_row_and_ran_the_
     assert ProbeToolkit.calls == ["dangerous"]
     record, [member] = team.stored_runs()
     assert (record.status, member.status) == (RunStatus.error, RunStatus.completed)
-    assert "provider connection lost" in str(record.content)
+    assert "provider connection lost" in str(record.error)
     assert member.tools is not None
     assert (member.tools[0].confirmed, member.tools[0].result) == (True, "touched dangerous")
 
@@ -1979,7 +1975,7 @@ async def test_a_failed_team_turn_records_why_its_runs_failed(
     await team.reply(stream=stream, show_tool_calls=False)
 
     record, _ = team.stored_runs()
-    assert (record.status, record.content) == (RunStatus.error, "provider connection lost")
+    assert (record.status, record.content, record.error) == (RunStatus.error, None, "provider connection lost")
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == recorded
 

@@ -25,14 +25,16 @@ from mindroom.delegation.audit import (
 )
 from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
 from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
-from mindroom.delegation.recovery import interrupt_child
+from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.history.storage import new_scope_session
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
@@ -243,6 +245,52 @@ async def test_interruption_recovery_keeps_a_settlement_saved_before_a_crash(tmp
     assert (snapshot.status, snapshot.result) == ("cancelled", "Delegation cancelled.")
     run = json.loads((await _record_dir(child, config, paths) / "run.json").read_text())
     assert (run["status"], run["error"]) == ("cancelled", "Delegation cancelled.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+async def test_a_child_failed_by_recovery_keeps_its_text_and_stores_why_it_failed_as_its_error(
+    tmp_path: Path,
+    status: Literal["cancelled", "failed"],
+) -> None:
+    """Recovery that fails a child's paused run stores the reason as the run's error, beside the text the child wrote.
+
+    A cancelled child's run still stores the reason in place of its text.
+    """
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope_id="child", is_team=False)
+    paused = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        user_id="@alice:localhost",
+        agent_id="child",
+        status=RunStatus.paused,
+        content="Half of the report is inspected.",
+    )
+    assert storage.save_run(session, paused, record_usage=False) == "written"
+
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Restarted", status=status)
+
+    stored = await read_child_run(child, config, paths)
+    assert stored is not None
+    assert (stored.status, stored.content, stored.error) == (
+        (RunStatus.error, "Half of the report is inspected.", "Restarted")
+        if status == "failed"
+        else (RunStatus.cancelled, "Restarted", None)
+    )
+    assert (child.status, child.result) == (status, "Restarted")
+    # A settlement that reads the stored row reports why the child failed, as the recovery did.
+    assert stored.handover_content == "Restarted"
 
 
 @pytest.mark.asyncio

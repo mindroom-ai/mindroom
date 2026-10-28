@@ -166,12 +166,12 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
 _RAW_FAILURE = "checker provider down: api_key=example-secret"
 
 
-@pytest.mark.parametrize("source", ["live", "loaded"])
+@pytest.mark.parametrize("source", ["current", "stored-before-errors"])
 def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: str) -> None:
-    """A member whose run failed shows why, credentials redacted, whether its record is live or loaded from storage.
+    """A member whose run failed shows why, credentials redacted, whether its record carries an error or predates it.
 
-    The live record carries the reason the loop recorded, though its model wrote text first; a loaded one holds only
-    its stored content, the raw error, since the model wrote nothing.
+    A current record carries the reason the loop recorded, though its model wrote text first; one stored before
+    failed runs stored their error holds only its content, the raw error, since the model wrote nothing.
     """
     reason = redact_sensitive_text(_RAW_FAILURE)
     checker = RunRecord(
@@ -179,8 +179,8 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
         agent_id="checker",
         agent_display_name="Checker",
         status=RunStatus.error,
-        content="I will check." if source == "live" else _RAW_FAILURE,
-        error=reason if source == "live" else None,
+        content="I will check." if source == "current" else _RAW_FAILURE,
+        error=reason if source == "current" else None,
     )
 
     presentation = TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False)

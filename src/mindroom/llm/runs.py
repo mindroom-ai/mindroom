@@ -17,9 +17,9 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from mindroom.llm.events import ReportedCall
+from mindroom.llm.legacy_run_content import legacy_failure_text, stored_content
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import RunMetrics
-from mindroom.redaction import redact_sensitive_text
 
 
 def _new_id() -> str:
@@ -280,7 +280,11 @@ class _RunRecordCommon:
     parent_run_id: str | None = None
     user_id: str | None = None
     status: RunStatus = RunStatus.running
+    # What the run's model wrote, its requests' texts a blank line apart; a resumed run's holds only what its model
+    # wrote since the resume (``resumed_record``). A pause is in ``requirements`` and a failure in ``error``, never here.
     content: str | None = None
+    # Why an ``ERROR`` run failed, credentials redacted, set by whatever ended the run so.
+    error: str | None = None
     model: str | None = None
     model_provider: str | None = None
     messages: list[Message] = field(default_factory=list)
@@ -292,39 +296,16 @@ class _RunRecordCommon:
     metrics: RunMetrics | None = None
     metadata: dict[str, Any] | None = None
     created_at: int = field(default_factory=_now)
-    # Why an ``ERROR`` run failed, credentials redacted, set by the loop that ended it. It is never stored, so a
-    # loaded record has none; the stored ``content`` holds the error's text only when the model said nothing.
-    error: str | None = field(default=None, compare=False, repr=False)
-    # The content a resumed run carried over from its pause, set by the resume (``resumed_record``): a resumed agent
-    # or team member keeps its paused content until it writes text of its own, while a resumed team leader starts its
-    # text afresh (``continue_team``) and this records what it had at the pause. It is never stored, so a loaded
-    # record has none.
-    carried_content: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def handover_content(self) -> str | None:
         """Return what the run shows whoever reads it after it ends: why it failed, else its content.
 
-        The run that started it, a team's document of its members, and a delegation's settlement all read this. A
-        failed run that ended in this process shows its ``error``; a failed record loaded from storage has none, so
-        its stored content, the unredacted error when its model said nothing, is shown with credentials redacted.
+        The run that started it, a team's document of its members, and a delegation's settlement all read this.
         """
         if self.status is not RunStatus.error:
             return self.content
-        if self.error is not None:
-            return self.error
-        return None if self.content is None else redact_sensitive_text(self.content)
-
-    @property
-    def new_handover_content(self) -> str | None:
-        """Return what the run hands over (``handover_content``) beyond what it carried over from its pause.
-
-        A reply that a resume continues already accounts for what each resumed run carried over: the text it wrote
-        before the pause, or a paused notice that no longer holds once the run continues. A run that was not resumed
-        hands over all of it, and a failed run why it failed.
-        """
-        handover = self.handover_content
-        return None if handover == self.carried_content else handover
+        return self.error if self.error is not None else legacy_failure_text(self.content)
 
     def _scalars_dict(self, identity: Mapping[str, str | None]) -> dict[str, Any]:
         """Return the scalar keys in stored order: the run, its agent or team, then the rest."""
@@ -335,6 +316,7 @@ class _RunRecordCommon:
             "parent_run_id": self.parent_run_id,
             "user_id": self.user_id,
             "content": self.content,
+            "error": self.error,
             "model": self.model,
             "model_provider": self.model_provider,
         }
@@ -373,7 +355,8 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "parent_run_id": data.get("parent_run_id"),
         "user_id": data.get("user_id"),
         "status": _stored_status(data.get("status", RunStatus.running.value)),
-        "content": data.get("content"),
+        "content": stored_content(data),
+        "error": data.get("error"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),
         "messages": [Message.from_dict(message) for message in data.get("messages") or []],

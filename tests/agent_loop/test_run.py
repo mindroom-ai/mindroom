@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import pytest
 
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, LoopHooks
-from mindroom.agent_loop.run import paused_content, resume_agent, run_agent
+from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.event_journal.approval_continuations import ApprovalCall, approval_arguments_digest
@@ -231,7 +231,7 @@ async def test_stored_messages_leave_out_history_copies_and_transient_context() 
 
 
 @pytest.mark.asyncio
-async def test_a_paused_run_is_stored_paused_with_the_confirmation_notice_when_the_model_said_nothing() -> None:
+async def test_a_paused_run_whose_model_said_nothing_is_stored_paused_without_content() -> None:
     store = _Store()
     model = ScriptedModel([calls(tool_call("add", "c1", a=6, b=7), metrics=usage(1, 1))])
 
@@ -240,7 +240,9 @@ async def test_a_paused_run_is_stored_paused_with_the_confirmation_notice_when_t
     )
 
     assert record.status is RunStatus.paused
-    assert record.content == "I have tools to execute, but I need confirmation."
+    # The pause is the record's requirements; no notice stands in for text the model did not write.
+    assert record.content is None
+    assert "content" not in store.saved[0]
     assert record.requirements is not None
     assert record.requirements[0].needs_confirmation
     assert store.saved[0]["status"] == "PAUSED"
@@ -261,34 +263,14 @@ async def test_a_paused_run_keeps_the_text_the_model_streamed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_silent_external_pause_has_empty_content() -> None:
+async def test_a_silent_external_pause_has_no_content() -> None:
     model = ScriptedModel([calls(tool_call("echo", "c1", text="task"), metrics=usage(1, 1))])
 
     _, record = await collect(
         run_agent(spec(model, external(echo)), _prompt(), ctx=context(), persist=None, request_template=EMPTY_REQUEST),
     )
 
-    assert (record.status, record.content) == (RunStatus.paused, "")
-
-
-def test_paused_content_is_the_confirmation_notice_only_while_a_confirmation_is_pending() -> None:
-    confirm = ToolExecution(tool_call_id="c1", tool_name="t", requires_confirmation=True)
-    silent = ToolExecution(
-        tool_call_id="c2",
-        tool_name="t",
-        external_execution_required=True,
-        external_execution_silent=True,
-    )
-
-    def paused(*tools: ToolExecution) -> RunRecord:
-        return RunRecord(run_id="r", status=RunStatus.paused, tools=list(tools))
-
-    assert paused_content(paused(confirm)) == "I have tools to execute, but I need confirmation."
-    assert paused_content(paused(silent)) == ""
-    assert paused_content(paused(confirm, silent)) == "I have tools to execute, but I need confirmation."
-    decided = ToolExecution(tool_call_id="c3", tool_name="t", requires_confirmation=True, confirmed=True)
-    assert paused_content(paused(decided)) == ""
-    assert paused_content(RunRecord(run_id="r", status=RunStatus.paused)) == ""
+    assert (record.status, record.content) == (RunStatus.paused, None)
 
 
 @pytest.mark.asyncio
@@ -306,7 +288,7 @@ async def test_a_provider_error_stores_an_error_record_with_the_error_text_and_r
             pass
 
     [stored] = store.saved
-    assert (stored["status"], stored["content"]) == ("ERROR", "Rate limited")
+    assert (stored["status"], stored.get("content"), stored["error"]) == ("ERROR", None, "Rate limited")
     assert [message["role"] for message in stored["messages"]] == ["system", "user", "assistant"]
     assert stored["messages"][-1]["metrics"] == {"input_tokens": 5, "total_tokens": 5}
     assert stored["metrics"]["input_tokens"] == 5
@@ -320,11 +302,8 @@ async def test_a_provider_error_stores_an_error_record_with_the_error_text_and_r
     ids=["with_text", "without_text"],
 )
 async def test_a_failed_run_records_why_it_failed(error: Exception, text: str) -> None:
-    """A run that raises records the exception's text as its error and content, or its type name when it has none."""
-    records: list[RunRecord] = []
-
-    async def keep(record: RunRecord) -> None:
-        records.append(record)
+    """A run that raises stores the exception's text, or its type name when it has none, as its error, not its content."""
+    store = _Store()
 
     async def fail() -> None:
         raise error
@@ -332,11 +311,32 @@ async def test_a_failed_run_records_why_it_failed(error: Exception, text: str) -
     model = ScriptedModel([[Await(fail)]])
 
     with pytest.raises(type(error)):
-        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=keep, request_template=EMPTY_REQUEST):
+        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST):
             pass
 
-    [record] = records
-    assert (record.status, record.content, record.error) == (RunStatus.error, text, text)
+    [stored] = store.saved
+    assert (stored["status"], stored.get("content"), stored["error"]) == ("ERROR", None, text)
+    # A loaded record hands over why the run failed, as the live one did.
+    assert RunRecord.from_dict(stored).handover_content == text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_stores_its_failure_text_only_with_credentials_redacted() -> None:
+    store = _Store()
+
+    async def fail() -> None:
+        msg = "provider down: api_key=unit-test-secret"
+        raise RuntimeError(msg)
+
+    model = ScriptedModel([[Await(fail)]])
+
+    with pytest.raises(RuntimeError):
+        async for _ in run_agent(spec(model), _prompt(), ctx=context(), persist=store, request_template=EMPTY_REQUEST):
+            pass
+
+    [stored] = store.saved
+    assert stored["error"] == "provider down: api_key=***redacted***"
+    assert "unit-test-secret" not in json.dumps(stored)
 
 
 @pytest.mark.asyncio
@@ -361,7 +361,11 @@ async def test_an_error_after_text_keeps_the_text_as_content() -> None:
         ):
             pass
 
-    assert (store.saved[0]["status"], store.saved[0]["content"]) == ("ERROR", "Working.")
+    assert (store.saved[0]["status"], store.saved[0]["content"], store.saved[0]["error"]) == (
+        "ERROR",
+        "Working.",
+        "boom",
+    )
 
 
 @pytest.mark.asyncio
@@ -476,7 +480,7 @@ async def test_a_stop_while_the_paused_record_is_being_saved_leaves_a_cancelled_
     # Cancellation wins over the pause: the requirement leaves and the tool entry stops waiting.
     assert cancelled["requirements"] == []
     assert (cancelled["tools"][0]["requires_confirmation"], cancelled["tools"][0]["confirmed"]) == (False, None)
-    assert cancelled["content"] == "I have tools to execute, but I need confirmation."
+    assert "content" not in cancelled
 
 
 @pytest.mark.asyncio

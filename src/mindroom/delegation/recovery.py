@@ -147,8 +147,12 @@ async def interrupt_child(
         return
     if response is not None:
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
-        response.content = reason
+        if status == "cancelled":
+            response.status = RunStatus.cancelled
+            response.content = reason
+        else:
+            response.status = RunStatus.error
+            response.error = reason
         response.requirements = []
         for tool in response.tools or ():
             if tool.is_paused:

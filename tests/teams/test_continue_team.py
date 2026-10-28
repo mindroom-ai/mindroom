@@ -142,6 +142,38 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
     assert checker_request.messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
 
 
+@pytest.mark.parametrize("before_the_pause", [None, "Let me multiply that."], ids=["stored-notice", "own-text"])
+async def test_a_resumed_member_that_ends_without_text_hands_the_leader_its_call_s_result(
+    before_the_pause: str | None,
+) -> None:
+    """A member whose resumed run ran its approved call and then wrote nothing hands over the call's result.
+
+    Neither what the member wrote before the pause nor the paused notice its stored row held, which reads as no
+    content, reaches the leader after the call ran.
+    """
+    paused = _paused_team_approved()
+    if before_the_pause is not None:
+        [paused_member] = paused.member_responses
+        paused_member.content = before_the_pause
+    leader = scripted("leader-model", answer("The checker found 42.", usage(1, 1)))
+    checker = scripted("checker-model", answer("", usage(1, 1)))
+
+    await collect(
+        resume_team(
+            squad(leader, scripted("writer-model"), checker),
+            paused,
+            _resume_request(paused),
+            approved={
+                ("checker", APPROVED_CALL): approval(APPROVED_CALL, "multiply", {"a": 6, "b": 7}, agent="checker"),
+            },
+            context=lambda run_id: run_context(run_id, SQUAD_APPROVED),
+        ),
+    )
+
+    [request] = leader.requests
+    assert request.messages[-1].content == '{"operation": "multiplication", "result": 42.0}'
+
+
 async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader_request() -> None:
     paused = _paused_team_approved()
     leader = scripted("leader-model")  # Any request would fail: the scripted model has no turn for it.
@@ -172,7 +204,7 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
         "checker",
         member.run_id,
     )
-    assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
+    assert (record.content, member.content) == (None, None)
     # The delegation still reports the pause: the member results reach the leader once every member is done.
     assert record.tools is not None
     assert record.tools[0].result == MEMBER_PAUSED_RESULT.format(name="Checker")
@@ -1226,7 +1258,8 @@ async def test_a_failed_resume_stores_its_error_over_the_paused_team_row() -> No
     member_row, team_row = store.records
     assert member_row["run_id"] == paused.member_responses[0].run_id
     assert team_row["run_id"] == "team-approved"
-    assert "provider connection lost" in team_row["content"]
+    assert "provider connection lost" in team_row["error"]
+    assert "content" not in team_row
     assert team_row["requirements"] == []
 
 

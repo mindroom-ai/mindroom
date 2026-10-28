@@ -421,8 +421,8 @@ async def continue_paused_team_run(
                     if attempt.apply(event):
                         await publish_team_presentation(progress, presentation)
         continued = attempt.terminal_record()
-        # Each resumed run's slot shows what the run hands over beyond what it carried over from the pause and its
-        # events did not show, such as a failed member run's reason; a run that paused again shows no paused notice.
+        # Each resumed run's slot shows what the run hands over since the resume and its events did not show, such as
+        # a failed member run's reason; a run that paused again shows nothing more.
         for run in (continued, *continued.ended_member_runs):
             attempt.show_unshown_handover(run)
         paused = paused_attempt_from_response(
@@ -437,8 +437,8 @@ async def continue_paused_team_run(
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
         # A resume whose document stays empty, every run's text blank, shows the leader's own text or the no-reply
-        # note. The document already holds what each run handed over beyond what it carried over, so rendering the
-        # member runs again could add only what they carried over.
+        # note. The document already holds what each run handed over since the resume, so rendering the member runs
+        # again would add nothing.
         response_text = presentation.render_body(finished=True) or (
             format_team_header(members.display_names) + (finished_run_text(continued) or NO_TEAM_RESPONSE)
         )

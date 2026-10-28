@@ -130,8 +130,6 @@ def continue_team(
     # (``_store_interrupted`` in ``agent_loop/run.py``): the resume ends its approval anyway.
     record = resumed_record(paused)
     record.member_responses = []
-    # The paused notice is not part of the answer; the leader's text starts afresh.
-    record.content = None
     leader_requirements = [r for r in record.requirements or () if r.member_agent_id is None]
     record.requirements = leader_requirements
     plans = _plan_member_resumes(spec, paused, decisions)
@@ -164,19 +162,6 @@ def continue_team(
         entry=entry,
         resumed=decided,
     )
-
-
-def team_paused_content(record: TeamRunRecord) -> str:
-    """Return the text of a team run paused without text of its own: who waits for which confirmation.
-
-    The only externally executed calls are the silent delegation calls, so a pause on delegations alone has no text.
-    """
-    parts = [
-        f"- {r.member_display_name or 'team'}: {r.tool_execution.tool_name} requires confirmation"
-        for r in record.requirements or ()
-        if r.needs_confirmation
-    ]
-    return "Team run paused. The following require input:\n" + "\n".join(parts) if parts else ""
 
 
 def team_usage_runs(record: TeamRunRecord) -> list[tuple[AnyRunRecord, RunMetrics]]:
@@ -438,14 +423,10 @@ async def _drive_team(
             messages,
             ctx=ctx,
             hooks=hooks,
-            # The leader's loop stores only the team record. A store of any run is a store of team records, but ty
-            # infers the loop's record type as the union of both arguments', so the cast names the team record that
-            # ``pause_content`` takes.
-            persist=cast("Persist[TeamRunRecord]", persist),
+            persist=persist,
             template=template,
             entry=None if entry is None else lambda: entry(members),
             resumed=resumed,
-            pause_content=team_paused_content,
         )
         async with closing_async_stream(events):
             async for event in events:
@@ -468,7 +449,6 @@ __all__ = [
     "continue_team",
     "leader_tool_specs",
     "run_team",
-    "team_paused_content",
     "team_usage",
     "team_usage_runs",
 ]

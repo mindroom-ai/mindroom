@@ -21,7 +21,7 @@ from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunMetrics, RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
-from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_paused_content, team_usage
+from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_usage
 from mindroom.teams.spec import TeamMode
 from tests.agent_loop.helpers import add, echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -276,7 +276,7 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
             metadata=_METADATA,
         ),
     )
-    # The failed member run keeps its task and stores the error's text as its content, with no usage.
+    # The failed member run keeps its task and stores the error's text as its error, with no content or usage.
     assert settled(member) == settled(
         RunRecord(
             run_id=member.run_id,
@@ -286,7 +286,7 @@ async def test_a_failing_member_reaches_the_leader_as_its_error_text_and_stores_
             parent_run_id="team-member-error",
             user_id=REQUESTER,
             status=RunStatus.error,
-            content="Checker overloaded",
+            error="Checker overloaded",
             model="checker-model",
             model_provider=PROVIDER,
             messages=[
@@ -324,7 +324,6 @@ async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() 
         parent_run_id="team-paused",
         user_id=REQUESTER,
         status=RunStatus.paused,
-        content="I have tools to execute, but I need confirmation.",
         model="checker-model",
         model_provider=PROVIDER,
         messages=[
@@ -345,7 +344,6 @@ async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() 
             session_id=SQUAD,
             user_id=REQUESTER,
             status=RunStatus.paused,
-            content="Team run paused. The following require input:\n- Checker: multiply requires confirmation",
             model="leader-model",
             model_provider=PROVIDER,
             messages=[
@@ -381,7 +379,6 @@ async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() 
     assert [item.id for item in member.requirements or ()] == [requirement.id]
     assert len(leader.requests) == 1  # The leader is not asked again while the member waits.
     assert store.statuses == [("checker", "PAUSED"), ("squad", "PAUSED")]
-    assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
 
 
 async def test_a_collaborate_run_stores_labeled_member_results_in_member_order() -> None:
@@ -538,7 +535,7 @@ async def test_a_collaborate_member_that_pauses_adds_its_labeled_notice_in_its_p
     assert record.requirements is not None
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
-    assert record.content == "Team run paused. The following require input:\n- Checker: multiply requires confirmation"
+    assert record.content is None  # The pause is the team run's requirements; no notice stands in for text.
 
 
 @pytest.mark.parametrize("mode", list(TeamMode))
@@ -587,7 +584,7 @@ async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == (None, None)
     assert requirement.tool_execution.tool_call_id == "call-echo"
-    assert record.content == "Team run paused. The following require input:\n- team: echo requires confirmation"
+    assert record.content is None
     assert (record.member_responses, store.members) == ([], [])
 
 
@@ -630,8 +627,7 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
     assert requirement.member_run_id == member.run_id
     assert record.tools is not None
     assert record.tools[0].result == MEMBER_PAUSED_RESULT.format(name="Checker")
-    # A silent external pause names nothing, so the team's paused text is empty.
-    assert team_paused_content(record) == ""
+    assert record.content is None
 
 
 async def test_cancelling_the_team_stores_the_member_s_cancelled_row_before_the_team_s() -> None:
@@ -802,10 +798,14 @@ async def test_a_fresh_member_whose_provider_fails_reaches_the_leader_as_its_red
     assert record.tools[0].result == expected
     delegated = leader.requests[1].messages[-1]
     assert (delegated.role, delegated.tool_call_id, delegated.content) == ("tool", "call-all", expected)
-    # The member's stored row keeps its content: the text its model wrote before the failure, else the error.
+    # The member's stored row keeps the text its model wrote before the failure as its content, and why it failed,
+    # credentials redacted, as its error.
     [failed] = [member for member in store.members if member.agent_id == "checker"]
-    stored_content = "I will check." if wrote_text else "checker provider down: api_key=example-secret"
-    assert (failed.status, failed.content) == (RunStatus.error, stored_content)
+    assert (failed.status, failed.content, failed.error) == (
+        RunStatus.error,
+        "I will check." if wrote_text else None,
+        _REDACTED_FAILURE,
+    )
 
 
 @pytest.mark.parametrize(

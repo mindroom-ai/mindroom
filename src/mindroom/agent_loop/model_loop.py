@@ -254,8 +254,7 @@ def _accept_turn(
 
     The provider stamped the message with the model that answered it. The run's content is its requests' texts, a
     blank line between them, so the text before and after a tool call reads as two paragraphs. A request that answers
-    without content, as the adapters report a turn without text, leaves the content as it was, so a resumed run keeps
-    its paused text until the model says something new.
+    without content, as the adapters report a turn without text, leaves the content as it was.
     """
     metrics = state.record.metrics
     assert metrics is not None
