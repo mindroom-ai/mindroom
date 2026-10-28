@@ -79,6 +79,7 @@ from mindroom.tool_system.runtime_context import (
     worker_progress_pump_scope,
     worker_runtime_context,
 )
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
@@ -2795,7 +2796,10 @@ def test_shell_subprocess_env_path_passthrough_without_prepend(
     )
 
     runtime_env = dict(shell_execution_runtime_env_values(runtime_paths))
-    assert shell_tool_module._shell_subprocess_env(runtime_env)["PATH"] == "/usr/local/bin:/usr/bin"
+    assert (
+        shell_tool_module._shell_subprocess_env(runtime_env, call_environment=ToolEnvironment())["PATH"]
+        == "/usr/local/bin:/usr/bin"
+    )
 
 
 def test_shell_subprocess_env_prefers_explicit_base_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2805,6 +2809,7 @@ def test_shell_subprocess_env_prefers_explicit_base_process_env(monkeypatch: pyt
 
     env = shell_tool_module._shell_subprocess_env(
         {},
+        call_environment=ToolEnvironment(),
         base_process_env={"PATH": "/request/bin", "HOME": "/request-home"},
     )
 
@@ -2816,7 +2821,7 @@ def test_shell_subprocess_env_forces_vendor_telemetry_over_runtime_env() -> None
     """Shell subprocesses should not let request-scoped env re-enable vendor telemetry."""
     runtime_env = dict.fromkeys(VENDOR_TELEMETRY_ENV_VALUES, "enabled")
 
-    env = shell_tool_module._shell_subprocess_env(runtime_env)
+    env = shell_tool_module._shell_subprocess_env(runtime_env, call_environment=ToolEnvironment())
 
     for name, value in VENDOR_TELEMETRY_ENV_VALUES.items():
         assert env[name] == value
@@ -2851,6 +2856,7 @@ def test_shell_subprocess_env_preserves_workspace_home_contract_names() -> None:
             "XDG_DATA_HOME": "/env-data",
             "XDG_STATE_HOME": "/env-state",
         },
+        call_environment=ToolEnvironment(),
         base_process_env={
             "HOME": "/workspace",
             "MINDROOM_AGENT_WORKSPACE": "/workspace",
@@ -2885,6 +2891,7 @@ def test_shell_subprocess_env_prefers_runtime_env_when_no_workspace_contract() -
             "XDG_CONFIG_HOME": "/runtime-config",
             "VIRTUAL_ENV": "/runtime-venv",
         },
+        call_environment=ToolEnvironment(),
         base_process_env={
             "HOME": "/process-home",
             "XDG_CONFIG_HOME": "/process-config",
