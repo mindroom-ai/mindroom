@@ -155,12 +155,14 @@ def test_text_edits_replace_the_base_values(tmp_path: Path) -> None:
 
 
 def test_a_created_agent_replaces_identity_fields(tmp_path: Path) -> None:
-    """A created agent belongs to its owners alone and cannot create, delegate or self-configure."""
-    config = _config(tmp_path)
+    """A created agent is its owners' and cannot create, delegate or self-configure; credentials stay the creator's."""
+    raw = deepcopy(BASE)
+    raw["agents"]["creator"]["credential_managers"] = ["@carol:localhost"]
+    config = Config.validate_with_runtime(raw, test_runtime_paths(tmp_path))
     data, _ = _generated_agent_data(config, "creator", _created().edits, created=_created())
     owners = [OWNER, CO_OWNER]
     assert data["access"] == {"users": owners, "members_of_rooms": []}
-    assert data["credential_managers"] == owners
+    assert data["credential_managers"] == ["@carol:localhost"]
     assert data["accept_invites"] == owners
     assert data["rooms"] == []
     assert data["automations"] is None

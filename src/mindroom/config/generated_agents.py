@@ -67,9 +67,9 @@ def _generated_agent_data(
             data["include_default_tools"] = False
     if created is not None:
         owners = [created.owner, *created.co_owners]
+        # credential_managers stays the creator's, because an unscoped agent shares its creator's credentials.
         data |= {
             "access": {"users": owners, "members_of_rooms": []},
-            "credential_managers": owners,
             "accept_invites": owners,
             "rooms": [],
             "automations": None,

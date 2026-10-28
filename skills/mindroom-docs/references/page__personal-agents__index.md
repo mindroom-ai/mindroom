@@ -173,7 +173,8 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
 - Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings.
-- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may manage its credentials or invite it.
+- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
+  Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, has no `self_config`, and cannot create agents of its own.
 
 The new agent joins no room by itself.
@@ -195,7 +196,7 @@ The person whose request creates an agent is its owner, resolved through any [br
 Only a person can own an agent, so a MindRoom account is refused, and so is a Matrix ID with `[`, `]`, a space, `*`, or `?`.
 
 An owner can share a created agent by passing `co_owners` to `update_agent`, and passing `null` clears them.
-Co-owners may use the agent, manage its credentials, invite it, and change its `display_name`, `role`, `instructions`, and `tools`.
+Co-owners may use the agent, invite it, and change its `display_name`, `role`, `instructions`, and `tools`.
 Only the owner may change `co_owners` or delete the agent with `delete_agent`.
 
 ### Approval Cards
