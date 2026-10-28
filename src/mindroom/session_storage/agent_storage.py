@@ -7,6 +7,8 @@ from contextlib import ExitStack, closing
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from mindroom.llm.messages import ModelProvenance
+from mindroom.llm.usage import HelperUsage, RequestUsage, RunMetrics
 from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
 from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database
 from mindroom.session_storage.preflight import session_storage_preflight
@@ -84,24 +86,29 @@ def save_compaction_usage(
     usage: MessageMetrics,
     initial_session: ConversationSession | None,
 ) -> None:
-    """Persist one summary response's returned counters independently of conversation changes."""
-    # TODO(simplify): this summary request records no model provenance, so reports attribute it by the legacy rule.
-    # Stamp its `provider_data` with the model, as the other usage writers do. Stored usage ledger rows would notice.
-    metrics = usage.to_dict()
+    """Persist one summary response's returned counters, with the model that answered it, apart from the conversation."""
     created_at = time.time()
+    summary = HelperUsage(
+        run_id=str(uuid4()),
+        model=model.id,
+        provider=model.provider_name,
+        metrics=RunMetrics(tokens=usage.tokens),
+        requests=(
+            RequestUsage(
+                created_at=created_at,
+                metrics=usage,
+                model=ModelProvenance(model_id=model.id, provider=model.provider_name),
+            ),
+        ),
+        created_at=created_at,
+    )
     store.save_independent_usage(
         session_id=session_id,
-        usage_id=f"compaction:{uuid4()}",
+        usage_id=f"compaction:{summary.run_id}",
         kind="compaction_summary",
         requester_id=requester_id,
         initial_session=initial_session,
-        run={
-            "model_provider": model.provider_name,
-            "model": model.id,
-            "created_at": created_at,
-            "metrics": metrics,
-            "messages": [{"role": "assistant", "created_at": created_at, "metrics": dict(metrics)}],
-        },
+        usage=summary,
     )
 
 
