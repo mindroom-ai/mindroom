@@ -668,11 +668,7 @@ def finalize_history_preparation(
         active_context_window=resolved_inputs.active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )
-    history_budget = (
-        execution_plan.hard_replay_budget_tokens
-        if execution_plan.automatic_compaction
-        else execution_plan.replay_budget_tokens
-    )
+    history_budget = execution_plan.hard_replay_budget_tokens
     if execution_plan.automatic_compaction and execution_plan.unavailable_reason is not None:
         logger.warning(
             "Compaction unavailable for this run",

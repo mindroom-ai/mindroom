@@ -58,12 +58,8 @@ def resolve_history_execution_plan(
         )
         if history_settings.automatic_compaction:
             threshold_tokens = _resolve_effective_compaction_threshold(compaction_config, replay_window_tokens)
-            replay_budget_tokens = _resolve_replay_budget_tokens(
-                compaction_config=compaction_config,
-                replay_window_tokens=replay_window_tokens,
-                threshold_tokens=threshold_tokens,
-                static_prompt_tokens=static_prompt_tokens,
-            )
+            # The trigger budget after the static prompt, kept within the hard budget.
+            replay_budget_tokens = min(max(0, threshold_tokens - static_prompt_tokens), hard_replay_budget_tokens)
         else:
             # Without automatic compaction nothing trims history at the trigger, so replay fits the hard budget.
             replay_budget_tokens = hard_replay_budget_tokens
@@ -219,21 +215,6 @@ def resolve_replay_window(
     if active_context_window is None:
         return configured_replay_window
     return min(active_context_window, configured_replay_window)
-
-
-def _resolve_replay_budget_tokens(
-    *,
-    compaction_config: CompactionConfig,
-    replay_window_tokens: int,
-    threshold_tokens: int,
-    static_prompt_tokens: int,
-) -> int:
-    """Return the trigger budget after the static prompt, kept within the hard budget."""
-    ceiling_tokens = min(
-        threshold_tokens,
-        context_budget_after_reserve(replay_window_tokens, compaction_config.reserve_tokens),
-    )
-    return max(0, ceiling_tokens - static_prompt_tokens)
 
 
 def _resolve_effective_compaction_threshold(compaction_config: CompactionConfig, replay_window_tokens: int) -> int:
