@@ -4769,7 +4769,7 @@ def test_resumed_approval_tool_context_keeps_the_turns_hook_source(tmp_path: Pat
 
     def tool_context(hook_source: str | None) -> ToolRuntimeContext:
         continuation = approval_continuation(approval_id="approval-hook-source", hook_source=hook_source)
-        request = runner._approval_response_request(continuation, target=target)
+        request = runner._approvals._approval_response_request(continuation, target=target)
         context = runner.deps.tool_runtime.build_context(
             target,
             user_id=continuation.requester_id,
