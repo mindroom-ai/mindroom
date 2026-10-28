@@ -10,16 +10,20 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from mindroom import constants
-from mindroom.api import main
+from mindroom.api import config_lifecycle, main
 from mindroom.api.dynamic_workflows import _authorize_private_report_request
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers, use_trusted_upstream_runtime
 
 if TYPE_CHECKING:
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from mindroom.constants import RuntimePaths
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun
+
+_BROWSER_ACCEPT = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
 
 
 def _workflow_spec() -> dict[str, object]:
@@ -44,6 +48,49 @@ def _workflow_spec() -> dict[str, object]:
 def _run(service: DynamicWorkflowService, **options: object) -> DynamicWorkflowRun:
     """Run one workflow to its end, as the workflow tool runs it."""
     return asyncio.run(service.run_workflow(**options))
+
+
+def _completed_run(runtime_paths: RuntimePaths, *, requested_by: str) -> DynamicWorkflowRun:
+    """Create the report workflow for agent `general` and run it once for `requested_by`."""
+    store = DynamicWorkflowStore(runtime_paths.storage_root)
+    store.create_workflow(
+        spec=_workflow_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    return _run(
+        DynamicWorkflowService(store),
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "Agno factories"},
+        requested_by=requested_by,
+        base_url="https://mindroom.example.com",
+    )
+
+
+def _use_administrator_only_dashboard(api_app: FastAPI) -> RuntimePaths:
+    """Reinitialize the app with trusted upstream auth and `MINDROOM_CONNECTIONS_AGENT`, which limits the dashboard to administrators."""
+    runtime_paths = main._app_runtime_paths(api_app)
+    connections_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=runtime_paths.config_path,
+        storage_path=runtime_paths.storage_root,
+        process_env=trusted_upstream_env() | {"MINDROOM_CONNECTIONS_AGENT": "test_agent"},
+    )
+    main.initialize_api_app(api_app, connections_runtime_paths)
+    config_lifecycle.load_config_into_app(connections_runtime_paths, api_app)
+    return connections_runtime_paths
+
+
+def _signed_headers(matrix_user_id: str) -> dict[str, str]:
+    localpart = matrix_user_id.removeprefix("@").split(":")[0]
+    return trusted_upstream_headers(
+        user_id=f"user-{localpart}",
+        email=f"{localpart}@example.com",
+        matrix_user_id=matrix_user_id,
+    )
 
 
 def test_private_dynamic_workflow_report_served_from_runtime_storage(test_client: TestClient) -> None:
@@ -318,6 +365,64 @@ def test_private_dynamic_workflow_report_accepts_derived_trusted_upstream_matrix
 
     assert response.status_code == 200
     assert "Agno factories" in response.text
+
+
+@pytest.mark.parametrize("accept", [_BROWSER_ACCEPT, {}], ids=["browser", "api"])
+@pytest.mark.parametrize("requester", ["@alice:example.org", "@owner:example.org"], ids=["user", "administrator"])
+def test_private_dynamic_workflow_report_opens_for_requester_when_dashboard_is_administrator_only(
+    test_client: TestClient,
+    requester: str,
+    accept: dict[str, str],
+) -> None:
+    """The requester opens their own report whether or not `administrators` lists them."""
+    runtime_paths = _use_administrator_only_dashboard(test_client.app)
+    run = _completed_run(runtime_paths, requested_by=requester)
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers=_signed_headers(requester) | accept,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert "Agno factories" in response.text
+
+
+@pytest.mark.parametrize("accept", [_BROWSER_ACCEPT, {}], ids=["browser", "api"])
+@pytest.mark.parametrize("viewer", ["@bob:example.org", "@owner:example.org"], ids=["user", "administrator"])
+def test_private_dynamic_workflow_report_rejects_other_user_when_dashboard_is_administrator_only(
+    test_client: TestClient,
+    viewer: str,
+    accept: dict[str, str],
+) -> None:
+    """Neither another user nor an administrator opens someone else's report."""
+    runtime_paths = _use_administrator_only_dashboard(test_client.app)
+    run = _completed_run(runtime_paths, requested_by="@alice:example.org")
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers=_signed_headers(viewer) | accept,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Private Dynamic Workflow report access denied."
+
+
+def test_private_dynamic_workflow_report_requires_sign_in_when_dashboard_is_administrator_only(
+    test_client: TestClient,
+) -> None:
+    """A request without the gateway's signed identity gets no report."""
+    runtime_paths = _use_administrator_only_dashboard(test_client.app)
+    run = _completed_run(runtime_paths, requested_by="@alice:example.org")
+
+    response = test_client.get(
+        f"/reports/private/agent/general/competitor-research-report/{run.run_id}",
+        headers=_BROWSER_ACCEPT,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
 
 
 def test_private_dynamic_workflow_report_rejects_other_platform_user(test_client: TestClient) -> None:

@@ -19,7 +19,7 @@ from mindroom.agent_policy import build_agent_policy_seeds, resolve_agent_policy
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import router as agent_cli_router
-from mindroom.api.auth import ApiAuthState, dashboard_cors_origins, verify_user  # noqa: F401
+from mindroom.api.auth import ApiAuthState, authenticate_user, dashboard_cors_origins, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.budgets import router as budgets_router
 from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
@@ -781,7 +781,8 @@ app.include_router(external_triggers_router)
 app.include_router(computers_router)
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)
-app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
+# Each report admits the user who requested its run, administrator or not.
+app.include_router(dynamic_workflows_router, dependencies=[Depends(authenticate_user)])
 
 
 @app.get("/api/health")
