@@ -2363,7 +2363,7 @@ The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so 
 
 ## Ollama Context Size
 
-MindRoom does not send Ollama a context size, so Ollama runs each model with its own default, which depends on the Ollama version and server and is often only a few thousand tokens.
+Unless `extra_kwargs.options.num_ctx` is set, MindRoom sends Ollama no context size, so Ollama runs each model with its own default, which depends on the Ollama version and server and is often only a few thousand tokens.
 When a conversation is longer, Ollama drops its oldest messages to fit, without an error, so the model answers without seeing them.
 Set `extra_kwargs.options.num_ctx` to the context size Ollama should use, and `context_window` to the same value so MindRoom fits history into it (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)), as the `local` model in [Configuration Examples](#configuration-examples) does.
 A larger `num_ctx` needs more memory on the Ollama server.
