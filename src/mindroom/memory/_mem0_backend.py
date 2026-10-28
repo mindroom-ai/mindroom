@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, ClassVar, Protocol, TypeVar, cast, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
 
 from mindroom.embeddings.embedder_health import (
     EmbedderHealthRecorder,
@@ -38,6 +38,7 @@ from ._shared import (
     ScopedMemoryWriter,
     new_memory_id,
 )
+from .config import recorded_embedder_failures
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -59,13 +60,6 @@ logger = get_logger(__name__)
 # those with cosine similarity of at least 0.1; Mem0's default threshold of 0.1 would keep every unit-length hit.
 _MIN_COSINE_SIMILARITY = 0.1
 _MEM0_SEARCH_THRESHOLD = 1 / (1 + 2 * (1 - _MIN_COSINE_SIMILARITY))
-
-
-@runtime_checkable
-class _OperationTrackedEmbedder(Protocol):
-    def begin_operation(self) -> None: ...
-
-    def raise_for_operation_failure(self) -> None: ...
 
 
 def _record_classified_embedder_failure(
@@ -103,13 +97,11 @@ async def _strict_mem0_add(
     user_id: str,
     metadata: dict[str, object],
 ) -> object:
-    """Add through Mem0 and surface embedding failures it catches internally."""
-    embedder = getattr(memory, "embedding_model", None)
-    if isinstance(embedder, _OperationTrackedEmbedder):
-        embedder.begin_operation()
-    result = await memory.add(messages, user_id=user_id, metadata=metadata)
-    if isinstance(embedder, _OperationTrackedEmbedder):
-        embedder.raise_for_operation_failure()
+    """Add through Mem0 and raise the add's first embedding failure, which Mem0 may have caught."""
+    with recorded_embedder_failures() as failures:
+        result = await memory.add(messages, user_id=user_id, metadata=metadata)
+    if failures:
+        raise failures[0]
     return result
 
 

@@ -3709,7 +3709,7 @@ depends_on = [
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
-visibility = ["mindroom.cli.doctor", "mindroom.memory._backend"]
+visibility = ["mindroom.cli.doctor", "mindroom.memory._backend", "mindroom.memory._mem0_backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -3761,6 +3761,7 @@ depends_on = [
     "mindroom.memory._policy",
     "mindroom.memory._prompting",
     "mindroom.memory._shared",
+    "mindroom.memory.config",
     "mindroom.memory_scope_ids",
     "mindroom.session_storage.agent_storage",
     "mindroom.timing",
