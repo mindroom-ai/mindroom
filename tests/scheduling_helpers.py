@@ -91,6 +91,11 @@ def room_create_state_response(room_id: str, *, full_event: bool) -> nio.RoomGet
     return nio.RoomGetStateEventResponse(body, "m.room.create", "", room_id)
 
 
+def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]] | None = None) -> None:  # noqa: ANN401
+    """Answer the full room-state read that decides a new task's owner; without events no router has joined."""
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
+
+
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
     """Report every requested member as joined, for runners that check creator membership."""
     assert event_type == "m.room.member"

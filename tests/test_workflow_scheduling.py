@@ -46,7 +46,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
-from tests.scheduling_helpers import serve_task_state_events
+from tests.scheduling_helpers import serve_full_room_state, serve_task_state_events
 
 
 def _parser_model(workflow: ScheduledWorkflow) -> ScriptedModel:
@@ -986,6 +986,7 @@ class TestIntegrationWithScheduling:
     async def test_schedule_task_workflow_path(self, mock_parse_workflow: AsyncMock) -> None:
         """Test that schedule_task uses workflow parsing for complex requests."""
         client = AsyncMock()
+        serve_full_room_state(client, "!room:server")
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
         mock_parse_workflow.return_value = ScheduledWorkflow(
             schedule_type="cron",
@@ -1048,6 +1049,7 @@ class TestIntegrationWithScheduling:
         """An edit can clear a limit while preserving the original scheduled message."""
         original_message = "tool-audit schedule test — safe to ignore"
         client = AsyncMock()
+        serve_full_room_state(client, "!room:server")
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
         model = _parser_model(
@@ -1154,6 +1156,7 @@ class TestIntegrationWithScheduling:
         """A timing-only edit carries an existing history limit forward."""
         original_message = "tool-audit schedule test - safe to ignore"
         client = AsyncMock()
+        serve_full_room_state(client, "!room:server")
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
         model = _parser_model(

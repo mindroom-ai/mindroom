@@ -37,6 +37,7 @@ from tests.scheduling_helpers import (
     schedule_runtime_paths,
     scheduled_task_runtime,
     scheduling_bot,
+    serve_full_room_state,
     serve_task_state_events,
 )
 
@@ -79,6 +80,7 @@ def _owner_schedule(
         "workflow": workflow.model_dump_json(),
         "status": "pending",
         "created_at": "2026-09-01T00:00:00+00:00",
+        "owner": writer,
     }
 
     async def read_state(room_id: str, event_type: str, state_key: str = "") -> object:
@@ -145,6 +147,7 @@ async def test_departed_owner_cancels_persisted_schedule(
     assert state["status"] == "cancelled"
     assert state["workflow"] == workflow.model_dump_json()
     assert state["created_at"] == "2026-09-01T00:00:00+00:00"
+    assert state["owner"] == _SCHEDULE_WRITER
 
 
 @pytest.mark.asyncio
@@ -810,8 +813,9 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         schedule_type=schedule_type,
         writer=_ALIAS_SCHEDULE_WRITER,
     )
-    # The router writes the task, so the router's runner owns it.
+    # The router saves the task in a room it has not joined, so it owns the task as its creator.
     client.user_id = _ALIAS_SCHEDULE_WRITER
+    serve_full_room_state(client, "!test:server")
     config, runtime_paths = _alias_schedule_config(tmp_path)
     config.agents["helper"].rooms = ["!test:server"]
     config.agents["helper"].access = ResponderAccessConfig(users=["@alice:server"])

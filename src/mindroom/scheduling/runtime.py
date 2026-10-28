@@ -1,9 +1,9 @@
 """The one owner of scheduled-task runners: which bot runs each task, and when its runner may use that bot.
 
-Each task has one owner bot, chosen by a pure rule over room state, so every
-bot that restores a room agrees on it. A runner holds no Matrix client: each
-Matrix operation borrows the owner's live bot, so a runner waits through its
-owner's restarts and never uses a client that a stop closed.
+Each task has one owner bot, decided once when the task is saved and stored
+with it, so every bot that restores a room agrees on it. A runner holds no
+Matrix client: each Matrix operation borrows the owner's live bot, so a runner
+waits through its owner's restarts and never uses a client that a stop closed.
 """
 
 from __future__ import annotations
@@ -18,22 +18,36 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.approval.tool_approval import arm_scheduled_call_approval
+from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_shutdown import SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
 from mindroom.scheduling import executor as scheduling_executor
-from mindroom.scheduling import tasks as schedules
+from mindroom.scheduling.legacy_task_owner import legacy_task_owner
+from mindroom.scheduling.ownership import room_from_state
 from mindroom.scheduling.recurring_schedule import (
     RecurringCheckpointUnavailableError,
     complete_recurring_occurrence,
     plan_recurring_occurrence,
 )
+from mindroom.scheduling.tasks import (
+    SCHEDULE_CANCELLED_REASON,
+    ScheduledTaskStateReadError,
+    get_scheduled_task,
+    persist_scheduled_task_state,
+    schedule_edit_lock,
+    scheduled_call_workflow_digest,
+    scheduled_task_timezone,
+    task_records_with_writers,
+    withdraw_scheduled_call,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
@@ -53,41 +67,8 @@ _OWNER_POLL_INTERVAL_SECONDS = 1.0
 _TASK_STATE_POLL_INTERVAL_SECONDS = 30
 # A missed one-time task older than this is marked failed instead of run when its room is restored.
 _MISSED_TASK_MAX_AGE_SECONDS = 86400
-
-
-def _scheduled_task_owner(room: nio.MatrixRoom, workflow: ScheduledWorkflow, *, writer_id: str, router_id: str) -> str:
-    """Return the Matrix ID of the bot that runs a task: the router when it can serve the room, else its writer.
-
-    The rule reads only room state, never which bots run, so a restarting
-    owner keeps its tasks and every bot evaluating the room agrees.
-    """
-    if _may_send_trigger(room, router_id, workflow) and room.power_levels.can_user_send_state(
-        router_id,
-        schedules._SCHEDULED_TASK_EVENT_TYPE,
-    ):
-        return router_id
-    return writer_id
-
-
-def _may_send_trigger(room: nio.MatrixRoom, user_id: str, workflow: ScheduledWorkflow) -> bool:
-    if user_id not in room.users or user_id in room.invited_users:
-        return False
-    trigger_type = (
-        "m.room.encrypted" if room.encrypted else scheduling_executor.scheduled_trigger_message_type(workflow)
-    )
-    return room.power_levels.can_user_send_message(user_id, trigger_type)
-
-
-def _room_from_state(room_id: str, own_user_id: str, events: Iterable[dict[str, object]]) -> nio.MatrixRoom:
-    """Build the membership and power view of a room from its full state, as Matrix sync would."""
-    room = nio.MatrixRoom(room_id, own_user_id)
-    for source in events:
-        event = nio.Event.parse_event(dict(source))
-        if isinstance(event, nio.RoomMemberEvent):
-            room.handle_membership(event)
-        elif isinstance(event, nio.Event):
-            room.handle_event(event)
-    return room
+# Reason shown on a scheduled tool call's approval card when its trigger never went out.
+_SCHEDULE_UNSENT_REASON = "Scheduled task did not run."
 
 
 @dataclass
@@ -123,23 +104,9 @@ class ScheduledTaskRuntime:
         self._runners[task_id] = (runner, asyncio.create_task(run, name=f"scheduled_task_{task_id}", context=Context()))
         return True
 
-    def start_new_task(
-        self,
-        room: nio.MatrixRoom,
-        task_id: str,
-        workflow: ScheduledWorkflow,
-        *,
-        writer_id: str,
-    ) -> None:
-        """Start a just-saved task's runner under the owner the rule picks for the account that wrote it."""
-        registry = entity_identity_registry(self._config(), self.runtime_paths)
-        owner_id = _scheduled_task_owner(
-            room,
-            workflow,
-            writer_id=writer_id,
-            router_id=registry.current_id(ROUTER_AGENT_NAME).full_id,
-        )
-        owner = registry.current_entity_name_for_user_id(owner_id)
+    def start_new_task(self, task_id: str, workflow: ScheduledWorkflow, *, owner_id: str) -> None:
+        """Start a just-saved task's runner under the owner stored with it."""
+        owner = entity_identity_registry(self._config(), self.runtime_paths).current_entity_name_for_user_id(owner_id)
         if owner is None:
             logger.error("scheduled_task_owner_unconfigured", task_id=task_id, owner_id=owner_id)
             return
@@ -177,13 +144,13 @@ class ScheduledTaskRuntime:
         config = self._config()
         registry = entity_identity_registry(config, self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
-        room = _room_from_state(room_id, client.user_id, response.events)
+        room = room_from_state(room_id, client.user_id, response.events)
         restored = 0
-        for task, writer_id in schedules.task_records_with_writers(room_id, response, self.runtime_paths):
-            owner_id = _scheduled_task_owner(room, task.workflow, writer_id=writer_id, router_id=router_id)
+        for task, writer_id in task_records_with_writers(room_id, response, self.runtime_paths):
+            owner_id = task.owner_id or legacy_task_owner(room, task.workflow, sender=writer_id, router_id=router_id)
             owner = registry.current_entity_name_for_user_id(owner_id)
             if owner is None:
-                if not room.power_levels.can_user_send_state(client.user_id, schedules._SCHEDULED_TASK_EVENT_TYPE):
+                if not room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE):
                     logger.warning(
                         "scheduled_task_of_removed_owner_skipped",
                         room_id=room_id,
@@ -223,11 +190,11 @@ class ScheduledTaskRuntime:
             if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
                 logger.warning("Skipping ancient missed task", task_id=task.task_id, missed_by_seconds=missed_by)
                 try:
-                    await schedules._save_task_status(
+                    await _save_task_status(
                         client,
                         task,
                         "failed",
-                        timezone=schedules.scheduled_task_timezone(workflow, config),
+                        timezone=scheduled_task_timezone(workflow, config),
                         writers=self,
                     )
                 except Exception:
@@ -267,17 +234,17 @@ class ScheduledTaskRuntime:
         """Mark one pending task failed because its owner was removed, and say so where it posts."""
         client = bot.client
         assert client is not None
-        async with schedules._schedule_edit_lock(client, room_id, task_id):
-            task = await schedules._get_pending_task_record(client, room_id, task_id, self.runtime_paths)
+        async with schedule_edit_lock(client, room_id, task_id):
+            task = await _get_pending_task_record(client, room_id, task_id, self.runtime_paths)
             if task is None:
                 return
             if task.workflow.pre_approved_call:
-                await schedules._withdraw_scheduled_call(task_id, reason=schedules._SCHEDULE_CANCELLED_REASON)
-            await schedules._save_task_status(
+                await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
+            await _save_task_status(
                 client,
                 task,
                 "failed",
-                timezone=schedules.scheduled_task_timezone(task.workflow, self._config()),
+                timezone=scheduled_task_timezone(task.workflow, self._config()),
                 writers=self,
             )
         logger.warning("scheduled_task_failed_owner_removed", room_id=room_id, task_id=task_id, owner=owner)
@@ -347,7 +314,7 @@ class ScheduledTaskRuntime:
                 and client is not None
                 and room is not None
                 and client.user_id != refused_user_id
-                and room.power_levels.can_user_send_state(client.user_id, schedules._SCHEDULED_TASK_EVENT_TYPE)
+                and room.power_levels.can_user_send_state(client.user_id, SCHEDULED_TASK_EVENT_TYPE)
             ):
                 with self._tracked(bot):
                     yield client
@@ -413,7 +380,7 @@ class _TaskRunner:
                 async with runtime.operation(self.owner) as bot:
                     client = bot.client
                     assert client is not None
-                    task = await schedules._get_pending_task_record(
+                    task = await _get_pending_task_record(
                         client=client,
                         room_id=self.room_id,
                         task_id=self.task_id,
@@ -425,8 +392,8 @@ class _TaskRunner:
                         membership_config = runtime.config_provider()
                         if membership_config is None:
                             msg = "Scheduled task membership configuration is unavailable"
-                            raise schedules._ScheduledTaskStateReadError(msg)  # noqa: TRY301
-                        creator_joined = await schedules._scheduled_task_creator_is_joined(
+                            raise ScheduledTaskStateReadError(msg)  # noqa: TRY301
+                        creator_joined = await _scheduled_task_creator_is_joined(
                             client,
                             task,
                             membership_config,
@@ -438,8 +405,8 @@ class _TaskRunner:
                             return task
                         departed_task = task
 
-                    async with schedules._schedule_edit_lock(client, self.room_id, self.task_id):
-                        current_task = await schedules._get_pending_task_record(
+                    async with schedule_edit_lock(client, self.room_id, self.task_id):
+                        current_task = await _get_pending_task_record(
                             client=client,
                             room_id=self.room_id,
                             task_id=self.task_id,
@@ -450,21 +417,22 @@ class _TaskRunner:
                         if current_task != departed_task:
                             continue
                         if current_task.workflow.pre_approved_call:
-                            await schedules._withdraw_scheduled_call(
+                            await withdraw_scheduled_call(
                                 self.task_id,
-                                reason=schedules._SCHEDULE_CANCELLED_REASON,
+                                reason=SCHEDULE_CANCELLED_REASON,
                             )
-                        await schedules._persist_scheduled_task_state(
+                        await persist_scheduled_task_state(
                             client=client,
                             room_id=self.room_id,
                             task_id=self.task_id,
                             workflow=current_task.workflow,
-                            timezone=schedules.scheduled_task_timezone(current_task.workflow, runtime._config()),
+                            timezone=scheduled_task_timezone(current_task.workflow, runtime._config()),
+                            owner_id=current_task.owner_id,
                             status="cancelled",
                             created_at=current_task.created_at,
                             writers=runtime,
                         )
-            except schedules._ScheduledTaskStateReadError as exc:
+            except ScheduledTaskStateReadError as exc:
                 logger.warning(
                     "scheduled_task_state_read_failed_retrying",
                     room_id=self.room_id,
@@ -549,11 +517,11 @@ class _TaskRunner:
                 client = bot.client
                 assert client is not None
                 try:
-                    await schedules._save_task_status(
+                    await _save_task_status(
                         client,
                         task,
                         status,
-                        timezone=schedules.scheduled_task_timezone(task.workflow, self.runtime._config()),
+                        timezone=scheduled_task_timezone(task.workflow, self.runtime._config()),
                         writers=self.runtime,
                     )
                 except Exception:
@@ -711,7 +679,7 @@ class _TaskRunner:
                     return
 
                 approval_state = (
-                    await schedules._arm_scheduled_call(task_id, workflow, self.runtime._config())
+                    await _arm_scheduled_call(task_id, workflow, self.runtime._config())
                     if workflow.pre_approved_call
                     else "none"
                 )
@@ -721,7 +689,7 @@ class _TaskRunner:
                 else:
                     outcome = await self._execute(workflow)
                     if approval_state == "armed" and outcome.status != "delivered":
-                        await schedules._withdraw_unsent_scheduled_call(task_id)
+                        await _withdraw_unsent_scheduled_call(task_id)
                     final_status = "completed" if outcome.status == "delivered" else "failed"
 
                 # After a send, only the status write is retried; the send never repeats.
@@ -740,7 +708,7 @@ class _TaskRunner:
             with bound_log_context(**current_target.log_context):
                 logger.exception("one_time_task_failed", task_id=task_id)
                 if approval_state == "armed":
-                    await schedules._withdraw_unsent_scheduled_call(task_id)
+                    await _withdraw_unsent_scheduled_call(task_id)
                 if workflow.room_id:
                     error_message = (
                         f"❌ One-time task failed: {workflow.description}\nTask ID: {task_id}\nError: {failure_text(e)}"
@@ -750,6 +718,109 @@ class _TaskRunner:
                     await self._save_status(latest_pending_task, "failed")
         finally:
             self.runtime._runner_finished(task_id)
+
+
+async def _get_pending_task_record(
+    client: nio.AsyncClient,
+    room_id: str | None,
+    task_id: str,
+    runtime_paths: RuntimePaths,
+) -> ScheduledTaskRecord | None:
+    """Return the latest pending task state for a task id, if it still exists."""
+    if not room_id:
+        return None
+
+    task_record = await get_scheduled_task(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        runtime_paths=runtime_paths,
+    )
+    if not task_record or task_record.status != "pending":
+        return None
+    return task_record
+
+
+async def _scheduled_task_creator_is_joined(
+    client: nio.AsyncClient,
+    task: ScheduledTaskRecord,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Check live membership for the creator or a permitted human alias."""
+    creator = task.workflow.created_by
+    assert creator is not None
+    requester_ids = equivalent_requester_ids(creator, config, runtime_paths)
+    membership_unknown = False
+    for requester_id in sorted(requester_ids, key=lambda user_id: (user_id != creator, user_id)):
+        try:
+            response = await client.room_get_state_event(
+                room_id=task.room_id,
+                event_type="m.room.member",
+                state_key=requester_id,
+            )
+        except Exception:
+            membership_unknown = True
+            continue
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+            membership = response.content.get("membership")
+            if membership == "join":
+                return True
+            if membership in ("leave", "ban", "invite", "knock"):
+                continue
+        # Errors (including missing/inaccessible state) do not prove a departure.
+        membership_unknown = True
+    if membership_unknown:
+        msg = f"Could not establish schedule creator membership for {creator!r} in room {task.room_id!r}"
+        raise ScheduledTaskStateReadError(msg)
+    return False
+
+
+async def _save_task_status(
+    client: nio.AsyncClient,
+    task: ScheduledTaskRecord,
+    status: str,
+    *,
+    timezone: str,
+    writers: ScheduledTaskRuntime | None = None,
+) -> None:
+    """Persist a task's new status, keeping its stored owner, without touching its runner."""
+    await persist_scheduled_task_state(
+        client=client,
+        room_id=task.room_id,
+        task_id=task.task_id,
+        workflow=task.workflow,
+        timezone=timezone,
+        owner_id=task.owner_id,
+        status=status,
+        created_at=task.created_at,
+        writers=writers,
+    )
+
+
+async def _withdraw_unsent_scheduled_call(task_id: str) -> None:
+    """Withdraw an armed approval whose trigger never went out, so no other call can use it."""
+    try:
+        await withdraw_scheduled_call(task_id, reason=_SCHEDULE_UNSENT_REASON)
+    except ValueError:
+        logger.exception("scheduled_tool_call_withdrawal_failed", task_id=task_id)
+
+
+async def _arm_scheduled_call(
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+) -> ScheduledApprovalArmState:
+    """Arm a firing task's call approval; an approval-journal error leaves the call asking at send time."""
+    try:
+        return await arm_scheduled_call_approval(
+            task_id,
+            scheduled_call_workflow_digest(task_id, workflow),
+            any_arguments_allowed=config.tool_approval.scheduled_any_arguments,
+        )
+    except Exception:
+        logger.warning("scheduled_tool_call_arming_failed", task_id=task_id, exc_info=True)
+        return "unarmed"
 
 
 def _workflows_differ(left: ScheduledWorkflow, right: ScheduledWorkflow) -> bool:

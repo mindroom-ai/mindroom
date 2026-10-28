@@ -57,9 +57,9 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _parse_scheduled_task_record,
-    _scheduled_call_workflow_digest,
     cancel_scheduled_task,
     save_edited_scheduled_task,
+    scheduled_call_workflow_digest,
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
@@ -84,7 +84,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime
+from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime, serve_full_room_state
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
@@ -1030,6 +1030,7 @@ def _gated_config() -> Config:
 def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolRuntimeContext:
     context = _make_context(config)
     client = context.client
+    serve_full_room_state(client, "!room:localhost")
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!room:localhost"),
     )
@@ -1209,7 +1210,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
         toolkit_name=_TOOLKIT,
         tool_name="post_slack_message",
         arguments_json=canonical_arguments({"channel": "U123", "text": "Good morning!"}),
-        workflow_digest=_scheduled_call_workflow_digest(record.task_id, workflow),
+        workflow_digest=scheduled_call_workflow_digest(record.task_id, workflow),
         execute_at_ns=int(workflow.execute_at.timestamp() * 1_000_000_000),
     )
     kwargs = request.await_args.kwargs
@@ -1477,21 +1478,21 @@ def test_workflow_digest_survives_matrix_state_round_trip() -> None:
     record = _parse_scheduled_task_record("!room:localhost", "task1234", stored)
 
     assert record is not None
-    assert _scheduled_call_workflow_digest("task1234", record.workflow) == _scheduled_call_workflow_digest(
+    assert scheduled_call_workflow_digest("task1234", record.workflow) == scheduled_call_workflow_digest(
         "task1234",
         workflow,
     )
-    original = _scheduled_call_workflow_digest("task1234", workflow)
+    original = scheduled_call_workflow_digest("task1234", workflow)
     for change in (
         {"message": workflow.message.replace("Grüße", "Hi")},
         {"execute_at": workflow.execute_at + timedelta(minutes=1)},
         {"thread_id": "$other"},
         {"created_by": "@other:localhost"},
     ):
-        assert _scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
+        assert scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
     # Fields that do not define the call, including ones a later release may add, leave the binding intact.
     assert (
-        _scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
+        scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
     )
 
 
@@ -1534,8 +1535,8 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     arm = AsyncMock(return_value=approval_state)
 
     with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=arm),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.runtime.arm_scheduled_call_approval", new=arm),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
@@ -1552,7 +1553,7 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
 
     arm.assert_awaited_once_with(
         "task1234",
-        _scheduled_call_workflow_digest("task1234", workflow),
+        scheduled_call_workflow_digest("task1234", workflow),
         any_arguments_allowed=True,
     )
     assert execute.await_count == int(fires)
@@ -1598,8 +1599,8 @@ async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
     withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=AsyncMock(return_value=approval_state)),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.runtime.arm_scheduled_call_approval", new=AsyncMock(return_value=approval_state)),
         patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
@@ -1722,8 +1723,8 @@ async def test_tasks_fire_without_an_armed_approval(
     arm = AsyncMock(side_effect=arm_error)
 
     with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=arm),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        patch("mindroom.scheduling.runtime.arm_scheduled_call_approval", new=arm),
         patch(
             "mindroom.scheduling.executor.execute_scheduled_workflow",
             new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),

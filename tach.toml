@@ -1513,6 +1513,7 @@ visibility = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
+    "mindroom.scheduling.runtime",
     "mindroom.scheduling.tasks",
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
@@ -5273,29 +5274,51 @@ depends_on = [
 path = "mindroom.scheduling.tasks"
 depends_on = [
     "mindroom.helper_usage",
+    "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.llm",
-    "mindroom.requester_identity",
     "mindroom.approval.tool_approval",
     "mindroom.failure_text",
+    "mindroom.scheduling.ownership",
 ]
 
 [[modules]]
 path = "mindroom.scheduling.runtime"
 depends_on = [
+    "mindroom.approval.tool_approval",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.failure_text",
     "mindroom.logging_config",
     "mindroom.message_target",
+    "mindroom.requester_identity",
     "mindroom.runtime_shutdown",
     "mindroom.scheduling.executor",
+    "mindroom.scheduling.legacy_task_owner",
+    "mindroom.scheduling.ownership",
     "mindroom.scheduling.recurring_schedule",
     "mindroom.scheduling.tasks",
 ]
+
+[[modules]]
+path = "mindroom.scheduling.ownership"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.scheduling.executor",
+]
+visibility = [
+    "mindroom.scheduling.legacy_task_owner",
+    "mindroom.scheduling.runtime",
+    "mindroom.scheduling.tasks",
+]
+
+[[modules]]
+path = "mindroom.scheduling.legacy_task_owner"
+depends_on = ["mindroom.scheduling.ownership"]
+visibility = ["mindroom.scheduling.runtime"]
 
 [[modules]]
 path = "mindroom.scheduling.executor"

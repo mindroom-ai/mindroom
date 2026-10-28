@@ -212,7 +212,7 @@ async def test_one_time_task_cancel_log_includes_workflow_thread_context(
         "!room:localhost",
     )
 
-    with patch("mindroom.scheduling.tasks._get_pending_task_record", new=fake_get_pending_task_record):
+    with patch("mindroom.scheduling.runtime._get_pending_task_record", new=fake_get_pending_task_record):
         task = asyncio.create_task(
             run_once_task(
                 client,
@@ -264,7 +264,7 @@ async def test_cron_task_cancel_log_includes_workflow_thread_context(
         await release_pending_read.wait()
         return SimpleNamespace(workflow=workflow)
 
-    with patch("mindroom.scheduling.tasks._get_pending_task_record", new=fake_get_pending_task_record):
+    with patch("mindroom.scheduling.runtime._get_pending_task_record", new=fake_get_pending_task_record):
         task = asyncio.create_task(
             run_cron_task(
                 AsyncMock(),

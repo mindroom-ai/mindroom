@@ -52,7 +52,7 @@ async def test_cancel_mid_wait_cron_task(tmp_path: Path) -> None:
 
     with (
         patch("mindroom.scheduling.tasks.asyncio.sleep", new=wait_until_cancelled),
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(return_value=pending_record)),
     ):
         task = asyncio.create_task(
             run_cron_task(
