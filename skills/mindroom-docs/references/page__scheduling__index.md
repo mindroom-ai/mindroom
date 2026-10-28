@@ -258,8 +258,11 @@ The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventT
 
 ### Scheduled Task Restoration
 
-The router restores a room's schedules and pending configuration changes when it joins the room after startup.
-A one-time task missed by less than 24 hours runs once Matrix sync is ready; an older one is marked failed instead.
+The router runs a room's schedules when it may post their trigger and save schedule state there; otherwise the agent that saved a schedule runs it, as in a DM or an agent's personal room.
+Every agent restores the schedules it runs in a room when it joins that room, at startup or when it accepts an invitation, and the router also restores the room's pending configuration changes.
+Schedules keep running when their agent restarts, for example after a config edit, and a task that came due during the restart runs once the agent is back.
+A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
+When an agent is removed from the config, each schedule it runs is marked failed and the agent says so in the schedule's thread, or in the room for a schedule without one; its schedules never move to another agent.
 
 ### Recurring task recovery
 
