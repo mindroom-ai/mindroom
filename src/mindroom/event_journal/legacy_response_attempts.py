@@ -10,6 +10,7 @@ from . import journal
 
 if TYPE_CHECKING:
     from .backend import Transaction
+    from .upgrades import SchemaInspector
 
 # LEGACY_COMPAT: Approval continuations an earlier release left pending.
 # Legacy format: approval_continuations without a span_id column, keeping their entity in an entity_name column and
@@ -21,8 +22,9 @@ if TYPE_CHECKING:
 # it deletes the continuation with its calls and card records, and settles its pending sources unanswered. A click on
 # one of its cards then does nothing, and its reply keeps what it showed. The upgrade then adds span_id and
 # claim_span_id and drops approval_continuation_sources, the entity_name column, and the response attempt tables, and
-# it drops approval_continuation_calls, which the cancellation emptied, so the schema creates it again with the
-# toolkit_name (since v2026.9.140) and arguments_digest (since v2026.10.36) columns older releases lacked.
+# it drops approval_continuation_calls, which the cancellation emptied; the approval-record conversion that runs next
+# creates approval_calls with the toolkit_name (since v2026.9.140) and arguments_digest (since v2026.10.36) columns
+# older releases lacked.
 # Coverage: tests/test_legacy_continuation_identity.py::test_an_approval_an_earlier_release_left_pending_is_cancelled,
 # tests/test_legacy_continuation_identity.py::test_the_upgrade_drops_what_kept_the_identity_of_a_pending_approval,
 # tests/test_legacy_continuation_identity.py::test_the_upgrade_cancels_every_approval_in_bounded_pages.
@@ -32,19 +34,16 @@ logger = get_logger(__name__)
 _PAGE_SIZE = 128
 
 
-def upgrade_continuation_identity(
-    transaction: Transaction,
-    existing_tables: frozenset[str],
-    continuation_columns: frozenset[str],
-) -> None:
+def upgrade_continuation_identity(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Cancel the approvals an earlier release left pending and name paused spans, inside the schema transaction."""
+    continuation_columns = inspector.columns("approval_continuations")
     # No columns: no approval_continuations table yet, or one a pre-Nio-1 upgrade just retired.
     if not continuation_columns or "span_id" in continuation_columns:
         return
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN span_id TEXT")
     transaction.execute("ALTER TABLE approval_continuations ADD COLUMN claim_span_id TEXT")
     # Releases before approval cards kept none to drop.
-    cards = "approval_cards" in existing_tables
+    cards = "approval_cards" in inspector.tables()
     # Each pass deletes the page it read, so the next one reads the rows after it.
     while rows := transaction.fetchall(
         "SELECT principal_id, approval_id FROM approval_continuations ORDER BY principal_id, approval_id LIMIT ?",
@@ -58,7 +57,7 @@ def upgrade_continuation_identity(
     transaction.execute("ALTER TABLE approval_continuations DROP COLUMN entity_name")
     transaction.execute("DROP TABLE IF EXISTS response_attempt_sources")
     transaction.execute("DROP TABLE IF EXISTS response_attempts")
-    # Empty now; the schema creates it again with the columns a release before them lacked.
+    # Empty now; the approval-record conversion replaces it with approval_calls.
     transaction.execute("DROP TABLE IF EXISTS approval_continuation_calls")
 
 

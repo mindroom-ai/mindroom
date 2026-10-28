@@ -42,6 +42,7 @@ from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalDecision,
     ApprovalDecisionMetadata,
+    CallKey,
     ConversationCursor,
     DeliveryAcknowledgement,
     DeliveryStage,
@@ -57,7 +58,6 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
     TerminalTurnWrite,
-    UnreadableApprovalCard,
     approval_arguments_digest,
     delivery_transaction_id,
     reads,
@@ -80,6 +80,7 @@ from mindroom.handled_turns import TurnRecordCodec
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
+from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, postgres_journal_schema_url
 from tests.journal_helpers import admit_room_event
@@ -6732,7 +6733,7 @@ class TestApprovalContinuations:
         continuation_principal_id: str = "agent@alice",
     ) -> None:
         """Persist one current-format card for the first continuation generation."""
-        reserved = await store.approvals.reserve_approval_card_deliveries(
+        reserved = await store.approvals.reserve_reply_cards(
             continuation_principal_id=continuation_principal_id,
             continuation_id="approval-1",
             expected_generation=0,
@@ -6741,6 +6742,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id=tool_call_id,
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
@@ -6778,16 +6781,21 @@ class TestApprovalContinuations:
     ) -> None:
         """Both database backends preserve the extracted exact-call transaction."""
         router = journal_store.principal("router@shared")
-        assert await router.approvals.reserve_background_approval_card(
+        assert await router.approvals.reserve_detached_card(
+            call=CallKey.detached("background-run-1", "background-call-1"),
+            owner_kind="script",
+            tool_name="shell",
+            toolkit_name="shell",
+            invoking_agent="agent",
             room_id=ROOM,
             thread_id="$thread",
-            run_id="background-run-1",
-            call_id="background-call-1",
             expires_at_ns=time.time_ns() + 60_000_000_000,
             card=ApprovalCardReservation(
                 delivery_id="background-card-1",
                 tool_call_id="background-call-1",
                 event_type="io.mindroom.tool_approval",
+                approver_user_id="@user:example.org",
+                approvable=True,
                 payload={
                     "approval_target": "background_script",
                     "background_run_id": "background-run-1",
@@ -6812,7 +6820,9 @@ class TestApprovalContinuations:
             delivered_projections=(),
         )
 
-        recorded = await router.approvals.resolve_continuation_approval_card(
+        recorded = await resolve_card_event(
+            router.approvals,
+            room_id=ROOM,
             card_event_id="$background-approval",
             requested_status="approved",
             reason=None,
@@ -6821,13 +6831,10 @@ class TestApprovalContinuations:
 
         assert recorded.recorded is True
         assert recorded.continuation_ready is False
-        decision = await router.approvals.background_approval_decision(
-            run_id="background-run-1",
-            call_id="background-call-1",
-        )
+        decision = await router.approvals.detached_decision(CallKey.detached("background-run-1", "background-call-1"))
         assert decision is not None
         assert decision.status == "approved"
-        assert await router.approvals.prune_background_approvals(run_id="background-run-1") is False
+        assert await router.approvals.prune_detached_calls(owner_id="background-run-1") is False
 
         assert await router.claim_matrix_delivery(
             delivery_id="background-card-1",
@@ -6846,9 +6853,8 @@ class TestApprovalContinuations:
         )
         assert await router.approvals.retire_approval_card(
             delivery_id="background-card-1",
-            card_event_id="$background-approval",
         )
-        assert await router.approvals.prune_background_approvals(run_id="background-run-1") is True
+        assert await router.approvals.prune_detached_calls(owner_id="background-run-1") is True
 
     async def test_continuation_is_reachable_from_every_owned_source(self, alice: PrincipalStore) -> None:
         """A coalesced source cannot replay outside its one paused-run owner."""
@@ -7032,8 +7038,8 @@ class TestApprovalContinuations:
         failing = await alice.pending(room_id=room_id, runtime_generation="runtime-a")
         assert [event.event_id for event in failing] == ["$source-1"]
 
-    async def test_pending_card_page_exposes_unreadable_durable_debt(self, alice: PrincipalStore) -> None:
-        """A corrupt card stays visible to recovery accounting without becoming actionable."""
+    async def test_pending_card_page_reads_the_call_not_the_card_payload(self, alice: PrincipalStore) -> None:
+        """A card's frozen payload only renders its terminal edit; what it shows and decides comes from its call."""
         await self.admit_sources(alice)
         await paused_for_approval(
             alice,
@@ -7065,10 +7071,12 @@ class TestApprovalContinuations:
         page = await alice.approvals.pending_approval_cards(room_id=ROOM)
 
         assert len(page) == 1
-        unreadable = page[0]
-        assert isinstance(unreadable, UnreadableApprovalCard)
-        assert unreadable.delivery_id == "approval-card-1"
-        assert unreadable.continuation_id == "approval-1"
+        card = page[0]
+        assert card.delivery_id == "approval-card-1"
+        assert card.call == CallKey("approval-1", 0, "call-1")
+        assert card.owner_kind == "reply"
+        assert card.approver_user_id == "@user:example.org"
+        assert not card.decided
         continuation = await alice.approvals.approval_continuation("approval-1")
         assert continuation is not None
         assert continuation.state == "waiting"
@@ -7269,7 +7277,7 @@ class TestApprovalContinuations:
         )
         await paused_for_approval(responder, publishing)
 
-        reserved = await router.approvals.reserve_approval_card_deliveries(
+        reserved = await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id=publishing.approval_id,
             expected_generation=0,
@@ -7278,6 +7286,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": publishing.approval_id,
@@ -7290,6 +7300,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-2",
                     tool_call_id="call-2",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-2",
                         "continuation_id": publishing.approval_id,
@@ -7333,7 +7345,7 @@ class TestApprovalContinuations:
         )
         await paused_for_approval(responder, publishing)
 
-        reserved = await router.approvals.reserve_approval_card_deliveries(
+        reserved = await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id=publishing.approval_id,
             expected_generation=0,
@@ -7342,12 +7354,16 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={"approval_id": "approval-card-1", "status": "pending"},
                 ),
                 ApprovalCardReservation(
                     delivery_id="approval-card-2",
                     tool_call_id="missing-call",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={"approval_id": "approval-card-2", "status": "pending"},
                 ),
             ),
@@ -7384,7 +7400,7 @@ class TestApprovalContinuations:
         await paused_for_approval(responder, publishing)
 
         with pytest.raises(ValueError, match="changed exact-call identity"):
-            await router.approvals.reserve_approval_card_deliveries(
+            await router.approvals.reserve_reply_cards(
                 continuation_principal_id=responder.principal_id,
                 continuation_id=publishing.approval_id,
                 expected_generation=publishing.generation,
@@ -7393,6 +7409,8 @@ class TestApprovalContinuations:
                         delivery_id="approval-card-1",
                         tool_call_id="call-1",
                         event_type="io.mindroom.tool_approval",
+                        approver_user_id="@user:example.org",
+                        approvable=True,
                         payload={
                             "approval_id": "approval-card-1",
                             "continuation_id": publishing.approval_id,
@@ -7429,7 +7447,7 @@ class TestApprovalContinuations:
         )
         await admit_room_membership(router, ROOM, "leave", source=DepartureSource.REPORTED)
 
-        reserved = await router.approvals.reserve_approval_card_deliveries(
+        reserved = await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
@@ -7438,6 +7456,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "continuation_id": "approval-1",
                         "continuation_generation": 0,
@@ -7489,7 +7509,7 @@ class TestApprovalContinuations:
             ),
         ).principal("router@shared")
         reservation = asyncio.create_task(
-            reserving.approvals.reserve_approval_card_deliveries(
+            reserving.approvals.reserve_reply_cards(
                 continuation_principal_id=principal_id,
                 continuation_id="approval-1",
                 expected_generation=0,
@@ -7498,6 +7518,8 @@ class TestApprovalContinuations:
                         delivery_id="approval-card-1",
                         tool_call_id="call-1",
                         event_type="io.mindroom.tool_approval",
+                        approver_user_id="@user:example.org",
+                        approvable=True,
                         payload={
                             "approval_id": "approval-card-1",
                             "continuation_id": "approval-1",
@@ -7573,11 +7595,13 @@ class TestApprovalContinuations:
             backend=_PausingBackend(
                 rival_stores.first.backend,
                 pause_after_continuation_read,
-                statement_matches=lambda sql: "SELECT principal_id, state, generation, failure_reason" in sql,
+                statement_matches=lambda sql: "AS continuation_principal_id" in sql,
             ),
         ).principal("router@shared")
         decision = asyncio.create_task(
-            deciding.approvals.resolve_continuation_approval_card(
+            resolve_card_event(
+                deciding.approvals,
+                room_id=ROOM,
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,
@@ -7650,7 +7674,9 @@ class TestApprovalContinuations:
             ),
         ).principal("router@shared")
         decision = asyncio.create_task(
-            deciding.approvals.resolve_continuation_approval_card(
+            resolve_card_event(
+                deciding.approvals,
+                room_id=ROOM,
                 card_event_id="$approval",
                 requested_status="approved",
                 reason=None,
@@ -7787,7 +7813,9 @@ class TestApprovalContinuations:
         )
         await self.remember_card(alice)
 
-        recorded = await alice.approvals.resolve_continuation_approval_card(
+        recorded = await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="approved",
             reason="Looks safe.",
@@ -7854,7 +7882,9 @@ class TestApprovalContinuations:
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
-        await alice.approvals.resolve_continuation_approval_card(
+        await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
@@ -7864,7 +7894,6 @@ class TestApprovalContinuations:
         assert (
             await alice.approvals.retire_approval_card(
                 delivery_id="approval-card-1",
-                card_event_id="$approval",
             )
             is False
         )
@@ -7885,12 +7914,11 @@ class TestApprovalContinuations:
         assert (
             await alice.approvals.retire_approval_card(
                 delivery_id="approval-card-1",
-                card_event_id="$approval",
             )
             is True
         )
-        assert await alice.approvals.pending_approval_card(room_id=ROOM, card_event_id="$approval") is None
-        assert await alice.approvals.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
+        assert await pending_card(alice.approvals, room_id=ROOM, card_event_id="$approval") is None
+        assert await card_is_terminal(alice.approvals, room_id=ROOM, card_event_id="$approval") is True
         initial = await alice.load_matrix_delivery(
             delivery_id="approval-card-1",
             stage=DeliveryStage.INITIAL,
@@ -7913,7 +7941,9 @@ class TestApprovalContinuations:
         await paused_for_approval(alice, expired)
         await self.remember_card(alice)
 
-        recorded = await alice.approvals.resolve_continuation_approval_card(
+        recorded = await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
@@ -7949,7 +7979,9 @@ class TestApprovalContinuations:
         await paused_for_approval(alice, expired)
         await self.remember_card(alice)
 
-        recorded = await alice.approvals.resolve_continuation_approval_card(
+        recorded = await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
@@ -7984,7 +8016,7 @@ class TestApprovalContinuations:
             runtime_generation="runtime-a",
         )
         await paused_for_approval(alice, expired)
-        assert await router.approvals.reserve_approval_card_deliveries(
+        assert await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
@@ -7993,6 +8025,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
@@ -8010,7 +8044,11 @@ class TestApprovalContinuations:
             sending_device_id="OLDDEVICE",
         )
 
-        recorded = await router.approvals.expire_unacknowledged_approval_card(delivery_id="approval-card-1")
+        recorded = await router.approvals.resolve_approval_call(
+            CallKey("approval-1", 0, "call-1"),
+            requested_status="expired",
+            reason=None,
+        )
 
         assert recorded.recorded is True
         assert recorded.resolution is not None
@@ -8063,7 +8101,9 @@ class TestApprovalContinuations:
         )
         assert failing is not None
 
-        recorded = await alice.approvals.resolve_continuation_approval_card(
+        recorded = await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
@@ -8098,14 +8138,18 @@ class TestApprovalContinuations:
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
-        await alice.approvals.resolve_continuation_approval_card(
+        await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="approved",
             reason=None,
             metadata=ApprovalDecisionMetadata(),
         )
 
-        duplicate = await alice.approvals.resolve_continuation_approval_card(
+        duplicate = await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="denied",
             reason="Changed my mind.",
@@ -8201,6 +8245,13 @@ class TestApprovalContinuations:
 
         assert await alice.approvals.approval_continuation("approval-1") is None
         assert await alice.approvals.approval_continuation_for_source("$source-1") is None
+        # No card shows its calls, so they went with it.
+        assert (
+            await alice._backend.read(
+                lambda transaction: transaction.fetchall("SELECT owner_id FROM approval_calls"),
+            )
+            == ()
+        )
         # Both sources are ordinary pending work again, even for the runtime that claimed them.
         replayable = await alice.pending(runtime_generation="runtime-a")
         assert [event.event_id for event in replayable] == ["$source-1", "$source-2"]
@@ -8631,6 +8682,27 @@ class TestApprovalContinuations:
             "removed",
         ]
 
+    async def test_room_departure_discards_a_paused_reply_with_the_calls_no_card_shows(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A paused reply the responder's departure deletes takes the calls no live card shows with it."""
+        await self.admit_sources(alice)
+        await paused_for_approval(
+            alice,
+            replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
+        )
+
+        await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.REPORTED)
+
+        assert await alice.approvals.approval_continuation("approval-1") is None
+        assert (
+            await alice._backend.read(
+                lambda transaction: transaction.fetchall("SELECT owner_id FROM approval_calls"),
+            )
+            == ()
+        )
+
     async def test_room_departure_discards_continuation_and_cards_with_its_sources(
         self,
         alice: PrincipalStore,
@@ -8667,11 +8739,12 @@ class TestApprovalContinuations:
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.REPORTED)
 
         assert await alice.approvals.approval_continuation("approval-1") is None
-        stored = await router.approvals.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        stored = await pending_card(router.approvals, room_id=ROOM, card_event_id="$approval")
         assert stored is not None
-        assert stored.resolution is not None
-        assert stored.resolution["status"] == "expired"
-        assert stored.resolution["resolution_reason"] == "Requesting agent left the room."
+        assert stored.decided
+        resolution = await terminal_edit(router, stored.delivery_id)
+        assert resolution["status"] == "expired"
+        assert resolution["resolution_reason"] == "Requesting agent left the room."
 
     async def test_room_departure_retires_router_card_after_terminal_ack_crash(
         self,
@@ -8686,7 +8759,9 @@ class TestApprovalContinuations:
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
-        await router.approvals.resolve_continuation_approval_card(
+        await resolve_card_event(
+            router.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
@@ -8707,7 +8782,7 @@ class TestApprovalContinuations:
 
         assert await alice.approvals.approval_continuation("approval-1") is None
         assert await router.approvals.pending_approval_cards(room_id=ROOM) == ()
-        assert await router.approvals.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
+        assert await card_is_terminal(router.approvals, room_id=ROOM, card_event_id="$approval") is True
 
     async def test_room_departure_retires_router_cards_that_were_never_attempted(
         self,
@@ -8721,7 +8796,7 @@ class TestApprovalContinuations:
             alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
-        assert await router.approvals.reserve_approval_card_deliveries(
+        assert await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
@@ -8730,6 +8805,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
@@ -8772,7 +8849,7 @@ class TestApprovalContinuations:
             alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
-        assert await router.approvals.reserve_approval_card_deliveries(
+        assert await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
@@ -8781,6 +8858,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
@@ -8831,7 +8910,7 @@ class TestApprovalContinuations:
             alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
-        assert await router.approvals.reserve_approval_card_deliveries(
+        assert await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
@@ -8840,6 +8919,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
@@ -8954,7 +9035,9 @@ class TestApprovalContinuations:
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(alice)
-        await alice.approvals.resolve_continuation_approval_card(
+        await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
@@ -8974,7 +9057,7 @@ class TestApprovalContinuations:
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.REPORTED)
 
         assert await alice.approvals.pending_approval_cards(room_id=ROOM) == ()
-        assert await alice.approvals.is_terminal_approval_card(room_id=ROOM, card_event_id="$approval") is True
+        assert await card_is_terminal(alice.approvals, room_id=ROOM, card_event_id="$approval") is True
 
     async def test_card_owner_departure_keeps_a_precommitted_terminal_edit_recoverable_after_rejoin(
         self,
@@ -8989,7 +9072,9 @@ class TestApprovalContinuations:
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
         await self.remember_card(router)
-        recorded = await router.approvals.resolve_continuation_approval_card(
+        recorded = await resolve_card_event(
+            router.approvals,
+            room_id=ROOM,
             card_event_id="$approval",
             requested_status="denied",
             reason="Unsafe.",
@@ -9029,9 +9114,9 @@ class TestApprovalContinuations:
         assert len(resolved) == 1
         assert len(sent) == 1
 
-        stored = await router.approvals.pending_approval_card(room_id=ROOM, card_event_id="$approval")
+        stored = await pending_card(router.approvals, room_id=ROOM, card_event_id="$approval")
         assert stored is not None
-        assert stored.resolution == {
+        assert await terminal_edit(router, stored.delivery_id) == {
             "approval_id": "approval-card-1",
             "tool_name": "shell",
             "approvable": False,
@@ -9073,7 +9158,7 @@ class TestApprovalContinuations:
             alice,
             replace(self.continuation(state="waiting"), runtime_generation="runtime-a"),
         )
-        assert await router.approvals.reserve_approval_card_deliveries(
+        assert await router.approvals.reserve_reply_cards(
             continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
@@ -9082,6 +9167,8 @@ class TestApprovalContinuations:
                     delivery_id="approval-card-1",
                     tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
@@ -9807,14 +9894,23 @@ class TestHotQueriesAreIndexCovered:
             "JOIN approval_cards AS cards ON cards.principal_id=initial.principal_id "
             "AND cards.delivery_id=initial.delivery_id "
             "WHERE initial.principal_id=? AND initial.room_id=? AND initial.stage='initial' "
+            "AND cards.kind='request' AND cards.retired=0 "
             "ORDER BY initial.created_at_ns, initial.delivery_id LIMIT 50"
         ),
         "approval card point lookup": (
-            "SELECT * FROM matrix_delivery_outbox AS initial "
-            "JOIN approval_cards AS cards ON cards.principal_id=initial.principal_id "
-            "AND cards.delivery_id=initial.delivery_id "
-            "WHERE initial.principal_id=? AND initial.acknowledged_event_id=? AND initial.stage='initial'"
+            "SELECT * FROM approval_card_events AS events "
+            "JOIN approval_cards AS cards ON cards.principal_id=events.principal_id "
+            "AND cards.delivery_id=events.delivery_id "
+            "WHERE events.principal_id=? AND events.room_id=? AND events.card_event_id=?"
         ),
+        "approval call's request card": (
+            "SELECT * FROM approval_cards WHERE owner_id=? AND generation=? AND tool_call_id=? "
+            "AND kind='request' AND retired=0"
+        ),
+        "approval card event of a delivery": (
+            "SELECT MIN(card_event_id) FROM approval_card_events WHERE principal_id=? AND delivery_id=?"
+        ),
+        "timed grant scope candidates": ("SELECT * FROM approval_card_scopes WHERE principal_id=? AND scope_key=?"),
         "continuation owner page": (
             "SELECT * FROM approval_continuations WHERE approval_id > ? ORDER BY approval_id LIMIT 50"
         ),

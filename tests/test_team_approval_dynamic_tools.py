@@ -11,7 +11,7 @@ import pytest
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall
-from mindroom.event_journal.approval_continuations import ApprovalDecision
+from mindroom.event_journal.approval_calls import ApprovalDecision
 from mindroom.history.session_context import load_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunStatus, TeamRunRecord

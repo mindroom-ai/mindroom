@@ -26,7 +26,7 @@ from mindroom.event_journal.history_recovery import (
 )
 from mindroom.logging_config import get_logger
 
-from . import approval_continuations, approvals, membership_hooks, replies, reply_messages
+from . import approval_calls, approval_cards, approval_continuations, membership_hooks, replies, reply_messages
 from .identity import decode_thread_id, encode_thread_id
 from .models import (
     TURN_BACKED_KINDS,
@@ -652,15 +652,14 @@ def _advance_membership_epoch(
     # retain decision. That durable identity is the property this table exists
     # for.
     # A terminal acknowledgement may have committed just before a crash that
-    # prevented its approval-domain row from being retired. Preserve the click
-    # tombstone before either side of the cross-principal relationship is
-    # fenced or deleted below.
-    approvals.retire_completed_cards_for_departure(
+    # prevented its card from being retired. Retire it before either side of
+    # the cross-principal relationship is fenced or deleted below.
+    approval_cards.retire_completed_for_departure(
         transaction,
         principal_id,
         room_id=room_id,
     )
-    approvals.fail_continuations_for_departed_card_owner(
+    approval_cards.deny_for_departed_card_owner(
         transaction,
         principal_id,
         room_id=room_id,
@@ -675,14 +674,15 @@ def _advance_membership_epoch(
               SELECT 1 FROM approval_cards AS cards
               WHERE cards.principal_id = delivery.principal_id
                 AND cards.delivery_id = delivery.delivery_id
+                AND cards.kind = 'request'
           )
         """,
         (principal_id, room_id),
     )
     # Approval cards are authored by the router principal, while the paused
-    # run belongs to the responding entity principal. Preserve the router's
-    # terminal Matrix edit debt before this fence removes the continuation.
-    approvals.expire_cards_for_departed_continuations(
+    # run belongs to the responding entity principal. Decide its calls and keep
+    # the router's terminal Matrix edit debt before this fence removes it.
+    approval_cards.expire_for_departed_responder(
         transaction,
         principal_id,
         room_id=room_id,
@@ -690,7 +690,16 @@ def _advance_membership_epoch(
     )
     # A paused run owns exactly the source rows this fence is about to settle.
     # Delete the aggregate first so no durable continuation survives with no
-    # runnable source. Its call rows cascade.
+    # runnable source. Its calls go with it unless a live card still shows them.
+    for departed in transaction.fetchall(
+        f"""
+        SELECT approval_id FROM approval_continuations
+        WHERE principal_id = ?
+          AND {approval_continuations.holds_source_in_room("approval_continuations")}
+        """,  # noqa: S608 - a fixed SQL fragment, not input
+        (principal_id, room_id),
+    ):
+        approval_calls.delete_reply_calls(transaction, approval_id=str(departed["approval_id"]))
     transaction.execute(
         f"""
         DELETE FROM approval_continuations

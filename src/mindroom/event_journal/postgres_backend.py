@@ -15,14 +15,9 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
-from .legacy_response_attempts import upgrade_continuation_identity
-from .legacy_schema import (
-    upgrade_hydration_walk_version,
-    upgrade_legacy_journal,
-    upgrade_outbox_reply_rows,
-)
 from .offloading import ThreadOffload, settled
-from .schema import OUTBOX_TABLE, POSTGRES_DIALECT, render, schema_statements
+from .schema import POSTGRES_DIALECT, SchemaDialect, render, schema_statements
+from .upgrades import upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 # An arbitrary constant that only this schema setup uses, so the lock it
@@ -84,6 +79,29 @@ class _PostgresTransaction:
         """Run one query and return every row."""
         self.cursor.execute(_statement(sql), tuple(params))
         return tuple(self.cursor.fetchall())
+
+
+@dataclass(frozen=True, slots=True)
+class _PostgresSchemaInspector:
+    """What the PostgreSQL schema transaction currently holds."""
+
+    cursor: psycopg.Cursor[dict[str, Any]]
+    dialect: SchemaDialect = POSTGRES_DIALECT
+
+    def tables(self) -> frozenset[str]:
+        """Return the names of every table."""
+        self.cursor.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()",
+        )
+        return frozenset(str(row["table_name"]) for row in self.cursor.fetchall())
+
+    def columns(self, table: str) -> frozenset[str]:
+        """Return the column names of one table, empty when it does not exist."""
+        self.cursor.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = %s",
+            (table,),
+        )
+        return frozenset(str(row["column_name"]) for row in self.cursor.fetchall())
 
 
 @dataclass
@@ -157,34 +175,7 @@ class PostgresBackend:
             # advisory lock costs nothing at steady state, because the
             # statements are all no-ops once the schema exists.
             cursor.execute(cast("LiteralString", f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK_KEY})"))
-            cursor.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()",
-            )
-            existing_tables = frozenset(str(row["table_name"]) for row in cursor.fetchall())
-            upgrade_legacy_journal(_PostgresTransaction(cursor), existing_tables)
-            cursor.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'conversation_hydration'",
-            )
-            hydration_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
-            upgrade_hydration_walk_version(_PostgresTransaction(cursor), hydration_columns)
-            cursor.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'matrix_delivery_outbox'",
-            )
-            outbox_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
-            upgrade_outbox_reply_rows(
-                _PostgresTransaction(cursor),
-                outbox_columns,
-                outbox_table_ddl=OUTBOX_TABLE,
-                sqlite=False,
-            )
-            cursor.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = 'approval_continuations'",
-            )
-            continuation_columns = frozenset(str(row["column_name"]) for row in cursor.fetchall())
-            upgrade_continuation_identity(_PostgresTransaction(cursor), existing_tables, continuation_columns)
+            upgrade_schema(_PostgresTransaction(cursor), _PostgresSchemaInspector(cursor))
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
         self._writer.commit()

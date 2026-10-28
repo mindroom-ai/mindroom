@@ -48,6 +48,7 @@ The primary key leaves the principal out, so the database itself guarantees what
 A reply-owned call outlives its paused reply until every card that shows it retires, so a card's decision always has its one owner.
 Calls with no live card are deleted with their paused reply; the rest are deleted when their last card retires.
 Detached calls are pruned by their owner after their cards retire, as today.
+A detached run's calls are ordered by reservation, since `(owner_id, generation, call_ordinal)` is unique and a script or job run can ask more than once.
 
 ### `approval_cards`: one row per Matrix card or receipt
 
@@ -77,6 +78,7 @@ A click resolves its card through this table, so it replaces `approval_action_to
 One row per card that offers "approve for N minutes", keyed by `(principal_id, delivery_id)`: `scope_key`, `operation`, `requester_id`, `entity_name`, `invoking_agent`, `responder_principal_id`, `responder_epoch`, `consent_epoch` (the card principal's membership epoch when the card was reserved).
 The consent epochs are immutable; delivery cleanup moves only `approval_cards.membership_epoch`.
 Whether a card offers timed approvals is this row's existence.
+A receipt offers nothing, so it has no scope row; the active grant is matched against the scope a reservation computes before it decides between a request card and a receipt.
 
 ### `approval_grants`
 
@@ -110,12 +112,14 @@ The new tables take exactly the locks the rows they replace take today, in the s
   A paused reply's generation keeps its publication lease: it stays `waiting` with `runtime_generation` set until `activate` releases the lease, even when every call was decided automatically, so no decision can make it ready before its pause presentation commits.
 - **Resolve.** `resolve_call(call_key, requested, reason, metadata)` is the only writer of a decision.
   It locks in the order above, returns an existing decision unchanged, and applies the fences: expiry from `expires_at_ns`; for `reply` owners the generation must match, the paused reply must be `waiting` or `failing`, and a `failing` reply turns an approval into a denial with its failure's card reason.
+  A requested expiry keeps the reason its caller gives, so a responder departure's cards still say "Requesting agent left the room."; only a passed deadline forces the timeout reason.
   It writes the decision, queues the terminal edit of the call's live request card built from the frozen INITIAL payload, and for `reply` owners moves a lease-free `waiting` reply whose calls are all decided to `ready`.
   Card clicks, timed-grant batches, deadline expiry, failure settlement, job and script settlement, scheduled withdrawal, and both departure paths call it.
 - **Retire.** A request card retires after its terminal edit is acknowledged, a receipt after its INITIAL delivery is acknowledged or permanently refused, as today.
   Retiring deletes the card's outbox rows, sets `retired`, deletes a non-originating card's scope row, and deletes a reply-owned call whose paused reply is gone and that no live card shows.
   A card whose delivery was never attempted is still deleted outright by departure cleanup.
 - The manager's click handling reads one typed `ApprovalCardView` (card, call, scope, scheduled offer) and never parses card JSON for a decision input; the frozen payload is only the source of the terminal edit's content.
+  Whether an approval can be honored is computed once from the prepared payload (`approval/events.py` `card_approvable`) and stored on the card, so the card parser and its legacy identity alias go.
 
 ## Paused replies: one rules module
 
@@ -214,6 +218,8 @@ The one-second poll goes; the wait ends at the decision or at `expires_at_ns`.
 ## Journal upgrades
 
 Both backends gain one schema inspector (`tables()`, `columns(table)`) and run one ordered list of upgrade functions, each taking the transaction and the inspector, inside their existing schema transaction; a new upgrade is one line in that list.
+The inspector also names the backend's `dialect`, because the outbox upgrade rebuilds its table only on SQLite and the approval conversion creates the new tables in its backend's spelling before the schema statements run.
+The approval conversion runs before the schema statements because three of the new tables reuse old names; it reads every old row, drops the old tables, creates the new ones, and writes the converted rows.
 The approval conversion and the `failure_kind` conversion are two entries, after `upgrade_continuation_identity`.
 A fresh database has none of the source tables and skips both; a converted database has the new tables and skips both.
 
@@ -236,6 +242,10 @@ A fresh database has none of the source tables and skips both; a converted datab
 | tombstone matching a converted card's event | that event row |
 | tombstone matching no converted card | event row with `delivery_id` `NULL`: a terminal identity with no provenance, matched by event id alone |
 | `failure_reason` | `cancelled_by_user`: `user_stop`; `sync_restart_cancelled`: `restart`; `interrupted`: `interrupted`; the fixed interrupted-before-final text: `shutdown`; other text: `error` with it as detail |
+
+A rebuilt `reply` call takes the card principal as its principal, since the paused reply that named its own is gone, and calls rebuilt for one generation take ordinals in delivery order.
+A live card whose calls are gone and that never got a terminal edit is expired with the timeout reason and its edit queued, so it can still retire.
+A grant whose originating card left no timed-grant row gets a retired request card from the grant's own room, thread, scope, and event; a retired card's call is never read.
 
 **Pending approvals survive the conversion**: a card pending before the upgrade can still be answered, and its paused reply resumes, because every fact a decision or resume reads is copied, and metadata that was never stored is left `NULL`.
 This differs from the v2026.10.228 precedent, which cancelled pending paused-reply approvals because it could not rebuild their reply identity.

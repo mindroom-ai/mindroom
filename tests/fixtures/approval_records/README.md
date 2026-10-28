@@ -1,7 +1,8 @@
 # Approval-record recordings
 
-These files are the rows the event journal wrote for each tool-approval state before the approval tables were replaced, so the one-time conversion is tested against real rows instead of hand-written ones.
-`tests/approval_records_recorder.py` recorded them at commit `b19c4c4acd5ea2f3b8aa126ab55048b3ca41713a` by driving the approval manager, the response coordinator, and the journal's own transactions onto a fresh SQLite journal.
+These files are the rows the event journal wrote for each tool-approval state before the approval tables were replaced, so the one-time conversion in `src/mindroom/event_journal/legacy_approval_records.py` is tested against real rows instead of hand-written ones.
+`tests/approval_records_recorder.py` recorded them at commit `b19c4c4acd5ea2f3b8aa126ab55048b3ca41713a` by driving the approval manager, the response coordinator, and the journal's own transactions onto a fresh SQLite journal; the recorder was removed with the tables it describes.
+`tests/test_legacy_approval_records.py` loads each recording on SQLite and PostgreSQL and checks what the conversion makes of it.
 
 `schema.sql` is the schema those rows belong to, as `schema_statements(SQLITE_DIALECT)` rendered it at that commit.
 Each `<scenario>.sql` holds every row of every journal table after one scenario, as `INSERT` statements in schema order, headed by a one-line description.
@@ -23,6 +24,8 @@ Load a recording by running `schema.sql` and then the scenario file against an e
 | `12_scheduled_calls.sql` | Scheduled calls that are pending, approved for any arguments, armed, consumed with a completed outcome and a retired receipt, and withdrawn. |
 | `13_timed_grants.sql` | A timed grant that approved a second waiting card in its batch and two later calls at reservation, one receipt live and one retired, and a revoked grant in another thread. |
 | `14_expired_calls.sql` | A paused reply's call and a background job's call that the deadline sweep expired. |
+| `15_responder_departed_card_debt.sql` | Hand-built from `01`: the requesting agent left the room, so its paused reply and calls are gone while the router's card owes its queued expiry edit. |
+| `16_receipt_after_reply_ended.sql` | Hand-built from `13`: the paused reply the live receipt approved finished, so its continuation and calls are gone while the receipt is still owed. |
 
 The router's journal principal is `router@@mindroom_router:example.org`, at its second membership of the room (epoch 1), and the replying agent's is `code@@mindroom_code:example.org`.
 Every recording starts its clock at 2027-01-15T08:00:00Z and moves it only between its steps, and the n-th `uuid4` it reaches is `UUID(int=n)`, so recording again at the same commit writes identical files.
@@ -30,13 +33,10 @@ Grant scope keys and operations hash the whole config model, so recording at ano
 
 ## Recording again
 
-The recorder only describes a journal that still writes these tables, so record again only on a commit from before the replacement.
-From the repository root, inside the NixOS development shell:
+The recorder only describes a journal that still writes these tables, so record again only by checking out commit `b19c4c4acd5ea2f3b8aa126ab55048b3ca41713a` in a separate worktree and running, from its root inside the NixOS development shell:
 
 ```bash
 nix-shell shell.nix --run "env -u TMPDIR -u TEMP -u TMP MINDROOM_RECORD_APPROVAL_FIXTURES=1 uv run pytest tests/approval_records_recorder.py -n 0 --no-cov"
 ```
 
-Without `MINDROOM_RECORD_APPROVAL_FIXTURES=1` every recorder test is skipped and nothing is written.
-After writing each file, the recorder loads it into a fresh database, opens it with `EventJournalStore`, reads every continuation, card, grant, scheduled call, and detached call back, and checks that no row changed.
-Update the commit named above when you record again.
+The two hand-built recordings are edits of `01` and `13` that delete the rows their scenario says are gone and, for `15`, add the queued expiry edit the departure wrote.

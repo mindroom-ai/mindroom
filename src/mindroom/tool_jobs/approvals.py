@@ -20,7 +20,7 @@ from mindroom.approval.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.event_journal import ApprovalDecision
+from mindroom.event_journal import JOB_ENDED_REASON, ApprovalDecision
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-_CANCELLED_REASON = "The background job asking for this approval ended before a decision."
 _INTERRUPTED_APPROVAL_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
 
 
@@ -148,6 +147,7 @@ async def _decide(
             toolkit_name=call.toolkit_name,
             function_name=call.tool_name,
         ),
+        owner_kind="job",
         room_id=owner.room_id,
         thread_id=owner.resolved_thread_id,
         agent_name=call.invoking_agent,
@@ -189,7 +189,7 @@ async def settle_job_approvals(runtime: ToolJobRuntime, job_id: str) -> None:
     manager = approval_manager.get_approval_store()
     if manager is not None and manager.cards is not None and manager.send_delivery is not None:
         try:
-            await manager.settle_pending_background_approvals(_approval_run_id(job_id), reason=_CANCELLED_REASON)
+            await manager.settle_pending_background_approvals(_approval_run_id(job_id), reason=JOB_ENDED_REASON)
         except Exception:
             # A settlement failure must not replace how the job ended.
             logger.exception("Denying a background job's approval cards failed; retrying", job_id=job_id)

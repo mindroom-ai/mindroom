@@ -13,16 +13,18 @@ from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import (
     ApprovalCardReservation,
+    ApprovalCardView,
     BackgroundApprovalDecision,
+    CallKey,
     DeliveryStage,
     DepartureSource,
     EventJournalStore,
     MatrixDelivery,
-    StoredApprovalCard,
 )
 from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
+from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.conftest import handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_script_run_manager import _context as _manager_context
@@ -146,10 +148,11 @@ async def _approval_manager(
     return manager, journal, initial_sent
 
 
-async def _wait_for_pending_card(journal: EventJournalStore) -> StoredApprovalCard:
+async def _wait_for_pending_card(journal: EventJournalStore) -> ApprovalCardView:
     cards = journal.principal("router@shared")
     for _attempt in range(1000):
-        stored = await cards.approvals.pending_approval_card(
+        stored = await pending_card(
+            cards.approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -170,6 +173,7 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
     try:
         decision = await asyncio.wait_for(
             manager.request_background_approval(
+                owner_kind="script",
                 origin=_origin(),
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -186,7 +190,7 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
         assert decision.status == "denied"
         assert decision.reason == "Approval card could not be published in this room."
         assert initial_sent.is_set() is False
-        assert await cards.approvals.background_approval_decision(run_id="run-1", call_id="call-1") is None
+        assert await cards.approvals.detached_decision(CallKey.detached("run-1", "call-1")) is None
     finally:
         await manager.shutdown()
         await journal.close()
@@ -207,23 +211,19 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
     cards = journal.principal("router@shared")
     read_started = asyncio.Event()
     decision_committed = asyncio.Event()
-    original_read = ApprovalStore.background_approval_decision
+    original_read = ApprovalStore.detached_decision
     decision_task: asyncio.Task[BackgroundApprovalDecision] | None = None
 
-    async def read_after_commit(
-        approvals: ApprovalStore,
-        *,
-        run_id: str,
-        call_id: str,
-    ) -> BackgroundApprovalDecision | None:
+    async def read_after_commit(approvals: ApprovalStore, call: CallKey) -> BackgroundApprovalDecision | None:
         if asyncio.current_task() is decision_task and approvals == cards.approvals:
             read_started.set()
             await decision_committed.wait()
-        return await original_read(approvals, run_id=run_id, call_id=call_id)
+        return await original_read(approvals, call)
 
-    monkeypatch.setattr(ApprovalStore, "background_approval_decision", read_after_commit)
+    monkeypatch.setattr(ApprovalStore, "detached_decision", read_after_commit)
     decision_task = asyncio.create_task(
         manager.request_background_approval(
+            owner_kind="script",
             origin=_origin(),
             room_id="!room:localhost",
             thread_id="$thread",
@@ -239,7 +239,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         await initial_sent.wait()
         stored = await _wait_for_pending_card(journal)
         await read_started.wait()
-        assert stored.target_kind == "background_script"
+        assert stored.owner_kind == "script"
         wrong_actor = await handle_card_response_for_test(
             manager,
             room_id="!room:localhost",
@@ -250,7 +250,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         )
         assert wrong_actor.consumed is False
         assert decision_task.done() is False
-        assert await cards.approvals.background_approval_decision(run_id="run-1", call_id="call-1") is None
+        assert await cards.approvals.detached_decision(CallKey.detached("run-1", "call-1")) is None
 
         result = await handle_card_response_for_test(
             manager,
@@ -262,7 +262,7 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             authorize_responder=lambda _entity_name: True,
         )
         assert result.consumed is True
-        committed = await cards.approvals.background_approval_decision(run_id="run-1", call_id="call-1")
+        committed = await cards.approvals.detached_decision(CallKey.detached("run-1", "call-1"))
         assert committed is not None
         assert committed.status == status
         assert committed.reason == "operator decision"
@@ -270,7 +270,8 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
         decision = await decision_task
         assert decision.status == status
         assert decision.reason == "operator decision"
-        assert await journal.principal("router@shared").approvals.is_terminal_approval_card(
+        assert await card_is_terminal(
+            journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -284,9 +285,8 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             authorize_responder=lambda _entity_name: True,
         )
         assert repeated.consumed is True
-        persisted = await journal.principal("router@shared").approvals.background_approval_decision(
-            run_id="run-1",
-            call_id="call-1",
+        persisted = await journal.principal("router@shared").approvals.detached_decision(
+            CallKey.detached("run-1", "call-1"),
         )
         assert persisted is not None
         assert persisted.status == status
@@ -305,6 +305,7 @@ async def test_background_script_approval_expires_and_retires_without_a_response
     manager, journal, _initial_sent = await _approval_manager(tmp_path)
     try:
         decision = await manager.request_background_approval(
+            owner_kind="script",
             origin=_origin(),
             room_id="!room:localhost",
             thread_id="$thread",
@@ -318,7 +319,8 @@ async def test_background_script_approval_expires_and_retires_without_a_response
 
         assert decision.status == "expired"
         assert decision.reason == "Tool approval request timed out."
-        assert await journal.principal("router@shared").approvals.is_terminal_approval_card(
+        assert await card_is_terminal(
+            journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -332,6 +334,7 @@ async def test_background_script_terminal_edit_is_recovered_after_restart(tmp_pa
     """Restart recovery retries a failed terminal edit and retires the card."""
     first, first_journal, _initial_sent = await _approval_manager(tmp_path, fail_final=True)
     decision = await first.request_background_approval(
+        owner_kind="script",
         origin=_origin(),
         room_id="!room:localhost",
         thread_id="$thread",
@@ -351,7 +354,8 @@ async def test_background_script_terminal_edit_is_recovered_after_restart(tmp_pa
         sweep = await recovered.recover_cards_on_startup()
 
         assert sweep.complete is True
-        assert await recovered_journal.principal("router@shared").approvals.is_terminal_approval_card(
+        assert await card_is_terminal(
+            recovered_journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
@@ -366,6 +370,7 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
     manager, journal, initial_sent = await _approval_manager(tmp_path)
     decision_task = asyncio.create_task(
         manager.request_background_approval(
+            owner_kind="script",
             origin=_origin(),
             room_id="!room:localhost",
             thread_id="$thread",
@@ -389,16 +394,14 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
         assert settled is True
         assert decision.status == "denied"
         assert decision.reason == "Background script ownership was cancelled."
-        assert await journal.principal("router@shared").approvals.is_terminal_approval_card(
+        assert await card_is_terminal(
+            journal.principal("router@shared").approvals,
             room_id="!room:localhost",
             card_event_id="$approval",
         )
         assert await manager.prune_background_approvals("run-1") is True
         assert (
-            await journal.principal("router@shared").approvals.background_approval_decision(
-                run_id="run-1",
-                call_id="call-1",
-            )
+            await journal.principal("router@shared").approvals.detached_decision(CallKey.detached("run-1", "call-1"))
             is None
         )
     finally:
@@ -426,16 +429,21 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
     try:
         for index in range(historical_count):
             call_id = f"history-{index}"
-            assert await run_cards.approvals.reserve_background_approval_card(
+            assert await run_cards.approvals.reserve_detached_card(
+                call=CallKey.detached("run-1", call_id),
+                owner_kind="script",
+                tool_name="shell",
+                toolkit_name="shell",
+                invoking_agent="agent",
                 room_id="!room:localhost",
                 thread_id="$thread",
-                run_id="run-1",
-                call_id=call_id,
                 expires_at_ns=0,
                 card=ApprovalCardReservation(
                     delivery_id=f"script-approval:run-1:{call_id}",
                     tool_call_id=call_id,
                     event_type="m.room.message",
+                    approver_user_id="@user:example.org",
+                    approvable=True,
                     payload={
                         "approval_target": "background_script",
                         "background_run_id": "run-1",
@@ -445,9 +453,8 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
                     },
                 ),
             )
-            recorded = await run_cards.approvals.resolve_background_approval_call(
-                run_id="run-1",
-                call_id=call_id,
+            recorded = await run_cards.approvals.resolve_approval_call(
+                CallKey.detached("run-1", call_id),
                 requested_status="expired",
                 reason="historical timeout",
             )
@@ -455,6 +462,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
 
         pending_run_task = asyncio.create_task(
             manager.request_background_approval(
+                owner_kind="script",
                 origin=pending_run_origin,
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -468,6 +476,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
         )
         other_run_task = asyncio.create_task(
             manager.request_background_approval(
+                owner_kind="script",
                 origin=other_run_origin,
                 room_id="!room:localhost",
                 thread_id="$thread",
@@ -491,10 +500,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
         assert decision.status == "denied"
         assert other_run_task.done() is False
         for index in range(historical_count):
-            historical = await run_cards.approvals.background_approval_decision(
-                run_id="run-1",
-                call_id=f"history-{index}",
-            )
+            historical = await run_cards.approvals.detached_decision(CallKey.detached("run-1", f"history-{index}"))
             assert historical is not None
             assert historical.status == "expired"
         assert await manager.settle_pending_background_approvals("run-1", reason="repeated") == 0

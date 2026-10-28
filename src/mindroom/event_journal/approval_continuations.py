@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.history.types import HistoryScope
@@ -14,7 +12,7 @@ from mindroom.reply_lifecycle import ReplyState
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import membership_state, outbox, reply_messages, reply_spans
+from . import approval_calls, membership_state, outbox, reply_messages, reply_spans
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -23,6 +21,7 @@ if TYPE_CHECKING:
     from mindroom.response_sources import ResponseSources
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+    from .approval_calls import ApprovalCall
     from .backend import Row, Transaction
 
 # ``claimed`` is never stored: a ready continuation is claimed by the span its
@@ -103,38 +102,6 @@ def enqueue_unavailable_notice(
         edits_event_id=None,
     )
     return delivery_id if transaction_id is not None else None
-
-
-class ApprovalDecision(StrEnum):
-    """One terminal decision for an exact paused tool call."""
-
-    APPROVED = "approved"
-    DENIED = "denied"
-    EXPIRED = "expired"
-
-
-@dataclass(frozen=True, slots=True)
-class ApprovalCall:
-    """One exact tool call of one paused generation."""
-
-    tool_call_id: str
-    tool_name: str
-    invoking_agent: str
-    expires_at_ns: int
-    decision: ApprovalDecision | None = None
-    reason: str | None = None
-    human_approval_required: bool | None = None
-    toolkit_name: str | None = None
-    arguments_digest: str | None = None
-
-    def binds_arguments(self, tool_args: Mapping[str, object] | None) -> bool:
-        """Return whether these are exactly the arguments this call paused with."""
-        return self.arguments_digest is not None and self.arguments_digest == approval_arguments_digest(tool_args)
-
-
-def approval_arguments_digest(tool_args: Mapping[str, object] | None) -> str:
-    """Return the canonical digest that binds one approval to its call's exact arguments."""
-    return hashlib.sha256(_json(tool_args or {}).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,17 +257,7 @@ def get(
     )
     if row is None:
         return None
-    call_rows = transaction.fetchall(
-        """
-        SELECT generation, tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
-               human_approval_required, toolkit_name, arguments_digest
-        FROM approval_continuation_calls
-        WHERE principal_id = ? AND approval_id = ? AND generation <= ?
-        ORDER BY generation, call_ordinal
-        """,
-        (principal_id, approval_id, int(row["generation"])),
-    )
-    return _from_rows(transaction, principal_id, row, call_rows)
+    return _from_rows(transaction, principal_id, row, approval_calls.reply_call_rows(transaction, (approval_id,)))
 
 
 def _shows_tool_calls(presentation: str) -> bool:
@@ -310,23 +267,6 @@ def _shows_tool_calls(presentation: str) -> bool:
     imports.
     """
     return json.loads(presentation)["show_tool_calls"] is True
-
-
-def _call(row: Row) -> ApprovalCall:
-    """Decode one stored exact call."""
-    return ApprovalCall(
-        tool_call_id=str(row["tool_call_id"]),
-        tool_name=str(row["tool_name"]),
-        invoking_agent=str(row["invoking_agent"]),
-        toolkit_name=cast("str | None", row["toolkit_name"]),
-        arguments_digest=cast("str | None", row["arguments_digest"]),
-        expires_at_ns=int(row["expires_at_ns"]),
-        decision=(ApprovalDecision(str(row["decision"])) if row["decision"] is not None else None),
-        reason=cast("str | None", row["reason"]),
-        human_approval_required=(
-            bool(row["human_approval_required"]) if row["human_approval_required"] is not None else None
-        ),
-    )
 
 
 def _from_rows(
@@ -365,8 +305,10 @@ def _from_rows(
         requester_id=cast("str", stored["requester_id"]),
         response_event_id=reply.event_id,
         sources=span.sources,
-        calls=tuple(_call(call) for call in call_rows if int(call["generation"]) == generation),
-        earlier_calls=tuple(_call(call) for call in call_rows if int(call["generation"]) < generation),
+        calls=tuple(approval_calls.reply_call(call) for call in call_rows if int(call["generation"]) == generation),
+        earlier_calls=tuple(
+            approval_calls.reply_call(call) for call in call_rows if int(call["generation"]) < generation
+        ),
         state="claimed" if claimed else cast("ApprovalContinuationState", row["state"]),
         delegation_storage_bindings=cast(
             "dict[str, dict[str, object]]",
@@ -411,41 +353,6 @@ def _from_rows(
         span_id=cast("str | None", row["span_id"]),
         claim_span_id=claim_span_id,
     )
-
-
-def _insert_calls(
-    transaction: Transaction,
-    principal_id: str,
-    approval_id: str,
-    generation: int,
-    calls: tuple[ApprovalCall, ...],
-) -> None:
-    """Insert one ordered exact-call generation."""
-    for ordinal, call in enumerate(calls):
-        transaction.execute(
-            """
-            INSERT INTO approval_continuation_calls (
-                principal_id, approval_id, generation, tool_call_id, call_ordinal,
-                tool_name, invoking_agent, expires_at_ns, decision, reason,
-                human_approval_required, toolkit_name, arguments_digest
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                principal_id,
-                approval_id,
-                generation,
-                call.tool_call_id,
-                ordinal,
-                call.tool_name,
-                call.invoking_agent,
-                call.expires_at_ns,
-                call.decision.value if call.decision is not None else None,
-                call.reason,
-                call.human_approval_required,
-                call.toolkit_name,
-                call.arguments_digest,
-            ),
-        )
 
 
 def create(
@@ -507,12 +414,12 @@ def create(
     if inserted is None:
         existing = get(transaction, principal_id, approval_id=continuation.approval_id)
         return existing if existing == continuation else None
-    _insert_calls(
+    approval_calls.insert_reply_generation(
         transaction,
         principal_id,
-        continuation.approval_id,
-        continuation.generation,
-        continuation.calls,
+        approval_id=continuation.approval_id,
+        generation=continuation.generation,
+        calls=continuation.calls,
     )
     return get(transaction, principal_id, approval_id=continuation.approval_id)
 
@@ -545,25 +452,9 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
     if not rows:
         return ()
     approval_ids = tuple(str(row["approval_id"]) for row in rows)
-    placeholders = ", ".join("?" for _approval_id in approval_ids)
-    call_rows = transaction.fetchall(
-        f"""
-        SELECT calls.approval_id, calls.generation, calls.tool_call_id, calls.tool_name,
-               calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
-               calls.human_approval_required, calls.toolkit_name, calls.arguments_digest
-        FROM approval_continuation_calls AS calls
-        JOIN approval_continuations AS continuations
-          ON continuations.principal_id = calls.principal_id
-         AND continuations.approval_id = calls.approval_id
-         AND calls.generation <= continuations.generation
-        WHERE calls.approval_id IN ({placeholders})
-        ORDER BY calls.approval_id/*bytes*/, calls.generation, calls.call_ordinal
-        """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
-        approval_ids,
-    )
     calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
-    for call in call_rows:
-        calls_by_approval[str(call["approval_id"])].append(call)
+    for call in approval_calls.reply_call_rows(transaction, approval_ids):
+        calls_by_approval[str(call["owner_id"])].append(call)
     owners = []
     for row in rows:
         principal_id = str(row["principal_id"])
@@ -686,7 +577,13 @@ class ApprovalAdvance:
         )
         if updated is None:
             return None
-        _insert_calls(transaction, principal_id, self.approval_id, next_generation, self.calls)
+        approval_calls.insert_reply_generation(
+            transaction,
+            principal_id,
+            approval_id=self.approval_id,
+            generation=next_generation,
+            calls=self.calls,
+        )
         return get(transaction, principal_id, approval_id=self.approval_id)
 
 
@@ -698,15 +595,8 @@ def activate(
     expected_generation: int,
 ) -> ApprovalContinuation | None:
     """Release one publication lease and make its generation decidable or executable."""
-    undecided = transaction.fetchone(
-        """
-        SELECT 1 AS present FROM approval_continuation_calls
-        WHERE principal_id = ? AND approval_id = ? AND generation = ? AND decision IS NULL
-        LIMIT 1
-        """,
-        (principal_id, approval_id, expected_generation),
-    )
-    state: Literal["waiting", "ready"] = "waiting" if undecided is not None else "ready"
+    undecided = approval_calls.has_undecided(transaction, approval_id=approval_id, generation=expected_generation)
+    state: Literal["waiting", "ready"] = "waiting" if undecided else "ready"
     updated = transaction.fetchone(
         """
         UPDATE approval_continuations SET state = ?, runtime_generation = NULL
@@ -834,7 +724,8 @@ def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:
-    """Delete a paused run whose end the reply it paused already applied."""
+    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows."""
+    approval_calls.delete_reply_calls(transaction, approval_id=approval_id)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),

@@ -30,6 +30,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
+    CallKey,
     DeliveryStage,
     EventClass,
     EventJournalStore,
@@ -74,6 +75,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
     handle_card_response_for_test,
@@ -315,12 +317,13 @@ async def test_scheduling_card_shows_the_stored_call_and_send_time(
         assert card.payload["expires_at"] == "2030-01-02T14:00:00+00:00"
         assert card.payload["body"] == "🔒 Approval required: post_slack_message (scheduled for 9:00 AM EDT)"
         assert "auto_approve_options" not in card.payload
-        stored = await journal.principal("router@shared").approvals.pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id=_ROOM,
             card_event_id=_SCHEDULED_CARD,
         )
         assert stored is not None
-        assert stored.target_kind == "scheduled_call"
+        assert stored.owner_kind == "scheduled"
         call = await manager.scheduled_call(_TASK)
         assert call is not None
         assert call.toolkit_name == _TOOLKIT
@@ -367,7 +370,7 @@ async def test_armed_approval_is_spent_once_with_its_receipt(
         assert provenance["scope"] == "exact_arguments"
         assert provenance["arguments_digest"] == approval_arguments_digest(_ARGUMENTS)
         cards = journal.principal("router@shared")
-        assert await cards.approvals.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
 
         assert await _claim(manager) == "used"
     finally:
@@ -438,7 +441,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
             ),
         )
         assert remaining is None
-        assert await cards.approvals.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -613,10 +616,7 @@ async def test_cancelling_the_task_denies_its_pending_card(
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
 
         cards = journal.principal("router@shared")
-        decision = await cards.approvals.background_approval_decision(
-            run_id=scheduled_call_run_id(_TASK),
-            call_id=_TASK,
-        )
+        decision = await cards.approvals.detached_decision(CallKey.detached(scheduled_call_run_id(_TASK), _TASK))
         assert decision is not None
         assert decision.status == "denied"
         assert decision.reason == "Schedule cancelled."
@@ -661,7 +661,8 @@ async def test_direct_call_to_the_tool_still_asks_for_approval(
 
         assert direct.calls[0].decision is None
         assert (
-            await journal.principal("router@shared").approvals.pending_approval_card(
+            await pending_card(
+                journal.principal("router@shared").approvals,
                 room_id=_ROOM,
                 card_event_id="$card-direct",
             )
@@ -897,7 +898,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
         await manager.recover_cards_on_startup()
 
         assert await _binding_column(journal, "task_id") is None
-        assert await cards.approvals.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -1017,7 +1018,7 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
             delivery_id=_RECEIPT,
         )
 
-        assert await cards.approvals.is_terminal_approval_card(room_id=_ROOM, card_event_id="$receipt-copy")
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$receipt-copy")
     finally:
         await manager.shutdown()
 

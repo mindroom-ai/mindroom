@@ -22,12 +22,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
@@ -387,61 +384,15 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
     }
 
 
-def test_background_approval_transactions_have_a_focused_module_boundary() -> None:
-    """Background rows depend on shared card state without owning its lifecycle."""
-    probe = """
-import importlib
-import json
-
-card_state = importlib.import_module("mindroom.event_journal.approval_card_state")
-background = importlib.import_module("mindroom.event_journal.background_approvals")
-dispatcher = importlib.import_module("mindroom.event_journal.approvals")
-print(json.dumps({
-    "background_exports": background.__all__,
-    "background_resolve_owner": background.resolve.__module__,
-    "card_state_exports": card_state.__all__,
-    "card_reserve_owner": card_state.reserve_delivery.__module__,
-    "dispatcher_owner": dispatcher.resolve_card.__module__,
-}))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=120,
+def test_approval_calls_are_decided_by_one_writer() -> None:
+    """Only the call resolver writes a decision, so a card's terminal edit and its call cannot disagree."""
+    journal = Path(__file__).parents[1] / "src" / "mindroom" / "event_journal"
+    writers = sorted(
+        path.name
+        for path in journal.glob("*.py")
+        if "SET decision = ?" in path.read_text() and not path.name.startswith("legacy_")
     )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "background_exports": [
-            "BackgroundApprovalDecision",
-            "background_identity",
-            "decision",
-            "prune_calls",
-            "reserve_delivery",
-            "reserve_script_delivery",
-            "resolve",
-            "resolve_call",
-            "resolve_pending_calls",
-        ],
-        "background_resolve_owner": "mindroom.event_journal.background_approvals",
-        "card_state_exports": [
-            "DETACHED_GENERATION",
-            "TIMEOUT_REASON",
-            "ApprovalCardReservation",
-            "ApprovalDecisionMetadata",
-            "RecordedApprovalDecision",
-            "decode_object_payload",
-            "decode_resolution",
-            "enqueue_resolution",
-            "reserve_delivery",
-            "stored_resolution",
-            "terminal_content",
-        ],
-        "card_reserve_owner": "mindroom.event_journal.approval_card_state",
-        "dispatcher_owner": "mindroom.event_journal.approvals",
-    }
+    assert writers == ["approval_calls.py"]
 
 
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:

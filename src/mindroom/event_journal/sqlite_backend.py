@@ -23,14 +23,9 @@ from typing import TYPE_CHECKING, Any
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
 
-from .legacy_response_attempts import upgrade_continuation_identity
-from .legacy_schema import (
-    upgrade_hydration_walk_version,
-    upgrade_legacy_journal,
-    upgrade_outbox_reply_rows,
-)
 from .offloading import ThreadOffload, settled
-from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
+from .schema import SQLITE_DIALECT, SchemaDialect, render, schema_statements
+from .upgrades import upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 if TYPE_CHECKING:
@@ -69,6 +64,26 @@ class _SqliteTransaction:
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> tuple[Row, ...]:
         """Run one query and return every row."""
         return tuple(self.connection.execute(render(sql, SQLITE_DIALECT), tuple(params)).fetchall())
+
+
+@dataclass(frozen=True, slots=True)
+class _SqliteSchemaInspector:
+    """What the SQLite schema transaction currently holds."""
+
+    connection: sqlite3.Connection
+    dialect: SchemaDialect = SQLITE_DIALECT
+
+    def tables(self) -> frozenset[str]:
+        """Return the names of every table."""
+        return frozenset(
+            str(row[0]) for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        )
+
+    def columns(self, table: str) -> frozenset[str]:
+        """Return the column names of one table, empty when it does not exist."""
+        return frozenset(
+            str(row[0]) for row in self.connection.execute("SELECT name FROM pragma_table_info(?)", (table,))
+        )
 
 
 def _enter_wal(connection: sqlite3.Connection) -> None:
@@ -190,27 +205,7 @@ class SqliteBackend:
         _configure(connection, synchronous="FULL")
         connection.execute("BEGIN IMMEDIATE")
         try:
-            existing_tables = frozenset(
-                str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-            )
-            upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
-            hydration_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(conversation_hydration)")
-            )
-            upgrade_hydration_walk_version(_SqliteTransaction(connection), hydration_columns)
-            outbox_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
-            )
-            upgrade_outbox_reply_rows(
-                _SqliteTransaction(connection),
-                outbox_columns,
-                outbox_table_ddl=OUTBOX_TABLE,
-                sqlite=True,
-            )
-            continuation_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
-            )
-            upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
+            upgrade_schema(_SqliteTransaction(connection), _SqliteSchemaInspector(connection))
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
             connection.execute("COMMIT")
