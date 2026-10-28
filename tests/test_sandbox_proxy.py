@@ -4463,6 +4463,31 @@ def test_static_runner_asks_once_and_again_after_a_failed_call(monkeypatch: pyte
     assert len(probed) == 4
 
 
+def test_static_runner_asks_again_after_a_failure_recorded_during_its_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure recorded while a probe is in flight keeps that probe's answer from skipping the next probe."""
+    backend = StaticSandboxRunnerBackend(api_root="http://sandbox-runner:8765", auth_token=_TEST_AUTH_TOKEN)
+    probed: list[str] = []
+
+    def answer_after_a_concurrent_failure(runner_root: str) -> httpx.Response:
+        probed.append(runner_root)
+        if len(probed) == 1:
+            # Another call to the runner fails while this probe waits for its answer.
+            backend.record_failure("worker-b", "Connection reset by peer")
+        return httpx.Response(
+            200,
+            json=_CURRENT_RUNNER_HEALTH,
+            request=httpx.Request("GET", f"{runner_root}/healthz"),
+        )
+
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", answer_after_a_concurrent_failure)
+
+    backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-a"))
+    backend.ensure_worker(WorkerSpec("worker-a"))
+
+    assert len(probed) == 2
+
+
 @pytest.mark.parametrize(
     ("proxy_url", "proxy_token", "missing_setting"),
     [

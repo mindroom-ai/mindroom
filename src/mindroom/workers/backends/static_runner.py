@@ -83,7 +83,9 @@ class StaticSandboxRunnerBackend:
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self._lock = threading.Lock()
         self._workers: dict[str, _StaticWorkerMetadata] = {}
-        self._runner_compatible = False
+        # A probe that passed stands until the next recorded failure, which may mean the runner was replaced.
+        self._recorded_failures = 0
+        self._compatible_since_failures: int | None = None
 
     def shutdown(self) -> None:
         """Drop cached shared-runner worker handles before manager replacement."""
@@ -135,7 +137,8 @@ class StaticSandboxRunnerBackend:
             msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
             raise WorkerBackendError(msg)
         with self._lock:
-            if self._runner_compatible:
+            failures_before_probe = self._recorded_failures
+            if self._compatible_since_failures == failures_before_probe:
                 return
         runner_root = self.api_root.removesuffix(_SANDBOX_RUNNER_API_ROOT)
         try:
@@ -152,7 +155,8 @@ class StaticSandboxRunnerBackend:
         if compatibility_error is not None:
             raise WorkerBackendError(compatibility_error)
         with self._lock:
-            self._runner_compatible = True
+            # A failure recorded while the probe was in flight leaves the next call to probe again.
+            self._compatible_since_failures = failures_before_probe
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one shared-runner worker."""
@@ -195,7 +199,7 @@ class StaticSandboxRunnerBackend:
         timestamp = time.time() if now is None else now
         with self._lock:
             # The runner may have been replaced by one from another release, so the next call asks again.
-            self._runner_compatible = False
+            self._recorded_failures += 1
             metadata = self._workers.get(worker_key) or self._new_metadata(worker_key, timestamp)
             write_lifecycle_state(
                 metadata,
