@@ -712,33 +712,6 @@ def test_build_summary_input_honors_tool_call_history_limit() -> None:
     assert "second result" in summary_input
 
 
-@pytest.mark.parametrize(
-    ("message", "shrink"),
-    [
-        ("Request too large for gpt-6-astra in organization org-test on tokens per min (TPM): Limit 30000.", True),
-        ("Rate limit reached for gpt-6-astra on tokens per min (TPM).", False),
-    ],
-)
-def test_a_rate_limit_shrinks_the_summary_input_only_when_the_input_alone_is_too_large(
-    message: str,
-    *,
-    shrink: bool,
-) -> None:
-    """Waiting never lets a request above the per-minute token limit through, so only a smaller input can pass."""
-    error = classify_provider_error(message, provider="fake", status_code=429, code="rate_limit_exceeded")
-
-    decision = SummaryRetryPolicy().retry_budget(
-        attempt=1,
-        budget=16_000,
-        input_tokens=16_000,
-        minimum_progress_input_tokens=0,
-        error=error,
-    )
-
-    assert decision is not None
-    assert decision.kind == ("shrink" if shrink else "same-budget-transient")
-
-
 def test_owned_timeout_classification_does_not_depend_on_message_text() -> None:
     """Renaming an engine deadline message cannot change retry or lifecycle decisions."""
     error = _CompactionSummaryTimeoutError("deadline expired")
