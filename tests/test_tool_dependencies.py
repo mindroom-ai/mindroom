@@ -762,17 +762,26 @@ elif mode == 'mem0_reader':
 
         @classmethod
         def from_config(cls, config):
+            # Mem0 imports Chroma and the provider SDKs here, so it runs inside the import scope.
+            assert dependencies._ENVIRONMENT_LOCK_STATE.held
             for name in importlib.metadata.packages_distributions()['transient_embedding']:
                 assert importlib.metadata.version(name) == '1'
             return cls()
 
+    def import_async_memory(name):
+        # Importing Mem0 also waits until no install runs.
+        if name != 'AsyncMemory':
+            raise AttributeError(name)
+        assert dependencies._ENVIRONMENT_LOCK_STATE.held
+        return Memory
+
     mem0 = ModuleType('mem0')
-    mem0.AsyncMemory = Memory
+    mem0.__getattr__ = import_async_memory
     sys.modules['mem0'] = mem0
     memory_config.ensure_optional_deps = lambda *args, **kwargs: False
-    memory_config.ensure_sentence_transformers_dependencies = lambda paths: None
     config = Config()
-    config.memory.embedder.provider = 'sentence_transformers'
+    # A remote embedder, whose Mem0 build imports Chroma and the provider SDKs only from from_config.
+    config.memory.embedder.provider = 'ollama'
     config.memory.llm = None
     paths = resolve_primary_runtime_paths(config_path=root / 'mem0-runtime' / 'config.yaml', process_env={})
     print('ready', flush=True)

@@ -355,7 +355,7 @@ def _job_turn(
         id=actor.name,
         name=actor.name,
         model=model,
-        system_message=None,
+        system_messages=(),
         toolkits=(AdaptedToolkit(name="tools", functions=functions, instructions=None),),
     )
     hooks = LoopHooks(
@@ -495,7 +495,7 @@ async def run_built_turn(
     finished = [
         event.record
         async for event in run_agent(
-            replace(build.spec, system_message=prompt_for_turn(build)),
+            replace(build.spec, system_messages=prompt_for_turn(build)),
             [Message(role="user", content=prompt)],
             ctx=RunContext(run_id=run_id, session=UnstoredSession(session_id)),
             hooks=hooks,
@@ -777,7 +777,7 @@ class DelegatingLeader:
             ),
         )
         events = run_agent(
-            replace(build.spec, system_message=prompt_for_turn(build)),
+            replace(build.spec, system_messages=prompt_for_turn(build)),
             [Message(role="user", content="Delegate")],
             ctx=RunContext(
                 run_id=run_id,

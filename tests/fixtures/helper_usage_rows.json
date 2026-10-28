@@ -1,0 +1,130 @@
+{
+  "claude_agent": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "claude_agent:<hex id>",
+      "{\"run_id\": \"claude_agent:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 50, \"output_tokens\": 9, \"total_tokens\": 59, \"cache_read_tokens\": 5, \"cache_write_tokens\": 2, \"details\": {\"model\": [{\"input_tokens\": 50, \"output_tokens\": 9, \"total_tokens\": 59, \"cache_read_tokens\": 5, \"cache_write_tokens\": 2, \"id\": \"claude-sonnet-5-5\", \"provider\": \"Anthropic\"}]}}, \"requests\": [], \"kind\": \"claude_agent\"}"
+    ]
+  ],
+  "dynamic_workflow": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "dynamic_workflow:<hex id>",
+      "{\"run_id\": \"dynamic_workflow:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": \"@user:localhost\", \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"dynamic_workflow\"}"
+    ]
+  ],
+  "knowledge_chunk_context": [
+    [
+      "system/sessions/system.db",
+      "knowledge_chunk_context",
+      "knowledge_chunk_context:<uuid>",
+      "{\"run_id\": \"knowledge_chunk_context:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"knowledge_chunk_context\"}"
+    ]
+  ],
+  "knowledge_graph": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "knowledge_graph:<hex id>",
+      "{\"run_id\": \"knowledge_graph:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"knowledge_graph\"}"
+    ]
+  ],
+  "memory_auto_flush": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "memory_auto_flush:<hex id>",
+      "{\"run_id\": \"memory_auto_flush:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": \"@user:localhost\", \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"memory_auto_flush\"}"
+    ]
+  ],
+  "memory_extraction": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "memory_extraction:<hex id>",
+      "{\"run_id\": \"memory_extraction:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": \"@user:localhost\", \"model_provider\": \"OpenAI Chat\", \"model\": \"gpt-6-luna\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 240, \"output_tokens\": 60, \"total_tokens\": 300, \"details\": {\"model\": [{\"input_tokens\": 240, \"output_tokens\": 60, \"total_tokens\": 300, \"id\": \"gpt-6-luna\", \"provider\": \"OpenAI Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 120, \"output_tokens\": 30, \"total_tokens\": 150}, \"model\": \"gpt-6-luna\", \"model_provider\": \"OpenAI Chat\"}, {\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 120, \"output_tokens\": 30, \"total_tokens\": 150}, \"model\": \"gpt-6-luna\", \"model_provider\": \"OpenAI Chat\"}], \"kind\": \"memory_extraction\"}"
+    ]
+  ],
+  "memory_extraction_system": [
+    [
+      "system/sessions/system.db",
+      "memory_extraction",
+      "memory_extraction:<hex id>",
+      "{\"run_id\": \"memory_extraction:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"OpenAI Chat\", \"model\": \"gpt-6-luna\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 240, \"output_tokens\": 60, \"total_tokens\": 300, \"details\": {\"model\": [{\"input_tokens\": 240, \"output_tokens\": 60, \"total_tokens\": 300, \"id\": \"gpt-6-luna\", \"provider\": \"OpenAI Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 120, \"output_tokens\": 30, \"total_tokens\": 150}, \"model\": \"gpt-6-luna\", \"model_provider\": \"OpenAI Chat\"}, {\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 120, \"output_tokens\": 30, \"total_tokens\": 150}, \"model\": \"gpt-6-luna\", \"model_provider\": \"OpenAI Chat\"}], \"kind\": \"memory_extraction\"}"
+    ]
+  ],
+  "room_topic": [
+    [
+      "system/sessions/system.db",
+      "room_topic",
+      "room_topic:<uuid>",
+      "{\"run_id\": \"room_topic:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"room_topic\"}"
+    ]
+  ],
+  "routing": [
+    [
+      "system/sessions/system.db",
+      "routing",
+      "routing:<uuid>",
+      "{\"run_id\": \"routing:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"routing\"}"
+    ]
+  ],
+  "routing_retried": [
+    [
+      "system/sessions/system.db",
+      "routing",
+      "routing:<uuid>",
+      "{\"run_id\": \"routing:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [], \"kind\": \"routing\"}"
+    ]
+  ],
+  "schedule_parse": [
+    [
+      "system/sessions/system.db",
+      "schedule_parse",
+      "schedule_parse:<uuid>",
+      "{\"run_id\": \"schedule_parse:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"schedule_parse\"}"
+    ]
+  ],
+  "skill_learning": [
+    [
+      "agents/test_agent/sessions/test_agent.db",
+      "session",
+      "skill_learning:<hex id>",
+      "{\"run_id\": \"skill_learning:<hex id>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"skill_learning\"}"
+    ]
+  ],
+  "team_mode": [
+    [
+      "system/sessions/system.db",
+      "team_mode",
+      "team_mode:<uuid>",
+      "{\"run_id\": \"team_mode:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"team_mode\"}"
+    ]
+  ],
+  "thread_summary": [
+    [
+      "system/sessions/system.db",
+      "thread_summary",
+      "thread_summary:<uuid>",
+      "{\"run_id\": \"thread_summary:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"thread_summary\"}"
+    ]
+  ],
+  "voice_normalization": [
+    [
+      "system/sessions/system.db",
+      "voice_normalization",
+      "voice_normalization:<uuid>",
+      "{\"run_id\": \"voice_normalization:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"Scripted\", \"model\": \"scripted-model\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"details\": {\"model\": [{\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3, \"id\": \"scripted-model\", \"provider\": \"Scripted Chat\"}]}}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 20, \"output_tokens\": 2, \"total_tokens\": 22, \"cache_read_tokens\": 3}, \"model\": \"scripted-model\", \"model_provider\": \"Scripted Chat\"}], \"kind\": \"voice_normalization\"}"
+    ]
+  ],
+  "voice_transcription": [
+    [
+      "system/sessions/system.db",
+      "voice_transcription",
+      "voice_transcription:<uuid>",
+      "{\"run_id\": \"voice_transcription:<uuid>\", \"parent_run_id\": null, \"team_id\": null, \"user_id\": null, \"model_provider\": \"openai\", \"model\": \"gpt-transcribe\", \"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 12, \"output_tokens\": 3, \"total_tokens\": 15, \"audio_input_tokens\": 9, \"audio_total_tokens\": 9}, \"requests\": [{\"created_at\": 1790000000, \"metrics\": {\"input_tokens\": 12, \"output_tokens\": 3, \"total_tokens\": 15, \"audio_input_tokens\": 9, \"audio_total_tokens\": 9}}], \"kind\": \"voice_transcription\"}"
+    ]
+  ]
+}

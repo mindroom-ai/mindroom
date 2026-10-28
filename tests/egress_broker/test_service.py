@@ -9,6 +9,7 @@ import ssl
 import stat
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -27,7 +28,14 @@ from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import apply_runner_ca_bundle
-from mindroom.egress_broker.secrets import delete_secret, save_egress_document, save_secret
+from mindroom.egress_broker.secrets import (
+    Secret,
+    SecretMissing,
+    SecretRequest,
+    delete_secret,
+    save_egress_document,
+    save_secret,
+)
 from mindroom.egress_broker.service import (
     active_audit_log,
     active_ca_pem,
@@ -35,7 +43,7 @@ from mindroom.egress_broker.service import (
     manage_url,
     serve_egress_broker,
 )
-from mindroom.egress_broker.tokens import TokenSigner
+from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.egress_broker.user_services import (
     USER_SERVICES_CREDENTIAL_SERVICE,
     delete_user_service,
@@ -69,6 +77,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.egress_broker.secrets import SecretResult
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, OAuthCredentialsSnapshot
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
@@ -890,6 +899,43 @@ async def test_a_connected_account_is_refused_until_agent_keys_may_use_it(
     assert tls_upstream.hits == ["/echo"]
 
 
+@pytest.mark.usefixtures("github_oauth_client", "allow_loopback", "trust_upstream")
+@pytest.mark.asyncio
+async def test_a_read_only_account_reads_through_the_running_broker_and_a_stored_key_still_writes(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    tmp_path: Path,
+) -> None:
+    """An account allowed read-only gets the token for GET and for POST to the service's read paths only.
+
+    A stored key is the user's own choice of credential, so the opt-in's level never limits it.
+    """
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config(github={**_GITHUB_OAUTH, "read_only": {"post_paths": ["/echo"]}})
+    target = _routable_target()
+    connect_account(manager, account_store("@alice:example.org"), "alice-oauth")
+    allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"), access="read")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
+        async with _worker_client(env, tmp_path / "runner") as client:
+            read = await client.get(tls_upstream.url("/echo"))
+            listed_post = await client.post(tls_upstream.url("/echo"), content=b"{}")
+            write = await client.post(tls_upstream.url("/ok"), content=b"{}")
+            save_secret(manager, target, "github", "s3cret")
+            write_with_key = await client.post(tls_upstream.url("/ok"), content=b"{}")
+    assert read.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert listed_post.json()["headers"]["authorization"] == ["Bearer alice-oauth"]
+    assert (write.status_code, write.json()["error"]) == (403, "read_only")
+    assert "alice-oauth" not in write.text
+    assert write_with_key.status_code == 200
+    assert [seen.headers["authorization"] for seen in tls_upstream.requests] == [
+        ["Bearer alice-oauth"],
+        ["Bearer alice-oauth"],
+        ["Bearer s3cret"],
+    ]
+
+
 @pytest.mark.usefixtures("github_oauth_client")
 @pytest.mark.parametrize("scope", ["shared", None], ids=["shared", "unscoped"])
 @pytest.mark.asyncio
@@ -1633,3 +1679,107 @@ async def test_config_placeholders_win_over_user_placeholders(
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=target)
     assert env["GH_TOKEN"] == _PLACEHOLDER
     assert env["MINE_TOKEN"] == "mine-placeholder"  # noqa: S105 - a placeholder value, not a secret
+
+
+_DRIVE_PLACEHOLDER = "DRIVE_TOKEN"
+
+
+def _own_drive_service(manager: CredentialsManager, runtime_paths: RuntimePaths, tools_token: str) -> OAuthProvider:
+    """Save Alice's service `mine` with its own Drive account, connect the tools' Drive account, and allow `mine`.
+
+    The opt-in is written for the service's own account, as its row writes it, and that account is returned unconnected.
+    """
+    drive = google_drive_oauth_provider()
+    own = oauth_source.separate_account_provider(drive, "mine")
+    manager.save_credentials("google_drive_oauth_client", {"client_id": "google_drive-client-id", "client_secret": "s"})
+    save_user_service(
+        manager,
+        _routable_target(),
+        "mine",
+        EgressService.model_validate(
+            {
+                "preset": "google_drive",
+                "oauth_separate_account": True,
+                "placeholder_env": {_DRIVE_PLACEHOLDER: _PLACEHOLDER},
+            },
+        ),
+        config_services={},
+        oauth_providers={drive.id},
+    )
+    connect_account(manager, _routable_target(), tools_token, provider=drive)
+    allow_oauth_reuse(manager, runtime_paths, _routable_target(), "mine", provider=own)
+    return own
+
+
+async def _resolve_mine(config: Config, runtime_paths: RuntimePaths, manager: CredentialsManager) -> SecretResult:
+    """Resolve Alice's service `mine` as the broker does for a request its definition routed."""
+    claims = WorkerClaims.from_worker_target(_routable_target())
+    assert claims is not None
+    routed = user_services.effective_config(config.egress_broker, manager, claims.to_worker_target()).services["mine"]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return await service._resolve_secret(
+            claims,
+            "mine",
+            routed,
+            SecretRequest(method="GET", path="/drive/v3/files"),
+            config=service._LastGoodConfig(lambda: config, manager, personal_page=True),
+            runtime_paths=runtime_paths,
+            credentials_manager=manager,
+            oauth_executor=executor,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_broker_resolves_a_routed_service_with_its_own_account(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """The secret lookup reads the routed definition's own account, never the tools' connection."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    connect_account(manager, _routable_target(), "own-access", provider=own)
+
+    assert await _resolve_mine(config, runtime_paths, manager) == Secret("own-access")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connected", [True, False], ids=["connected", "unconnected"])
+async def test_a_service_with_its_own_account_never_uses_a_stored_key(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    connected: bool,
+) -> None:
+    """A key stored under such a service's name neither wins over its own account nor stands in until it is connected."""
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    save_secret(manager, _routable_target(), "mine", "stored-key")
+    if connected:
+        connect_account(manager, _routable_target(), "own-access", provider=own)
+
+    result = await _resolve_mine(config, runtime_paths, manager)
+
+    assert result == (Secret("own-access") if connected else SecretMissing(own_account=True))
+
+
+@pytest.mark.asyncio
+async def test_placeholder_env_follows_a_services_own_account(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """A service with its own account sets its placeholders once that account is connected, not for the tools' one.
+
+    Nor for a key stored under its name, which it never uses.
+    """
+    runtime_paths = _oauth_runtime(tmp_runtime_paths)
+    config = _config()
+    own = _own_drive_service(manager, runtime_paths, "tools-access")
+    save_secret(manager, _routable_target(), "mine", "stored-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        before = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        connect_account(manager, _routable_target(), "own-access", provider=own)
+        after = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+
+    assert _DRIVE_PLACEHOLDER not in before
+    assert after[_DRIVE_PLACEHOLDER] == _PLACEHOLDER

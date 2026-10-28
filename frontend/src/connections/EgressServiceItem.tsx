@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   accountReuseDescription,
   egressDisconnectDescription,
@@ -25,6 +26,7 @@ import { BusyNote, useLimitActions } from "./EgressLimitRows";
 import { ServiceStatus } from "./EgressServiceStatus";
 import {
   AgentSees,
+  Code,
   type RowAction,
   RowActionsMenu,
   SERVICE_CELL,
@@ -40,7 +42,7 @@ import {
 } from "./request";
 import { SharedAccountDialog } from "./SharedAccountDialog";
 import { ItemName } from "./ToolRow";
-import type { EgressCredentialService } from "./types";
+import type { EgressAccess, EgressCredentialService } from "./types";
 
 /** The endpoints one service row talks to. */
 export interface ServicePaths {
@@ -56,19 +58,27 @@ export interface ServicePaths {
 // What the server needs before Agent Keys may use an account: the user saw that commands skip the tools' approvals.
 const REUSE_BODY = { acknowledge_approval_bypass: true };
 
-/** Asked before Agent Keys may use an account; a second click while it closes goes on only once. */
+/**
+ * Asked before Agent Keys may use an account, or at more access; a second
+ * click while it closes goes on only once. With `onAccessChange`, for a
+ * service that offers read only, it also asks how much the account may do.
+ */
 function AccountReuseDialog({
   open,
-  provider,
+  title,
   description,
   confirmLabel,
+  access,
+  onAccessChange,
   onContinue,
   onCancel,
 }: {
   open: boolean;
-  provider: string;
+  title: string;
   description: string;
   confirmLabel: string;
+  access: EgressAccess;
+  onAccessChange: ((access: EgressAccess) => void) | null;
   onContinue: () => void;
   onCancel: () => void;
 }) {
@@ -79,7 +89,7 @@ function AccountReuseDialog({
   return (
     <ConfirmDialog
       open={open}
-      title={`Use your ${provider} account for Agent Keys?`}
+      title={title}
       description={description}
       confirmLabel={confirmLabel}
       destructive={false}
@@ -89,7 +99,23 @@ function AccountReuseDialog({
         continued.current = true;
         onContinue();
       }}
-    />
+    >
+      {onAccessChange && (
+        <ToggleGroup
+          type="single"
+          aria-label="Access"
+          className="justify-self-start"
+          value={access}
+          // Pressing the chosen level again would clear it; one stays chosen.
+          onValueChange={(value) =>
+            value && onAccessChange(value as EgressAccess)
+          }
+        >
+          <ToggleGroupItem value="read">Read only</ToggleGroupItem>
+          <ToggleGroupItem value="read_write">Read and write</ToggleGroupItem>
+        </ToggleGroup>
+      )}
+    </ConfirmDialog>
   );
 }
 
@@ -124,7 +150,9 @@ export function EgressServiceItem({
   const oauth = service.oauth;
   // Rows with an account keep the key behind a toggle until a key is set.
   const showKeyControls = !oauth || service.key_configured || editing;
-  const canManageKey = service.can_manage && !hideKeyActions;
+  // A service with its own account uses only that account, so it takes no key.
+  const canManageKey =
+    service.can_manage && !hideKeyActions && !service.separate_account;
   const keyInsteadLabel = oauth?.connected
     ? "Use an API key instead of the account"
     : "Use an API key instead";
@@ -143,6 +171,19 @@ export function EgressServiceItem({
     oauth.unavailable_reason === null &&
     (service.can_manage || oauth.can_connect);
   const reuseEnabled = oauth?.reuse_enabled === true;
+  // The level the reuse question allows the account at; a service that
+  // offers read only asks, starting from it, a change of an allowed
+  // account's level sends it, and anything else sends no level.
+  const readOnlyOffered = service.read_only_supported;
+  const [access, setAccess] = useState<EgressAccess>("read");
+  const reuseBody = (level: EgressAccess) =>
+    readOnlyOffered || reuseEnabled
+      ? { ...REUSE_BODY, access: level }
+      : REUSE_BODY;
+  const askReuse = (level: EgressAccess) => {
+    setAccess(level);
+    setConfirm("reuse");
+  };
 
   // A limit of the viewer's that narrows this administrator's service.
   const limit = limitOf(service, agent.services);
@@ -248,7 +289,7 @@ export function EgressServiceItem({
               paths.reuse,
               signal,
               "PUT",
-              REUSE_BODY,
+              reuseBody(access),
               errorMessages,
             );
           return requestConnection<OAuthAuthorization>(
@@ -289,6 +330,7 @@ export function EgressServiceItem({
     !editing &&
     (!oauth || (!canConnect && !oauth.connected && !oauth.reset_required));
   const editable = canEdit(serviceEditing, service);
+  const addAccount = serviceEditing.addAccount?.(service);
   // Everything but the action that makes the service work, which is a button of its own.
   const actions: RowAction[] = [
     ...(oauth && canManageKey && !showKeyControls && !setKeyFirst
@@ -342,6 +384,33 @@ export function EgressServiceItem({
           },
         ]
       : []),
+    // Only a connected account: connecting one already allowed keeps its level.
+    // One allowed only to read, where the service no longer offers read only,
+    // is refused everything until it changes to read and write.
+    ...(oauth?.connected &&
+    reuseEnabled &&
+    canChangeReuse &&
+    (readOnlyOffered || oauth.reuse_access === "read")
+      ? [
+          oauth.reuse_access === "read"
+            ? {
+                label: "Change to read and write",
+                ariaLabel: `Change to read and write for ${name}`,
+                // More access skips the tools' approvals for writes too, so it is confirmed.
+                onSelect: () => askReuse("read_write"),
+              }
+            : {
+                label: "Change to read only",
+                ariaLabel: `Change to read only for ${name}`,
+                onSelect: () =>
+                  void run(
+                    "reuse",
+                    "Could not change the access. Try again.",
+                    write(paths.reuse, "PUT", reuseBody("read")),
+                  ),
+              },
+        ]
+      : []),
     ...(oauth && reuseEnabled && canChangeReuse
       ? [
           {
@@ -353,6 +422,16 @@ export function EgressServiceItem({
                 "Could not stop using the account. Try again.",
                 write(paths.reuse, "DELETE"),
               ),
+          },
+        ]
+      : []),
+    ...(addAccount
+      ? [
+          {
+            label: "Add another account",
+            ariaLabel: `Add another account for ${name}`,
+            disabled: serviceEditing.disabled || serviceEditing.limitDisabled,
+            onSelect: addAccount,
           },
         ]
       : []),
@@ -403,6 +482,12 @@ export function EgressServiceItem({
           description={service.description}
         >
           <AgentSees service={service} />
+          {service.separate_account && (
+            <p className="text-xs text-muted-foreground">
+              Agents choose it with{" "}
+              <Code>X-Agent-Keys-Service: {service.name}</Code>
+            </p>
+          )}
           {limitedText && (
             <p className="text-xs text-muted-foreground">{limitedText}</p>
           )}
@@ -443,7 +528,7 @@ export function EgressServiceItem({
                 aria-label={`Connect ${oauth.display_name} for Agent Keys for ${name}`}
                 onClick={() =>
                   !reuseEnabled
-                    ? setConfirm("reuse")
+                    ? askReuse("read")
                     : asksAboutSharedAccount
                       ? setConfirm("shared")
                       : connect()
@@ -480,7 +565,7 @@ export function EgressServiceItem({
               variant="outline"
               disabled={busy !== null}
               aria-label={`Use account for ${name}`}
-              onClick={() => setConfirm("reuse")}
+              onClick={() => askReuse("read")}
             >
               Use account
             </Button>
@@ -592,7 +677,12 @@ export function EgressServiceItem({
         {oauth && (
           <AccountReuseDialog
             open={confirm === "reuse"}
-            provider={oauth.display_name}
+            // An allowed account asks again only to change to read and write.
+            title={
+              reuseEnabled
+                ? `Change ${oauth.display_name} to read and write?`
+                : `Use your ${oauth.display_name} account for Agent Keys?`
+            }
             description={accountReuseDescription({
               provider: oauth.display_name,
               account: oauth.connected
@@ -602,15 +692,28 @@ export function EgressServiceItem({
               service: name,
               sharedAgent: asksAboutSharedAccount ? agent.displayName : null,
               unscoped: agent.scope === "unscoped",
+              readOnly: readOnlyOffered && access === "read",
+              // A `user` scope's services and their own accounts serve all of the user's agents in it.
+              oneAgent:
+                service.separate_account === true &&
+                agent.scope === "user_agent",
             })}
-            confirmLabel={oauth.connected ? "Use account" : "Continue"}
+            confirmLabel={
+              reuseEnabled
+                ? "Change"
+                : oauth.connected
+                  ? "Use account"
+                  : "Continue"
+            }
+            access={access}
+            onAccessChange={readOnlyOffered && !reuseEnabled ? setAccess : null}
             onCancel={() => setConfirm(null)}
             onContinue={() =>
               oauth.connected
                 ? void run(
                     "reuse",
                     "Could not allow the account. Try again.",
-                    write(paths.reuse, "PUT", REUSE_BODY),
+                    write(paths.reuse, "PUT", reuseBody(access)),
                   )
                 : connect()
             }

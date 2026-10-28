@@ -61,7 +61,13 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
-from tests.approval_continuation_helpers import carries_approval_receipt, receipt_call_ids, request_call_ids
+from tests.approval_continuation_helpers import (
+    carries_approval_receipt,
+    receipt_call_ids,
+    receipts,
+    repeats_each_request,
+    request_call_ids,
+)
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
@@ -160,7 +166,8 @@ async def test_a_streamed_team_reply_renders_the_members_and_the_consensus_and_s
     assert isinstance(leader_system, str)
     assert '<member id="writer" name="Writer">' in leader_system
     assert "coordinate mode" in leader_system
-    assert [message.content for message in team.models["writer-model"].requests[0].messages[1:]] == ["Report"]
+    member_request = team.models["writer-model"].requests[0].messages
+    assert [message.content for message in member_request if message.role != "system"] == ["Report"]
     assert team.models["checker-model"].requests == []
     session = team.storage.load_session(SESSION_ID, "team")
     assert session is not None
@@ -272,12 +279,12 @@ async def test_a_blocking_team_reply_is_the_marker_free_member_and_consensus_doc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
-async def test_a_blocking_team_reply_lists_the_members_as_they_finished_and_a_streamed_one_as_configured(
+async def test_a_team_reply_lists_the_members_as_configured_on_either_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
 ) -> None:
-    """The checker finishes before the writer; only the blocking reply puts it first, and it records what it sent."""
+    """The checker finishes before the writer; both replies list the writer first, and each records what it sent."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -292,10 +299,32 @@ async def test_a_blocking_team_reply_lists_the_members_as_they_finished_and_a_st
 
     text = await team.reply(stream=stream, show_tool_calls=False)
 
-    slots = (
-        "**Writer**: Written.\n\n**Checker**: Checked." if stream else "**Checker**: Checked.\n\n**Writer**: Written."
+    assert text == f"{HEADER}**Writer**: Written.\n\n**Checker**: Checked.\n\n\n**Team Consensus**:\n\nBoth done."
+    assert team.recorder.assistant_text == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [True, False])
+async def test_a_member_delegated_twice_shows_each_run_a_paragraph_apart_on_either_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+) -> None:
+    """A coordinate leader asks the writer twice; both replies, and what each records, keep the two runs apart."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-draft", "writer", "Draft"),
+            delegate("call-revise", "writer", "Revise"),
+            answer("Both drafts done.", usage(50, 5)),
+        ],
+        writer=[answer("Draft one."), answer("Draft two.")],
     )
-    assert text == f"{HEADER}{slots}\n\n\n**Team Consensus**:\n\nBoth done."
+
+    text = await team.reply(stream=stream, show_tool_calls=False)
+
+    assert text == f"{HEADER}**Writer**: Draft one.\n\nDraft two.\n\n\n**Team Consensus**:\n\nBoth drafts done."
     assert team.recorder.assistant_text == text
 
 
@@ -337,14 +366,14 @@ async def _checker_overloaded() -> None:
             ],
             [answer("Draft one."), answer("Draft two.")],
             [],
-            "**Writer**: Draft one.\n\n**Writer**: Draft two.\n\n\n**Team Consensus**:\n\nBoth drafts done.",
+            "**Writer**: Draft one.\n\nDraft two.\n\n\n**Team Consensus**:\n\nBoth drafts done.",
             id="member-delegated-twice",
         ),
         pytest.param(
             [delegate("call-write", "writer", "Write"), answer("")],
             [answer("Written.\n")],
             [],
-            "**Writer**: Written.\n\n\n\n*No team consensus - showing individual responses only*",
+            "**Writer**: Written.\n\n\n*No team consensus - showing individual responses only*",
             id="no-consensus",
         ),
     ],
@@ -357,11 +386,10 @@ async def test_a_blocking_team_reply_renders_each_finished_member_run_then_the_c
     checker: list[list[ScriptStep]],
     body: str,
 ) -> None:
-    """Each member run that ended shows its own text, then the leader's text, and the turn records the reply.
+    """Each member's slot shows the text of its runs that ended, then the leader's text, and the turn records the reply.
 
-    The bodies are what the Agno-backed blocking reply rendered for the same runs: a member that failed before any
-    text shows its error, one without text shows nothing, a member delegated twice shows twice, and text keeps its
-    whitespace.
+    A member that failed before any text shows its error, one without text shows nothing, and a member delegated
+    twice shows both runs' text in its one slot, as a streamed reply does.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=leader, writer=writer, checker=checker)
 
@@ -415,9 +443,9 @@ async def test_a_collaborate_team_puts_the_task_to_every_member_and_reads_them_i
     )
     record, members = team.stored_runs()
     assert record.tools is not None
-    assert record.tools[0].result == "Writer fact.Checker fact."
+    assert record.tools[0].result == "Agent Writer: Writer fact.\n\nAgent Checker: Checker fact."
     assert sorted(member.agent_id or "" for member in members) == ["checker", "writer"]
-    assert "broadcast mode" in str(team.models["default"].requests[0].messages[0].content)
+    assert "collaborate mode" in str(team.models["default"].requests[0].messages[0].content)
 
 
 @pytest.mark.asyncio
@@ -459,7 +487,8 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
     await team.stream(ctx=ctx)
 
     # The transient block is the user message right after the prompt, apart from it.
-    assert [(message.role, message.content) for message in team.models["default"].requests[0].messages[1:]] == [
+    leader_request = team.models["default"].requests[0].messages
+    assert [(message.role, message.content) for message in leader_request if message.role != "system"] == [
         ("user", f'Current message:\n<msg event_id="{EVENT_ID}" from="{REQUESTER_ID}"><![CDATA[Hello]]></msg>'),
         (
             "user",
@@ -1003,10 +1032,11 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The member whose call was approved and the leader each read the trusted receipt in their first resumed request.
+    """The member whose call was approved and the leader each read the trusted receipt after their decided results.
 
-    The response runner binds the receipt around the resume; it is projected into each loop's request only, so no
-    stored run holds it. A member the resumed leader then hands a new task runs fresh and never reads it.
+    The response runner binds the receipt around the resume; each run keeps it, as a user message, for the rest of
+    the run, and no finished run stores it. A member the resumed leader then hands a new task runs fresh and never
+    reads it.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(
@@ -1027,11 +1057,59 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
             for request in team.models[model].requests
         ]
 
-    assert receipt_roles("checker-model") == [["system"]]
-    assert receipt_roles("default") == [["system"], []]
+    assert receipt_roles("checker-model") == [["user"]]
+    assert receipt_roles("default") == [["user"], ["user"]]
     assert receipt_roles("writer-model") == [[]]
     record, members = team.stored_runs()
     assert all(receipt not in json.dumps(run.to_dict()) for run in [record, *members])
+
+
+@pytest.mark.asyncio
+async def test_an_approval_resume_repeats_the_request_the_leader_and_the_member_each_paused_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The leader and the member resume with the request each paused on, then the paused turn, its result, the receipt.
+
+    The leader's turn context, which no history keeps, comes back where the paused request sent it; each run's
+    receipt follows its decided result and stays there for the run's later requests.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Touch it")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    location = EnrichmentItem(key="location", text="Alice is in Lisbon.", persist=False)
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(ctx=team.ctx(transient_enrichment_items=(location,)), show_tool_calls=False)
+    [paused_leader] = team.models["default"].requests
+    [paused_checker] = team.models["checker-model"].requests
+    team.models["default"] = ScriptedModel(
+        [delegate("call-polish", "writer", "Polish it"), answer("The checker touched it.", usage(50, 5))],
+    )
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([answer("Polished.")])
+    call = member_approval("call-touch", "dangerous")
+    decided = (replace(call, decision=ApprovalDecision.APPROVED, human_approval_required=True),)
+
+    with approval_receipt_context(decided, run_id=raised.value.paused.run_id):
+        result = await team.resume(raised.value.paused, approved=True, approvals=(call,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert "Alice is in Lisbon." in str(paused_leader.messages[-1].content)
+    for paused_request, model in ((paused_leader, "default"), (paused_checker, "checker-model")):
+        requests = [paused_request, *team.models[model].requests]
+        assert repeats_each_request(requests), model
+        resumed = requests[1]
+        assert [message.role for message in resumed.messages[len(paused_request.messages) :]] == [
+            "assistant",
+            "tool",
+            "user",
+        ], model
+        assert receipts(resumed) == [build_approval_receipt(decided)], model
+    assert [len(receipts(request)) for request in team.models["default"].requests] == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -1039,7 +1117,7 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only the runs the approval resumes read its receipt, each once.
+    """Only the runs the approval resumes read its receipt, each once, and keep it for the rest of the run.
 
     The resumed leader hands the writer a fresh task; the writer delegates to the helper and continues with the
     helper's answer. No approval resumed the writer, so neither of its requests carries the receipt.
@@ -1078,7 +1156,7 @@ async def test_a_member_continued_after_its_own_delegation_in_an_approval_resume
 
     assert isinstance(result, CompletedApprovalRun)
     assert carries("checker-model") == [True]
-    assert carries("default") == [True, False]
+    assert carries("default") == [True, True]
     assert carries("writer-model") == [False, False]
     assert carries("helper-model") == [False]
 
@@ -1090,7 +1168,8 @@ async def test_each_approval_of_a_chained_team_approval_reaches_the_runs_it_resu
 ) -> None:
     """The checker reads each approval's receipt on its resume, and the leader reads the second approval's.
 
-    The checker's first approved call leads only to a second gated call, and the leader's first request comes after
+    The checker's first approved call leads only to a second gated call, so its second resume keeps the first
+    receipt where it was and adds the second after the newly decided result; the leader's first request comes after
     the second approval. What a receipt covers is the response runner's to compose, so each approval here binds a
     receipt of its own call alone.
     """
@@ -1123,7 +1202,9 @@ async def test_each_approval_of_a_chained_team_approval_reaches_the_runs_it_resu
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous", "again"]
-    assert receipts_read("checker-model") == [[receipts[0]], [receipts[1]]]
+    assert receipts_read("checker-model") == [[receipts[0]], [receipts[0], receipts[1]]]
+    first, second = team.models["checker-model"].requests
+    assert second.messages[: len(first.messages)] == first.messages
     assert receipts_read("default") == [[receipts[1]]]
 
 
@@ -1574,6 +1655,37 @@ async def test_an_approved_resume_shows_once_the_text_its_runs_wrote_before_the_
 
 
 @pytest.mark.asyncio
+async def test_a_member_asked_again_after_an_approval_resume_starts_a_new_paragraph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer's draft from before another member's pause stays a paragraph apart from its revision after approval."""
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-draft", "writer", "Draft"), delegate("call-check", "checker", "Touch it")],
+        writer=[answer("Draft one.")],
+        checker=[calls(tool_call("touch", "call-touch", label="dangerous"))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([delegate("call-revise", "writer", "Revise"), answer("Both done.")])
+    team.models["checker-model"] = ScriptedModel([answer("Checked.")])
+    team.models["writer-model"] = ScriptedModel([answer("Draft two.")])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+    )
+
+    assert result.response_text == (
+        f"{HEADER}**Writer**: Draft one.\n\nDraft two.\n\n**Checker**: Checked.\n\n\n**Team Consensus**:\n\nBoth done."
+    )
+
+
+@pytest.mark.asyncio
 async def test_an_approved_member_that_answers_without_text_shows_no_paused_notice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1644,17 +1756,12 @@ _TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_appro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stream", "writer_piece"),
-    [(False, "Agent Writer: Writer drafted."), (True, "Writer drafted.")],
-    ids=["blocking", "streamed"],
-)
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_collaborate_resume_hands_the_leader_the_sibling_that_finished_before_the_pause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
-    writer_piece: str,
 ) -> None:
     """The writer finished before the checker paused; once the checker's call is approved, the leader reads both.
 
@@ -1683,7 +1790,7 @@ async def test_a_collaborate_resume_hands_the_leader_the_sibling_that_finished_b
 
     assert isinstance(result, CompletedApprovalRun)
     assert ProbeToolkit.calls == ["dangerous"]
-    answered = f"{writer_piece}Agent Checker: Touched."
+    answered = "Agent Writer: Writer drafted.\n\nAgent Checker: Touched."
     [request] = team.models["default"].requests
     assert request.messages[-1].content == answered
     record, _members = team.stored_runs()
@@ -1744,7 +1851,7 @@ async def test_a_chained_team_approval_hands_the_leader_each_member_s_result(
     answered = (
         ["Writer touched.", "Checker touched."]
         if mode == "coordinate"
-        else ["Agent Writer: Writer touched.Agent Checker: Checker touched."]
+        else ["Agent Writer: Writer touched.\n\nAgent Checker: Checker touched."]
     )
     assert [message.content for message in request.messages if message.role == "tool"] == answered
 
@@ -2460,14 +2567,14 @@ async def test_a_stopped_member_keeps_its_usage_and_both_rows_end_cancelled(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_the_order_they_ended(
+async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_configured_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Stop of a blocking turn records the stopped team run's records, as the Agno-backed blocking turn did.
+    """A Stop of a blocking turn records the stopped team run's records, each member in its configured slot.
 
-    The members are listed as their runs ended: the checker failed before any text and shows its error, then the
-    writer, stopped while its call ran, shows what it wrote before.
+    The writer, stopped while its call ran, shows what it wrote before; the checker failed before any text and shows
+    its error.
     """
     team = squad_turn(
         tmp_path,
@@ -2485,7 +2592,7 @@ async def test_a_stopped_blocking_team_turn_records_its_member_runs_in_the_order
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.cancelled, RunStatus.error, RunStatus.cancelled]
     assert team.recorder.outcome == "interrupted"
-    assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n**Writer**: Drafting."
+    assert team.recorder.assistant_text == "**Writer**: Drafting.\n\n**Checker**: Checker overloaded"
 
 
 @pytest.mark.asyncio
@@ -2601,7 +2708,7 @@ async def test_a_blocking_team_turn_that_fails_after_its_run_ended_records_the_r
     record, members = team.stored_runs()
     assert [run.status for run in (record, *members)] == [RunStatus.paused, RunStatus.error, RunStatus.paused]
     assert (team.recorder.outcome, team.recorder.original_status) == ("interrupted", RunStatus.error)
-    assert team.recorder.assistant_text == "**Checker**: Checker overloaded\n\n**Writer**: Let me touch it."
+    assert team.recorder.assistant_text == "**Writer**: Let me touch it.\n\n**Checker**: Checker overloaded"
 
 
 def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot:
@@ -2671,9 +2778,11 @@ def _older_thread_history(bot: AgentBot) -> AbstractContextManager[object]:
 
 
 def _leader_request_text(team: TeamTurn, model: str) -> tuple[str, str]:
-    """Return the leader's first request on ``model`` as its system message and the text of every other message."""
-    [system, *rest] = team.models[model].requests[0].messages
-    return str(system.content), "\n".join(str(message.content) for message in rest)
+    """Return the leader's first request on ``model`` as the text of its system messages and of every other message."""
+    messages = team.models[model].requests[0].messages
+    system = [message for message in messages if message.role == "system"]
+    rest = [message for message in messages if message.role != "system"]
+    return "\n".join(str(message.content) for message in system), "\n".join(str(message.content) for message in rest)
 
 
 @pytest.mark.asyncio
@@ -3030,7 +3139,8 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
     )
     assert await bot.journal_principal().approval_continuation_for_source(EVENT_ID) is None
     assert len(team.models["checker-model"].requests) == 1
-    assert "Helper: dug deeper." in str(team.models["writer-model"].requests[-1].messages[-1].content)
+    *_, helper_result = [m for m in team.models["writer-model"].requests[-1].messages if m.role == "tool"]
+    assert "Helper: dug deeper." in str(helper_result.content)
     record, member, state = _delegation_state(team)
     assert (record.status, member.status) == (RunStatus.completed, RunStatus.completed)
     assert [child.status for child in state.children] == ["completed"]

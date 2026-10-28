@@ -1,8 +1,8 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """The conversation message exchanged with models and stored in runs.
 
-Field names are the keys stored ``run_data`` messages and summary-row segments hold, so they decode without
-migration. The record is mutable: history replay, compaction, and notices rewrite fields in place.
+Field names are the keys a stored message row's data holds, and those of the Agno-layout messages only the storage v2
+conversion still reads. The record is mutable: history replay, compaction, and notices rewrite fields in place.
 """
 
 from __future__ import annotations
@@ -35,11 +35,11 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
 
 
 # ``Message.provider_data`` key marking an assistant message whose usage sums a retried request's attempts, so usage
-# readers do not take the sum for one request's size (``model_usage.py``, ``usage/storage.py``).
+# readers do not take the sum for one request's size; ``usage_sums_attempts`` reads it.
 AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
-# (``usage/storage.py``, ``memory/_mem0_usage.py``). It also tells a run's own model messages from the replies its
+# (``usage/storage.py``, ``agent_loop/helper.py``). It also tells a run's own model messages from the replies its
 # input carries (``is_own_model_message``).
 MODEL_PROVENANCE_KEY = "mindroom_model"
 
@@ -75,6 +75,14 @@ def read_model_provenance(provider_data: Mapping[str, object] | None) -> ModelPr
     return None
 
 
+def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
+    """Return whether ``provider_data`` marks its message's usage as the sum of a retried request's attempts.
+
+    Such usage counts toward the totals but describes no one request: not its size, its price, or its time.
+    """
+    return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+
+
 def is_own_model_message(message: Message) -> bool:
     """Return whether a model answered ``message`` in the run that holds it.
 
@@ -93,8 +101,10 @@ class Message:
     """One message in a model conversation.
 
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
-    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks a message
-    sent to the model but never stored.
+    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks context sent
+    to the model that history never replays: a run that pauses stores it, so its resume sends it again where it was,
+    and a run that ends drops it. Rows rewritten outside that ending, minimal mode's checkpoint and a paused delegated
+    child that recovery stopped, keep it but never replay.
     """
 
     role: Literal["system", "user", "assistant", "tool"]
@@ -134,7 +144,10 @@ class Message:
         return ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always."""
+        """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always.
+
+        ``add_to_agent_memory`` is written only when False, which a paused run's context holds.
+        """
         values: dict[str, Any] = {
             "id": self.id,
             "content": self.content,
@@ -168,6 +181,8 @@ class Message:
         metrics = self.metrics.to_dict()
         if metrics:
             result["metrics"] = metrics
+        if not self.add_to_agent_memory:
+            result["add_to_agent_memory"] = False
         result["created_at"] = self.created_at
         return result
 
@@ -175,8 +190,8 @@ class Message:
     def from_dict(cls, data: Mapping[str, Any]) -> Message:
         """Rebuild from a stored dict.
 
-        Keys this type does not model are ignored.
-        The non-persisted flags are read when present so ``model_dump``-shaped payloads decode too.
+        Keys this type does not model are ignored. ``add_to_agent_memory`` is True unless the dict says otherwise, as
+        ``to_dict`` writes it and ``model_dump``-shaped payloads carry it.
         """
         # LEGACY_COMPAT: Agno 3 message dicts carry keys the owned Message dropped.
         # Legacy format: ``run_data`` messages, summary-row segments, and tool-job payloads written by the
@@ -214,6 +229,33 @@ class Message:
             from_history=data.get("from_history", False),
             add_to_agent_memory=data.get("add_to_agent_memory", True),
         )
+
+
+def system_texts(messages: Sequence[Message]) -> tuple[str, ...]:
+    """Return the text of each system message in ``messages``, in order.
+
+    A request's system prompt is its system messages: the first is the stable prefix providers may cache, and the rest
+    hold the turn's context. A wire that takes one system text joins them with ``system_text``.
+    """
+    return tuple(text for message in messages if message.role == "system" and (text := message.get_content_string()))
+
+
+def system_text(messages: Sequence[Message]) -> str:
+    """Return the system prompt of ``messages`` as one text: each system message's text, a blank line between them."""
+    return "\n\n".join(system_texts(messages))
+
+
+def with_joined_system(messages: Sequence[Message]) -> list[Message]:
+    """Return ``messages`` with their system messages joined into one (``system_text``), in the first one's place.
+
+    Chat templates of many local models accept only one system message, so wires that send messages by role send the
+    system prompt as one.
+    """
+    first = next((index for index, message in enumerate(messages) if message.role == "system"), None)
+    if first is None or sum(message.role == "system" for message in messages) == 1:
+        return list(messages)
+    rest = [message for message in messages[first:] if message.role != "system"]
+    return [*messages[:first], Message(role="system", content=system_text(messages)), *rest]
 
 
 _NO_ERROR_TEXT = "The tool call failed without an error message."
@@ -271,5 +313,9 @@ __all__ = [
     "is_own_model_message",
     "model_provenance",
     "read_model_provenance",
+    "system_text",
+    "system_texts",
     "tool_result_view",
+    "usage_sums_attempts",
+    "with_joined_system",
 ]

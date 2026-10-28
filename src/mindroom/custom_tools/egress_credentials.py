@@ -1,6 +1,6 @@
 """Egress broker credential status tool for MindRoom agents.
 
-Listing this tool is what opts an agent into Agent Keys: only its shell and python calls get the broker env.
+Listing this tool opts an agent into Agent Keys: only its worker-routed shell and python calls get the broker env.
 When a brokered request fails with ``credential_not_configured``, the agent
 calls this tool to tell the user which services the egress broker can inject
 credentials for, which of them have a key or a connected account Agent Keys
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.egress_broker.env import personal_page_served
+from mindroom.egress_broker.env import egress_tool_without_worker_commands, personal_page_served
 from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import is_personal_target, service_status
@@ -42,6 +42,11 @@ _NO_WORKER_NOTE = (
     "Egress credentials require a worker-scoped agent; ask the operator to give this agent a worker scope."
 )
 _NO_CONFIG_NOTE = "The egress broker configuration is not available in this context, so no services can be listed."
+_NO_WORKER_COMMANDS_NOTE = (
+    "None of this agent's shell or python calls run in a worker, so Agent Keys never adds a key or account to them "
+    "and the Agent Keys pages do not list this agent. Ask the operator to route `shell` or `python` to a worker "
+    "with `worker_tools`."
+)
 _NO_SERVICES_NOTE = (
     "No egress services are configured. An operator defines them under `egress_broker.services` in config.yaml, "
     "and users can add services of their own on the egress page where it is available."
@@ -68,10 +73,14 @@ class EgressCredentialsTools(Toolkit):
         which credential they need. Returns each configured service with whether this agent has a
         credential for it (`configured`) and which one the broker uses (`active_source`: `key` or `oauth`).
         `source` says who defined the service: `config` for the administrator, `user` for the user's own.
-        `oauth_reuse` says whether Agent Keys may use the service's account (null without one). A service with
+        `oauth_reuse` says whether Agent Keys may use the service's account (null without one), and `oauth_access`
+        whether only to read (`read`) or also to write (`read_write`; null while not allowed). A service with
         nothing configured also says whether the user can connect an account instead of adding a key
         (`can_connect_account`), with the account's
-        `provider` when it can or when the account still needs allowing. The result carries the link
+        `provider` when it can or when the account still needs allowing. `separate_account: true` marks a service
+        of the user's own that takes no API key, only an account of its own, which a request uses by naming it in an
+        `X-Agent-Keys-Service` header.
+        The result carries the link
         where the user connects and allows accounts and adds or replaces keys. Never ask the user to paste a key
         into the chat; send them to the link instead.
         """
@@ -84,6 +93,9 @@ class EgressCredentialsTools(Toolkit):
         if context is None:
             return self._payload([], link, _NO_CONFIG_NOTE)
         config = context.current_config
+        agent_name = self._worker_target.routing_agent_name
+        if agent_name is not None and egress_tool_without_worker_commands(config, agent_name, self._runtime_paths):
+            return self._payload([], None, _NO_WORKER_COMMANDS_NOTE)
         manager = get_runtime_credentials_manager(self._runtime_paths)
         # The config's services plus the ones the user defined in this agent's scope, as the broker matches them.
         # A restrict-only service only limits paths and never takes a credential, so it is not listed.
@@ -115,6 +127,8 @@ class EgressCredentialsTools(Toolkit):
             "display_name": service.display_name or name,
             "source": service_source(config.egress_broker, name),
         }
+        if service.oauth_separate_account:
+            entry["separate_account"] = True
         try:
             status = service_status(
                 manager,
@@ -124,6 +138,7 @@ class EgressCredentialsTools(Toolkit):
                 oauth_status=functools.partial(
                     oauth_status,
                     service=name,
+                    separate_account=service.oauth_separate_account,
                     config=config,
                     runtime_paths=self._runtime_paths,
                     credentials_manager=manager,
@@ -136,6 +151,7 @@ class EgressCredentialsTools(Toolkit):
                 "configured": False,
                 "active_source": None,
                 "oauth_reuse": None,
+                "oauth_access": None,
                 "can_connect_account": False,
                 "provider": None,
             }
@@ -146,6 +162,7 @@ class EgressCredentialsTools(Toolkit):
             "configured": status.configured,
             "active_source": status.active_source,
             "oauth_reuse": reuse,
+            "oauth_access": oauth.reuse_access if oauth is not None and reuse else None,
         }
         if not status.configured:
             # An unreadable stored connection must be reset before a new one can be stored, so it is not connectable.
@@ -192,9 +209,15 @@ class EgressCredentialsTools(Toolkit):
         return (
             "Services with `configured: false` have neither an API key nor a connected account Agent Keys may use in "
             "this agent's scope, so brokered requests to them fail with `credential_not_configured`. "
-            "`active_source` names what a configured service uses; an API key wins over a connected account. "
+            "`active_source` names what a configured service uses; an API key wins over a connected account, but "
+            "a `separate_account: true` service takes no API key, only its own account. "
             "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
             f"{fix}"
+            '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '
+            "until whoever allows the account allows read and write there. "
+            "A request uses one of the user's own services (`source: user`) by sending the header "
+            "`X-Agent-Keys-Service: <name>`; without it the most specific rule decides, so a `separate_account: true` "
+            "service, which logs in with an account of its own instead of the one this agent's tools use, may need it. "
             "Never ask the user to paste a key into the chat."
         )
 

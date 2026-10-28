@@ -17,16 +17,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mindroom.agent_loop.model_loop import LoopEndHook, LoopState
     from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 @dataclass(frozen=True)
 class CapturedRequest:
-    """One run's last model request, its messages continued with the model's final answer."""
+    """One run's last model request, its messages continued with the model's final answer.
+
+    ``functions`` are the run's offered functions, whose policy says which of the request's tools wait for a decision.
+    """
 
     model: ModelProvider
     model_name: str
     run_id: str
     request: ModelRequest
+    functions: tuple[ToolFunction, ...]
 
 
 @dataclass
@@ -46,8 +51,8 @@ def capture_final_request(
 
     Each attempt names its own configured ``model_name``, because a same-turn continuation can switch models within one
     response. The request keeps the run's own messages and tool definitions, as its functions declare them: what a
-    pre-request hook projected for that request alone, such as the approval receipt or the wait budget job admission
-    accepts, belongs to the run's own calls, and the review answers its calls with other functions.
+    pre-request hook projected for that request alone, such as the wait budget job admission accepts, belongs to the
+    run's own calls, and the review answers its calls with other functions.
     """
 
     def record(state: LoopState, request: ModelRequest) -> None:
@@ -58,6 +63,7 @@ def capture_final_request(
             model_name=model_name,
             run_id=state.run.run_id,
             request=replace(request, messages=messages, tools=state.offered.specs()),
+            functions=tuple(state.offered.functions.values()),
         )
 
     return record

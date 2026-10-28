@@ -20,10 +20,10 @@ from mindroom.providers.openai.replay_estimate import (
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
     ResponsesWire,
+    conversation_digest,
     request_store,
     responses_request_kwargs,
     responses_stop_reason,
-    system_text_digest,
     usage_report,
 )
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -148,7 +148,7 @@ class ResponsesAdapter:
             store=request_store(self.wire, request),
             portable_replay=request.portable_replay,
             native_compaction=request.native_compaction,
-            system_digest=system_text_digest(request.messages),
+            conversation_digest=conversation_digest(request.messages),
         )
         try:
             client = await self.clients.client(request.overrides)

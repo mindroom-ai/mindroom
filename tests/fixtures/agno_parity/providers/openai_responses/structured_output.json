@@ -50,6 +50,7 @@
     "message": {
       "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
       "provider_data": {
+        "mindroom_conversation_sha256": "495ecf7d64eef2c0cdce5f4e69b133d2954ecf021b479e77418a8fee90b87278",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -57,7 +58,6 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "3815e2aa5abe2371e573aad504da599e37991a9b14158ea28b459edc73df188d",
         "response_id": "resp_parity"
       },
       "role": "assistant"
@@ -76,7 +76,15 @@
       "input": [
         {
           "role": "developer",
-          "content": "Route the message to the best agent."
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Route the message to the best agent.",
+              "prompt_cache_breakpoint": {
+                "mode": "explicit"
+              }
+            }
+          ]
         },
         {
           "role": "user",

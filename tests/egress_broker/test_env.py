@@ -16,6 +16,7 @@ from mindroom.egress_broker.env import (
     broker_execution_env,
     egress_agent_scope,
     egress_broker_enabled,
+    egress_tool_without_worker_commands,
     personal_page_served,
     primary_callback_hosts,
 )
@@ -266,6 +267,10 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
     return {"display_name": "Agent", "tools": list(tools), "include_default_tools": False, **extra}
 
 
+# A sandbox runner, so shell and python calls run in a worker unless an agent's `worker_tools` keeps them local.
+_RUNNER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
+
+
 @pytest.mark.parametrize(
     ("agent", "scope"),
     [
@@ -277,11 +282,86 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
     ],
 )
 def test_only_agents_with_the_egress_credentials_tool_use_the_broker(
+    tmp_path: Path,
     agent: dict[str, object],
     scope: EgressAgentScope | None,
 ) -> None:
     """The `egress_credentials` tool opts an agent in, and only its shell or python calls carry brokered traffic."""
     config = Config(agents={"agent": agent}, defaults={"tools": ["egress_credentials"]})
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=_RUNNER,
+    )
 
-    assert egress_agent_scope(config, "agent") == scope
-    assert egress_agent_scope(config, "removed") is None
+    assert egress_agent_scope(config, "agent", runtime_paths) == scope
+    assert egress_agent_scope(config, "removed", runtime_paths) is None
+
+
+@pytest.mark.parametrize(
+    ("agent", "process_env", "scope"),
+    [
+        pytest.param(
+            _agent("shell", "egress_credentials", worker_tools=["shell"]),
+            _RUNNER,
+            "unscoped",
+            id="shell-in-worker",
+        ),
+        pytest.param(
+            _agent("shell", "python", "egress_credentials", worker_tools=["python"]),
+            _RUNNER,
+            "unscoped",
+            id="python-in-worker",
+        ),
+        pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), _RUNNER, None, id="shell-in-primary"),
+        pytest.param(_agent("shell", "egress_credentials"), {}, None, id="no-worker-backend"),
+        pytest.param(
+            _agent("python", "egress_credentials"),
+            {**_RUNNER, "MINDROOM_SANDBOX_EXECUTION_MODE": "off"},
+            None,
+            id="local-execution",
+        ),
+    ],
+)
+def test_agents_whose_shell_and_python_run_in_the_primary_do_not_use_the_broker(
+    tmp_path: Path,
+    agent: dict[str, object],
+    process_env: dict[str, str],
+    scope: EgressAgentScope | None,
+) -> None:
+    """Only worker-routed calls get the broker env, so an agent whose shell and python run in the primary is not listed."""
+    config = Config(agents={"agent": agent})
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=process_env,
+    )
+
+    assert egress_agent_scope(config, "agent", runtime_paths) == scope
+
+
+@pytest.mark.parametrize(
+    ("agent", "unused"),
+    [
+        pytest.param(_agent("shell", "egress_credentials", worker_tools=[]), True, id="shell-in-primary"),
+        pytest.param(_agent("egress_credentials"), False, id="tool-without-shell"),
+        pytest.param(_agent("shell", "egress_credentials", worker_tools=["shell"]), False, id="shell-in-worker"),
+        pytest.param(_agent("shell", worker_tools=[]), False, id="no-egress-tool"),
+    ],
+)
+def test_an_egress_tool_no_worker_command_uses_is_reported(
+    tmp_path: Path,
+    agent: dict[str, object],
+    *,
+    unused: bool,
+) -> None:
+    """An agent whose shell or python could use Agent Keys but runs in the primary is named; one without them is not."""
+    config = Config(agents={"agent": agent})
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=_RUNNER,
+    )
+
+    assert egress_tool_without_worker_commands(config, "agent", runtime_paths) is unused
+    assert egress_tool_without_worker_commands(config, "removed", runtime_paths) is False

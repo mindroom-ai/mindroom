@@ -30,9 +30,7 @@ from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.media import Audio, canonical_mime_type
-from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
+from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
@@ -523,21 +521,21 @@ def _transcription_token_usage(result: object) -> TokenCounts | None:
     return counts.with_totals()
 
 
-def _transcription_usage_run(
+def _transcription_usage(
     usage: TokenCounts,
     *,
     model: str | None,
     provider: str | None,
     created_at: int,
-) -> RunRecord:
+) -> HelperUsage:
     """Represent one provider response without retaining transcription content."""
-    return RunRecord(
+    return HelperUsage(
         run_id=str(uuid.uuid4()),
         model=model,
-        model_provider=provider,
-        created_at=created_at,
+        provider=provider,
         metrics=RunMetrics(tokens=usage),
-        messages=[Message(role="assistant", created_at=created_at, metrics=MessageMetrics(tokens=usage))],
+        requests=(RequestUsage(created_at=created_at, metrics=MessageMetrics(tokens=usage)),),
+        created_at=created_at,
     )
 
 
@@ -602,7 +600,7 @@ async def _transcribe_audio(
             model = form_data.get("model")
             provider = "openai" if config.voice.stt.provider == "openai" and stt_base_url is None else None
             await record_system_usage(
-                _transcription_usage_run(
+                _transcription_usage(
                     usage,
                     model=model if isinstance(model, str) else None,
                     provider=provider,
@@ -687,7 +685,9 @@ async def _process_transcription(
                 response = await complete_prompt(
                     provider,
                     prompt,
-                    role="Normalize voice transcriptions while preserving natural language and mention intent",
+                    instructions=[
+                        "Normalize voice transcriptions while preserving natural language and mention intent",
+                    ],
                 )
         except TimeoutError:
             logger.warning(
@@ -695,7 +695,7 @@ async def _process_transcription(
                 timeout_seconds=_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS,
             )
         else:
-            await record_system_usage(response.record, runtime_paths=runtime_paths, kind="voice_normalization")
+            await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="voice_normalization")
             if response.content:
                 return _sanitize_unavailable_mentions(
                     response.content.strip(),

@@ -156,10 +156,10 @@ def _loop_hooks(
     ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; mid-turn compaction rewrites the live messages, and folds into the
-    scope only when the run replays it; the bound approval receipt then projects into the first request of a run
-    that reads it. Queued-message notices follow every tool batch and a resume's entry when ``queued_notices`` is
-    on; the run hears of the ended jobs of ``job_notices_for`` after each batch; ``skill_review_capture`` records the
-    run's final request.
+    scope only when the run replays it; the bound approval receipt then joins the messages of a run that reads it,
+    before its first request as a reader. Queued-message notices follow every tool batch and a resume's entry when
+    ``queued_notices`` is on; the run hears of the ended jobs of ``job_notices_for`` after each batch;
+    ``skill_review_capture`` records the run's final request.
     """
     before_request: list[BeforeRequestHook] = []
     if job_definitions is not None:

@@ -30,7 +30,7 @@ import { EgressBroker } from "./EgressBroker";
 const NOT_RUNNING =
   "Egress broker is not running. Set MINDROOM_EGRESS_BROKER_PORT and MINDROOM_EGRESS_BROKER_URL.";
 const NO_AGENT_USES_KEYS =
-  "No agent uses these keys. An agent uses them once it has shell or python and the egress_credentials tool.";
+  "No agent uses these keys. An agent uses them once it has the egress_credentials tool and shell or python running in a worker.";
 
 let storeState: {
   agents: unknown[];
@@ -345,7 +345,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every user and to every agent with the egress_credentials tool. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page.",
+      "Services you add here are offered to every user and to every agent that uses Agent Keys. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page.",
     );
     expect(
       within(note).getByRole("link", { name: "Agent Keys page" }),
@@ -365,7 +365,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every user and to every agent with the egress_credentials tool. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
+      "Services you add here are offered to every user and to every agent that uses Agent Keys. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
     );
     expect(within(note).queryByRole("link")).toBeNull();
   });

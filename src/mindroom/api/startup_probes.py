@@ -1,4 +1,4 @@
-"""Answer health probes on the API address while `mindroom run` waits for hosted pairing approval."""
+"""Answer health probes on the API address while `mindroom run` waits before the API starts."""
 
 from __future__ import annotations
 
@@ -14,18 +14,18 @@ from urllib.parse import urlsplit
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-_PAIRING_WAIT_DETAIL = "Waiting for local pairing approval"
-
 
 class _ProbeHandler(BaseHTTPRequestHandler):
-    """Report liveness and not-ready readiness; the real API replaces this server after pairing."""
+    """Report liveness and not-ready readiness; the real API replaces this server once the wait ends."""
+
+    server: _ProbeServer
 
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path == "/api/health":
             self._send_json(200, {"status": "healthy"})
         elif path == "/api/ready":
-            self._send_json(503, {"status": "starting", "detail": _PAIRING_WAIT_DETAIL})
+            self._send_json(503, {"status": "starting", "detail": self.server.detail})
         else:
             self._send_json(404, {"detail": "Not Found"})
 
@@ -38,12 +38,13 @@ class _ProbeHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        """Keep probe requests out of the pairing instructions printed to the terminal."""
+        """Keep probe requests out of what the terminal shows meanwhile, such as the pairing instructions."""
 
 
 class _ProbeServer(ThreadingHTTPServer):
-    def __init__(self, family: socket.AddressFamily, address: tuple) -> None:
+    def __init__(self, family: socket.AddressFamily, address: tuple, detail: str) -> None:
         self.address_family = family
+        self.detail = detail
         # The caller binds, so an address this host has not configured can be skipped.
         super().__init__(address, _ProbeHandler, bind_and_activate=False)
 
@@ -55,11 +56,11 @@ class _ProbeServer(ThreadingHTTPServer):
 
 
 @contextmanager
-def serve_pairing_probes(host: str, port: int) -> Iterator[None]:
-    """Serve `/api/health` and a not-ready `/api/ready` on the API address until the block exits.
+def serve_startup_probes(host: str, port: int, *, detail: str) -> Iterator[None]:
+    """Serve `/api/health` and a `/api/ready` not ready for ``detail`` on the API address until the block exits.
 
-    Container probes then see a live process that is waiting for pairing instead of a closed port.
-    Raises OSError naming the address when it cannot be resolved or bound, before pairing starts.
+    Container probes then see a live process that is waiting, for pairing or for the conversation storage conversion,
+    instead of a closed port. Raises OSError naming the address when it cannot be resolved or bound, before the wait.
     """
     with ExitStack() as servers:
         try:
@@ -79,7 +80,7 @@ def serve_pairing_probes(host: str, port: int) -> Iterator[None]:
                 # Like asyncio's create_server, skip a family this host cannot create sockets for
                 # and an address it has not configured, such as `::1` with IPv6 disabled.
                 try:
-                    server = _ProbeServer(family, address)
+                    server = _ProbeServer(family, address, detail)
                 except OSError:
                     continue
                 servers.callback(server.server_close)
@@ -90,7 +91,7 @@ def serve_pairing_probes(host: str, port: int) -> Iterator[None]:
                         continue
                     raise
                 server.server_activate()
-                threading.Thread(target=server.serve_forever, name="pairing_probes", daemon=True).start()
+                threading.Thread(target=server.serve_forever, name="startup_probes", daemon=True).start()
                 servers.callback(server.shutdown)
                 listening += 1
             if not listening:

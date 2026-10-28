@@ -93,7 +93,7 @@ def test_unreachable_kubernetes_api_fails_retirement(
 
 @pytest.mark.asyncio
 async def test_failed_retirement_fails_startup_before_anything_serves(tmp_path: Path) -> None:
-    """The primary never builds its runtime or API while an old worker may still run."""
+    """The primary never converts its databases, builds its runtime, or serves while an old worker may still run."""
     with (
         patch("mindroom.orchestrator.setup_logging"),
         patch("mindroom.orchestrator.sync_env_to_credentials"),
@@ -101,9 +101,11 @@ async def test_failed_retirement_fails_startup_before_anything_serves(tmp_path: 
             "mindroom.orchestrator.retire_state_root_worker_mounts",
             side_effect=WorkerBackendError("Could not stop workers that mount whole state roots: old-worker"),
         ),
+        patch("mindroom.orchestrator.migrate_conversation_storage") as convert,
         patch("mindroom.orchestrator._MultiAgentOrchestrator") as orchestrator,
         pytest.raises(WorkerBackendError, match="old-worker"),
     ):
         await main(log_level="INFO", runtime_paths=_runtime_paths(tmp_path, "kubernetes"), api=True)
 
+    convert.assert_not_called()
     orchestrator.assert_not_called()

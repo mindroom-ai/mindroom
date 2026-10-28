@@ -1,34 +1,34 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""The team leader's system message: the ``<team>`` block, the tool instructions, the model note, and the context.
+"""The team leader's system prompt, rendered like an agent's: its identity, the ``<team>`` block, then the turn.
 
-A team has no description, role, or instructions of its own, so the ``<team>`` block (the capability sentence, the
-member roster, and the mode's ``<delegation>`` block) opens the prompt. Texts and layout are part of every leader
-request's prompt-cache prefix: changing them changes the cacheable prefix and may prevent reuse of cached tokens.
+The team's identity (its name, its purpose, and how conversation history reaches it), the ``<team>`` block (the
+capability sentence, the member roster with each member's authored role, and the mode's ``<delegation>`` block), and
+the leader's tool instructions are the stable part; the date and session context with the turn's system enrichment
+are the turn part (``agent_loop.prompt``).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import Message
+from mindroom.agent_loop.prompt import PromptSpec, render_system_messages
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.llm.messages import Message
     from mindroom.teams.spec import TeamMember
 
 _TEAM_OPENING_PROMPT = (
-    "You coordinate this team to fulfill the user's request. "
-    "You have a team of specialists, listed below. "
-    "Delegate to members when their expertise or tools are needed; "
-    "answer directly — including with your own tools — when they are not.\n"
+    "You lead this team to fulfill the user's request. Its members are listed below. "
+    "Delegate to members when their expertise or tools are needed; answer directly when they are not.\n"
 )
 
 _TEAM_COORDINATE_DELEGATION_TEMPLATE = (
     "You work in coordinate mode: you hand sub-tasks to members with "
     "`delegate_task_to_member` and write the answer yourself.\n\n"
-    "- Match each sub-task to the member whose role and description fit it best. When sub-tasks do not "
+    "- Match each sub-task to the member whose role fits it best. When sub-tasks do not "
     "depend on each other, delegate them in the same turn instead of one per turn.\n"
     "- A member's output is evidence, not your answer. When a member fails, refuses, or returns "
     "nothing, say so plainly and name what it reported — never supply a cause, source, or finding "
@@ -41,7 +41,7 @@ _TEAM_COORDINATE_DELEGATION_TEMPLATE = (
 )
 
 _TEAM_COLLABORATE_DELEGATION_TEMPLATE = (
-    "You work in broadcast mode: one call puts the same task to every member, then you write the "
+    "You work in collaborate mode: one call puts the same task to every member, then you write the "
     "answer yourself.\n\n"
     "- Call `delegate_task_to_members` exactly once. One call reaches every member; do not call it "
     "once per member.\n"
@@ -64,55 +64,61 @@ _TEAM_MEMBERS_CONTEXT_NOTE = (
 _TEAM_MEMBER_IDS_NOTE = "Member ids are the ids shown in the roster above, used exactly as written.\n"
 
 TEAM_MEMBER_NOT_FOUND_TEMPLATE = (
-    "Member with ID {member_id} not found in the team or any subteams. "
-    "Please choose the correct member from the list of members:\n\n{roster}"
+    "Member with ID {member_id} is not in this team. Choose a member from the list of members:\n\n{roster}"
 )
 
 
 def render_members_roster(members: Sequence[TeamMember]) -> str:
-    """Return the ``<team_members>`` entries: one ``<member>`` element per member with its id, name, and role."""
+    """Return the ``<team_members>`` entries: one ``<member>`` per member, with its id, name, and authored role."""
     return "".join(
         f'<member id="{member.spec.id}" name="{member.spec.name}">\n  Role: {member.role}\n</member>\n'
         for member in members
     )
 
 
-def render_leader_system_message(
+def render_leader_system_messages(
     members: Sequence[TeamMember],
     mode: TeamMode,
     *,
+    identity: str,
+    markdown: bool,
     tool_instructions: Sequence[str],
-    model_note: str | None,
-    additional_context: str,
-) -> Message:
-    """Return the leader's system message for ``members`` in ``mode``.
+    turn_context: str,
+) -> tuple[Message, ...]:
+    """Return the leader's system messages for ``members`` in ``mode``.
 
-    ``tool_instructions`` are the leader's toolkit instructions in offer order, ``model_note`` the provider family's
-    text (``agent_loop.prompt.model_note_for``), and ``additional_context`` the per-turn context MindRoom adds: the
-    date context and any appended system enrichment.
+    ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``, or its
+    ``OPENAI_COMPAT_`` form in the OpenAI-compatible API), ``markdown`` whether the prompt states the chat's Markdown
+    output format, as an agent's does, ``tool_instructions`` the leader's toolkit instructions in offer order, and
+    ``turn_context`` the turn part: the date and session context and any appended system enrichment.
     """
     delegation = (
         _TEAM_COLLABORATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE
         if mode is TeamMode.COLLABORATE
         else _TEAM_COORDINATE_DELEGATION_TEMPLATE + _TEAM_MEMBERS_CONTEXT_NOTE + _TEAM_MEMBER_IDS_NOTE
     )
-    content = (
+    team = (
         "<team>\n"
         f"{_TEAM_OPENING_PROMPT}"
         "\n<team_members>\n"
         f"{render_members_roster(members)}"
         "</team_members>\n"
         f"\n<delegation>\n{delegation}</delegation>\n"
-        "</team>\n\n"
+        "</team>"
     )
-    content += "".join(f"{instruction}\n" for instruction in tool_instructions)
-    content += model_note or ""
-    content += f"<additional_context>\n{additional_context.strip()}\n</additional_context>\n\n"
-    return Message(role="system", content=content.strip())
+    return render_system_messages(
+        PromptSpec(
+            role=identity,
+            markdown=markdown,
+            instructions=(team,),
+            tool_instructions=tuple(tool_instructions),
+            turn_context=turn_context,
+        ),
+    )
 
 
 __all__ = [
     "TEAM_MEMBER_NOT_FOUND_TEMPLATE",
-    "render_leader_system_message",
+    "render_leader_system_messages",
     "render_members_roster",
 ]

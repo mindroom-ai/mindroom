@@ -13,16 +13,13 @@ from uuid import uuid4
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.failure_text import failure_text
-from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
 from mindroom.history.storage import (
     FoldBasis,
     append_compaction_chunk,
     append_fold,
-    ensure_scope_session_row,
     read_chunk_basis,
     record_summary_usage,
-    save_working_run_changes,
     update_scope_state_on_latest,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, generate_compaction_summary
@@ -67,7 +64,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.summary_call import SummaryRetryDecision
-    from mindroom.history.summary_rows import Segment
+    from mindroom.history.summary_rows import Fold
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, PortableReplayEstimator
     from mindroom.llm.runs import AnyRunRecord
@@ -209,9 +206,17 @@ def load_summarizer(
 def scope_usage_recorder(
     storage: ConversationStore,
     session_id: str,
+    *,
+    initial_session: ConversationSession | None = None,
 ) -> Callable[[ModelIdentity, MessageMetrics], Awaitable[None]]:
-    """Record each summary response's usage in the scope's storage, under the current request's requester."""
-    return partial(record_summary_usage, storage=storage, session_id=session_id, requester_id=current_requester_id())
+    """Record each summary response's usage under the current request's requester, first creating ``initial_session``'s row."""
+    return partial(
+        record_summary_usage,
+        storage=storage,
+        session_id=session_id,
+        requester_id=current_requester_id(),
+        initial_session=initial_session,
+    )
 
 
 @dataclass(frozen=True)
@@ -347,7 +352,6 @@ async def compact_scope_history(
         return None
 
     mode = state.compaction_mode
-    loaded_runs = list(session.runs)
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     compacted_messages: list[Message] = []
@@ -409,10 +413,6 @@ async def compact_scope_history(
         return None
 
     compacted_at = _iso_utc_now()
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(save_working_run_changes, session=session, loaded_runs=loaded_runs, working_session=working_session),
-    )
     await clear_manual_compaction_request(storage=storage, session=session, scope=scope, state=state)
     logger.info(
         "Compaction summary generated",
@@ -504,7 +504,6 @@ async def _rewrite_working_session_for_compaction(
                 basis=basis,
                 included_run_ids=compacted_run_ids,
                 summary=chunk.summary,
-                summary_model=chunk.summarizer.model.model.identity.id,
             ),
         )
         if not appended:
@@ -520,9 +519,6 @@ async def _rewrite_working_session_for_compaction(
 
     if summary_text is None:
         return None
-    strip_stale_anthropic_replay_fields(
-        [message for run in scope_visible_runs(working_session, scope) for message in run.messages],
-    )
     return _CompactionRewriteResult(
         summary_text=summary_text,
         compacted_run_count=compacted_run_count,
@@ -580,7 +576,7 @@ async def compact_running_turn(
     session: ConversationSession,
     scope: HistoryScope,
     basis: FoldBasis,
-    segment: Segment,
+    fold: Fold,
     snapshots: Sequence[AnyRunRecord],
     folded_messages: Sequence[Message],
     summarizer: Summarizer,
@@ -592,7 +588,7 @@ async def compact_running_turn(
     rewritten_request_tokens: Callable[[], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
 ) -> CompactionOutcome:
-    """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row with ``segment``.
+    """Summarize the basis's stored runs and the running turn's ``snapshots``, then append one row storing ``fold``.
 
     Nothing is written until every chunk has been summarized. The append leaves ``session`` holding what the store
     does; once it starts, ``on_commit`` receives the stored summary and the compaction is reported even when the turn
@@ -602,11 +598,6 @@ async def compact_running_turn(
     changed since ``basis`` was read.
     """
     runs = [*basis.runs, *snapshots]
-    # The summary's usage row and summary row reference the session row, which a first turn has not written yet.
-    await run_session_storage_operation(
-        lambda: storage,
-        partial(ensure_scope_session_row, session=session, scope=scope),
-    )
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
     # Hooks see the folded messages themselves, not the per-call units the summarizer reads.
     hook_runs = [*basis.runs, RunRecord(run_id="", messages=list(folded_messages))]
@@ -633,8 +624,7 @@ async def compact_running_turn(
                 scope=scope,
                 basis=basis,
                 summary=summary,
-                summary_model=summarizer.model.model.identity.id,
-                segment=segment,
+                fold=fold,
             ),
         )
         if not appended:
@@ -688,7 +678,7 @@ async def _report_committed(
 def _compaction_sizing(summary_model: ModelProvider) -> tuple[Callable[[str], int], CompactionEstimateKind]:
     """Resolve one estimator together with the kind describing its arithmetic."""
     model_id = summary_model.identity.id
-    conservative_fallback = summary_model.capabilities.claude_family
+    conservative_fallback = summary_model.capabilities.conservative_token_estimates
     estimator = partial(
         estimate_compaction_input_tokens,
         model_id=model_id,
@@ -710,7 +700,7 @@ def _after_native_checkpoint(previous_summary: str | None, runs: Sequence[AnyRun
     for index in range(len(runs) - 1, 0, -1):
         basis = replay_basis(previous_summary, runs[:index])
         for message in reversed(runs[index].messages):
-            if not message.from_history and (summary := checkpoint_summary(message, basis)) is not None:
+            if (summary := checkpoint_summary(message, basis)) is not None:
                 return _SummarySource(list(runs[:index]), summary, list(runs[index:]))
     return None
 

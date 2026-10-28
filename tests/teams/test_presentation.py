@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from mindroom.approval.response import require_ordered_pause_presentation
-from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.redaction import redact_sensitive_text
@@ -161,7 +161,7 @@ def test_a_finished_run_without_content_reads_as_the_text_its_model_wrote() -> N
 
     assert finished_run_text(scout) == "Three vendors.\n\nTwo more."
     team = TeamRunRecord(run_id="team-run", content="Five in all.", ended_member_runs=[scout], team_id=None)
-    assert format_team_response(team) == (
+    assert format_team_response(team, TeamStreamPresentation.new(["scout"], ["Scout"], show_tool_calls=False)) == (
         "**Scout**: Three vendors.\n\nTwo more.\n\n\n**Team Consensus**:\n\nFive in all."
     )
 
@@ -188,6 +188,7 @@ def test_a_failed_member_shows_its_redacted_reason_in_the_team_document(source: 
 
     document = format_team_response(
         TeamRunRecord(run_id="team-run", content="Unchecked.", ended_member_runs=[checker], team_id=None),
+        TeamStreamPresentation.new(["checker"], ["Checker"], show_tool_calls=False),
     )
 
     assert document == f"**Checker**: {reason}\n\n\n**Team Consensus**:\n\nUnchecked."
@@ -410,3 +411,27 @@ def test_a_restored_visible_marker_keeps_one_paragraph_break_before_the_consensu
     apply_team_event(presentation, TextDelta("After approval."))
 
     assert presentation.consensus == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
+
+
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+def test_the_recorded_text_is_the_document_without_tool_markers(show_tool_calls: bool) -> None:
+    """The text a streamed reply records is its document's slots, a blank line where a tool call split them."""
+    presentation = TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=show_tool_calls)
+    member_call = ReportedCall(tool_call_id="call-1", tool_name="lookup", tool_args={})
+    leader_call = ReportedCall(tool_call_id="call-2", tool_name="lookup", tool_args={})
+
+    for event in (
+        MemberEvent("general", "GeneralAgent", "run-1", TextDelta("Looking.")),
+        MemberEvent("general", "GeneralAgent", "run-1", ToolStarted(member_call)),
+        MemberEvent("general", "GeneralAgent", "run-1", TextDelta("Four seats.")),
+        MemberEvent("general", "GeneralAgent", "run-2", TextDelta("Five now.")),
+        TextDelta("Checking."),
+        ToolStarted(leader_call),
+        TextDelta("Done."),
+    ):
+        apply_team_event(presentation, event)
+
+    assert presentation.text_without_tool_markers(finished=True) == (
+        "**GeneralAgent**: Looking.\n\nFour seats.\n\nFive now.\n\n\n**Team Consensus**:\n\nChecking.\n\nDone."
+    )
+    assert ("🔧" in presentation.render_body(finished=True)) is show_tool_calls

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import google.auth
@@ -31,7 +32,8 @@ from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import env_key_for_provider, resolve_primary_runtime_paths
-from mindroom.credentials.sync import get_embedder_api_key
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.credentials.sync import get_api_key_for_provider, get_embedder_api_key, sync_env_to_credentials
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.providers.anthropic import messages as claude_messages
 
@@ -196,7 +198,7 @@ def test_provider_key_placeholder_warns_not_set_and_is_never_validated(
         ("openrouter", "https://openrouter.ai/api/v1/key", {"Authorization": "Bearer k"}),
         ("anthropic", "https://api.anthropic.com/v1/models", {"x-api-key": "k", "anthropic-version": "2023-06-01"}),
         ("openai", "https://api.openai.com/v1/models", {"Authorization": "Bearer k"}),
-        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models?key=k", {}),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models", {"x-goog-api-key": "k"}),
         ("groq", "https://api.groq.com/openai/v1/models", {"Authorization": "Bearer k"}),
     ],
 )
@@ -278,10 +280,25 @@ def _record_key_checks(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[
     return sent
 
 
-def _runtime_with_env(tmp_path: Path, env_file: dict[str, str], exported: dict[str, str] | None = None) -> RuntimePaths:
-    """Return runtime paths whose ``.env`` holds ``env_file`` and whose process exports ``exported``."""
+def _runtime_with_env(
+    tmp_path: Path,
+    env_file: dict[str, str],
+    exported: dict[str, str] | None = None,
+    *,
+    dashboard: dict[str, str] | None = None,
+) -> RuntimePaths:
+    """Return runtime paths as doctor's checks see them after its startup import of provider keys into the store.
+
+    ``.env`` holds ``env_file``, the process exports ``exported``, and the store holds each ``dashboard`` service's key
+    as the dashboard saves it.
+    """
     (tmp_path / ".env").write_text("".join(f"{name}={value}\n" for name, value in env_file.items()), encoding="utf-8")
-    return resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env=exported or {})
+    runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env=exported or {})
+    credentials = get_runtime_shared_credentials_manager(runtime_paths)
+    for service, api_key in (dashboard or {}).items():
+        credentials.save_credentials(service, {"api_key": api_key, "_source": "ui"})
+    sync_env_to_credentials(runtime_paths)
+    return runtime_paths
 
 
 @pytest.mark.parametrize(
@@ -482,7 +499,7 @@ def test_doctor_skips_the_shared_key_check_wherever_an_endpoint_setting_or_varia
         (
             "google",
             {"GOOGLE_GMAIL_ALLOWED_HOSTED_DOMAINS": "example.com"},
-            "https://generativelanguage.googleapis.com/v1beta/models?key=shared",
+            "https://generativelanguage.googleapis.com/v1beta/models",
         ),
     ],
 )
@@ -540,7 +557,7 @@ def test_a_provider_without_a_key_check_gets_one_no_key_check_warning_whatever_i
     assert _check_providers(config, runtime_paths) == (0, 0, 1)
     assert sent == []
     output = " ".join(capsys.readouterr().out.split())
-    assert f"{provider}: could not validate key (no key check for this provider)" in output
+    assert f"{provider}: could not validate {env_key} (no key check for this provider)" in output
     assert "not checked" not in output
 
 
@@ -650,6 +667,331 @@ def test_doctor_keeps_the_shared_key_from_an_endpoint_that_gets_the_model_s_clie
     assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer shared"})]
 
 
+_DASHBOARD = "key saved in the dashboard"
+
+
+@pytest.mark.parametrize(
+    ("dashboard", "env_file", "used_key", "origin"),
+    [
+        pytest.param({"openai": "sk-dashboard"}, {}, "sk-dashboard", _DASHBOARD, id="dashboard"),
+        pytest.param({"OPENAI_API_KEY": "sk-dashboard"}, {}, "sk-dashboard", _DASHBOARD, id="dashboard-variable-name"),
+        pytest.param({}, {"OPENAI_API_KEY": "sk-env"}, "sk-env", "OPENAI_API_KEY", id="environment"),
+        # Import never replaces a key saved in the dashboard, so the runtime uses it over the variable.
+        pytest.param(
+            {"openai": "sk-dashboard"},
+            {"OPENAI_API_KEY": "sk-env"},
+            "sk-dashboard",
+            _DASHBOARD,
+            id="dashboard-over-environment",
+        ),
+        # The provider's own service, which import fills, wins over a key saved under the variable's name.
+        pytest.param(
+            {"OPENAI_API_KEY": "sk-dashboard"},
+            {"OPENAI_API_KEY": "sk-env"},
+            "sk-env",
+            "OPENAI_API_KEY",
+            id="environment-over-dashboard-variable-name",
+        ),
+    ],
+)
+def test_doctor_checks_the_shared_key_the_runtime_uses_and_names_where_it_came_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dashboard: dict[str, str],
+    env_file: dict[str, str],
+    used_key: str,
+    origin: str,
+) -> None:
+    """Doctor checks the key the runtime reads, from the environment or the dashboard, and never prints it."""
+    runtime_paths = _runtime_with_env(tmp_path, env_file, dashboard=dashboard)
+    sent = _record_key_checks(monkeypatch)
+    config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert get_api_key_for_provider("openai", runtime_paths) == used_key
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": f"Bearer {used_key}"})]
+    output = " ".join(capsys.readouterr().out.split())
+    assert f"openai: {origin} valid" in output
+    assert "sk-" not in output
+
+
+def _seeds_file(tmp_path: Path, service: str, api_key: str) -> dict[str, str]:
+    """Write a credential seed file declaring ``service``'s key and return the ``.env`` entry that names it."""
+    seed = {"service": service, "credentials": {"api_key": {"value": api_key}}}
+    (tmp_path / "seeds.json").write_text(json.dumps(seed), encoding="utf-8")
+    return {"MINDROOM_CREDENTIAL_SEEDS_FILE": "seeds.json"}
+
+
+@pytest.mark.parametrize(
+    ("seeded", "env_file", "used_key", "origin"),
+    [
+        pytest.param("sk-seed", {}, "sk-seed", "MINDROOM_CREDENTIAL_SEEDS_FILE", id="seed"),
+        # A seed is imported after the provider's variable, so its key replaces the variable's.
+        pytest.param(
+            "sk-seed",
+            {"OPENAI_API_KEY": "sk-env"},
+            "sk-seed",
+            "MINDROOM_CREDENTIAL_SEEDS_FILE",
+            id="seed-over-variable",
+        ),
+        pytest.param(None, {"OPENAI_API_KEY_FILE": "openai.key"}, "sk-file", "OPENAI_API_KEY_FILE", id="file-variable"),
+    ],
+)
+def test_doctor_names_an_imported_key_by_the_variable_that_supplied_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: str | None,
+    env_file: dict[str, str],
+    used_key: str,
+    origin: str,
+) -> None:
+    """A seeded key is named by its seed declaration's variable, not by the provider's variable it never came from."""
+    (tmp_path / "openai.key").write_text("sk-file\n", encoding="utf-8")
+    seeds = _seeds_file(tmp_path, "openai", seeded) if seeded else {}
+    runtime_paths = _runtime_with_env(tmp_path, {**env_file, **seeds})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert get_api_key_for_provider("openai", runtime_paths) == used_key
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": f"Bearer {used_key}"})]
+    assert f"openai: {origin} valid" in " ".join(capsys.readouterr().out.split())
+
+
+def test_doctor_names_the_seed_declaration_that_supplied_the_stored_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The inline declaration is imported after the file, so its key is stored and doctor names it."""
+    file_seeds = [
+        {"service": "anthropic", "credentials": {"api_key": "sk-json-seed"}},
+        {"service": "openai", "credentials": {"api_key": "sk-file-seed"}},
+    ]
+    (tmp_path / "seeds.json").write_text(json.dumps(file_seeds), encoding="utf-8")
+    json_seed = {"service": "openai", "credentials": {"api_key": "sk-json-seed"}}
+    runtime_paths = _runtime_with_env(
+        tmp_path,
+        {"MINDROOM_CREDENTIAL_SEEDS_FILE": "seeds.json"},
+        {"MINDROOM_CREDENTIAL_SEEDS_JSON": json.dumps(json_seed)},
+    )
+    sent = _record_key_checks(monkeypatch)
+    config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-json-seed"})]
+    assert "openai: MINDROOM_CREDENTIAL_SEEDS_JSON valid" in " ".join(capsys.readouterr().out.split())
+
+
+def test_doctor_names_a_key_no_variable_supplies_any_more_as_imported_earlier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Import keeps a key whose variable was removed, and the runtime uses it, so doctor checks it under that name."""
+    runtime_paths = _runtime_with_env(tmp_path, {})
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+        "openai",
+        {"api_key": "sk-old", "_source": "env"},
+    )
+    sent = _record_key_checks(monkeypatch)
+    config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-old"})]
+    assert "openai: key imported earlier from the environment valid" in " ".join(capsys.readouterr().out.split())
+
+
+@pytest.mark.parametrize(
+    ("model_settings", "env_file", "reason"),
+    [
+        ({"extra_kwargs": {"base_url": _GATEWAY}}, {}, "models.default.extra_kwargs.base_url"),
+        ({}, {"OPENAI_BASE_URL": _GATEWAY}, "OPENAI_BASE_URL"),
+    ],
+)
+def test_doctor_does_not_check_a_dashboard_key_that_an_endpoint_setting_or_variable_may_send_elsewhere(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    model_settings: dict[str, object],
+    env_file: dict[str, str],
+    reason: str,
+) -> None:
+    """A key saved in the dashboard follows the same not-checked rule as one from the environment."""
+    runtime_paths = _runtime_with_env(tmp_path, env_file, dashboard={"openai": "sk-dashboard"})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="m", **model_settings)},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert f"openai: {_DASHBOARD} not checked: {reason} may send it elsewhere" in output
+
+
+def test_doctor_checks_the_environment_variable_when_the_credential_store_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without the store, doctor still checks the key the environment supplies."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "sk-env"})
+    sent = _record_key_checks(monkeypatch)
+
+    def unreadable(*_args: object) -> None:
+        msg = "invalid encryption key"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.cli.doctor.get_stored_provider_key", unreadable)
+    config = Config(models={"default": ModelConfig(provider="openai", id="m")}, router=RouterConfig(model="default"))
+
+    assert _check_providers(config, runtime_paths) == (1, 0, 0)
+    assert sent == [("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-env"})]
+    assert "openai: OPENAI_API_KEY valid" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("provider", "dashboard", "exported", "expected", "sent_request", "line"),
+    [
+        (
+            "openai",
+            {"openai": "sk-dashboard"},
+            {},
+            (1, 0, 0),
+            [("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-dashboard"})],
+            f"Memory LLM (openai/m): {_DASHBOARD} valid",
+        ),
+        # Mem0 sends an exported OPENROUTER_API_KEY in place of the key it is given.
+        (
+            "openrouter",
+            {"openrouter": "sk-dashboard"},
+            {"OPENROUTER_API_KEY": "or-key"},
+            (0, 0, 1),
+            [],
+            f"Memory LLM (openrouter/m): {_DASHBOARD} not checked: OPENROUTER_API_KEY may send it elsewhere",
+        ),
+    ],
+)
+def test_memory_llm_shared_key_saved_in_the_dashboard_is_checked_like_one_from_the_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provider: str,
+    dashboard: dict[str, str],
+    exported: dict[str, str],
+    expected: tuple[int, int, int],
+    sent_request: list[tuple[str, dict[str, str]]],
+    line: str,
+) -> None:
+    """Mem0 gets the shared key the runtime reads, so a key saved in the dashboard is checked, or skipped, as such."""
+    runtime_paths = _runtime_with_env(tmp_path, {}, exported, dashboard=dashboard)
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": provider, "config": {"model": "m"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == expected
+    assert sent == sent_request
+    assert line in " ".join(capsys.readouterr().out.split())
+
+
+_OPENROUTER_KEY_CHECK = "https://openrouter.ai/api/v1/key"
+
+
+@pytest.mark.parametrize(
+    ("seeded", "env_file", "exported", "dashboard", "expected", "sent_request", "line"),
+    [
+        # The seed's key replaces the imported variable's in the store, but Mem0 sends the exported variable.
+        pytest.param(
+            "sk-seed",
+            {},
+            {"OPENROUTER_API_KEY": "or-key"},
+            {},
+            (0, 0, 1),
+            [],
+            "Memory LLM (openrouter/m): MINDROOM_CREDENTIAL_SEEDS_FILE not checked: OPENROUTER_API_KEY may send it",
+            id="seed-replaced-by-exported-variable",
+        ),
+        # The exported variable is the stored key, so Mem0 sends the key doctor checks.
+        pytest.param(
+            None,
+            {},
+            {"OPENROUTER_API_KEY": "or-key"},
+            {},
+            (1, 0, 0),
+            [(_OPENROUTER_KEY_CHECK, {"Authorization": "Bearer or-key"})],
+            "Memory LLM (openrouter/m): OPENROUTER_API_KEY valid",
+            id="exported-variable",
+        ),
+        # Mem0 reads only the process environment, so OPENROUTER_API_KEY in .env replaces no key.
+        pytest.param(
+            None,
+            {"OPENROUTER_API_KEY": "or-key"},
+            {},
+            {"openrouter": "sk-dashboard"},
+            (1, 0, 0),
+            [(_OPENROUTER_KEY_CHECK, {"Authorization": "Bearer sk-dashboard"})],
+            f"Memory LLM (openrouter/m): {_DASHBOARD} valid",
+            id="env-file-variable",
+        ),
+    ],
+)
+def test_memory_llm_openrouter_key_is_not_checked_only_when_mem0_sends_the_exported_variable_instead(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seeded: str | None,
+    env_file: dict[str, str],
+    exported: dict[str, str],
+    dashboard: dict[str, str],
+    expected: tuple[int, int, int],
+    sent_request: list[tuple[str, dict[str, str]]],
+    line: str,
+) -> None:
+    """Mem0 sends an exported OPENROUTER_API_KEY in place of any other key, whatever name doctor gives the stored key."""
+    seeds = _seeds_file(tmp_path, "openrouter", seeded) if seeded else {}
+    runtime_paths = _runtime_with_env(tmp_path, {**env_file, **seeds}, exported, dashboard=dashboard)
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": "openrouter", "config": {"model": "m"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == expected
+    assert sent == sent_request
+    assert line in " ".join(capsys.readouterr().out.split())
+
+
+def test_doctor_names_a_rejected_key_by_where_it_came_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A rejected key saved in the dashboard is reported as that key, not as the variable the user may also set."""
+    runtime_paths = _runtime_with_env(tmp_path, {"OPENAI_API_KEY": "sk-env"}, dashboard={"openai": "sk-dashboard"})
+    monkeypatch.setattr(
+        "mindroom.cli.doctor.httpx.get",
+        lambda url, **_kwargs: httpx.Response(401, request=httpx.Request("GET", url)),
+    )
+    config = Config(
+        models={"default": ModelConfig(provider="openai", id="m")},
+        memory={"backend": "mem0", "llm": {"provider": "openai", "config": {"model": "m"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_providers(config, runtime_paths) == (0, 1, 0)
+    assert _check_memory_llm(config, runtime_paths) == (0, 1, 0)
+    output = " ".join(capsys.readouterr().out.split())
+    assert f"openai: {_DASHBOARD} invalid (HTTP 401)" in output
+    assert f"Memory LLM (openai/m): {_DASHBOARD} invalid (HTTP 401)" in output
+    assert "sk-" not in output
+
+
 def test_memory_embedder_check_passes_on_healthy_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A healthy embedding round-trip counts as a pass."""
     monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
@@ -724,13 +1066,13 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "memory.llm.config.openai_base_url",
         ),
         # An OpenRouter gateway: an exported OPENROUTER_API_KEY sends Mem0's OpenAI client, for openrouter and openai
-        # alike, to openrouter_base_url with that key.
+        # alike, to openrouter_base_url with that key, which is the configured openrouter key here.
         (
             "openrouter",
             {"model": "m", "api_key": "gateway-key", "openrouter_base_url": "https://gateway.example/v1"},
             {"OPENROUTER_API_KEY": "gateway-key"},
             "memory.llm.config.api_key",
-            "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
+            "memory.llm.config.openrouter_base_url",
         ),
         (
             "openai",
@@ -739,9 +1081,16 @@ def test_memory_embedder_check_warns_when_endpoint_unreachable(
             "memory.llm.config.api_key",
             "memory.llm.config.openrouter_base_url, OPENROUTER_API_KEY",
         ),
-        # The exported OPENROUTER_API_KEY alone takes an openai memory LLM to OpenRouter, and it replaces a configured
-        # openrouter key.
+        # The exported OPENROUTER_API_KEY alone takes an openai memory LLM to OpenRouter, even with that same key, and it
+        # replaces a configured openrouter key.
         ("openai", {"model": "m"}, {"OPENROUTER_API_KEY": "or-key"}, "OPENAI_API_KEY", "OPENROUTER_API_KEY"),
+        (
+            "openai",
+            {"model": "m", "api_key": "or-key"},
+            {"OPENROUTER_API_KEY": "or-key"},
+            "memory.llm.config.api_key",
+            "OPENROUTER_API_KEY",
+        ),
         (
             "openrouter",
             {"model": "m", "api_key": "sk-or-config"},
@@ -774,8 +1123,9 @@ def test_memory_llm_key_is_not_checked_wherever_an_endpoint_setting_or_variable_
     assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
     assert sent == []
     output = " ".join(capsys.readouterr().out.split())
+    subject = f"Memory LLM ({provider}/m)"
     assert (
-        f"Memory LLM: {key_name} not checked: {reason} may send it elsewhere or send another key in its place" in output
+        f"{subject}: {key_name} not checked: {reason} may send it elsewhere or send another key in its place" in output
     )
 
 
@@ -817,10 +1167,43 @@ def test_memory_llm_key_is_checked_at_the_provider_s_own_api_without_endpoint_se
     assert sent == [sent_request]
 
 
+def test_memory_llm_lines_name_a_model_that_looks_like_markup_as_written(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every memory LLM key line names the provider and model, and a bracketed model reaches the output verbatim."""
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": "openai", "config": {"model": "[/m]"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, _runtime_with_env(tmp_path, {})) == (0, 0, 1)
+    assert "Memory LLM (openai/[/m]): OPENAI_API_KEY not set" in capsys.readouterr().out
+
+
+def test_memory_llm_of_a_provider_without_a_shared_key_is_not_probed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A provider MindRoom keeps no shared key for has no key check, so doctor warns that it could not validate one."""
+    runtime_paths = _runtime_with_env(tmp_path, {})
+    sent = _record_key_checks(monkeypatch)
+    config = Config(
+        memory={"backend": "mem0", "llm": {"provider": "litellm", "config": {"model": "m"}}},
+        router=RouterConfig(model="default"),
+    )
+
+    assert _check_memory_llm(config, runtime_paths) == (0, 0, 1)
+    assert sent == []
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Memory LLM (litellm/m): could not validate API key (no key check for this provider)" in output
+
+
 @pytest.mark.parametrize(
     ("env_file", "expected", "urls"),
     [
-        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models?key=shared"]),
+        ({}, (1, 0, 0), ["https://generativelanguage.googleapis.com/v1beta/models"]),
         ({"GOOGLE_GEMINI_BASE_URL": "https://embed-gateway.example"}, (0, 0, 1), []),
     ],
 )

@@ -21,6 +21,7 @@ from mindroom.credentials.sync import (
     get_embedder_api_key,
     get_ollama_host,
     get_secret_from_env,
+    get_stored_provider_key,
     sync_env_to_credentials,
 )
 from mindroom.providers.credentials import missing_model_api_key_provider
@@ -661,6 +662,25 @@ class TestCredentialsSync:
         )
 
         assert cm.get_api_key("openai") == "ui-set-key"
+
+    def test_a_dashboard_key_is_never_attributed_to_the_variable_holding_the_same_key(
+        self,
+        temp_credentials_dir: Path,
+    ) -> None:
+        """A key saved in the dashboard was not imported, whatever value the provider's variable has."""
+        CredentialsManager(base_path=temp_credentials_dir).save_credentials(
+            "openai",
+            {"api_key": "sk-same", "_source": "ui"},
+        )
+        runtime_paths = _runtime_paths(
+            temp_credentials_dir.parent,
+            shared_credentials_dir=temp_credentials_dir,
+            process_env={"OPENAI_API_KEY": "sk-same"},
+        )
+        sync_env_to_credentials(runtime_paths=runtime_paths)
+
+        key = get_stored_provider_key("openai", runtime_paths)
+        assert (key.api_key, key.imported, key.import_variable) == ("sk-same", False, None)
 
     def test_sync_env_does_not_overwrite_unreadable_existing_credentials(
         self,

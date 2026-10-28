@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import threading
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -11,15 +13,19 @@ import httpx
 import pytest
 from anthropic import AuthenticationError
 from anthropic.types import Message as AnthropicMessage
-from mem0.memory.storage import SQLiteManager
+from chromadb.api.rust import RustBindingsAPI
+from mem0.embeddings.base import EmbeddingBase
+from mem0.utils.factory import EmbedderFactory
 
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig, _MemoryEmbedderConfig, _MemoryLLMConfig
 from mindroom.config.models import EmbedderConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
 from mindroom.memory import add_agent_memory, list_all_agent_memories, search_agent_memories, store_conversation_memory
+from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -75,6 +81,14 @@ class _TableEmbedder:
         return self.embed(texts, purpose=purpose)
 
 
+class _TableLocalEmbedding(EmbeddingBase):
+    """Replace Mem0's huggingface embedder, which both local providers load, with the table vectors, offline."""
+
+    def embed(self, text: str, memory_action: str | None = None) -> list[float]:
+        del memory_action
+        return list(_VECTORS.get(text, _OTHER_TEXT_VECTOR))
+
+
 def _claude_reply(*, facts: list[str], thinking_first: bool) -> AnthropicMessage:
     """Return a Claude message carrying Mem0's extraction JSON, after a thinking block as thinking models reply."""
     text_block = {"type": "text", "text": json.dumps({"memory": [{"text": fact} for fact in facts]})}
@@ -96,11 +110,13 @@ def _claude_reply(*, facts: list[str], thinking_first: bool) -> AnthropicMessage
 class _FakeAnthropicClient:
     """Answer every Messages API request with one canned reply, or raise it when it is an error."""
 
-    def __init__(self, reply: AnthropicMessage | Exception) -> None:
+    def __init__(self, reply: AnthropicMessage | Exception, prompts: list[str]) -> None:
         self.messages = self
         self._reply = reply
+        self._prompts = prompts
 
-    def create(self, **_: object) -> AnthropicMessage:
+    def create(self, **request: object) -> AnthropicMessage:
+        self._prompts.append(json.dumps(request["messages"]))
         if isinstance(self._reply, Exception):
             raise self._reply
         return self._reply
@@ -125,6 +141,7 @@ def config(tmp_path: Path) -> Config:
     agents = {
         "general": AgentConfig(display_name="General", role="General assistant"),
         "calculator": AgentConfig(display_name="Calculator", role="Calculator assistant"),
+        "mind": AgentConfig(display_name="Mind", role="Personal assistant", private=AgentPrivateConfig(per="user")),
     }
     teams = {"pair": TeamConfig(display_name="Pair", role="Pair of agents", agents=["general", "calculator"])}
     return bind_runtime_paths(Config(agents=agents, teams=teams, memory=memory), runtime_paths)
@@ -136,13 +153,21 @@ def claude_reply() -> list[AnthropicMessage | Exception]:
     return [_claude_reply(facts=[], thinking_first=False)]
 
 
+@pytest.fixture
+def extraction_prompts() -> list[str]:
+    """Collect the messages of every request the memory model receives."""
+    return []
+
+
 @pytest.fixture(autouse=True)
-def offline_mem0(tmp_path: Path, claude_reply: list[AnthropicMessage | Exception]) -> Iterator[None]:
-    """Run real Mem0 and Chroma with table embeddings, a canned Claude reply, and history kept under ``tmp_path``."""
+def offline_mem0(claude_reply: list[AnthropicMessage | Exception], extraction_prompts: list[str]) -> Iterator[None]:
+    """Run real Mem0 and Chroma with table embeddings and a canned Claude reply."""
     with (
         patch("mindroom.embeddings.factory.create_configured_embedder", return_value=_TableEmbedder()),
-        patch("anthropic.Anthropic", side_effect=lambda **_: _FakeAnthropicClient(claude_reply[0])),
-        patch("mem0.memory.main.SQLiteManager", side_effect=lambda _path: SQLiteManager(str(tmp_path / "history.db"))),
+        patch(
+            "anthropic.Anthropic",
+            side_effect=lambda **_: _FakeAnthropicClient(claude_reply[0], extraction_prompts),
+        ),
     ):
         yield
 
@@ -248,3 +273,80 @@ async def test_a_failed_memory_model_call_reaches_the_memory_tool_without_the_re
 
     assert result.startswith("Failed to store memory: LLM extraction failed: Error code: 401 - invalid x-api-key ")
     assert rejected_key not in result
+
+
+@pytest.mark.asyncio
+async def test_a_save_and_a_search_that_first_open_one_store_together_both_succeed(
+    config: Config,
+    claude_reply: list[AnthropicMessage | Exception],
+) -> None:
+    """After a restart, the last turn's memory save and the next message's search can first open one store together."""
+    config.memory.embedder.provider = "sentence_transformers"
+    first_start = threading.Event()
+    finish_first_start = threading.Event()
+    start_store = RustBindingsAPI.start
+
+    def slow_first_start(api: RustBindingsAPI) -> None:
+        # Chroma has registered the store's client and is starting it, which is when an overlapping build fails.
+        if not first_start.is_set():
+            first_start.set()
+            finish_first_start.wait(5)
+        start_store(api)
+
+    with (
+        patch.dict(EmbedderFactory.provider_to_class, {"huggingface": f"{__name__}.{_TableLocalEmbedding.__name__}"}),
+        patch("mindroom.memory.config.ensure_sentence_transformers_dependencies"),
+        patch.object(RustBindingsAPI, "start", slow_first_start),
+    ):
+        saving = asyncio.create_task(_remember(config, claude_reply, ["PR review"]))
+        assert await asyncio.to_thread(first_start.wait, 5)
+        searching = asyncio.create_task(_search(config))
+        # An overlapping build reaches the store during this wait and fails both operations.
+        await asyncio.wait({searching}, timeout=0.5)
+        finish_first_start.set()
+        await saving
+        await searching
+
+        assert [memory for memory, _ in await _search(config)] == ["PR review"]
+
+
+def _requester(requester_id: str) -> ToolExecutionIdentity:
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="mind",
+        requester_id=requester_id,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=f"session-{requester_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_requesters_messages_never_reach_another_requesters_private_memory_extraction(
+    config: Config,
+    extraction_prompts: list[str],
+) -> None:
+    """Each private instance keeps Mem0's recent-message context beside its own memories, not in one shared file."""
+    runtime_paths = runtime_paths_for(config)
+    alice = _requester("@alice:example.org")
+    bob = _requester("@bob:example.org")
+    for identity, prompt in ((alice, "My locker code is 4512."), (bob, "Plan my week.")):
+        await store_conversation_memory(
+            prompt,
+            "mind",
+            runtime_paths.storage_root,
+            identity.session_id,
+            config,
+            runtime_paths,
+            execution_identity=identity,
+        )
+
+    alice_extraction, bob_extraction = extraction_prompts
+    assert "4512" in alice_extraction
+    assert "Plan my week." in bob_extraction
+    assert "4512" not in bob_extraction
+    assert set(runtime_paths.storage_root.rglob("history.db")) == {
+        resolve_agent_storage("mind", config, runtime_paths, identity).state_root / "mem0" / "history.db"
+        for identity in (alice, bob)
+    }

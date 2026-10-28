@@ -279,6 +279,8 @@ def greeter_tools() -> type[Toolkit]:
     return GreeterTools
 ```
 
+Pass `instructions="..."` to `Toolkit.__init__` for guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions, while each function's docstring is that function's description.
+
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
 Other parameters receive a model's `"none"`, `"null"`, `"true"`, or `"false"` string, in any case, as `None` or a boolean.
@@ -752,46 +754,10 @@ Build clients only from the credentials the helpers return, without copies such 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
 See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-connections) for the plugin example, fields, and callback setup.
 
-## MCP via plugins (advanced)
+## MCP servers
 
-Configure MCP servers directly in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
-Use a plugin only when you need a custom wrapper around Agno `MCPTools`:
-
-```python
-from agno.tools.mcp import MCPTools
-from mindroom.plugin_api import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolStatus,
-    register_tool_with_metadata,
-)
-
-
-class FilesystemMCPTools(MCPTools):
-    def __init__(self, **kwargs):
-        super().__init__(
-            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
-            **kwargs,
-        )
-
-
-@register_tool_with_metadata(
-    name="mcp_filesystem",
-    # The filesystem server reads local paths that file_access cannot confine.
-    file_access=ToolFileAccess.UNCONFINED,
-    display_name="MCP Filesystem",
-    description="Tools from an MCP filesystem server",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-)
-def mcp_filesystem_tools():
-    return FilesystemMCPTools
-```
-
-Add the plugin and assign `mcp_filesystem` to agents as in the [minimal example](#minimal-example).
-MindRoom connects and disconnects the MCP session around each agent run.
+Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
+MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## Plugin skills
 

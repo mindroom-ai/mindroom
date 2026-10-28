@@ -8,6 +8,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
+- `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories and the recent conversation messages Mem0 reads when it extracts memories
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
@@ -30,6 +31,7 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
+The [conversation storage v2 upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) cover the `<name>.db.pre-storage-v2` backups it leaves beside each conversation database and what a database restored from a backup taken before that upgrade needs when it converts again.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.

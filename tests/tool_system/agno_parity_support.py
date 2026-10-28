@@ -284,8 +284,9 @@ def normalize_error_text(text: str) -> str:
 def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
     """Return the golden entry of one adapted toolkit: its texts for the model, then each function the adapter made.
 
-    ``instructions`` is what the system prompt shows, and ``guidance`` what the agent CLI and minimal mode show; the
-    functions are in Agno's async-run order, which the adapter keeps.
+    ``instructions`` is what the system prompt shows, and ``guidance`` what the agent CLI and minimal mode show, before
+    an agent drops the default ones that name a function it does not offer; the functions are in Agno's async-run
+    order, which the adapter keeps.
     """
     entry = {
         "instructions": adapted.instructions,

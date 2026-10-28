@@ -1419,7 +1419,7 @@ async def test_a_call_the_output_limit_cut_off_is_answered_without_running_it(ro
             ),
         )
 
-    assert (record.content, len(bodies)) == (f"{_PARTIAL}ok", 2)
+    assert (record.content, len(bodies)) == (f"{_PARTIAL}\n\nok", 2)
     assert _tool_results(route, bodies[1]) == [("call_1", CUT_OFF_TOOL_CALL_RESULT)]
     if route == "openai_responses":
         assert bodies[1]["previous_response_id"] == "resp_1"

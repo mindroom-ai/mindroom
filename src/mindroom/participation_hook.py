@@ -25,7 +25,6 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import complete
 from mindroom.logging_config import get_logger
 from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecision
-from mindroom.providers.tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -102,16 +101,10 @@ async def _request_decision(model: ModelProvider, gate: ParticipationGate, state
     decision_messages = [deepcopy(message) for message in state.messages]
     decision_messages.append(Message(role="user", content=render_transient_context([prompt])))
     try:
-        with without_provider_tools():
-            turn = await complete(
-                model,
-                replace(
-                    state.request_template,
-                    messages=decision_messages,
-                    tools=state.tools,
-                    tool_choice="none",
-                ),
-            )
+        turn = await complete(
+            model,
+            replace(state.request_template, messages=decision_messages, tools=state.tools, tool_choice="none"),
+        )
         assert state.record.metrics is not None
         identity = model.identity
         state.record.metrics.add(turn.usage, model_id=identity.id, provider=identity.provider_name)

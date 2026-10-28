@@ -98,12 +98,15 @@ models:
       project_id: your-gcp-project
       region: global
 
-  # Local via Ollama
+  # Local via Ollama (see Ollama Context Size)
   local:
     provider: ollama
     id: qwen3.8:27b
-    context_window: 256000
+    context_window: 32768
     host: http://localhost:11434
+    extra_kwargs:
+      options:
+        num_ctx: 32768
 
   # OpenRouter (access to many model providers)
   openrouter:
@@ -164,7 +167,7 @@ They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effor
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
 Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
 With Sonnet 5.5's `between_tools` or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
-A reply that resumes after a tool approval or a delegation can also answer without earlier reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
+A reply that resumes after a tool approval or a delegation keeps its reasoning, unless its history was trimmed to fit the context window or another reply or a compaction ran in the conversation while it waited; then it answers without that reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
 ## Environment Variables
 
@@ -428,6 +431,13 @@ models:
 Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
 The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so confirm access, or switch to its `fable` alternative or `id: anthropic.claude-sonnet-5`.
 
+## Ollama Context Size
+
+Unless `extra_kwargs.options.num_ctx` is set, MindRoom sends Ollama no context size, so Ollama runs each model with its own default, which depends on the Ollama version and server and is often only a few thousand tokens.
+When a conversation is longer, Ollama drops its oldest messages to fit, without an error, so the model answers without seeing them.
+Set `extra_kwargs.options.num_ctx` to the context size Ollama should use, and `context_window` to the same value so MindRoom fits history into it (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)), as the `local` model in [Configuration Examples](#configuration-examples) does.
+A larger `num_ctx` needs more memory on the Ollama server.
+
 ## Built-In Synthetic Model
 
 Use `provider: synthetic` to run normal MindRoom conversations without an API key or model server, for example for load testing.
@@ -501,16 +511,16 @@ Some models reject sampling controls:
 
 ## Prompt Caching
 
-Claude and OpenAI Responses models keep shared agent instructions (identity, role, workspace context files, and tool instructions) separate from the current date and session context, so the shared part can be reused across conversations when the provider cache allows it.
+An agent's system prompt has a stable part (identity, role, instructions, workspace context files, tool instructions, skills, and knowledge bases) and a turn part (the current date, file memory, and system enrichment); the stable part stays the same across turns and conversations, so providers that cache prompts can reuse it.
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
 
 The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable prompt caching with a one-hour lifetime by default.
 The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching); other OpenRouter model families cache implicitly.
 Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's Claude cache breakpoints, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
-The `openai` Responses API and `codex` providers rely on provider-managed caching; on the public OpenAI API, GPT-5.6 and later also get an explicit cache breakpoint after the shared instructions.
+The `openai` Responses API and `codex` providers rely on provider-managed caching; on the public OpenAI API, GPT-5.6 and later also get an explicit cache breakpoint after the stable part of the system prompt.
 See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching) for eligibility and accounting.
-Set `extra_kwargs.cache_system_prompt: false` on a Responses model to send the instructions as one undivided system message.
+Set `extra_kwargs.cache_system_prompt: false` on a Responses model to send no explicit breakpoint.
 Chat Completions providers other than OpenRouter Claude routes keep their usual request format.
 
 Kimi Code caches repeated request prefixes automatically and reports them as `cached_tokens`.

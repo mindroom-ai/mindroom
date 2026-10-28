@@ -45,6 +45,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
 )
+from mindroom.conversation_state_writer import ReplySession, session_started_on_creation
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, is_automation_source_kind
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
@@ -183,7 +184,6 @@ from .response_lifecycle import (
     ResponseLifecycleCoordinator,
     ResponseLifecycleDeps,
     ResponseLifecycleReservation,
-    SessionStartedWatch,
 )
 
 
@@ -3621,30 +3621,6 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
 
-    async def _setup_session_watch(
-        self,
-        lifecycle: ResponseLifecycle,
-        *,
-        request: ResponseRequest,
-        tool_dispatch: ToolDispatchContext,
-        session_id: str,
-        scope: HistoryScope,
-        resolved_target: MessageTarget,
-    ) -> SessionStartedWatch:
-        """Pre-compute session:started eligibility for a response whose session lives in one history scope."""
-        return await lifecycle.setup_session_watch(
-            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-            session_id=session_id,
-            scope=scope,
-            room_id=request.room_id,
-            thread_id=resolved_target.resolved_thread_id,
-            create_storage=partial(
-                self.deps.state_writer.create_storage,
-                tool_dispatch.execution_identity,
-                scope=scope,
-            ),
-        )
-
     def _build_persist_response_event_id_effect(
         self,
         *,
@@ -4242,88 +4218,99 @@ class ResponseRunner:
         approval_suspension_handler: Callable[[PausedAttempt], Awaitable[FinalDeliveryOutcome]] | None = None,
         show_tool_calls: bool | None = None,
         participation: ParticipationGate | None = None,
+        reply_session: ReplySession | None = None,
     ) -> str | None:
-        """Run generation and settle its terminal lifecycle exactly once."""
+        """Run generation and settle its terminal lifecycle exactly once.
+
+        ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
+        row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
+        """
         deferred_error: BaseException | None = None
-        try:
-            # The attempt runs against the event the turn already adopted, which
-            # `progress` was seeded with, so it has no new event to report back.
-            await self._run_cancellable_response(
-                target=target,
-                response_function=response_function,
-                existing_event_id=_existing_event_id(request),
-                user_id=user_id,
-                on_cancelled=progress.note_task_cancelled,
-                show_stop_button=not _is_silent_schedule_response(request),
-            )
-        except ResponsePausedForApproval as error:
-            if approval_suspension_handler is None:
-                raise
-            frozen_show_tool_calls = _require_frozen_tool_visibility(show_tool_calls)
+        async with session_started_on_creation(
+            reply_session,
+            correlation_id=lifecycle.identity.correlation_id,
+            logger=self.deps.logger,
+        ):
             try:
-                progress.settle(
-                    await approval_suspension_handler(
-                        _paused_with_committed_presentation(
-                            error,
-                            show_tool_calls=frozen_show_tool_calls,
+                # The attempt runs against the event the turn already adopted, which
+                # `progress` was seeded with, so it has no new event to report back.
+                await self._run_cancellable_response(
+                    target=target,
+                    response_function=response_function,
+                    existing_event_id=_existing_event_id(request),
+                    user_id=user_id,
+                    on_cancelled=progress.note_task_cancelled,
+                    show_stop_button=not _is_silent_schedule_response(request),
+                )
+            except ResponsePausedForApproval as error:
+                if approval_suspension_handler is None:
+                    raise
+                frozen_show_tool_calls = _require_frozen_tool_visibility(show_tool_calls)
+                try:
+                    progress.settle(
+                        await approval_suspension_handler(
+                            _paused_with_committed_presentation(
+                                error,
+                                show_tool_calls=frozen_show_tool_calls,
+                            ),
                         ),
-                    ),
-                )
-            except Exception as suspension_error:
-                self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
-                progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
-                progress.settle(
-                    await self._finalize_failed_approval_handoff(
-                        target=target,
-                        request=request,
-                        failure_reason=progress.failure_reason,
-                    ),
-                )
-        except asyncio.CancelledError as error:
-            if current_task_is_process_shutdown():
-                raise
-            progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
-            self._settle_missing_delivery_outcome(
-                progress,
-                terminal_status="cancelled",
-                failure_reason=progress.failure_reason or "interrupted",
-            )
-            deferred_error = error
-        except Exception as error:
-            if current_task_is_process_shutdown():
-                if isinstance(error, StreamingDeliveryError) and isinstance(
-                    error.error,
-                    asyncio.CancelledError,
-                ):
-                    raise error.error from error
-                raise
-            if (
-                not progress.stage_started
-                and progress.delivery_outcome is None
-                and not (
-                    isinstance(error, StreamingDeliveryError) and error.transport_outcome.terminal_status == "cancelled"
-                )
-                and (skipped := _skip_unapproved_response(participation)) is not None
-            ):
-                self.deps.logger.exception("Response skipped before participation", error=str(error))
-                progress.settle(skipped)
-            elif isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
-                progress.settle(await streaming_delivery_error_handler(error))
-            elif progress.stage_started or progress.delivery_outcome is not None:
-                # Do not touch a tracked event after delivery starts: an adopted
-                # thinking-message stream can already hold the full reply.
-                self._log_delivery_failure(response_kind=lifecycle.identity.response_kind, error=error)
-                if progress.delivery_outcome is None:
-                    progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
-            else:
-                progress.failure_reason = str(error) or "delivery_failed_before_start"
-                progress.settle(
-                    self.deps.delivery_gateway.terminal_outcome_without_visible_event(
-                        terminal_status="error",
-                        failure_reason=progress.failure_reason,
-                    ),
+                    )
+                except Exception as suspension_error:
+                    self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
+                    progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
+                    progress.settle(
+                        await self._finalize_failed_approval_handoff(
+                            target=target,
+                            request=request,
+                            failure_reason=progress.failure_reason,
+                        ),
+                    )
+            except asyncio.CancelledError as error:
+                if current_task_is_process_shutdown():
+                    raise
+                progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
+                self._settle_missing_delivery_outcome(
+                    progress,
+                    terminal_status="cancelled",
+                    failure_reason=progress.failure_reason or "interrupted",
                 )
                 deferred_error = error
+            except Exception as error:
+                if current_task_is_process_shutdown():
+                    if isinstance(error, StreamingDeliveryError) and isinstance(
+                        error.error,
+                        asyncio.CancelledError,
+                    ):
+                        raise error.error from error
+                    raise
+                if (
+                    not progress.stage_started
+                    and progress.delivery_outcome is None
+                    and not (
+                        isinstance(error, StreamingDeliveryError)
+                        and error.transport_outcome.terminal_status == "cancelled"
+                    )
+                    and (skipped := _skip_unapproved_response(participation)) is not None
+                ):
+                    self.deps.logger.exception("Response skipped before participation", error=str(error))
+                    progress.settle(skipped)
+                elif isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
+                    progress.settle(await streaming_delivery_error_handler(error))
+                elif progress.stage_started or progress.delivery_outcome is not None:
+                    # Do not touch a tracked event after delivery starts: an adopted
+                    # thinking-message stream can already hold the full reply.
+                    self._log_delivery_failure(response_kind=lifecycle.identity.response_kind, error=error)
+                    if progress.delivery_outcome is None:
+                        progress.failure_reason = progress.failure_reason or str(error) or "late_delivery_failure"
+                else:
+                    progress.failure_reason = str(error) or "delivery_failed_before_start"
+                    progress.settle(
+                        self.deps.delivery_gateway.terminal_outcome_without_visible_event(
+                            terminal_status="error",
+                            failure_reason=progress.failure_reason,
+                        ),
+                    )
+                    deferred_error = error
 
         if progress.delivery_outcome is None and (progress.cancelled or progress.failure_reason is not None):
             self._settle_missing_delivery_outcome(
@@ -4628,7 +4615,7 @@ class ResponseRunner:
         )
         self._note_pipeline_metadata(request, response_kind="team", used_streaming=use_streaming)
         show_tool_calls = self._show_tool_calls()
-        mode = TeamMode.COORDINATE if team_request.team_mode == "coordinate" else TeamMode.COLLABORATE
+        mode = TeamMode(team_request.team_mode)
         matrix_target_item = _matrix_message_target_item(
             resolved_target,
             matrix_message_available=any(
@@ -4674,14 +4661,6 @@ class ResponseRunner:
         self.deps.runtime.config.assert_team_agents_supported(
             [agent_name for agent_name in agent_names if agent_name != ROUTER_AGENT_NAME],
             allow_direct_private_agents=allow_direct_private_agents,
-        )
-        session_started_watch = await self._setup_session_watch(
-            lifecycle,
-            request=request,
-            tool_dispatch=tool_dispatch,
-            session_id=session_id,
-            scope=session_scope,
-            resolved_target=resolved_target,
         )
         orchestrator = self.deps.runtime.orchestrator
         if orchestrator is None:
@@ -4854,8 +4833,6 @@ class ResponseRunner:
                             raise
                         await persist_interrupted_team_turn()
                         raise
-                    finally:
-                        await lifecycle.emit_session_started(session_started_watch)
                 _raise_if_process_shutdown()
                 if request.pipeline_timing is not None:
                     request.pipeline_timing.mark("streaming_complete")
@@ -4918,7 +4895,6 @@ class ResponseRunner:
                                 await persist_interrupted_team_turn()
                                 raise
                     finally:
-                        await lifecycle.emit_session_started(session_started_watch)
                         await persist_failed_team_turn()
                     _raise_if_process_shutdown()
                 except asyncio.CancelledError as exc:
@@ -5031,6 +5007,7 @@ class ResponseRunner:
                 team_mode=mode.value,
             ),
             show_tool_calls=show_tool_calls,
+            reply_session=ReplySession(session_scope, tool_dispatch),
         )
 
     async def _run_cancellable_response(
@@ -5360,18 +5337,6 @@ class ResponseRunner:
         """Process a message and send a response without streaming."""
         request = self._request_with_locked_target(request, runtime.resolved_target)
         response_identity = self._response_identity(request, response_kind="ai")
-        lifecycle = self._build_lifecycle(
-            identity=response_identity,
-            request=request,
-        )
-        session_started_watch = await self._setup_session_watch(
-            lifecycle,
-            request=request,
-            tool_dispatch=runtime.tool_dispatch,
-            session_id=runtime.session_id,
-            scope=history_scope,
-            resolved_target=runtime.resolved_target,
-        )
         active_event_ids = await self._active_response_event_ids(request.room_id)
 
         def build_outcome(delivery: FinalDeliveryOutcome) -> _ResponseGenerationOutcome:
@@ -5392,17 +5357,15 @@ class ResponseRunner:
                 _skip_unapproved_response(runtime.participation, turn_recorder)
                 raise
             finally:
-                if not current_task_is_process_shutdown():
-                    await lifecycle.emit_session_started(session_started_watch)
-                    await self._persist_failed_turn(
-                        turn_recorder,
-                        is_team=False,
-                        session_scope=history_scope,
-                        session_id=runtime.session_id,
-                        execution_identity=runtime.tool_dispatch.execution_identity,
-                        run_id=run_id,
-                        response_event_id=_existing_event_id(request),
-                    )
+                await self._persist_failed_turn(
+                    turn_recorder,
+                    is_team=False,
+                    session_scope=history_scope,
+                    session_id=runtime.session_id,
+                    execution_identity=runtime.tool_dispatch.execution_identity,
+                    run_id=run_id,
+                    response_event_id=_existing_event_id(request),
+                )
             _raise_if_process_shutdown()
         except ResponsePausedForApproval:
             raise
@@ -5472,18 +5435,6 @@ class ResponseRunner:
         """Process a message and send a streamed response."""
         request = self._request_with_locked_target(request, runtime.resolved_target)
         response_identity = self._response_identity(request, response_kind="ai")
-        lifecycle = self._build_lifecycle(
-            identity=response_identity,
-            request=request,
-        )
-        session_started_watch = await self._setup_session_watch(
-            lifecycle,
-            request=request,
-            tool_dispatch=runtime.tool_dispatch,
-            session_id=runtime.session_id,
-            scope=history_scope,
-            resolved_target=runtime.resolved_target,
-        )
         # The streaming path keeps these caller-owned (unlike the non-streaming
         # path's returned _NonStreamingGeneration): the metadata dict must stay
         # live while the delivery gateway snapshots extra_content, and both
@@ -5500,23 +5451,20 @@ class ResponseRunner:
         existing_event_id = _existing_event_id(request)
         replaceable_placeholder = _replaceable_placeholder(request)
         try:
-            try:
-                with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
-                    transport_outcome = await self.generate_streaming_ai_response(
-                        request,
-                        identity=response_identity,
-                        run_id=run_id,
-                        runtime=runtime,
-                        history_scope=history_scope,
-                        active_event_ids=active_event_ids,
-                        turn_recorder=turn_recorder,
-                        tool_trace=tool_trace,
-                        run_metadata_content=run_metadata_content,
-                        pipeline_timing=request.pipeline_timing,
-                        visible_event_id_callback=on_delivery_started,
-                    )
-            finally:
-                await lifecycle.emit_session_started(session_started_watch)
+            with response_shutdown_phase(ResponseShutdownPhase.STREAMING_RESPONSE):
+                transport_outcome = await self.generate_streaming_ai_response(
+                    request,
+                    identity=response_identity,
+                    run_id=run_id,
+                    runtime=runtime,
+                    history_scope=history_scope,
+                    active_event_ids=active_event_ids,
+                    turn_recorder=turn_recorder,
+                    tool_trace=tool_trace,
+                    run_metadata_content=run_metadata_content,
+                    pipeline_timing=request.pipeline_timing,
+                    visible_event_id_callback=on_delivery_started,
+                )
             _raise_if_process_shutdown()
         except StreamingDeliveryError as error:
             if current_task_is_process_shutdown() and isinstance(
@@ -5967,4 +5915,5 @@ class ResponseRunner:
                 ),
                 show_tool_calls=runtime.show_tool_calls,
                 participation=participation,
+                reply_session=ReplySession(history_scope, runtime.tool_dispatch),
             )

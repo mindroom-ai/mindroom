@@ -162,18 +162,18 @@ def test_a_distance_differing_only_in_float32_last_bits_regenerates_as_recorded(
     """
     recorded = next(search["documents"] for search in SEARCH_GOLDENS["searches"] if "documents" in search)
     [index] = [
-        index for index, document in enumerate(recorded) if document["meta_data"]["distances"] == 0.604523241519928
+        index for index, document in enumerate(recorded) if document["meta_data"]["distance"] == 0.604523241519928
     ]
     on_aarch64 = deepcopy(recorded)
-    on_aarch64[index]["meta_data"] |= {"distances": 0.6045231819152832, "similarity_score": 0.6045231819152832}
+    on_aarch64[index]["meta_data"] |= {"distance": 0.6045231819152832}
     moved = deepcopy(recorded)
-    moved[index]["meta_data"]["distances"] = 0.6046
+    moved[index]["meta_data"]["distance"] = 0.6046
     replaced = deepcopy(on_aarch64)
     replaced[index]["content"] = "Another chunk."
 
     assert distances_as_recorded(on_aarch64, recorded) == recorded
-    assert distances_as_recorded(moved, recorded)[index]["meta_data"]["distances"] == 0.6046
-    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distances"] == 0.6045231819152832
+    assert distances_as_recorded(moved, recorded)[index]["meta_data"]["distance"] == 0.6046
+    assert distances_as_recorded(replaced, recorded)[index]["meta_data"]["distance"] == 0.6045231819152832
 
 
 @pytest.mark.parametrize("memory_search_available", [False, True])

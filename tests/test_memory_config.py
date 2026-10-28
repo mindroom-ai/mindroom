@@ -1034,18 +1034,20 @@ class TestMemoryConfig:
         assert Path(result["vector_store"]["config"]["path"]) == expected_chroma
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["sentence_transformers", "huggingface"])
     @patch("mindroom.memory.config.ensure_sentence_transformers_dependencies")
     @patch.object(AsyncMemory, "from_config")
     async def test_create_memory_instance_auto_installs_sentence_transformers(
         self,
         mock_from_config: MagicMock,
         mock_ensure_sentence_transformers_dependencies: MagicMock,
+        provider: str,
         tmp_path: Path,
     ) -> None:
-        """Creating a local-embedder Mem0 instance should trigger optional runtime install."""
+        """Both local embedders load Mem0's huggingface embedder, which imports sentence-transformers, so both install it."""
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(
-                provider="sentence_transformers",
+                provider=provider,
                 config=EmbedderConfig(model="sentence-transformers/all-MiniLM-L6-v2"),
             ),
             llm=None,
@@ -1070,7 +1072,7 @@ class TestMemoryConfig:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Local-embedder Mem0 checks dependencies and waits for a running install without stalling the event loop."""
+        """Mem0 checks dependencies and waits for a running install without stalling the event loop."""
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
         memory = MemoryConfig(
             embedder=_MemoryEmbedderConfig(

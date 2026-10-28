@@ -27,6 +27,7 @@ import type {
   EgressOAuthStatus,
   EgressRuleAuthType,
   EgressRuleSummary,
+  EgressScope,
 } from "./types";
 
 type RowsProps =
@@ -589,6 +590,37 @@ describe("connected accounts", () => {
     await expectNoAction(/Use an API key instead/);
   });
 
+  it("offers no key on a service with its own account, which uses only that account", async () => {
+    const own = { separate_account: true };
+    renderRows([withAccount({}, own)]);
+    expect(
+      screen.getByRole("button", {
+        name: "Connect GitHub for Agent Keys for GitHub",
+      }),
+    ).toBeEnabled();
+    await expectNoAction(/Use an API key instead/);
+    cleanup();
+    // Not even as the main action where its account cannot be connected.
+    renderRows([withAccount({ can_connect: false }, own)]);
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
+    await expectNoAction(/Use an API key instead/);
+    cleanup();
+    renderRows([
+      withAccount(
+        { connected: true, account_label: "octocat" },
+        { ...own, configured: true, active_source: "oauth" },
+      ),
+    ]);
+    await expectNoAction(/Use an API key instead/);
+    await expectNoAction(/^(Set|Replace|Remove) key for /);
+  });
+
+  it("says a service's own account is not connected yet, not that it is not set", () => {
+    renderRows([withAccount({}, { separate_account: true })]);
+    expect(within(row("GitHub")).getByText("Not connected")).toBeVisible();
+    expect(screen.queryByText("Not set")).toBeNull();
+  });
+
   it("lets a user without key rights connect a requester-scoped account", async () => {
     renderRows([withAccount({}, { is_shared: true, can_manage: false })], {
       agentName: "shared_dev",
@@ -855,6 +887,56 @@ describe("connected accounts", () => {
       );
     });
 
+    it.each<[EgressScope, boolean]>([
+      ["user_agent", false],
+      ["user", true],
+    ])(
+      "says what allowing a service's own account does on a %s agent, covering other agents only where they share it",
+      async (scope, coversOthers) => {
+        const own = { ...toolsOnly, separate_account: true };
+        renderRows([own], {
+          agent: {
+            displayName: "Personal Mind",
+            shared: false,
+            scope,
+            services: [own],
+          },
+        });
+        fireEvent.click(
+          screen.getByRole("button", { name: "Use account for GitHub" }),
+        );
+        const dialog = await screen.findByRole("dialog");
+        expect(dialog).toHaveTextContent(approvalBypass);
+        const covers =
+          "This covers each of your agents whose GitHub service uses this account.";
+        if (coversOthers) expect(dialog).toHaveTextContent(covers);
+        else expect(dialog).not.toHaveTextContent("This covers");
+      },
+    );
+
+    it("says a service's own account is not used yet, never that the tools use it", () => {
+      renderRows([{ ...toolsOnly, separate_account: true }]);
+      expect(
+        within(row("GitHub")).getByText(
+          "Connected, not used for Agent Keys yet",
+        ),
+      ).toBeVisible();
+      expect(screen.queryByText("Connected for tools only")).toBeNull();
+    });
+
+    it("names the header agents choose a service's own account with", () => {
+      const header = wholeText(
+        "Agents choose it with X-Agent-Keys-Service: team_calendar",
+      );
+      renderRows([
+        { ...toolsOnly, name: "team_calendar", separate_account: true },
+      ]);
+      expect(within(row("GitHub")).getByText(header)).toBeVisible();
+      cleanup();
+      renderRows([toolsOnly]);
+      expect(screen.queryByText(/X-Agent-Keys-Service/)).toBeNull();
+    });
+
     it("leaves the account alone when the confirmation is cancelled", async () => {
       renderRows([toolsOnly]);
       fireEvent.click(
@@ -973,6 +1055,285 @@ describe("connected accounts", () => {
         within(row("GitHub")).getByText("Connected for tools only"),
       ).toBeVisible();
       expect(screen.queryByRole("button")).toBeNull();
+    });
+  });
+
+  describe("read-only access", () => {
+    const driveAccount = {
+      provider: "google_drive",
+      display_name: "Google Drive",
+      connected: true,
+      account_label: "me@example.com",
+    };
+    const drive = (
+      account: Partial<EgressOAuthStatus> = {},
+      service: Partial<EgressCredentialService> = {},
+    ) =>
+      withAccount(
+        { ...driveAccount, ...account },
+        {
+          name: "drive",
+          display_name: "Drive",
+          read_only_supported: true,
+          ...service,
+        },
+      );
+    const toolsOnlyDrive = drive(
+      { reuse_enabled: false, reuse_access: null },
+      { configured: false, active_source: null },
+    );
+    const reuseBodies = () =>
+      vi
+        .mocked(fetch)
+        .mock.calls.filter(([input]) => String(input).endsWith("/oauth-reuse"))
+        .map(([, init]) => [init?.method, init?.body]);
+
+    it("offers read only, preselected, where the service supports it, and sends it", async () => {
+      const onChanged = vi.fn();
+      renderRows([toolsOnlyDrive], { onChanged });
+      fireEvent.click(
+        screen.getByRole("button", { name: "Use account for Drive" }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveAccessibleName(
+        "Use your Google Drive account for Agent Keys?",
+      );
+      // A compact control at the start, not stretched across the dialog's grid.
+      expect(within(dialog).getByRole("group", { name: "Access" })).toHaveClass(
+        "justify-self-start",
+      );
+      expect(
+        within(dialog).getByRole("radio", { name: "Read only" }),
+      ).toBeChecked();
+      expect(
+        within(dialog).getByRole("radio", { name: "Read and write" }),
+      ).not.toBeChecked();
+      expect(dialog).toHaveTextContent(
+        "will act as me@example.com with read-only access, without the approval prompts",
+      );
+      await pressInDialog("Use account");
+
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      expect(reuseBodies()).toEqual([
+        [
+          "PUT",
+          JSON.stringify({ acknowledge_approval_bypass: true, access: "read" }),
+        ],
+      ]);
+    });
+
+    it("sends read and write when the user picks it", async () => {
+      renderRows([toolsOnlyDrive]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Use account for Drive" }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      fireEvent.click(
+        within(dialog).getByRole("radio", { name: "Read and write" }),
+      );
+      expect(dialog).toHaveTextContent(
+        "will act as me@example.com with its full access",
+      );
+      await pressInDialog("Use account");
+
+      await waitFor(() =>
+        expect(reuseBodies()).toEqual([
+          [
+            "PUT",
+            JSON.stringify({
+              acknowledge_approval_bypass: true,
+              access: "read_write",
+            }),
+          ],
+        ]),
+      );
+    });
+
+    it("offers no choice and sends no level where the service has no read-only access", async () => {
+      renderRows([
+        withAccount(
+          { connected: true, account_label: "octocat", reuse_enabled: false },
+          { configured: false, active_source: null },
+        ),
+      ]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Use account for GitHub" }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      expect(within(dialog).queryByRole("radio")).toBeNull();
+      await pressInDialog("Use account");
+
+      await waitFor(() =>
+        expect(reuseBodies()).toEqual([
+          ["PUT", JSON.stringify({ acknowledge_approval_bypass: true })],
+        ]),
+      );
+      expect(screen.queryByText("Read and write", { exact: true })).toBeNull();
+    });
+
+    it("connects for Agent Keys at the chosen level", async () => {
+      vi.mocked(fetch).mockImplementation(async (input) =>
+        String(input).endsWith("/oauth-reuse")
+          ? noContent()
+          : json({ ...authorization, provider: "google_drive" }),
+      );
+      renderRows([
+        drive({
+          connected: false,
+          account_label: null,
+          reuse_enabled: false,
+          reuse_access: null,
+        }),
+      ]);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: "Connect Google Drive for Agent Keys for Drive",
+        }),
+      );
+      expect(
+        within(await screen.findByRole("dialog")).getByRole("radio", {
+          name: "Read only",
+        }),
+      ).toBeChecked();
+      await pressInDialog("Continue");
+
+      await waitFor(() =>
+        expect(popup.location.href).toBe(authorization.auth_url),
+      );
+      expect(reuseBodies()).toEqual([
+        [
+          "PUT",
+          JSON.stringify({ acknowledge_approval_bypass: true, access: "read" }),
+        ],
+      ]);
+    });
+
+    it("shows a read-only account's level and changes it to read and write after confirming", async () => {
+      const onChanged = vi.fn();
+      renderRows(
+        [
+          drive(
+            { reuse_access: "read" },
+            { configured: true, active_source: "oauth" },
+          ),
+        ],
+        { onChanged },
+      );
+      expect(within(row("Drive")).getByText("Read only")).toBeVisible();
+      fireEvent.click(await rowAction("Change to read and write for Drive"));
+      const dialog = await screen.findByRole("dialog");
+      expect(dialog).toHaveAccessibleName(
+        "Change Google Drive to read and write?",
+      );
+      expect(within(dialog).queryByRole("radio")).toBeNull();
+      expect(dialog).toHaveTextContent(
+        "will act as me@example.com with its full access, without the approval prompts",
+      );
+      expect(fetch).not.toHaveBeenCalled();
+      await pressInDialog("Change");
+
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      expect(reuseBodies()).toEqual([
+        [
+          "PUT",
+          JSON.stringify({
+            acknowledge_approval_bypass: true,
+            access: "read_write",
+          }),
+        ],
+      ]);
+    });
+
+    it("says requests are refused for an account allowed only to read where the service no longer offers read only", () => {
+      renderRows([
+        drive(
+          { reuse_access: "read" },
+          {
+            read_only_supported: false,
+            configured: true,
+            active_source: "oauth",
+          },
+        ),
+      ]);
+      const drives = row("Drive");
+      expect(within(drives).getByText("Needs read and write")).toBeVisible();
+      expect(
+        within(drives).getByText(
+          "Requests are refused until this account is changed to read and write.",
+        ),
+      ).toBeVisible();
+      expect(within(drives).queryByText("Using connected account")).toBeNull();
+    });
+
+    it("changes an account allowed only to read to read and write where the service no longer offers read only", async () => {
+      const onChanged = vi.fn();
+      renderRows(
+        [
+          drive(
+            { reuse_access: "read" },
+            {
+              read_only_supported: false,
+              configured: true,
+              active_source: "oauth",
+            },
+          ),
+          connectedGithub,
+        ],
+        { onChanged },
+      );
+      await expectNoAction(/^Change to /, row("GitHub"));
+      await expectNoAction("Change to read only for Drive");
+      fireEvent.click(await rowAction("Change to read and write for Drive"));
+      await pressInDialog("Change");
+
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      expect(reuseBodies()).toEqual([
+        [
+          "PUT",
+          JSON.stringify({
+            acknowledge_approval_bypass: true,
+            access: "read_write",
+          }),
+        ],
+      ]);
+    });
+
+    it("offers no level change for a disconnected account it would not apply to", async () => {
+      renderRows([
+        drive(
+          { connected: false, account_label: null, reuse_access: "read" },
+          { configured: false, active_source: null },
+        ),
+      ]);
+      expect(
+        screen.getByRole("button", {
+          name: "Connect Google Drive for Agent Keys for Drive",
+        }),
+      ).toBeVisible();
+      await expectNoAction(/^Change to /);
+    });
+
+    it("shows a read-and-write account's level and changes it to read only at once", async () => {
+      const onChanged = vi.fn();
+      renderRows(
+        [
+          drive(
+            { reuse_access: "read_write" },
+            { configured: true, active_source: "oauth" },
+          ),
+        ],
+        { onChanged },
+      );
+      expect(within(row("Drive")).getByText("Read and write")).toBeVisible();
+      fireEvent.click(await rowAction("Change to read only for Drive"));
+
+      await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+      expect(reuseBodies()).toEqual([
+        [
+          "PUT",
+          JSON.stringify({ acknowledge_approval_bypass: true, access: "read" }),
+        ],
+      ]);
     });
   });
 
@@ -2035,6 +2396,32 @@ describe("what a row says about how the key is sent", () => {
     renderRows([
       custom([rule("api.github.com", "bearer")], {
         oauth: { ...githubAccount, ...account },
+      }),
+    ]);
+    expect(within(row("httpbin.org")).getByText(note)).toBeVisible();
+  });
+
+  it.each<[string, Partial<EgressOAuthStatus>, string]>([
+    [
+      "its own account to connect",
+      {},
+      "Requests are refused until its own account is connected.",
+    ],
+    [
+      "its own account, connected but not used yet",
+      toolsOnly,
+      "Requests are refused until this account is used for Agent Keys.",
+    ],
+    [
+      "its own account that cannot be connected here",
+      { can_connect: false },
+      "Requests are refused until its own account is connected.",
+    ],
+  ])("never names a key for a service with %s", (_, account, note) => {
+    renderRows([
+      custom([rule("api.github.com", "bearer")], {
+        oauth: { ...githubAccount, ...account },
+        separate_account: true,
       }),
     ]);
     expect(within(row("httpbin.org")).getByText(note)).toBeVisible();

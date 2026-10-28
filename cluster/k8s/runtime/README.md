@@ -426,9 +426,13 @@ env:
 
 Helm replaces lists wholesale when it merges several values files, so an environment overlay cannot change one list entry without restating the whole list.
 `env.extra`, `env.envFrom`, `workers.kubernetes.agentVault.server.extraEnv`, `workers.kubernetes.agentVault.server.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
+So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolicy.extraIngress`, `networkPolicy.extraEgress`, `egressProxy.networkPolicy.extraEgress`, `workers.kubernetes.agentVault.server.networkPolicy.extraIngress`, and `workers.kubernetes.agentVault.server.networkPolicy.extraEgress`, and the `egressProxy.noProxy` hosts.
 
 - Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
 - An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
+- NetworkPolicy rule keys only identify the rule, and each `egressProxy.noProxy` map value is a host string.
+  Removing every entry of a rule list behaves like an empty list, so `apiIngressFrom` then admits every source to the API port.
+- `egressProxy.noProxy` defaults to the map `localhost`, `loopback-ipv4`, and `loopback-ipv6`, so a map adds hosts to those defaults while a list replaces them, with a Helm table warning.
 - A `null` entry removes an inherited entry, and a `null` field removes an inherited field, for example to replace `value` with `valueFrom`.
 - An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
 - Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
@@ -561,6 +565,10 @@ Set `approvedEgress.manageRuntimeConfig: false` to skip that flag when the autho
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
 
+The proxy runs as one pod, so evicting it during a node drain or cluster-autoscaler scale-down interrupts worker egress until its replacement is ready.
+Set `approvedEgress.podDisruptionBudget.create: true` to refuse such evictions while the proxy is ready; an unready proxy can still be evicted.
+A drain of the proxy's node then waits until you remove the budget or restart the proxy Deployment, which the budget does not block.
+
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
 ```yaml
@@ -574,10 +582,7 @@ egressProxy:
     namespace: mindroom
     port: 3128
   noProxy:
-    - localhost
-    - 127.0.0.1
-    - ::1
-    - internal-api.mindroom.svc.cluster.local
+    internal-api: internal-api.mindroom.svc.cluster.local
   networkPolicy:
     create: true
     proxyPodSelector:
@@ -880,31 +885,32 @@ It cannot be combined with `workers.kubernetes.agentVault`; to switch an existin
 ### Self-service for users
 
 With the broker on, users without dashboard access manage their own keys, services, account connections, and request log on the personal Connections page at `/connections/egress`; see [Connections pages](../../../docs/deployment/egress-broker.md#connections-pages).
-Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings, which the chart does not render for you:
+Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings:
 
 - **Trusted upstream auth.** The gateway in front of the runtime must authenticate users and sign a JWT.
-  This chart has no values for it, so set the `MINDROOM_TRUSTED_UPSTREAM_*` variables and an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
+  Configure it with the `trustedUpstreamAuth` values, and set an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
   The chart creates no ingress.
 - **`MINDROOM_CONNECTIONS_AGENT`.** Set it to a private agent (`private.per: user` or `user_agent`), as in the example, whenever more than one user can sign in through the gateway.
   Without it, every user the gateway admits gets full dashboard access, whatever `administrators` lists.
 
 ```yaml
+trustedUpstreamAuth:
+  enabled: true
+  jwtHeader: X-Trusted-Jwt
+  jwksUrl: https://gateway.example.com/.well-known/jwks.json
+  jwtAudience: mindroom-dashboard
+  jwtIssuer: https://gateway.example.com
+  jwtEmailClaim: email
+  jwtUserIdClaim: sub
+  jwtMatrixUserIdClaim: matrix_user_id
 env:
   extra:
     MINDROOM_PUBLIC_URL: "https://assistant.example.org"
     MINDROOM_CONNECTIONS_AGENT: personal
-    MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED: "true"
-    MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER: X-Trusted-Jwt
-    MINDROOM_TRUSTED_UPSTREAM_JWKS_URL: https://gateway.example.com/.well-known/jwks.json
-    MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE: mindroom-dashboard
-    MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER: https://gateway.example.com
-    MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM: email
-    MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM: sub
-    MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: matrix_user_id
 ```
 
-See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every variable, the Matrix identity options, and what users outside `administrators` can reach.
+See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every setting and what the chart checks, the Matrix identity options, and what users outside `administrators` can reach.
 Connecting accounts also needs the providers' [OAuth clients](../../../docs/oauth-framework.md#built-in-providers), and personal GitHub and Atlassian accounts need agents with worker scope `user` or `user_agent` unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](../../../docs/deployment/egress-broker.md#personal-accounts-and-shared-sandboxes).
 
 ## Matrix Managed Account Authentication

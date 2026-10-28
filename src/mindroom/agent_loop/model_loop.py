@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.tools import (
     PlannedCall,
+    RefusedCall,
+    answered_tool_batch,
     dispatch_tool_calls,
     failed_answer,
     media_follow_up,
@@ -24,7 +26,7 @@ from mindroom.agent_loop.tools import (
 )
 from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, model_provenance, usage_sums_attempts
 from mindroom.llm.provider import ModelRequest, ReasoningDelta, ReportedUsage, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement
 from mindroom.logging_config import get_logger
@@ -75,9 +77,7 @@ class LoopState:
 
 @dataclass(frozen=True, slots=True)
 class SendRequest:
-    """Send the request; ``messages`` replaces the outbound list for this request only, leaving the live list as is."""
-
-    messages: Sequence[Message] | None = None
+    """Send the request with the live messages as the hooks left them."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,10 +99,11 @@ class LoopHooks:
     """The extension points of one loop, each fired at a fixed stage.
 
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
-      ``state.messages`` in place (mid-turn compaction), end the loop (participation, the skill review's budget),
-      or send a projected message list for this request only (the approval receipt); the last projection wins.
+      ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
+      (participation, the skill review's budget).
     - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
-      when it returns result messages, they answer the batch in place of running it (the output-limit policy).
+      when it returns result messages, one per call in call order, they answer the batch in place of running it, and
+      each call is recorded and announced as a failed call (the output-limit policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
@@ -189,16 +190,16 @@ async def run_model_loop(
         request_template=request_template,
     )
     max_requests = None if max_tool_calls_per_turn is None else max_tool_calls_per_turn + _EXTRA_MODEL_REQUESTS
-    # A resume continues its run, so the calls that run already made count toward its limit.
-    progress = _Progress(calls_so_far=len(record.tools or ()))
+    # A resume continues its run, so the calls that run already made count toward its limit; the refusals that never
+    # counted stay out.
+    progress = _Progress(calls_so_far=len(record.tools or ()) - record.uncounted_tool_calls)
     if resumed is not None:
         async for event in _answer_resumed(resumed, state, progress, hooks):
             yield event
     while not (progress.stopped or progress.paused):
-        outbound = await _before_request(hooks, state, max_requests=max_requests)
-        if outbound is None:
+        if not await _before_request(hooks, state, max_requests=max_requests):
             break
-        request = replace(state.request_template, messages=tuple(outbound), tools=state.tools)
+        request = replace(state.request_template, messages=tuple(state.messages), tools=state.tools)
         progress.last_request = request
         turn: TurnCompleted | None = None
         events = _stream_turn(model, request, messages, metrics)
@@ -227,8 +228,8 @@ async def _before_request(
     state: LoopState,
     *,
     max_requests: int | None,
-) -> Sequence[Message] | None:
-    """Apply the request cap, then the pre-request hooks; return the messages to send, or None to end the loop."""
+) -> bool:
+    """Apply the request cap, then the pre-request hooks; return whether to send the request or end the loop."""
     if max_requests is not None and state.request_index >= max_requests:
         logger.warning(
             "tool_call_limit_reached",
@@ -236,15 +237,11 @@ async def _before_request(
             budget=max_requests - _EXTRA_MODEL_REQUESTS,
             model_requests=state.request_index,
         )
-        return None
-    outbound: Sequence[Message] = state.messages
+        return False
     for hook in hooks.before_request:
-        decision = await hook(state)
-        if isinstance(decision, EndRun):
-            return None
-        if decision.messages is not None:
-            outbound = decision.messages
-    return outbound
+        if isinstance(await hook(state), EndRun):
+            return False
+    return True
 
 
 def _accept_turn(
@@ -255,9 +252,10 @@ def _accept_turn(
 ) -> None:
     """Record one finished request: the assistant message, its usage, and its text as the run's content so far.
 
-    The provider stamped the message with the model that answered it. A request that answers without content, as the
-    adapters report a turn without text, leaves the content as it was, so a resumed run keeps its paused text until the
-    model says something new.
+    The provider stamped the message with the model that answered it. The run's content is its requests' texts, a
+    blank line between them, so the text before and after a tool call reads as two paragraphs. A request that answers
+    without content, as the adapters report a turn without text, leaves the content as it was, so a resumed run keeps
+    its paused text until the model says something new.
     """
     metrics = state.record.metrics
     assert metrics is not None
@@ -266,10 +264,15 @@ def _accept_turn(
     state.request_index += 1
     if message.content is not None:
         progress.text_parts.append(message.get_content_string())
-        # TODO(simplify): the requests' texts join with no separator, so the run's text before and after a tool call
-        # runs together in its content. Join them with a blank line. Users (blocking replies), models reading a
-        # member's result, and stored data would notice. (#3075)
-        state.record.content = "".join(progress.text_parts)
+        state.record.content = _joined_texts(progress.text_parts)
+
+
+def _joined_texts(parts: Sequence[str]) -> str:
+    """Return a run's request texts as its content: one text as it is, several stripped and a blank line apart."""
+    texts = [part for part in parts if part.strip()]
+    if len(texts) <= 1:
+        return texts[0] if texts else "".join(parts)
+    return "\n\n".join(text.strip() for text in texts)
 
 
 async def _run_tool_batch(
@@ -280,34 +283,35 @@ async def _run_tool_batch(
     hooks: LoopHooks,
     max_tool_calls_per_turn: int | None,
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
-    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them."""
+    """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them.
+
+    Either way every call is recorded and announced in call order, and its answer reaches the model in that order.
+    """
     assert message.tool_calls
     answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
     if answers is not None:
-        progress.stopped = await _answer_batch(state.messages, answers, hooks.after_tool_batch)
-        return
-    if hooks.rewrite_tool_calls is not None:
-        message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, state.offered.functions)
-    batch = plan_tool_batch(
-        message.tool_calls,
-        state.offered.functions,
-        state.messages,
-        calls_so_far=progress.calls_so_far,
-        max_tool_calls_per_turn=max_tool_calls_per_turn,
-        entity=_entity(state.record),
-    )
+        batch = answered_tool_batch(answers)
+    else:
+        if hooks.rewrite_tool_calls is not None:
+            message.tool_calls = hooks.rewrite_tool_calls(message.tool_calls, state.offered.functions)
+        batch = plan_tool_batch(
+            message.tool_calls,
+            state.offered.functions,
+            calls_so_far=progress.calls_so_far,
+            max_tool_calls_per_turn=max_tool_calls_per_turn,
+            entity=_entity(state.record),
+        )
     _record_batch(state.record, batch)
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)
-    for call in batch.planned:
+    for call in batch.calls:
         yield ToolStarted(call.execution.call)
     executed = await dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
-    for call in batch.planned:
+    for call in batch.calls:
         if not call.execution.is_paused:
             yield ToolCompleted(call.execution.call)
-    results = [*batch.refused, *executed]
-    progress.calls_so_far += len(results)
-    progress.stopped = await _answer_batch(state.messages, results, hooks.after_tool_batch)
+    progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
+    progress.stopped = await _answer_batch(state.messages, batch.answers(executed), hooks.after_tool_batch)
     # A call of this batch paused, or a tool left a decision on the record (a delegation whose member paused).
     progress.paused = batch.paused or _waits_for_decision(state.record)
 
@@ -442,9 +446,7 @@ async def _stream_turn(
                 provider_data = model_provenance(identity.id, identity.provider_name)
                 # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
                 sums_attempts = (
-                    (turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
-                    if turn is not None
-                    else reported.sums_attempts
+                    usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
                 )
                 if sums_attempts:
                     # Usage that sums retried attempts must not read as one request's.
@@ -460,10 +462,15 @@ def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelId
 
 
 def _record_batch(record: AnyRunRecord, batch: ToolBatch) -> None:
-    """Add the batch's executions to the record, and a requirement for each paused one."""
+    """Add every call's execution to the record in call order, refused ones included.
+
+    Each paused call also adds its requirement, and each refusal that does not count toward the tool-call limit is
+    counted in ``uncounted_tool_calls``, so a resume charges the limit only for the calls that count.
+    """
     if record.tools is None:
         record.tools = []
-    for call in batch.planned:
+    record.uncounted_tool_calls += sum(isinstance(call, RefusedCall) and not call.counts for call in batch.calls)
+    for call in batch.calls:
         record.tools.append(call.execution)
         if call.execution.is_paused:
             if record.requirements is None:

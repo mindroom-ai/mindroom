@@ -12,7 +12,9 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools, _render_fact
+from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools, _render_fact, with_knowledge_graph
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import (
     GraphFact,
@@ -51,6 +53,12 @@ FACT = GraphFact(
     ],
     source_count=1,
 )
+
+
+class _DocsIndex:
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        del query, limit
+        return [SearchHit(content="Atlas runbook")]
 
 
 @dataclass
@@ -154,6 +162,44 @@ async def test_search_graph_reads_only_the_callers_graph(tmp_path: Path, store: 
     assert "tool_results: room !r thread $t; calls: get_repo 1a2b (2026-01-05)" in text
     # Ids are only for agents that may edit the graph.
     assert "id: " not in text
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_finds_facts_in_the_callers_graph(tmp_path: Path, store: _Store) -> None:
+    """``search_knowledge_base`` also returns the caller's graph facts, labelled as graph facts."""
+    config = _config(private=True)
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=ALICE)
+    knowledge = with_knowledge_graph(None, "mind", config, paths, identity)
+
+    hits = await knowledge.asearch("who leads Atlas")
+
+    assert store.queries == [(graph_scope("mind", config, paths, identity).graph_name, "who leads Atlas", 10)]
+    assert [(hit.content, hit.meta_data) for hit in hits] == [(_render_fact(FACT), {"source": "knowledge_graph"})]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_keeps_the_agents_other_sources(tmp_path: Path, store: _Store) -> None:
+    """The graph joins the agent's knowledge bases instead of replacing them."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    docs = KnowledgeSource(KnowledgeSourceDescription("docs", "Runbooks."), _DocsIndex())
+    knowledge = with_knowledge_graph(AgentKnowledge(sources=(docs,)), "mind", _config(), paths, None)
+
+    hits = await knowledge.asearch("who leads Atlas")
+
+    assert [source.description.base_id for source in knowledge.sources] == ["docs", "knowledge_graph"]
+    assert [hit.content for hit in hits] == ["Atlas runbook", _render_fact(FACT)]
+    assert len(store.queries) == 1
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_fails_rather_than_finding_nothing_in_a_stopped_graph(tmp_path: Path) -> None:
+    """A graph that is not running is a failed source, so a graph-only search never looks empty."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    knowledge = with_knowledge_graph(None, "mind", _config(), paths, None)
+
+    with pytest.raises(RuntimeError, match="not running"):
+        await knowledge.asearch("who leads Atlas")
 
 
 def test_a_fact_with_more_sources_than_shown_says_how_many_more() -> None:

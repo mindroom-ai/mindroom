@@ -28,7 +28,9 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
+    EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_SESSION_STARTED,
+    AfterResponseContext,
     HookRegistry,
     SessionHookContext,
     hook,
@@ -43,6 +45,7 @@ from mindroom.response_runner import (
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError, UnfinishedStreamedReply
+from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
@@ -63,9 +66,10 @@ from tests.ai_user_id_helpers import (
 from tests.bot_helpers import (
     _handled_response_event_id,
     _stream_outcome,
+    unique_room_send_responses,
 )
 from tests.conftest import install_model_providers, seed_session
-from tests.fakes.scripted_model import Await, ScriptedModel
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -102,6 +106,11 @@ def _team_session(
         runs=list(runs or []),
         created_at=1,
     )
+
+
+def _start_team_session(store: ConversationStore, session_id: str, *, team_id: str = "ultimate") -> None:
+    """Make the store write that creates a team reply's session row, as the reply's first write does."""
+    store.update_metadata(_team_session(session_id, team_id=team_id), lambda _metadata: {"started": True})
 
 
 def _persisted_runs(store: ConversationStore) -> list[TeamRunRecord]:
@@ -164,6 +173,40 @@ async def test_generate_team_response_helper_preserves_raw_prompt_when_model_pro
     message = mock_team_response.await_args.kwargs["message"]
     assert "Describe this image" in message
     assert "Available attachment IDs: att_1" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team_mode", ["coordinate", "collaborate"])
+async def test_generate_team_response_helper_runs_the_team_in_its_mode(tmp_path: Path, team_mode: str) -> None:
+    """The team runs in the mode its request names."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+        patch(
+            "mindroom.response_runner.team_response",
+            new=AsyncMock(return_value="Team answer"),
+        ) as mock_team_response,
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=team_orchestrator(config, runtime_paths),
+        )
+
+        await coordinator.generate_team_response_helper(
+            _response_request(prompt="Plan the launch", user_id="@alice:localhost", thread_id="$thread-root"),
+            member_names=["general"],
+            team_mode=team_mode,
+        )
+
+    assert mock_team_response.await_args.kwargs["mode"] is TeamMode(team_mode)
 
 
 @pytest.mark.asyncio
@@ -644,10 +687,86 @@ async def test_generate_team_response_preserves_model_prompt(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_team_session_started_fires_once_for_the_reply_that_creates_its_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """The first team reply's own run save creates the team session; its hooks run once, before it is reported."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    store = _team_store(config, runtime_paths)
+    sequence: list[str] = []
+
+    @hook(EVENT_SESSION_STARTED)
+    async def started(ctx: SessionHookContext) -> None:
+        sequence.append(f"started:{ctx.scope.key}:{ctx.agent_name}:{ctx.session_id}:{ctx.thread_id}")
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def after(ctx: AfterResponseContext) -> None:
+        sequence.append(f"after:{ctx.result.envelope.body}")
+
+    # The leader answers both turns itself; the member never runs.
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer("Team hello"), answer("Team again")])})
+    orchestrator = team_orchestrator(config, runtime_paths)
+    orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
+    with (
+        patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=streaming)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+    ):
+        coordinator = _build_response_runner(
+            bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            storage_path=tmp_path,
+            requester_id="@alice:localhost",
+            hook_registry=HookRegistry.from_plugins([_plugin("session-hooks", [started, after])]),
+            team_history_storage=store,
+            message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+            orchestrator=orchestrator,
+        )
+        unique_room_send_responses(bot.client)
+        streamed = iter(range(1, 100))
+
+        async def consume_delivery(request: StreamingDeliveryRequest) -> StreamTransportOutcome:
+            rendered = "".join([str(chunk) async for chunk in request.response_stream])
+            event_id = f"$streamed{next(streamed)}"
+            request.visible_event_id_callback(event_id)
+            return _stream_outcome(event_id, rendered)
+
+        coordinator.deps.delivery_gateway.deliver_stream.side_effect = consume_delivery
+
+        for prompt, event_id in (("Hello", "$user_msg"), ("Hello again", "$user_msg2")):
+            await coordinator.generate_team_response_helper(
+                _response_request(
+                    prompt=prompt,
+                    reply_to_event_id=event_id,
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                ),
+                member_names=["general"],
+                team_mode="coordinate",
+            )
+
+    assert sequence == [
+        f"started:team:ultimate:ultimate:{TEAM_SESSION_ID}:$thread-root",
+        "after:Hello",
+        "after:Hello again",
+    ]
+    assert len(_persisted_runs(store)) == 2
+    # Both replies ran the delivery mode under test.
+    assert coordinator.deps.delivery_gateway.deliver_stream.await_count == (2 if streaming else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_by", ["stream", "interrupted record"])
 async def test_generate_team_response_helper_streaming_emits_session_started_after_persisted_delivery_error(
     tmp_path: Path,
+    stored_by: str,
 ) -> None:
-    """session:started should still fire for team streams that fail after persisting the session."""
+    """session:started fires for a team stream that fails after its session persisted, by the run or its record."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -707,7 +826,8 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             async def fake_stream() -> AsyncIterator[str]:
                 session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
-                seed_session(store, _team_session(session_id, team_id="ultimate"))
+                if stored_by == "stream":
+                    _start_team_session(store, session_id)
                 sequence.append("stream")
                 yield "Team hello"
 
@@ -732,6 +852,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         "deliver:Team hello",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
     ]
+    assert store.load_session(TEAM_SESSION_ID, "team") is not None
 
 
 @pytest.mark.asyncio
@@ -1604,7 +1725,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
             cancel_message = "cancel"
             session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
-            seed_session(store, _team_session(session_id, team_id="ultimate"))
+            _start_team_session(store, session_id)
             sequence.append("team")
             raise asyncio.CancelledError(cancel_message)
 
@@ -1693,7 +1814,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
                 cancel_message = "cancel"
                 session_id = kwargs["ctx"].session_id
                 assert isinstance(session_id, str)
-                seed_session(store, _team_session(session_id, team_id="ultimate"))
+                _start_team_session(store, session_id)
                 sequence.append("stream")
                 yield "Team hello"
                 raise asyncio.CancelledError(cancel_message)
@@ -1756,7 +1877,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
             session_id = kwargs["ctx"].session_id
             assert isinstance(session_id, str)
             cast("TurnRecorder", kwargs["turn_recorder"]).mark_interrupted(RunStatus.error)
-            seed_session(store, _team_session(session_id, team_id="team_general"))
+            _start_team_session(store, session_id, team_id="team_general")
             return "Team hello"
 
         mock_team_response.side_effect = fake_team_response

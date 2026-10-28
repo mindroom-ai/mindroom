@@ -155,12 +155,22 @@ class _UnknownOAuthProviderError(HTTPException):
     """The provider in the URL is not registered; its detail repeats the URL text, which browser pages never show."""
 
 
-def _load_provider(request: Request, provider_id: str) -> tuple[OAuthProvider, RuntimePaths]:
+def _load_provider(
+    request: Request,
+    provider_id: str,
+    credential_service: str | None = None,
+) -> tuple[OAuthProvider, RuntimePaths]:
+    """Return the registry's provider, storing its connection under `credential_service` when one is given.
+
+    Agent Keys stores the own account of a user's service under a credential service of its own; no route takes one.
+    """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     providers = load_oauth_providers_for_snapshot(snapshot)
     provider = providers.get(provider_id)
     if provider is None:
         raise _UnknownOAuthProviderError(status_code=404, detail=f"Unknown OAuth provider: {provider_id}")
+    if credential_service is not None:
+        provider = replace(provider, credential_service=credential_service)
     return provider, snapshot.runtime_paths
 
 
@@ -295,6 +305,7 @@ async def _issue_authorization_url(
     *,
     agent_name: str | None,
     connect_target: OAuthConnectTarget | None = None,
+    credential_service: str | None = None,
 ) -> OAuthConnectResponse:
     conversation_context = None
     if connect_target is not None:
@@ -324,6 +335,7 @@ async def _issue_authorization_url(
             browser_user_required=connect_target is None or connect_target.binding.worker_scope != "shared",
             # The page that started the flow, so the popup's last page can tell it how the flow ended.
             opener_origin=_validated_opener_origin(request.headers.get("origin"), provider, runtime_paths),
+            credential_service=credential_service,
         )
         auth_url = await provider.authorization_uri_async(
             runtime_paths,
@@ -793,9 +805,26 @@ def _oauth_success_origin(provider: OAuthProvider, runtime_paths: RuntimePaths) 
 @router.post("/{provider_id}/connect")
 async def connect(provider_id: str, request: Request, agent_name: str | None = None) -> OAuthConnectResponse:
     """Start a provider OAuth flow and return the external authorization URL."""
+    return await connect_account(provider_id, request, agent_name=agent_name, credential_service=None)
+
+
+async def connect_account(
+    provider_id: str,
+    request: Request,
+    *,
+    agent_name: str | None,
+    credential_service: str | None,
+) -> OAuthConnectResponse:
+    """Start the flow of the provider's connection, stored under `credential_service` when given (Agent Keys)."""
     await _require_oauth_api_user(request)
-    provider, runtime_paths = _load_provider(request, provider_id)
-    return await _issue_authorization_url(request, provider, runtime_paths, agent_name=agent_name)
+    provider, runtime_paths = _load_provider(request, provider_id, credential_service)
+    return await _issue_authorization_url(
+        request,
+        provider,
+        runtime_paths,
+        agent_name=agent_name,
+        credential_service=credential_service,
+    )
 
 
 @router.get("/{provider_id}/authorize")
@@ -1021,6 +1050,8 @@ async def _store_callback_credentials(
 ) -> bool:
     """Resolve and store one callback's exact credential target."""
     pending = consume_pending_oauth_request(request, provider.id, state)
+    if pending.credential_service is not None:
+        provider = replace(provider, credential_service=pending.credential_service)
     token_url = pending.token_url
     # LEGACY_COMPAT: Pending OAuth connect state without a bound token endpoint.
     # Legacy format: pending `dashboard_oauth_state` records whose data has no `token_url`.
@@ -1320,8 +1351,19 @@ async def agent_connection_status(
 @router.post("/{provider_id}/disconnect")
 async def disconnect(provider_id: str, request: Request, agent_name: str | None = None) -> dict[str, str]:
     """Remove scoped OAuth credentials for one provider while preserving tool settings."""
+    return await disconnect_account(provider_id, request, agent_name=agent_name, credential_service=None)
+
+
+async def disconnect_account(
+    provider_id: str,
+    request: Request,
+    *,
+    agent_name: str | None,
+    credential_service: str | None,
+) -> dict[str, str]:
+    """Remove the provider's connection, the one stored under `credential_service` when given (Agent Keys)."""
     await _require_oauth_api_user(request)
-    provider, runtime_paths = _load_provider(request, provider_id)
+    provider, runtime_paths = _load_provider(request, provider_id, credential_service)
     target = _resolve_oauth_credentials_target(
         request,
         provider,

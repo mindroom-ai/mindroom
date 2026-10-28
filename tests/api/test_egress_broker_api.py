@@ -254,7 +254,8 @@ def _client_with_agents(
     config_data["agents"] = agents
     config_data["defaults"].update(defaults)
     egress_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
-    return _admin_client(egress_config_file)
+    # A sandbox runner, so the agents' shell and python calls run in a worker, where the broker reaches them.
+    return _admin_client(egress_config_file, MINDROOM_SANDBOX_PROXY_URL="http://sandbox-runner.test")
 
 
 def _agent(tools: list[str], **extra: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -277,7 +278,8 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
     """The listing names the shared agents that reach the broker by their resolved tools, a preset's included.
 
     Agents whose keys belong to each requester (`user`, `user_agent`, private) are left out, and so is an agent
-    without a command tool or without the `egress_credentials` tool. Every scope the panel selects gets the same answer.
+    without a command tool, without the `egress_credentials` tool, or whose command tools run in the primary.
+    Every scope the panel selects gets the same answer.
     """
     client = _client_with_agents(
         egress_config_file,
@@ -290,6 +292,7 @@ def test_services_listing_names_the_agents_whose_keys_the_dashboard_sets(egress_
             "mine": _keys_agent(["shell"], private={"per": "user_agent"}),
             "notes": _keys_agent(["calculator"]),
             "coder": _agent(["shell"]),
+            "host_shell": _keys_agent(["shell"], worker_scope="shared", worker_tools=[]),
         },
     )
 
@@ -700,13 +703,15 @@ def _connect(client: TestClient, name: str, provider: str, agent_name: str | Non
     _finish_oauth(client, response, provider)
 
 
-def _allow(client: TestClient, name: str, agent_name: str | None = None) -> Any:  # noqa: ANN401
-    """Let Agent Keys use the service's connected account in the selected scope, confirming the approval bypass."""
-    return client.put(
-        f"/api/egress-broker/services/{name}/oauth-reuse",
-        params=_scope_params(agent_name),
-        json={"acknowledge_approval_bypass": True},
-    )
+def _allow(client: TestClient, name: str, agent_name: str | None = None, access: str | None = None) -> Any:  # noqa: ANN401
+    """Let Agent Keys use the service's connected account in the selected scope, confirming the approval bypass.
+
+    `access` is sent only when given.
+    """
+    body: dict[str, object] = {"acknowledge_approval_bypass": True}
+    if access is not None:
+        body["access"] = access
+    return client.put(f"/api/egress-broker/services/{name}/oauth-reuse", params=_scope_params(agent_name), json=body)
 
 
 def _connect_and_allow(client: TestClient, name: str, provider: str, agent_name: str | None = None) -> None:
@@ -715,7 +720,14 @@ def _connect_and_allow(client: TestClient, name: str, provider: str, agent_name:
     assert response.status_code == 204, response.text
 
 
-def _broker_reads(requester_id: str, scope: WorkerScope | None, agent: str, service: str, provider: str) -> object:
+def _broker_reads(
+    requester_id: str,
+    scope: WorkerScope | None,
+    agent: str,
+    service: str,
+    provider: str,
+    method: str = "GET",
+) -> object:
     """Return what the broker resolves for `service` in a tool call by `requester_id` on `agent` under `scope`."""
     from mindroom.api import main  # noqa: PLC0415
 
@@ -735,13 +747,17 @@ def _broker_reads(requester_id: str, scope: WorkerScope | None, agent: str, serv
     # An unscoped call's token names the worker it was routed to.
     claims = WorkerClaims.from_worker_target(replace(target, worker_key=target.worker_key or "v1:local:unscoped:w"))
     assert claims is not None
+    config = main._app_context(main.app).runtime_config
     return resolve_oauth_token(
         service=service,
         provider_id=provider,
-        config=main._app_context(main.app).runtime_config,
+        config=config,
         runtime_paths=paths,
         credentials_manager=get_runtime_credentials_manager(paths),
         worker_target=claims.to_worker_target(),
+        request=secrets.SecretRequest(method=method, path="/"),
+        read_only=config.egress_broker.services[service].read_only,
+        separate_account=False,
     )
 
 
@@ -891,6 +907,36 @@ def test_a_requester_scoped_opt_in_on_the_panel_is_the_dashboard_users_own(
     assert other == secrets.SecretMissing(provider="github", reuse_off=True, requester_owned=True)
 
 
+def test_status_reports_access_and_support(
+    oauth_broker_client: TestClient,
+    egress_config_file: Path,
+) -> None:
+    """The panel stores the level it is sent, read and write by default, and refuses read-only where it is not offered.
+
+    Each row says whether its service offers read-only access, and its account the level it is allowed at.
+    """
+    _opt_in_to_shared_workers(egress_config_file)
+    _connect(oauth_broker_client, "drive", "google_drive")
+    _connect(oauth_broker_client, "gh", "github")
+    before = _service(oauth_broker_client, "drive")
+
+    read = _allow(oauth_broker_client, "drive", access="read")
+    drive = _service(oauth_broker_client, "drive")
+    writes = _broker_reads("@alice:example.org", None, "any_unscoped_agent", "drive", "google_drive", method="PUT")
+    refused = _allow(oauth_broker_client, "gh", access="read")
+    gh_refused = _service(oauth_broker_client, "gh")
+    default = _allow(oauth_broker_client, "gh")
+    gh = _service(oauth_broker_client, "gh")
+
+    assert (before["read_only_supported"], before["oauth"]["reuse_access"]) == (True, None)
+    assert (read.status_code, default.status_code) == (204, 204), (read.text, default.text)
+    assert (drive["read_only_supported"], drive["oauth"]["reuse_access"]) == (True, "read")
+    assert writes == secrets.SecretReadOnly(provider="google_drive")
+    assert (refused.status_code, refused.json()["detail"]) == (409, "This service does not offer read-only access")
+    assert gh_refused["oauth"]["reuse_access"] is None
+    assert (gh["read_only_supported"], gh["oauth"]["reuse_access"]) == (False, "read_write")
+
+
 def test_allowing_an_account_on_the_panel_requires_acknowledging_the_approval_bypass(
     oauth_broker_client: TestClient,
 ) -> None:
@@ -901,9 +947,10 @@ def test_allowing_an_account_on_the_panel_requires_acknowledging_the_approval_by
         oauth_broker_client.put(url),
         oauth_broker_client.put(url, json={}),
         oauth_broker_client.put(url, json={"acknowledge_approval_bypass": False}),
+        oauth_broker_client.put(url, json={"acknowledge_approval_bypass": True, "access": "write"}),
     ]
 
-    assert [response.status_code for response in responses] == [422] * 3
+    assert [response.status_code for response in responses] == [422] * 4
     assert _service(oauth_broker_client, "drive")["oauth"]["reuse_enabled"] is False
 
 

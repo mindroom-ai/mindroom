@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from contextlib import nullcontext
@@ -21,9 +22,11 @@ from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_pa
 from mindroom.egress_broker import service as egress_service
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
+    EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
     HookRegistry,
+    ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
     default_timeout_ms_for_event,
@@ -147,7 +150,7 @@ def _function(toolkit: object, key: str, name: str) -> ToolFunction:
     return next(function for function in adapt_toolkit(toolkit, key=key).functions if function.name == name)
 
 
-def _local_shell(tmp_path: Path) -> _Shell:
+def _local_shell(tmp_path: Path, **shell_settings: str) -> _Shell:
     tmp_path.mkdir(parents=True, exist_ok=True)
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n", encoding="utf-8")
@@ -160,13 +163,19 @@ def _local_shell(tmp_path: Path) -> _Shell:
         "shell",
         runtime_paths,
         disable_sandbox_proxy=True,
-        tool_config_overrides={"extra_env_passthrough": "PLUGIN_SECRET"},
+        tool_config_overrides={"extra_env_passthrough": "PLUGIN_SECRET", **shell_settings},
         worker_target=None,
     )
     return _Shell(_function(toolkit, "shell", "run_shell_command"), sent=[], runtime=nullcontext)
 
 
-def _worker_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool_name: str, function_name: str) -> _Shell:
+def _worker_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tool_name: str,
+    function_name: str,
+    **shell_settings: str,
+) -> _Shell:
     for name, value in _PROCESS_ENV.items():
         monkeypatch.setenv(name, value)
     primary_paths, workspace, sent = _forward_proxy_to_seeded_runner(
@@ -180,7 +189,9 @@ def _worker_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool_name: str
         tool_name,
         primary_paths,
         runtime_config=live_config,
-        tool_config_overrides={"extra_env_passthrough": "PLUGIN_SECRET"} if tool_name == "shell" else None,
+        tool_config_overrides=(
+            {"extra_env_passthrough": "PLUGIN_SECRET", **shell_settings} if tool_name == "shell" else None
+        ),
         tool_init_overrides={"base_dir": str(workspace)},
         worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
     )
@@ -193,11 +204,21 @@ def _worker_tool(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool_name: str
 
 
 @pytest.fixture(params=["local", "worker"])
-def shell(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Shell:
-    """The shell tool running commands in the primary process or in a worker."""
+def make_shell(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Callable[..., _Shell]:
+    """Build the shell tool, with any shell tool settings, to run commands in the primary process or in a worker."""
     if request.param == "local":
-        return _local_shell(tmp_path)
-    return _worker_tool(monkeypatch, tmp_path, "shell", "run_shell_command")
+        return functools.partial(_local_shell, tmp_path)
+    return functools.partial(_worker_tool, monkeypatch, tmp_path, "shell", "run_shell_command")
+
+
+@pytest.fixture
+def shell(make_shell: Callable[..., _Shell]) -> _Shell:
+    """The shell tool running commands in the primary process or in a worker."""
+    return make_shell()
 
 
 def test_tool_environment_is_a_builtin_collector_event() -> None:
@@ -308,7 +329,7 @@ async def test_database_url_variables_reach_the_command_wherever_it_runs(shell: 
 
 def _broker_sets_the_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sandbox_proxy, "egress_broker_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr(sandbox_proxy, "egress_agent_scope", lambda _config, agent_name: agent_name)
+    monkeypatch.setattr(sandbox_proxy, "egress_agent_scope", lambda _config, agent_name, _runtime_paths: agent_name)
     monkeypatch.setattr(egress_service, "execution_env_for_worker", lambda *_args, **_kwargs: {"HTTPS_PROXY": "egress"})
 
 
@@ -368,7 +389,8 @@ async def test_a_removal_leaves_the_workspace_variables_of_a_worker_command(
 async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path: Path) -> None:
     """A dedicated worker still puts its virtualenv first on a command's `PATH` when a hook sets `PATH`.
 
-    The hook's `PATH` also wins over the one the workspace's `.mindroom/worker-env.sh` exports.
+    The hook's `PATH` also wins over the one the workspace's `.mindroom/worker-env.sh` exports, and only a directory a
+    hook prepends comes before the virtualenv.
     """
     config_path = tmp_path / "config.yaml"
     _write_general_agent_config(config_path)
@@ -410,6 +432,7 @@ async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path:
             args=[["bash", "-c", 'printf "%s\\n" "$PATH"; worker-venv-tool']],
             execution_env={"PATH": hook_path},
             execution_env_set=["PATH"],
+            execution_path_prepend=["/plugin/wrapper"],
         ),
         worker_runtime,
         prepared_worker=sandbox_runner.sandbox_worker_prep.PreparedWorkerRequest(
@@ -427,9 +450,81 @@ async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path:
 
     assert response.ok, response.error
     command_path, tool_output = str(response.result).splitlines()[-2:]
-    assert command_path.split(os.pathsep)[:2] == [str(venv_tool.parent), "/plugin/bin"]
+    assert command_path.split(os.pathsep)[:3] == ["/plugin/wrapper", str(venv_tool.parent), "/plugin/bin"]
     assert "/script/bin" not in command_path
     assert tool_output == "from-venv"
+
+
+def _executable(directory: Path, name: str, output: str) -> Path:
+    """Write an executable ``name`` into ``directory`` that prints ``output``, and return the directory."""
+    directory.mkdir(parents=True)
+    executable = directory / name
+    executable.write_text(f"#!/bin/sh\necho {output}\n", encoding="utf-8")
+    executable.chmod(0o755)
+    return directory
+
+
+@pytest.mark.asyncio
+async def test_a_hook_s_path_directory_comes_before_the_shell_tool_s_own(
+    make_shell: Callable[..., _Shell],
+    tmp_path: Path,
+) -> None:
+    """A directory a hook prepends wins over the shell tool's `shell_path_prepend`, so the command finds its wrapper."""
+    configured = _executable(tmp_path / "configured-bin", "gh", "configured")
+    wrapper = _executable(tmp_path / "plugin-bin", "gh", "plugin-wrapper")
+    shell = make_shell(shell_path_prepend=str(configured))
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def wrapper_first(ctx: ToolEnvironmentContext) -> None:
+        ctx.prepend_path(str(wrapper))
+
+    command = 'printf "%s|%s" "$(gh)" "$PATH"'
+    without_hook = (await shell.run(HookRegistry.empty(), command)).split("|")
+    with_hook = (await shell.run(_registry(wrapper_first), command)).split("|")
+
+    assert without_hook[0] == "configured"
+    assert with_hook[0] == "plugin-wrapper"
+    assert with_hook[1].split(os.pathsep)[:2] == [str(wrapper), str(configured)]
+
+
+_REFUSAL = (
+    "[TOOL CALL DECLINED]\n"
+    "Tool: run_shell_command\n"
+    "Reason: The proxy session is unavailable.\n\n"
+    "Adjust your approach — try a different tool or different arguments."
+)
+
+
+@pytest.mark.asyncio
+async def test_a_declining_hook_stops_the_command_wherever_it_would_run(shell: _Shell, tmp_path: Path) -> None:
+    """A hook that cannot prepare the call refuses it, as a `tool:before_call` hook declines one.
+
+    The command never runs or reaches a worker, the first declining hook in hook order gives the reason, and the model
+    and the after-call hooks read the refusal.
+    """
+    marker = tmp_path / "command-ran"
+    observed: list[tuple[object, bool]] = []
+
+    @hook(EVENT_TOOL_ENVIRONMENT, priority=10)
+    async def session_unavailable(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("PLUGIN_VALUE", "unused")
+        ctx.decline("The proxy session is unavailable.")
+
+    @hook(EVENT_TOOL_ENVIRONMENT, priority=20)
+    async def also_declines(ctx: ToolEnvironmentContext) -> None:
+        ctx.decline("A later hook's reason.")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def audit(ctx: ToolAfterCallContext) -> None:
+        observed.append((ctx.result, ctx.blocked))
+
+    registry = _registry(session_unavailable, also_declines, audit)
+    outcome = await shell.call(registry, {"args": ["bash", "-c", f"touch {marker}"]})
+
+    assert (outcome.is_error, outcome.content) == (True, _REFUSAL)
+    assert observed == [(_REFUSAL, True)]
+    assert not marker.exists()
+    assert shell.sent == []
 
 
 @pytest.mark.asyncio
@@ -460,7 +555,10 @@ async def test_concurrent_calls_in_two_replies_each_get_only_their_own_variables
 
 @pytest.mark.asyncio
 async def test_hooks_merge_in_hook_order_and_a_failing_hook_loses_its_changes(tmp_path: Path) -> None:
-    """A later hook's value wins, each hook edits only its own copy of the arguments, and a raising hook adds nothing."""
+    """A later hook's value wins, each hook edits only its own copy of the arguments, and a raising hook adds nothing.
+
+    A raising hook's decline is lost with its changes, so the call still runs.
+    """
     shell = _local_shell(tmp_path)
     seen_arguments: list[dict[str, Any]] = []
 
@@ -478,6 +576,7 @@ async def test_hooks_merge_in_hook_order_and_a_failing_hook_loses_its_changes(tm
     async def broken(ctx: ToolEnvironmentContext) -> None:
         ctx.set_env("PLUGIN_VALUE", "broken")
         ctx.unset_env("PLUGIN_SECRET")
+        ctx.decline("broken")
         msg = "hook bug"
         raise RuntimeError(msg)
 
@@ -630,3 +729,19 @@ def test_a_hook_cannot_name_an_invalid_variable(name: str) -> None:
         ctx.set_env("PLUGIN_VALUE", 1)
     with pytest.raises(ValueError, match="PATH cannot be removed"):
         ctx.unset_env("PATH")
+
+
+@pytest.mark.parametrize("directory", ["", "relative/bin", f"/one{os.pathsep}/two", "/a\0b", b"/usr/local/bin"])
+def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: object) -> None:
+    """A `PATH` entry must be one absolute directory, since a relative one would follow each command's working directory."""
+    ctx = ToolEnvironmentContext(
+        function_name="run_shell_command",
+        registered_toolkit="shell",
+        arguments={},
+        agent_name="mind",
+        room_id=None,
+        requester_id=None,
+    )
+
+    with pytest.raises(ValueError, match="one absolute directory"):
+        ctx.prepend_path(directory)

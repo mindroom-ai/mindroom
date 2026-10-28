@@ -2,6 +2,7 @@ import { hasCustomTemplate } from "./egressRuleAuth";
 import type {
   AuthoredEgressService,
   EgressAuth,
+  EgressOAuthProviderOption,
   EgressRuleAuthType,
   EgressValidation,
   EgressPreset,
@@ -30,6 +31,8 @@ export interface EditorOptions {
    * in which case the checks that need it are left to the server.
    */
   validation: EgressValidation | null;
+  /** The account logins the server offers, from the presets response; empty while it loads. */
+  providers: readonly EgressOAuthProviderOption[];
 }
 
 export const BROKERED_PLACEHOLDER = "mindroom-brokered";
@@ -58,6 +61,8 @@ interface ExplicitlyEmpty {
   displayName: "" | null | undefined;
   description: boolean;
   placeholders: boolean;
+  /** The preset service names its own login (`oauthProvider`, empty for none) instead of the preset's. */
+  presetLogin: boolean;
 }
 
 /** No field emptied on purpose: what a new service, or one that picked another preset, starts with. */
@@ -65,6 +70,7 @@ export const NOT_EXPLICITLY_EMPTY: ExplicitlyEmpty = {
   displayName: undefined,
   description: false,
   placeholders: false,
+  presetLogin: false,
 };
 
 /** What the editor shows; `serializeService` turns it into the authored service. */
@@ -82,6 +88,8 @@ export interface EgressServiceForm {
   /** A service that only limits paths: no key, account, or placeholders, and rules that never pick a credential. */
   restrictOnly: boolean;
   oauthProvider: string;
+  /** A user's own service with a login keeps an account of its own (`oauth_separate_account`). */
+  separateAccount: boolean;
   explicitlyEmpty: ExplicitlyEmpty;
 }
 
@@ -139,6 +147,7 @@ export function formFromService(
     restrictToRules: service?.restrict_to_rules ?? false,
     restrictOnly: service?.restrict_only ?? false,
     oauthProvider: service?.oauth_provider ?? "",
+    separateAccount: service?.oauth_separate_account ?? false,
     explicitlyEmpty: {
       displayName:
         displayName === null || displayName === "" ? displayName : undefined,
@@ -146,6 +155,7 @@ export function formFromService(
       placeholders:
         service?.placeholder_env !== undefined &&
         Object.keys(service.placeholder_env).length === 0,
+      presetLogin: preset !== "" && service?.oauth_provider !== undefined,
     },
   };
 }
@@ -264,6 +274,8 @@ export function serializeService(
     // An override written for this preset; another preset has its own login.
     authored.oauth_provider = initial.oauth_provider;
   }
+  // As the form holds it: the server refuses a combination it cannot serve, and an unchanged save keeps it.
+  if (form.separateAccount) authored.oauth_separate_account = true;
   if (form.restrictToRules) authored.restrict_to_rules = true;
   if (
     options.context === "operator" &&
@@ -271,6 +283,34 @@ export function serializeService(
   )
     authored.oauth_on_shared_workers = initial.oauth_on_shared_workers;
   return authored;
+}
+
+/**
+ * Whether the editor shows "Use its own account": for a personal agent's own service whose login (the service's
+ * own, else the preset's) is not one whose accounts belong to each user (GitHub, Atlassian), and always while the
+ * form has it, so it can be unticked.
+ */
+export function offersSeparateAccount(
+  form: EgressServiceForm,
+  {
+    context,
+    sharedTarget,
+    providers,
+  }: Pick<EditorOptions, "context" | "sharedTarget" | "providers">,
+  preset: EgressPreset | undefined,
+): boolean {
+  if (form.separateAccount) return true;
+  if (context !== "personal" || sharedTarget) return false;
+  const login =
+    form.preset === "" || form.explicitlyEmpty.presetLogin
+      ? form.oauthProvider.trim()
+      : preset?.oauth_provider;
+  return (
+    !!login &&
+    !providers.some(
+      (provider) => provider.id === login && provider.requester_scoped,
+    )
+  );
 }
 
 /** Whether a preset carries an account login. */
@@ -299,24 +339,43 @@ export function splitHostInput(value: string): { host: string; path: string } {
 export const MAX_NAME_LENGTH = 63;
 
 /**
- * The name a new service gets until the user types one: the preset's id, or
- * the first label of the first rule's host (`httpbin.org` gives `httpbin`).
- * When `takenNames` has it, the first free `{base}-2` or `{base}-3` instead;
- * with all three taken it stays the base, so saving names the clash.
+ * `text` as a service name: accents folded (`é` gives `e`), lowercase, spaces
+ * as `_`, what a name cannot hold dropped, and each run of `-` and `_` cut to
+ * its first, with none at either end. Letters that NFKD does not decompose,
+ * such as `ß`, `ø`, `æ`, and `ł`, are dropped, and the user can edit the name.
+ */
+function asName(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/([-_])[-_]+/g, "$1")
+    .slice(0, MAX_NAME_LENGTH)
+    .replace(/^[-_]+|[-_]+$/g, "");
+}
+
+/**
+ * The name a new service gets until the user types one: its display name
+ * (`Team calendar` gives `team_calendar`) when that leaves a letter, else the
+ * preset's id, else the first label of the first rule's host (`httpbin.org`
+ * gives `httpbin`). When `takenNames` has it, the first free `{base}-2` or
+ * `{base}-3` instead; with all three taken it stays the base, so saving names
+ * the clash.
  */
 export function suggestedName(
   form: EgressServiceForm,
   takenNames: readonly string[] = [],
 ): string {
-  let base = form.preset;
-  if (!base) {
-    const host = (form.rules[0]?.host ?? "").trim().toLowerCase();
-    const label = host.replace(/^\*\./, "").split(/[.:/]/)[0];
-    base = label
-      .replace(/[^a-z0-9_-]/g, "")
-      .replace(/^[-_]+/, "")
-      .slice(0, MAX_NAME_LENGTH);
-  }
+  const host = (form.rules[0]?.host ?? "").trim().toLowerCase();
+  // Digits alone, such as the `2` that `カレンダー 2` leaves, say nothing about the service.
+  const label = asName(form.displayName);
+  const base =
+    (/[a-z]/.test(label) ? label : "") ||
+    form.preset ||
+    asName(host.replace(/^\*\./, "").split(/[.:/]/)[0]);
   if (base === "") return "";
   for (const suffix of ["", "-2", "-3"]) {
     const candidate = `${base.slice(0, MAX_NAME_LENGTH - suffix.length)}${suffix}`;
@@ -338,6 +397,7 @@ export function usesMoreOptions(form: EgressServiceForm): boolean {
       (first.pathPrefix.trim() !== "" || first.port.trim() !== "")) ||
     form.restrictToRules ||
     form.oauthProvider.trim() !== "" ||
+    form.separateAccount ||
     form.placeholders.length > 0
   );
 }

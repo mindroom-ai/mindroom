@@ -68,7 +68,6 @@ from tests.history_helpers import (
     _summarizer,
     compact_runs,
     folded_run_ids,
-    latest_summary_model,
     replay_settings,
     seed_summary,
 )
@@ -227,7 +226,7 @@ def test_update_scope_state_on_latest_applies_update_to_freshest_row(tmp_path: P
     assert concurrent_session is not None
     concurrent_state = HistoryScopeState(force_compact_before_next_run=True)
     storage.update_metadata(concurrent_session, lambda metadata: _with_scope_state(metadata, _SCOPE, concurrent_state))
-    storage.save_runs(concurrent_session, [_completed_run("run-2")])
+    storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=False)
 
     seen_states: list[HistoryScopeState] = []
 
@@ -1411,7 +1410,6 @@ async def test_compaction_fallback_serves_later_chunks_state_and_outcome(tmp_pat
     assert persisted is not None
     assert persisted.summary is not None
     assert persisted.summary.text == "recovered summary"
-    assert latest_summary_model(storage, _SCOPE) == "fallback-model-id"
 
 
 @pytest.mark.asyncio

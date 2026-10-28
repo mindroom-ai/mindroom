@@ -437,7 +437,7 @@ Usage: `!config <operation>` - View and modify MindRoom configuration
 - `!config set <path> <value>` - Set a configuration value
 - `!config set agents.analyst.display_name "Research Expert"` - Change display name
 - `!config set models.default.id my-model` - Change default model
-- `!config set defaults.markdown false` - Disable markdown by default
+- `!config set defaults.markdown false` - Stop telling agents their replies are shown as Markdown
 - `!config set timezone America/New_York` - Set timezone
 
 **Path Syntax:**

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from copy import deepcopy
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -29,7 +28,7 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
-from tests.conftest import persist_runs, seed_session
+from tests.conftest import persist_runs, seed_session, stored_session_state
 from tests.history_helpers import store_fold
 
 if TYPE_CHECKING:
@@ -421,6 +420,38 @@ def test_persist_interrupted_replay_snapshot_preserves_newer_persisted_runs(tmp_
     assert [run.run_id for run in persisted.runs] == ["old1", "old2", "cancelled-run"]
 
 
+def test_an_interrupted_replay_replaces_a_stored_answer_where_it_sorted(tmp_path: Path) -> None:
+    """A failure after a turn's terminal save stores what the user saw over that answer, without moving it."""
+    storage = create_state_storage("test_agent", tmp_path)
+    session = seed_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="session-1",
+            owner_id="test_agent",
+            runs=[_completed_run("answered", "Full answer"), _completed_run("later", "Later answer")],
+            metadata={},
+            created_at=1,
+        ),
+    )
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="Please continue",
+        user_message_is_structured=False,
+        partial_text="Text the user saw",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+    )
+
+    persist_interrupted_replay_snapshot(storage=storage, session=session, run_id="answered", snapshot=snapshot)
+
+    persisted = storage.load_session("session-1", "agent")
+    assert persisted is not None
+    assert [run.run_id for run in persisted.runs] == ["answered", "later"]
+    assert "Text the user saw" in _assistant_text(persisted.runs[0])
+    assert "Full answer" not in _assistant_text(persisted.runs[0])
+
+
 @pytest.mark.parametrize("stored", [True, False], ids=["stored-session", "first-session"])
 def test_an_interrupted_replay_is_saved_as_the_session_its_scope_context_names(tmp_path: Path, *, stored: bool) -> None:
     """The scope context's stored session, else a first one under its session id, receives the replay run."""
@@ -559,25 +590,21 @@ def test_an_interrupted_replay_and_the_session_state_it_carries_commit_together_
     database = tmp_path / "sessions" / "test_agent.db"
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "CREATE TRIGGER refuse_replay BEFORE INSERT ON test_agent_sessions_runs "
+            "CREATE TRIGGER refuse_replay BEFORE INSERT ON test_agent_sessions_log_runs "
             "WHEN NEW.run_id = 'cancelled-run' BEGIN SELECT RAISE(ABORT, 'replay refused'); END",
         )
 
     with pytest.raises(sqlite3.IntegrityError, match="replay refused"):
         persist_interrupted_replay_snapshot(**replay)
 
-    fields = storage.read_session_fields("session-1")
-    assert fields is not None
-    assert fields.session_state == {}
+    assert stored_session_state(storage, "session-1") == {}
     assert session.stored_session_state == {}
 
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER refuse_replay")
     persist_interrupted_replay_snapshot(**replay)
 
-    fields = storage.read_session_fields("session-1")
-    assert fields is not None
-    assert fields.session_state == {"recovered": "value"}
+    assert stored_session_state(storage, "session-1") == {"recovered": "value"}
     # The replay run is saved through the session the state came from, which learns both.
     assert session.stored_session_state == {"recovered": "value"}
     assert [run.run_id for run in session.runs] == ["old1", "cancelled-run"]
@@ -649,9 +676,8 @@ def test_interrupted_replay_preserves_independent_usage(tmp_path: Path, *, is_te
     persisted = storage.load_session("session-1", kind)
     assert persisted is not None
     assert persisted.runs
-    linked_run = deepcopy(persisted.runs[0])
-    linked_run.metadata = {**(linked_run.metadata or {}), "matrix_response_event_id": "$reply"}
-    storage.save_runs(persisted, [linked_run])
+    # The reply link is the one metadata edit a later delivery makes.
+    assert storage.patch_run_metadata("session-1", persisted.runs[0].run_id, {"matrix_response_event_id": "$reply"})
 
     storage = create_state_storage("test_scope", tmp_path)
     persisted = storage.load_session("session-1", kind)
@@ -826,7 +852,7 @@ def test_an_interrupted_record_without_a_turn_recorder_leaves_out_what_its_folds
         "session-1",
         HistoryScope(kind="agent", scope_id="test_agent"),
         "stopped-run",
-        tools=[{"tool_call_id": "folded-call"}],
+        tool_call_ids=["folded-call"],
     )
     snapshot = build_interrupted_replay_snapshot(
         user_message="Please continue",

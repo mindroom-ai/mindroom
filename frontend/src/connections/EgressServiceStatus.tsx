@@ -1,5 +1,6 @@
 import { personalAccountRefusal, personalSandboxRefusal } from "./accountCopy";
 import {
+  refusedReadOnly,
   type RowAgent,
   type ServiceEditing,
   sharesAccount,
@@ -27,7 +28,8 @@ export function ServiceStatus({
     <>
       <StatusLabel
         tone={
-          oauth?.reset_required && !service.configured
+          (oauth?.reset_required && !service.configured) ||
+          refusedReadOnly(service)
             ? "attention"
             : service.configured
               ? "set"
@@ -40,6 +42,13 @@ export function ServiceStatus({
       {service.active_source !== "key" && oauth?.account_label && (
         <span className="text-xs wrap-anywhere">{oauth.account_label}</span>
       )}
+      {/* The level is a choice only where the service offers read only, but a read-only account says so anywhere. */}
+      {service.active_source === "oauth" &&
+        (service.read_only_supported || oauth?.reuse_access === "read") && (
+          <span className="text-xs text-muted-foreground">
+            {oauth?.reuse_access === "read" ? "Read only" : "Read and write"}
+          </span>
+        )}
       {service.active_source === "oauth" && sharesAccount(agent, oauth) && (
         <span className="text-xs text-muted-foreground">
           Shared with everyone using {agent.displayName}

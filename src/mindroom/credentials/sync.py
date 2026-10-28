@@ -53,6 +53,25 @@ class _CredentialSeedDeclaration:
     seed: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class _SeededCredentials:
+    service: str
+    credentials: dict[str, Any]
+    source_env_var: str
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredProviderKey:
+    """A provider's shared API key as the runtime reads it from the credential store, and where it came from."""
+
+    api_key: str | None
+    # Whether the startup import stored the key; otherwise it was saved in the dashboard or has no recorded source.
+    imported: bool
+    # The variable the import copies this key from now, such as OPENAI_API_KEY_FILE or MINDROOM_CREDENTIAL_SEEDS_FILE;
+    # None for a key it does not supply any more.
+    import_variable: str | None
+
+
 def _read_secret_from_env(name: str, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
     """Read a secret from NAME or NAME_FILE and return it with the variable that supplied it.
 
@@ -326,9 +345,9 @@ def _resolve_seed_credentials(
     return credentials
 
 
-def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
-    """Seed/update explicitly declared credential services."""
-    synced_count = 0
+def _declared_seed_credentials(runtime_paths: RuntimePaths) -> list[_SeededCredentials]:
+    """Return the credentials each valid seed declaration supplies, in declaration order."""
+    seeded: list[_SeededCredentials] = []
     for declaration in _load_declared_credential_seeds(runtime_paths):
         seed = declaration.seed
         raw_service = seed.get("service")
@@ -351,14 +370,21 @@ def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
             continue
         if credentials is None:
             continue
-        if _sync_service_credentials(
-            service=service,
-            credentials=credentials,
+        seeded.append(_SeededCredentials(service, credentials, declaration.source_env_var))
+    return seeded
+
+
+def _sync_declared_credential_seeds(runtime_paths: RuntimePaths) -> int:
+    """Seed/update explicitly declared credential services."""
+    return sum(
+        _sync_service_credentials(
+            service=seed.service,
+            credentials=seed.credentials,
             runtime_paths=runtime_paths,
-            env_var=declaration.source_env_var,
-        ):
-            synced_count += 1
-    return synced_count
+            env_var=seed.source_env_var,
+        )
+        for seed in _declared_seed_credentials(runtime_paths)
+    )
 
 
 def sync_env_to_credentials(runtime_paths: RuntimePaths) -> None:
@@ -439,6 +465,36 @@ def get_api_key_for_provider(provider: str, runtime_paths: RuntimePaths) -> str 
     if provider == "ollama":
         return None
     return _get_provider_service_api_key(provider, runtime_paths)
+
+
+def get_stored_provider_key(provider: str, runtime_paths: RuntimePaths) -> _StoredProviderKey:
+    """Return a provider's shared API key as ``get_api_key_for_provider`` resolves it, and where it came from.
+
+    Import never overwrites a key saved in the dashboard. An imported key comes from the variable whose current value
+    it is (``_import_variable``); a key imported from a variable or seed since removed or changed has none.
+    """
+    creds_manager = get_runtime_shared_credentials_manager(runtime_paths)
+    service, api_key = resolve_provider_service_api_key(provider_route(provider), creds_manager.get_api_key)
+    imported = (creds_manager.load_credentials(service) or {}).get("_source") == "env"
+    variable = _import_variable(service, api_key, runtime_paths) if imported and api_key else None
+    return _StoredProviderKey(api_key=api_key, imported=imported, import_variable=variable)
+
+
+def _import_variable(service: str, api_key: str, runtime_paths: RuntimePaths) -> str | None:
+    """Return the variable the import copies ``api_key`` into ``service`` from now: the provider's own, else a seed's.
+
+    It is a variable whose current value for the service is ``api_key``; a later seed for the service replaces an
+    earlier one and the provider's variable. Seeds are read only for a key the provider's variable does not supply, so
+    the warnings of a bad seed, which the import already logged, repeat only for a seeded key.
+    """
+    env_var = PROVIDER_ENV_KEYS.get(service)
+    secret = _read_secret_from_env(env_var, runtime_paths) if env_var else None
+    if secret is not None and secret[0] == api_key:
+        return secret[1]
+    for seed in _declared_seed_credentials(runtime_paths):
+        if seed.service == service and seed.credentials.get("api_key") == api_key:
+            return seed.source_env_var
+    return None
 
 
 def canonical_provider_service(service: str) -> str:

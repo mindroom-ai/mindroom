@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
 from mindroom.knowledge.legacy_chroma_storage import remove_legacy_chroma_storage
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
 from mindroom.knowledge.vector_store import (
     KnowledgeCollection,
     StoredRow,
@@ -38,12 +38,6 @@ logger = get_logger(__name__)
 
 
 _COLLECTION_PREFIX = "mindroom_knowledge"
-
-#: Source signature every indexed chunk carries beside its ``SOURCE_PATH_KEY``, so a collection doubles as an
-#: index from source path to the vectors and signature that path produced.
-SOURCE_MTIME_NS_KEY = "source_mtime_ns"
-SOURCE_SIZE_KEY = "source_size"
-SOURCE_DIGEST_KEY = "source_digest"
 
 #: Completed candidate entries whose vectors are confirmed per thread hop, so verifying a huge candidate still yields
 #: to the event loop and to cancellation.
@@ -121,9 +115,9 @@ def _row_metadata(
 ) -> dict[str, Any]:
     """Return one chunk's stored metadata, with the keys and values rows have always carried.
 
-    Search results show the model every stored key except ``name``, so the
-    set stays the one existing collections hold: the reader's own keys, the
-    source signature, and ``linked_to``, ``content_hash``, and ``content_id``.
+    New rows keep the set existing collections hold, the reader's own keys, the source signature, and ``linked_to``,
+    ``content_hash``, and ``content_id``, so a collection reads the same whichever release wrote its rows. Search hits
+    leave out the keys that serve indexing (``knowledge.vector_store``).
     """
     metadata: dict[str, Any] = {key: value for key, value in chunk.metadata.items() if value is not None}
     metadata.update(source_metadata)

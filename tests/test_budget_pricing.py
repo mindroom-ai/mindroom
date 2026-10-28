@@ -24,7 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
-from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
 from mindroom.providers.registry import build_model_provider
 
 if TYPE_CHECKING:
@@ -225,12 +225,12 @@ def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its
     install_mem0_usage_capture(llm, "openai")
     with counted_mem0_usage() as calls:
         llm.client.chat.completions.create()
-    extraction = mem0_usage_run(calls)
+    extraction = mem0_usage(calls)
     assert extraction is not None
 
     cost = run_cost_usd(
         extraction.metrics,
-        model_provider=extraction.model_provider,
+        model_provider=extraction.provider,
         model_id=extraction.model,
         prices=_price_table(config, _paths(tmp_path)).prices,
     )

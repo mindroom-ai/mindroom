@@ -52,7 +52,7 @@ from mindroom.dynamic_workflows.validation import (
     require_granted_participant_tools,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
+from mindroom.helper_usage import get_helper_usage_owner, record_run_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.response_turn import ResponsePausedForApproval
@@ -893,7 +893,7 @@ async def _run_room_agent_turn(context: ToolRuntimeContext, build: AgentBuild, p
     usage_owner = get_helper_usage_owner()
     invocation_id = uuid4().hex
     events = run_agent(
-        replace(build.spec, system_message=prompt_for_turn(build)),
+        replace(build.spec, system_messages=prompt_for_turn(build)),
         [Message(role="user", content=prompt)],
         ctx=RunContext(
             run_id=invocation_id,
@@ -904,9 +904,8 @@ async def _run_room_agent_turn(context: ToolRuntimeContext, build: AgentBuild, p
             None
             if usage_owner is None
             else partial(
-                record_helper_usage,
+                record_run_usage,
                 owner=usage_owner,
-                invocation_id=invocation_id,
                 kind="dynamic_workflow",
                 requester_id=context.requester_id,
             )

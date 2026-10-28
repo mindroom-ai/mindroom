@@ -23,8 +23,9 @@ if TYPE_CHECKING:
 type MediaKind = Literal["audio", "image", "file", "video"]
 type StopReason = Literal["end", "tool_use", "output_limit", "refusal", "content_filter", "incomplete"]
 type ToolChoice = Literal["none"]
-# How a route enforces an output schema: natively, by a JSON-schema response format, or only by JSON mode.
-type StructuredOutput = Literal["native", "json_schema", "json_mode"]
+# How a route enforces an output schema: natively, by a JSON-schema response format, by a forced call of the
+# ``structured_output_tools`` tool, whose arguments are the answer, or only by JSON mode.
+type StructuredOutput = Literal["native", "json_schema", "forced_tool", "json_mode"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -45,33 +46,57 @@ class ModelIdentity:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Capabilities:
-    """What a provider route supports, so policy code stops probing adapter classes."""
+    """What a provider route supports, so policy code stops probing adapter classes.
+
+    ``conservative_token_estimates`` marks a route whose tokenizer no local encoding matches and can count more
+    tokens than o200k for the same text, so compaction sizes its input by an upper bound.
+    """
 
     structured_output: StructuredOutput = "json_mode"
     omitted_media: frozenset[MediaKind] = frozenset()
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False
-    claude_family: bool = False
+    conservative_token_estimates: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolSpec:
     """A model-facing tool definition; ``parameters`` is the final JSON schema.
 
-    ``description`` and the flags are None when the tool never set them, so wires that send the field inside each
-    function definition omit it. The approval flags are not policy here.
+    ``description`` and ``strict`` are None when the tool never set them, so wires that send the field inside each
+    function definition omit it.
     """
 
     name: str
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None
-    # TODO(simplify): the approval flags exist only so OpenAI-family wires send them in each function definition.
-    # Stop sending them and drop them here. Models would notice: tool definitions change once. (#3075)
-    requires_confirmation: bool | None
-    external_execution: bool | None
-    approval_type: str | None
+
+
+# The one tool a ``forced_tool`` route is made to call for a request's output schema.
+STRUCTURED_OUTPUT_TOOL = "structured_output"
+
+
+def structured_output_tools(
+    structured_output: StructuredOutput,
+    schema: type[BaseModel] | None,
+) -> tuple[ToolSpec, ...]:
+    """Return the tools a request adds for its output ``schema`` on a route that enforces it as ``structured_output``.
+
+    A ``forced_tool`` route gets the one tool it must call to answer, whose arguments are the answer in ``schema``;
+    any other route, and a request without a schema, gets none.
+    """
+    if schema is None or structured_output != "forced_tool":
+        return ()
+    return (
+        ToolSpec(
+            name=STRUCTURED_OUTPUT_TOOL,
+            description="Give your answer as this tool's arguments.",
+            parameters=schema.model_json_schema(),
+            strict=None,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -371,6 +396,7 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
 
 
 __all__ = [
+    "STRUCTURED_OUTPUT_TOOL",
     "Capabilities",
     "DeferredTools",
     "MediaKind",
@@ -396,4 +422,5 @@ __all__ = [
     "UsageReported",
     "complete",
     "hosted_tool_started",
+    "structured_output_tools",
 ]

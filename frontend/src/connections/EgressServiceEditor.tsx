@@ -200,13 +200,14 @@ export function EgressServiceEditor({
     sharedTarget,
     presets,
     validation,
+    providers,
   };
   // Checked against the names the editor opened with: a save that is still
   // running may already have written this name into the page's own list.
   const [openedWithNames] = useState(takenNames);
   const addingLimit = initialRestrictOnly && !editing;
-  // A new service is named after its preset or host until the user types a
-  // name; a new limit's name counts as typed.
+  // A new service is named after its display name, preset or host until the
+  // user types a name; a new limit's name counts as typed.
   const [nameTyped, setNameTyped] = useState(addingLimit);
   const [form, setForm] = useState(() => {
     if (addingLimit)
@@ -222,6 +223,9 @@ export function EgressServiceEditor({
   });
   // A service that only limits repositories has no key, login, or website of its own.
   const limiting = form.restrictOnly;
+  // One with its own account signs in through Connect, so the form asks for
+  // no key and saves none typed before.
+  const takesKey = !limiting && !form.separateAccount;
   const [apiKey, setApiKey] = useState("");
   const [moreOpen, setMoreOpen] = useState(() => usesMoreOptions(form));
   const loadPresetsRef = useRef(loadPresets);
@@ -239,7 +243,10 @@ export function EgressServiceEditor({
   // them anew only after they change and keeps rules edited by hand until then.
   const appliedHelper = useRef<string | null>(restored.applied);
   const showGithubHelper = limiting ? restored.exact : looksLikeGithub(form);
-  const settings = { editing, takenNames: openedWithNames, service };
+  // A new service that starts from another, such as another account, is still
+  // new: the save writes it from the form alone.
+  const initial = editing ? service : null;
+  const settings = { editing, takenNames: openedWithNames, service: initial };
 
   // Writes the typed repositories into the form, or shows why they cannot be.
   const applyHelper = (): EgressServiceForm | null => {
@@ -375,7 +382,7 @@ export function EgressServiceEditor({
       : "Add service";
   const note =
     context === "personal" && agentName !== undefined
-      ? scopeNote(scope, agentName, scopeAgents)
+      ? scopeNote(scope, agentName, scopeAgents, form.separateAccount)
       : null;
   // Deleting takes the service from everyone the store serves, so say who that is.
   const deleteNote =
@@ -390,6 +397,11 @@ export function EgressServiceEditor({
   const overlaps = limiting
     ? []
     : overlapWarnings(form, preset, agentServices, name);
+  // A request picks a service with its own account by the header its box names, so one note stands in for the warnings.
+  const headerNote =
+    form.separateAccount && overlaps.length > 0
+      ? "Without this service's header, the usual routing order applies."
+      : null;
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -413,16 +425,22 @@ export function EgressServiceEditor({
   });
 
   // Another preset has its own defaults, so what the loaded service emptied on
-  // purpose no longer applies to it.
+  // purpose no longer applies to it. Back on the loaded preset, its own login
+  // applies again, as the save writes it, whatever login was picked under Custom.
   const choosePreset = (value: string) => {
     // The rules the helper wrote are gone with the preset's own, so typed
     // repositories are to be applied again when the form is saved.
     appliedHelper.current = null;
+    const loaded = value !== "" && value === service?.preset;
     set({
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
-      explicitlyEmpty: NOT_EXPLICITLY_EMPTY,
+      ...(loaded && { oauthProvider: service.oauth_provider ?? "" }),
+      explicitlyEmpty: {
+        ...NOT_EXPLICITLY_EMPTY,
+        presetLogin: loaded && service.oauth_provider !== undefined,
+      },
     });
   };
 
@@ -456,7 +474,7 @@ export function EgressServiceEditor({
     const authored =
       limiting && service !== null && !dirty
         ? service
-        : serializeService(current, options, service);
+        : serializeService(current, options, initial);
     const signature = JSON.stringify([current.name, authored]);
     try {
       // The service goes first, and the key only after it is written.
@@ -471,7 +489,7 @@ export function EgressServiceEditor({
       setBusy(null);
       return;
     }
-    if (!limiting && saveKey && apiKey.trim() !== "") {
+    if (takesKey && saveKey && apiKey.trim() !== "") {
       try {
         await saveKey(apiKey, current.name);
       } catch (cause) {
@@ -559,11 +577,17 @@ export function EgressServiceEditor({
               <RuleSendFields {...ruleEditing(0, primaryRule)} />
             </div>
           )}
-          {overlaps.map((warning) => (
-            <p key={warning} role="status" className={warningClass}>
-              {warning}
+          {headerNote ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              {headerNote}
             </p>
-          ))}
+          ) : (
+            overlaps.map((warning) => (
+              <p key={warning} role="status" className={warningClass}>
+                {warning}
+              </p>
+            ))
+          )}
         </>
       )}
       <Field
@@ -590,7 +614,7 @@ export function EgressServiceEditor({
           />
         )}
       </Field>
-      {saveKey && !limiting && (
+      {saveKey && takesKey && (
         <Field
           label="API key"
           id={`${id}-key`}
@@ -699,7 +723,8 @@ export function EgressServiceEditor({
               onGithub={showGithubHelper}
               configPlaceholders={configPlaceholders}
               ruleEditing={ruleEditing}
-              newService={service === null}
+              newService={!editing}
+              focusDisplayName={!editing && service !== null}
             />
           )}
         </section>

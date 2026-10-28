@@ -230,7 +230,6 @@ Each requester's private knowledge path becomes `<their private root>/memory`, a
 The fields are listed under [Private Fields](https://docs.mindroom.chat/configuration/agents/#private-fields).
 `private.knowledge.path` is required unless `private.knowledge.enabled` is `false`; it must be relative to the private root (`.` allowed) and cannot be absolute or escape with `..`.
 Private knowledge has no background file watcher: with `watch: true` or `git`, it refreshes when the agent uses it, and with `watch: false` and no `git`, external edits are not picked up automatically.
-A private knowledge base can hold 256 MiB of vectors, about 43,000 chunks with the default `text-embedding-3-small` embedder; past that its searches fail until files are removed.
 An agent can combine private knowledge with shared top-level `knowledge_bases`, which stay the mechanism for documents shared across agents or users.
 Private knowledge is available in normal agent conversations, not through the OpenAI-compatible `/v1` API.
 With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoom rejects `.` and any path that overlaps private file memory (`memory/`, `MEMORY.md`) or content copied from `template_dir`.
@@ -241,7 +240,8 @@ With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoo
 One compares the query's embedding with every chunk's embedding, exactly rather than approximately.
 The other scores the query's words with BM25 over a keyword index that matches English word forms, so `leads` finds `lead`.
 Reciprocal rank fusion merges them, so a chunk that names the exact command, setting, or error message in the query ranks high even when its embedding is not the closest.
-Each result still reports its cosine distance as `distances`.
+Each result still reports its cosine distance as `distance`.
+A base whose folder sandboxed workers can write, or that contains such a folder, such as private knowledge or a base inside an agent workspace or shared directory, can hold 256 MiB of vectors, about 43,000 chunks with the default `text-embedding-3-small` embedder; past that its searches fail until files are removed and the base is refreshed.
 
 ### Reranking
 

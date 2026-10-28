@@ -41,6 +41,7 @@ __all__ = [
     "NATIVE_TOOL_SEARCH_INSTRUCTION_TEMPLATE",
     "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
     "OPENAI_COMPAT_HISTORY_GUIDANCE",
+    "OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
     "OUTPUT_REDIRECT_PROMPT",
     "PERSONALITY_CONTEXT_SECTION_HEADING",
     "PROMPT_CURATION_PROMPT_TEMPLATE",
@@ -53,6 +54,7 @@ __all__ = [
     "ROUTER_THREAD_CONTEXT_HEADER",
     "SKILLS_TOOL_USAGE_PROMPT",
     "SKILL_REVIEW_PROMPT",
+    "TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE",
     "TEAM_MODE_SELECTION_PROMPT_TEMPLATE",
     "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE",
     "THREAD_SUMMARY_INSTRUCTIONS",
@@ -63,20 +65,32 @@ __all__ = [
 ]
 
 
-# Universal identity context template for all agents
-AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
-You are {display_name} (Matrix ID: {matrix_id}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom (with Markdown support).
-You are powered by the {model_provider} model: {model_id}.
-When working in teams with other agents, you should identify yourself as {display_name} and leverage your specific expertise.
+# How Matrix conversation history reaches a model, which agents and team leaders share.
+_MATRIX_CONVERSATION_GUIDE = 'In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender\'s full Matrix ID and their stable identity. The optional `display_name` attribute is the sender\'s current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message\'s local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.'
+_MATRIX_MENTION_GUIDE = "When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill."
 
-In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.
-{openai_compat_history_guidance}When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.
+# Universal identity context template for all agents
+AGENT_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
+You are {{display_name}} (Matrix ID: {{matrix_id}}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.
+You are powered by the {{model_provider}} model: {{model_id}}.
+When working in teams with other agents, you should identify yourself as {{display_name}} and leverage your specific expertise.
+
+{_MATRIX_CONVERSATION_GUIDE}
+{{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
 
 ## Matrix Reply Targeting
 MindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.
 If a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.
 Multiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.
 
+"""
+
+# The team leader's identity: the team's name and purpose, and how conversation history reaches it.
+TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
+You are {{display_name}}, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.
+{{team_purpose}}
+{_MATRIX_CONVERSATION_GUIDE}
+{_MATRIX_MENTION_GUIDE}
 """
 
 OPENAI_COMPAT_HISTORY_GUIDANCE = (
@@ -90,6 +104,11 @@ You are powered by the {model_provider} model: {model_id}.
 {openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
 
 """
+
+# The team leader's identity in the OpenAI-compatible API, which has no Matrix chatroom, history format, or mentions.
+OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
+You are {display_name}, the MindRoom team exposed through the OpenAI-compatible API: you lead its members, hand them work, and write the team's answer.
+{team_purpose}{openai_compat_history_guidance}"""
 
 
 INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
@@ -247,7 +266,7 @@ TEAM_MODE_SELECTION_PROMPT_TEMPLATE = """Determine the best team collaboration m
 Task: {message}
 Agents: {agent_names}
 
-Team Modes (from Agno documentation):
+Team Modes:
 - "coordinate": Team leader delegates tasks to members and synthesizes their outputs.
                The leader decides whether to send tasks sequentially or in parallel based on what's appropriate.
 - "collaborate": All team members are given the SAME task and work on it simultaneously.
@@ -668,28 +687,15 @@ CODEX_DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
 DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
 {agent_descriptions}
 
-Use run_subagent(task, agent_name=None, model=None) for a bounded subtask whose result you need before continuing.
-The caller waits for the child to finish; this is not background work.
-The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
-It retains its configured tools, workspace, and memory.
-Set model to a configured model name to choose a different model for the child session, including follow-ups.
-Omit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.
-Delegation is limited to three nested child levels.
-For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
-It uses the current conversation; set new_thread=True to start a separate thread.
+Use run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.
+Delegation is limited to three nested child levels; a follow-up does not add nesting depth.
 In Matrix, child tools that require approval pause both runs until the user approves or denies them.
 Other runtimes retain their approval restrictions.
-The result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.
-Use continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.
-Keep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.
-Each follow-up has its own audit record and does not add nesting depth.
-A running child or one awaiting approval must finish its current turn before accepting a follow-up.
 Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 
 DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """With background jobs, run_subagent and continue_subagent wait by default but accept background_after like other managed calls, so a child can keep working as a job.
-A newer message you answer releases the wait while the child continues working.
 A child tool that requires approval asks the requester through an approval card of the child's job; only the child waits for the decision.
 Waiting neither restarts the child nor grants tool approval.
 To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
@@ -707,6 +713,10 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
                 "model_id",
                 "openai_compat_history_guidance",
             },
+        ),
+        "TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": frozenset({"display_name", "team_purpose"}),
+        "OPENAI_COMPAT_TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE": frozenset(
+            {"display_name", "team_purpose", "openai_compat_history_guidance"},
         ),
         "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE": frozenset(
             {

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
+from agno.tools.reasoning import ReasoningTools
 from structlog.testing import capture_logs
 
 import mindroom.agents as agents_module
@@ -20,14 +22,16 @@ from mindroom.agent_loop.build import (
     prompt_for_turn,
     tool_owners_by_agent,
 )
-from mindroom.agent_loop.prompt import CLAUDE_TOOLS_NOTE, render_system_message
+from mindroom.agent_loop.prompt import render_system_messages
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.provider import ModelRequest
+from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, get_plugin_skill_roots, set_plugin_skill_roots
@@ -136,7 +140,7 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
         "Assistant",
         "claude-sonnet-5-5",
     )
-    assert build.spec.system_message is None
+    assert build.spec.system_messages == ()
     assert [toolkit.name for toolkit in build.spec.toolkits] == ["calculator", "search_knowledge_base", "skills"]
     assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"search_knowledge_base"} | SKILL_FUNCTION_NAMES
     assert build.spec.max_tool_calls_per_turn == config.resolve_entity("assistant").max_tool_calls_per_turn
@@ -148,7 +152,6 @@ def test_create_agent_builds_the_spec_prompt_store_and_owners(tmp_path: Path) ->
     assert build.prompt.skills_block is not None
     assert "<name>expense-report</name>" in build.prompt.skills_block
     assert build.prompt.tool_instructions == ()
-    assert build.prompt.model_note == CLAUDE_TOOLS_NOTE
     assert build.prompt.turn_context is not None
     assert build.prompt.turn_context.startswith("<mindroom_session_context>")
     assert build.request_template == ModelRequest(messages=())
@@ -182,7 +185,7 @@ def test_a_build_without_runtime_state_has_no_store_tools_or_context(tmp_path: P
 
     assert build.store is None
     assert build.spec.toolkits == ()
-    assert (build.prompt.skills_block, build.prompt.knowledge_block, build.prompt.model_note) == (None, None, None)
+    assert (build.prompt.skills_block, build.prompt.knowledge_block) == (None, None)
     assert "SOUL.md" not in build.prompt.role
     assert (build.surface.context_documents, build.surface.knowledge_sources) == ((), ())
 
@@ -261,9 +264,11 @@ def test_prompt_for_turn_appends_the_turns_context_blocks(tmp_path: Path) -> Non
     base = build.prompt.turn_context
     assert base is not None
 
-    assert prompt_for_turn(build).content == render_system_message(build.prompt).content
-    expected = replace(build.prompt, turn_context=f"{base.strip()}\n\nmemory\n\n<ctx>")
-    assert prompt_for_turn(build, "memory\n", "", "<ctx>").content == render_system_message(expected).content
+    rendered = [message.content for message in render_system_messages(build.prompt)]
+    assert [message.content for message in prompt_for_turn(build)] == rendered
+    stable, turn = prompt_for_turn(build, "memory\n", "", "<ctx>")
+    assert stable.content == rendered[0]
+    assert turn.content == f"{base.strip()}\n\nmemory\n\n<ctx>"
 
 
 @pytest.mark.parametrize(
@@ -523,18 +528,126 @@ def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
     assert [function.name for function in build.spec.toolkits[0].functions] == ["ping"]
 
 
-def test_the_prompt_shows_a_toolkits_instructions_once_even_when_another_offers_its_names(tmp_path: Path) -> None:
-    """The same toolkit built for two tools shows its instructions once, though a run offers only the first's functions."""
+def test_a_toolkit_s_instructions_show_whenever_it_offers_a_function(tmp_path: Path) -> None:
+    """Agno's own toolkits show their instructions too, though their ``add_instructions`` switch is off."""
+    config, runtime_paths = _config(tmp_path, tools=["reasoning"])
+
+    build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    assert ReasoningTools().add_instructions is False
+    assert build.prompt.tool_instructions == (ReasoningTools().instructions,)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "saved", "expected"),
+    [
+        ({"enable_think": False}, {}, ()),
+        ({"enable_analyze": False}, {}, ()),
+        (
+            {"enable_think": False, "instructions": "Call think before each reply."},
+            {},
+            ("Call think before each reply.",),
+        ),
+        (
+            {},
+            {"enable_analyze": False, "instructions": "Use think to analyze complex requests."},
+            ("Use think to analyze complex requests.",),
+        ),
+    ],
+    ids=["without_think", "without_analyze", "authored_without_think", "saved_authored_without_analyze"],
+)
+def test_reasoning_s_default_instructions_show_only_while_both_its_functions_are_offered(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    saved: dict[str, object],
+    expected: tuple[str, ...],
+) -> None:
+    """The default instructions require both ``think`` and ``analyze``; authored instructions show with either one.
+
+    Settings saved for the tool, as the dashboard saves them, are authored like those in ``config.yaml``.
+    """
+    config, runtime_paths = _config(tmp_path, tools=[{"reasoning": overrides}])
+    get_runtime_credentials_manager(runtime_paths).save_credentials("reasoning", saved)
+
+    build = _build(config, runtime_paths, persist_runtime_state=False)
+
+    [reasoning] = [toolkit for toolkit in build.spec.toolkits if toolkit.name == "reasoning_tools"]
+    assert len(reasoning.functions) == 1
+    assert build.prompt.tool_instructions == expected
+
+
+@pytest.mark.parametrize("realtime_call", [False, True], ids=["chat", "realtime_call"])
+def test_matrix_message_guidance_reaches_the_prompt_only_with_the_matrix_message_function(
+    tmp_path: Path,
+    *,
+    realtime_call: bool,
+) -> None:
+    """Delegation guidance never names matrix_message; its own description, offered only with it, says how to use it.
+
+    A realtime call leaves out matrix_message when it needs approval, and nothing in the prompt still names it.
+    """
+    config, runtime_paths = _config(tmp_path, tools=["matrix_message"], delegate_to=["assistant"])
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
+    )
+    identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name="assistant",
+        runtime_paths=runtime_paths,
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    call_filter = partial(_function_available_during_call, config=config, agent_name="assistant")
+
+    build = create_agent(
+        "assistant",
+        config,
+        runtime_paths,
+        identity,
+        knowledge=None,
+        active_model_name=None,
+        persist_runtime_state=False,
+        tool_function_filter=call_filter if realtime_call else None,
+        # Chat asks for the approval; the realtime call builds as build_call_tools does.
+        supports_native_tool_approval=not realtime_call,
+    )
+
+    offered = {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}
+    assert {"run_subagent", "continue_subagent"} <= offered
+    assert ("matrix_message" in offered) is not realtime_call
+    assert not [text for text in build.prompt.tool_instructions if "matrix_message" in text]
+
+
+def test_a_toolkit_whose_functions_are_all_left_out_shows_no_instructions(tmp_path: Path) -> None:
+    """A toolkit shows its instructions only while it offers a function, not after a filter leaves them all out."""
+    config, runtime_paths = _config(tmp_path, tools=["reasoning", "calculator"])
+
+    build = _build(
+        config,
+        runtime_paths,
+        persist_runtime_state=False,
+        tool_function_filter=lambda function: function.name not in {"think", "analyze"},
+    )
+
+    assert "reasoning_tools" not in [toolkit.name for toolkit in build.spec.toolkits]
+    assert build.prompt.tool_instructions == ()
+
+
+def test_a_toolkit_whose_every_function_an_earlier_one_took_shows_no_instructions(tmp_path: Path) -> None:
+    """A run offers the first function of each name, so the later toolkit offers none and shows no instructions."""
     config, runtime_paths = _config(tmp_path, tools=["calculator", "wikipedia"])
 
-    def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
-        return Toolkit(name="pinger", tools=[ping], instructions="Ping politely.", add_instructions=True)
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        return Toolkit(name="pinger", tools=[ping], instructions=f"Ping for {tool_name}.")
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
         build = _build(config, runtime_paths, persist_runtime_state=False)
 
     assert [toolkit.functions != () for toolkit in build.spec.toolkits[:2]] == [True, False]
-    assert build.prompt.tool_instructions == ("Ping politely.",)
+    assert build.prompt.tool_instructions == ("Ping for calculator.",)
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,7 @@ API keys are `password` fields, so set them in the dashboard or through the envi
 `mem0` gives the agent `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()` backed by the `mem0ai` client.
 With an API key, it uses the hosted Mem0 Platform; without one, it uses Mem0's default setup, which stores memories locally but calls OpenAI for embeddings and memory extraction.
 That default setup requires `OPENAI_API_KEY` even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
-Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `~/.mem0/history.db`, so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
+Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `history.db` in Mem0's directory (`~/.mem0/`, or `MEM0_DIR` when set), so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
 A custom local Mem0 config object cannot be set through MindRoom.
 
 Memories are stored per user.
@@ -52,6 +52,7 @@ It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agen
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
 A `user_id` that does not exist yet in Zep is created automatically.
+The agent's prompt includes the default Zep usage instructions only while all three functions are enabled; instructions you set with `instructions` are always included.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -63,7 +64,6 @@ A `user_id` that does not exist yet in Zep is created automatically.
 | `enable_get_zep_memory` | `boolean` | `true` | Enable `get_zep_memory()`. |
 | `enable_search_zep_memory` | `boolean` | `true` | Enable `search_zep_memory()`. |
 | `instructions` | `text` | `null` | Replace the default Zep usage instructions. |
-| `add_instructions` | `boolean` | `false` | Add the Zep usage instructions to the agent's prompt. |
 | `all` | `boolean` | `false` | Enable every function regardless of the individual flags. |
 
 ```yaml

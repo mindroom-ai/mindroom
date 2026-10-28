@@ -350,3 +350,91 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             for line in event_path.read_text().splitlines()
         ]
         assert any(event["kind"] == "tool_result" and event["data"]["tool_name"] == "list_files" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not_started_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch the child's call limit refused never ran, so the child's answer after it settles the delegation."""
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+            "child": AgentConfig(
+                display_name="Child",
+                tools=["calculator", "thread_model"],
+                max_tool_calls_per_turn=1,
+            ),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
+        models={
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "alternate": ModelConfig(provider="openai", id="alternate-model"),
+        },
+    )
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add, then switch models")),
+            answer("Parent finished."),
+        ],
+    )
+    model = ScriptedModel(
+        [
+            calls(tool_call("add", "approved-add", a=1, b=2)),
+            calls(tool_call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall")),
+            answer("Child finished the requested work."),
+            answer("Child started over."),
+        ],
+    )
+    child_models: list[str] = []
+
+    def build(
+        _config: Config,
+        _paths: RuntimePaths,
+        model_name: str,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> ModelProvider:
+        assert execution_identity is not None
+        if execution_identity.session_id == identity.session_id:
+            return parent
+        child_models.append(model_name)
+        return model
+
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", build)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    reply = await respond("leader", "Delegate", **options, run_id="parent-run")
+    assert isinstance(reply, PausedAttempt)
+    state = DelegationState.from_metadata(stored_run("leader", "parent-run", **options).metadata)
+    approval_calls = tuple(
+        ApprovalCall(
+            tool_call_id=str(tool["tool_call_id"]),
+            tool_name=str(tool["tool_name"]),
+            invoking_agent="child",
+            toolkit_name="calculator",
+            expires_at_ns=2**62,
+            arguments_digest=approval_arguments_digest(tool["tool_args"]),
+        )
+        for tool in state.pending_tools
+    )
+
+    result = await resume(
+        approval_executor(config, paths),
+        reply,
+        approval_calls,
+        agent_name="leader",
+        **options,
+        decisions={call.tool_call_id: True for call in approval_calls},
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(model.requests) == 3
+    assert "alternate" not in child_models
+    child_id = state.children[0].delegation_id
+    run_path = next(tmp_path.glob(f"agents/child/workspace/.mindroom/delegations/*/{child_id}/run.json"))
+    assert json.loads(run_path.read_text())["output"] == "Child finished the requested work."

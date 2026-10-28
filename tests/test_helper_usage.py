@@ -37,8 +37,8 @@ from mindroom.llm import usage as llm_usage
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import UsageReported
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.usage import TokenCounts
-from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage_run
+from mindroom.llm.usage import HelperUsage, TokenCounts
+from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
 from mindroom.memory.auto_flush import _extract_memory_summary
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -56,7 +56,12 @@ from mindroom.usage.stats import collect_admin_usage, collect_self_usage
 from mindroom.usage.storage import quote_identifier
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import install_model_providers, make_turn_context, unwrap_extracted_collaborator
+from tests.conftest import (
+    install_model_providers,
+    make_turn_context,
+    seed_session_state,
+    unwrap_extracted_collaborator,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.fakes.scripted_model import usage as owned_usage
 from tests.history_helpers import (
@@ -222,11 +227,14 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         # Reconstruct an interrupted minimal response using its exact saved approval.
         scope_context = load_scope()
         assert scope_context is not None
-        stored = scope_context.storage.get_run(paused.run_id)
-        assert isinstance(stored, RunRecord)
-        stored.metadata = {**(stored.metadata or {}), "agent_mode": "minimal"}
+        assert isinstance(scope_context.storage.get_run(paused.run_id), RunRecord)
         assert scope_context.session is not None
-        scope_context.storage.save_runs(scope_context.session, [stored])
+        assert scope_context.storage.patch_run_metadata(
+            scope_context.session.session_id,
+            paused.run_id,
+            {"agent_mode": "minimal"},
+            session=scope_context.session,
+        )
     calls_ = (
         ApprovalCall(
             "approved",
@@ -379,7 +387,7 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     with counted_mem0_usage() as calls:
         llm.client.chat.completions.create()
         llm.client.chat.completions.create()
-    extraction = mem0_usage_run(calls)
+    extraction = mem0_usage(calls)
     assert extraction is not None
     await record_helper_usage(
         extraction,
@@ -387,7 +395,6 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
             storage_factory=partial(create_session_storage, "test_agent", config, paths, execution_identity=None),
             session_id="session",
         ),
-        invocation_id=extraction.run_id,
         kind="memory_extraction",
         requester_id="@user:localhost",
     )
@@ -460,7 +467,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     assert len({row["run_id"] for row in helpers}) == 2
     assert "Synthetic conversation" not in json.dumps(helpers)
     assert "Remember" not in json.dumps(helpers)
-    storage.save_session_state(session, session_state_snapshot(session.session_state))
+    seed_session_state(storage, session, session_state_snapshot(session.session_state))
     assert collect_admin_usage(config=config, runtime_paths=paths).totals == report.totals
 
 
@@ -642,12 +649,13 @@ async def test_scope_reset_and_first_turn_write_preserve_concurrent_session(tmp_
         assert owner.initial_session is not None
         context.storage.update_metadata(_session("session"), lambda _metadata: {"marker": "concurrent session"})
         await record_helper_usage(
-            RunRecord(
+            HelperUsage(
                 run_id="paid",
+                model=None,
+                provider=None,
                 metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=10, output_tokens=1, total_tokens=11)),
             ),
             owner=owner,
-            invocation_id="paid",
             kind="dynamic_workflow",
             requester_id=None,
         )
@@ -679,12 +687,13 @@ async def test_returned_helper_usage_write_finishes_after_cancellation(tmp_path:
         connection.execute("BEGIN IMMEDIATE")
         task = asyncio.create_task(
             record_helper_usage(
-                RunRecord(
+                HelperUsage(
                     run_id="paid-attempt",
+                    model=None,
+                    provider=None,
                     metrics=llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2, total_tokens=22)),
                 ),
                 owner=HelperUsageOwner(create_storage, "session"),
-                invocation_id="paid-attempt",
                 kind="memory_auto_flush",
                 requester_id=None,
             ),

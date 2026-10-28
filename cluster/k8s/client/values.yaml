@@ -127,6 +127,12 @@ config:
   # Maps merge key by key across values files, lists replace, and string values are rendered with tpl.
   values: {}
 
+# Operator notices shown as banners above every client screen.
+notices:
+  # ConfigMap with a notices.json key, mounted so edits reach running pods without a restart.
+  # Leave empty to serve the image's empty notice list.
+  existingConfigMap: ""
+
 # Chart-managed nginx server configuration.
 nginx:
   # Container port nginx listens on. Ports below 1024 require extra privileges.

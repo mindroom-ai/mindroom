@@ -175,7 +175,7 @@ async def run_bash_batch(owner: LiveTurnTools, *commands: str) -> RunRecord:
         id=catalog.runtime_context.agent_name,
         name=catalog.runtime_context.agent_name,
         model=model,
-        system_message=None,
+        system_messages=(),
         toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
     )
     record: RunRecord | None = None

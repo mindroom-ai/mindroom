@@ -309,15 +309,14 @@ async def _extract_memory_summary(
     )
 
     model_name = extractor.model or config.resolve_entity(agent_name).model_name
-    invocation_id = uuid4().hex
     response = await complete_prompt(
         provider_registry.build_model_provider(config, runtime_paths, model_name),
         prompt,
-        role="Extract durable memory statements for long-term memory storage.",
-        run_id=invocation_id,
+        instructions=["Extract durable memory statements for long-term memory storage."],
+        run_id=uuid4().hex,
     )
     await record_helper_usage(
-        response.record,
+        response.usage,
         owner=HelperUsageOwner(
             storage_factory=partial(
                 create_session_storage,
@@ -328,7 +327,6 @@ async def _extract_memory_summary(
             ),
             session_id=session_id,
         ),
-        invocation_id=invocation_id,
         kind="memory_auto_flush",
         requester_id=execution_identity.requester_id if execution_identity is not None else None,
     )

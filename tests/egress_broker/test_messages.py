@@ -45,10 +45,50 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             "No openai key is set for this shared agent. Only an administrator can add one, at manage_url.",
         ),
         (
+            "credential_not_configured",
+            {"service": "team_calendar", "own_account": True},
+            "No team_calendar account is connected for this agent. "
+            "Ask the user to connect the service's own account at manage_url, then retry.",
+        ),
+        (
+            "credential_not_configured",
+            {"service": "team_calendar", "provider": "google_calendar", "own_account": True, "reuse_off": True},
+            "No team_calendar account is allowed for this agent. "
+            "Ask the user to connect and allow the service's own account at manage_url, then retry.",
+        ),
+        (
             "oauth_connection_required",
-            {"service": "github", "provider": "github"},
+            {"service": "github", "provider": "github", "connectable": True},
             "The github account for github must be connected again. "
             "Ask the user to reconnect at connect_url or manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {"service": "github", "provider": "github"},
+            "The github account for github must be connected again. Ask the user to reconnect it at manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {"service": "drive", "provider": "google_drive", "shared": True, "managers": ["@alice:example.org"]},
+            "This shared agent's google_drive account for drive must be connected again. "
+            "Only its credential managers (@alice:example.org) can reconnect it, at manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {"service": "drive", "provider": "google_drive", "shared": True},
+            "This shared agent's google_drive account for drive must be connected again. "
+            "Only an administrator can reconnect it, at manage_url.",
+        ),
+        (
+            "oauth_connection_required",
+            {
+                "service": "github",
+                "provider": "github",
+                "shared": True,
+                "managers": ["@alice:example.org"],
+                "requester_owned": True,
+            },
+            "The github account for github must be connected again. Ask the user to reconnect it at manage_url.",
         ),
         (
             "oauth_refresh_failed",
@@ -61,6 +101,17 @@ from tests.egress_broker.conftest import CONNECT_URL, MANAGE_URL
             {"host": "api.github.com", "path": "/repos/o/b", "service": "github-limited"},
             "api.github.com/repos/o/b is outside the paths github-limited allows for this agent. "
             "Ask the user to add it at manage_url if the agent needs it.",
+        ),
+        (
+            "service_not_matched",
+            {"host": "www.googleapis.com", "path": "/calendar/v3?page=2", "service": "team_calendar"},
+            "The X-Agent-Keys-Service header names team_calendar, but no service of your own by that name has a rule "
+            "for www.googleapis.com/calendar/v3. Name one of your own services that covers it, or leave the header out.",
+        ),
+        (
+            "bad_request",
+            {"service_header": True},
+            "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own services.",
         ),
         (
             "bad_request",
@@ -163,6 +214,46 @@ def test_an_account_agent_keys_may_not_use_says_who_can_allow_it(values: dict[st
         "manage_url": MANAGE_URL,
         "message": message,
     }
+
+
+_READ_ONLY = {"service": "calendar", "provider": "google_calendar", "manage_url": MANAGE_URL}
+_READ_ONLY_PERSONAL = (
+    "Agent Keys may use the google_calendar account for calendar only to read, so this request was refused. "
+    "Ask the user to allow read and write at manage_url if the agent needs it, then retry."
+)
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({}, _READ_ONLY_PERSONAL),
+        ({"shared": True, "managers": ("@bob:example.org",), "requester_owned": True}, _READ_ONLY_PERSONAL),
+        (
+            {"shared": True, "managers": ("@bob:example.org",)},
+            "Agent Keys may use this shared agent's google_calendar account for calendar only to read, so this "
+            "request was refused. Only its credential managers (@bob:example.org) can allow read and write, "
+            "at manage_url.",
+        ),
+        (
+            {"shared": True},
+            "Agent Keys may use this shared agent's google_calendar account for calendar only to read, so this "
+            "request was refused. Only an administrator can allow read and write, at manage_url.",
+        ),
+    ],
+    ids=["personal", "shared-own-account", "shared", "shared-without-managers"],
+)
+def test_a_read_only_refusal_says_who_can_allow_writes(values: dict[str, object], message: str) -> None:
+    """A write with an account allowed read-only names the page where the level changes, and who may change it."""
+    body = refusal_body("read_only", **{**_READ_ONLY, **values})
+
+    assert body == {
+        "error": "read_only",
+        "service": "calendar",
+        "provider": "google_calendar",
+        "manage_url": MANAGE_URL,
+        "message": message,
+    }
+    assert git_error_text(body) == message.replace("manage_url", MANAGE_URL)
 
 
 def test_shared_agent_with_a_connect_link_gets_the_connectable_text() -> None:
@@ -278,6 +369,12 @@ _PATH = {"host": "api.github.com", "path": "/repos/o/b?page=2", "service": "gith
             "api.github.com/repos/o/b is outside the paths github-limited allows for this agent. "
             "Each user sets this agent's services " + _PAGE_NOT_SERVED,
         ),
+        (
+            "read_only",
+            {"service": "calendar", "provider": "google_calendar"},
+            "Agent Keys may use the google_calendar account for calendar only to read: each user allows writes "
+            + _PAGE_NOT_SERVED,
+        ),
     ],
 )
 def test_personal_scope_without_the_personal_page_gets_no_manage_link(
@@ -314,6 +411,7 @@ def test_personal_page_not_served_messages_fit_the_reason_phrase_for_a_provider_
         ("oauth_connection_required", {"service": "github", "provider": "github", "connectable": True}),
         ("oauth_refresh_failed", {"service": "drive", "provider": "google_drive"}),
         ("path_not_allowed", {**_PATH, "managers": ("@alice:example.org",)}),
+        ("read_only", {"service": "calendar", "provider": "google_calendar"}),
     ],
 )
 def test_shared_scopes_keep_their_refusals_without_the_personal_page(code: str, values: dict[str, object]) -> None:

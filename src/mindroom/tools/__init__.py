@@ -501,7 +501,9 @@ def _agent_vault_access_tools() -> type[Toolkit]:
     file_access=ToolFileAccess.NONE,
     requires_primary_runtime=True,
     display_name="Egress Credentials",
-    description="Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use",
+    description=(
+        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+    ),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,
     icon="KeyRound",

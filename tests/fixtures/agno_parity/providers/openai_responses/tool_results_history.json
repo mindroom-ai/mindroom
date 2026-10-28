@@ -18,6 +18,7 @@
           "total_tokens": 54
         },
         "provider_data": {
+          "mindroom_conversation_sha256": "dedcdff7cc131fbe48c0efa4cab41b760b88a272dcff947adee099253a251993",
           "mindroom_model": {
             "id": "gpt-6-astra",
             "provider": "OpenAI Responses"
@@ -25,7 +26,6 @@
           "mindroom_native_compaction": null,
           "mindroom_portable_replay": false,
           "mindroom_response_stored": true,
-          "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
           "response_id": "resp_parity"
         },
         "role": "assistant",
@@ -64,9 +64,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -88,13 +86,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Search the user's travel notes.",
-        "external_execution": false,
         "name": "search_notes",
         "parameters": {
           "properties": {
@@ -112,7 +107,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -121,6 +115,7 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
+        "mindroom_conversation_sha256": "cc1531fcf90f3feff10cce3dfca82607f120fb4ce10d9dce96e638d82d2b43a5",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Responses"
@@ -128,7 +123,6 @@
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
         "mindroom_response_stored": true,
-        "mindroom_system_sha256": "54340f9ddd79e27f939b9586862cad1c3e2a73939b3dc11bcf6248ecb63c933a",
         "response_id": "resp_parity"
       },
       "role": "assistant"
@@ -178,8 +172,6 @@
             ],
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function"
         },
         {
@@ -201,8 +193,6 @@
             ],
             "type": "object"
           },
-          "requires_confirmation": false,
-          "external_execution": false,
           "type": "function"
         }
       ]

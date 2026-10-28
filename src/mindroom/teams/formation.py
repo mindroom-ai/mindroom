@@ -167,10 +167,10 @@ async def select_ad_hoc_team_mode(
         result = await complete_prompt(
             provider_registry.build_model_provider(config, runtime_paths, "default"),
             prompt,
-            role="Determine team mode",
+            instructions=["Determine team mode"],
             schema=_TeamModeDecision,
         )
-        await record_system_usage(result.record, runtime_paths=runtime_paths, kind="team_mode")
+        await record_system_usage(result.usage, runtime_paths=runtime_paths, kind="team_mode")
     except Exception as e:
         logger.warning("team_mode_decision_failed", error=str(e))
         return TeamMode.COLLABORATE

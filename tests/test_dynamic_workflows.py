@@ -37,6 +37,7 @@ from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflow
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
@@ -2269,8 +2270,8 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     assert result == "done"
     assert loaded == ["large"]
     [request] = model.requests
-    system, prompt = request.messages
-    assert "You are Specialist Agent" in system.get_content_string()
+    *system, prompt = request.messages
+    assert "You are Specialist Agent" in system_text(system)
     assert (prompt.role, prompt.content) == ("user", "Write a report.")
     assert request.tools == ()
     create_kwargs = create_agent_mock.call_args.kwargs

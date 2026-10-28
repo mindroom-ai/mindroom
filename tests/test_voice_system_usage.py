@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import httpx
@@ -92,6 +93,36 @@ async def test_transcription_records_one_provider_request_without_content(
     assert len(stored) == 1
     assert "private transcript" not in json.dumps(stored)
     assert "private audio" not in json.dumps(stored)
+
+
+@pytest.mark.asyncio
+async def test_transcription_usage_is_dated_when_its_request_was_sent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A slow transcription still counts from when it was sent, not from when its usage is recorded."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-key")))
+    client_type = httpx.AsyncClient
+    reply = {
+        "text": "transcript",
+        "usage": {"type": "tokens", "input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+    }
+    monkeypatch.setattr(voice_handler, "time", SimpleNamespace(time=lambda: 1_700_000_000.5))
+    monkeypatch.setattr(
+        voice_handler.httpx,
+        "AsyncClient",
+        lambda *, timeout: client_type(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=reply)),
+            timeout=timeout,
+        ),
+    )
+
+    assert await voice_handler._transcribe_audio(b"audio", config, paths) == "transcript"
+
+    [stored] = _stored_usage(paths)
+    assert stored["created_at"] == 1_700_000_000
+    assert [request["created_at"] for request in stored["requests"]] == [1_700_000_000]
 
 
 @pytest.mark.asyncio

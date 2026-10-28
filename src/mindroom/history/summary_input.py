@@ -13,7 +13,6 @@ from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
     MINDROOM_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
 from mindroom.history.request_messages import filter_tool_calls, replayable_messages
 from mindroom.timing import timed
@@ -44,9 +43,6 @@ _SUMMARY_METADATA_OMIT_KEYS = frozenset(
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
         COMPACTED_REQUESTS_METADATA_KEY,
         "model_params",
-        # TODO(simplify): run decoding drops ``tools_schema``, so only a test's in-memory run still holds it here.
-        # Drop the key; nobody but the tests/test_history_summary_call.py cases that set it would notice.
-        "tools_schema",
     },
 )
 
@@ -242,10 +238,8 @@ def messages_for_runs(
     runs: Sequence[AnyRunRecord],
     history_settings: ResolvedHistorySettings,
 ) -> list[Message]:
-    """Copy and sanitize conversation messages for portable compaction hooks."""
-    messages = [deepcopy(message) for run in runs for message in _compaction_replay_messages(run, history_settings)]
-    strip_stale_anthropic_replay_fields(messages)
-    return messages
+    """Copy the conversation messages portable compaction hooks receive, stored thinking included."""
+    return [deepcopy(message) for run in runs for message in _compaction_replay_messages(run, history_settings)]
 
 
 def _serialize_run(run: AnyRunRecord, index: int, history_settings: ResolvedHistorySettings) -> str:

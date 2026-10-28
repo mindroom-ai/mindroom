@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _MEMORY_COLLECTION_PREFIX = "mindroom_memories"
+# Chroma publishes each store's shared system before starting it, so a build that overlaps the first build of the same
+# store can reach the unstarted system, and both builds fail. Builds of one store take turns; Chroma keys that shared
+# state by store path, so different stores still build in parallel.
+_STORE_BUILD_LOCKS: dict[str, threading.Lock] = {}
 
 
 @dataclass
@@ -148,7 +153,7 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
 
 
 def _get_memory_config(storage_path: Path, config: Config, runtime_paths: RuntimePaths) -> dict:
-    """Get Mem0 configuration with ChromaDB backend.
+    """Get Mem0 configuration with a ChromaDB backend and history database under ``storage_path``.
 
     Args:
         storage_path: Base directory for memory storage
@@ -166,6 +171,10 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
     # Ensure storage directories exist
     chroma_path = resolved_storage_path / "chroma"
     chroma_path.mkdir(parents=True, exist_ok=True)
+    # Mem0's history database keeps the text of changed and deleted memories, and the latest messages it adds to the
+    # next extraction prompt under keys that do not name the requester, so each storage root needs its own.
+    history_dir = resolved_storage_path / "mem0"
+    history_dir.mkdir(exist_ok=True)
     resolved_embedder = resolve_embedder_settings(app_config, runtime_paths)
     embedder_provider = resolved_embedder.provider
 
@@ -199,6 +208,7 @@ def _get_memory_config(storage_path: Path, config: Config, runtime_paths: Runtim
                 "path": str(chroma_path),
             },
         },
+        "history_db_path": str(history_dir / "history.db"),
     }
 
 
@@ -219,26 +229,23 @@ async def create_memory_instance(
         Configured AsyncMemory instance
 
     """
-    # Mem0 and its Chroma store install on first use, off the event loop.
-    await asyncio.to_thread(ensure_optional_deps, ["mem0ai"], "mem0", runtime_paths)
-    await asyncio.to_thread(ensure_optional_deps, ["chromadb"], "chromadb", runtime_paths)
-    from mem0 import AsyncMemory  # noqa: PLC0415
-
     config_dict = _get_memory_config(storage_path, config, runtime_paths)
-    # Create AsyncMemory instance with dictionary config directly
-    # Mem0 expects a dict for configuration, not config objects
-    if config_dict["embedder"]["provider"] == "huggingface":
-        # Mem0's huggingface embedder builds its own SentenceTransformer, which imports optional local packages.
-        # Install and wait for running installs in a worker thread so the event loop keeps serving other tasks.
-        def from_config_with_local_embedder() -> AsyncMemory:
-            if config.memory.embedder.provider == "sentence_transformers":
-                ensure_sentence_transformers_dependencies(runtime_paths)
-            with optional_dependency_environment():
-                return AsyncMemory.from_config(config_dict)
+    store_path = config_dict["vector_store"]["config"]["path"]
 
-        memory = await asyncio.to_thread(from_config_with_local_embedder)
-    else:
-        memory = AsyncMemory.from_config(config_dict)
+    def build_memory() -> AsyncMemory:
+        # Mem0 and its Chroma store install on first use, and Mem0's huggingface embedder, which both local providers
+        # load, imports sentence-transformers. Building the memory imports Chroma and the provider SDKs, so it waits
+        # until no install runs. All of it runs in a worker thread, so the event loop keeps serving other tasks.
+        ensure_optional_deps(["mem0ai"], "mem0", runtime_paths)
+        ensure_optional_deps(["chromadb"], "chromadb", runtime_paths)
+        if config_dict["embedder"]["provider"] == "huggingface":
+            ensure_sentence_transformers_dependencies(runtime_paths)
+        with _STORE_BUILD_LOCKS.setdefault(store_path, threading.Lock()), optional_dependency_environment():
+            from mem0 import AsyncMemory  # noqa: PLC0415
+
+            return AsyncMemory.from_config(config_dict)
+
+    memory = await asyncio.to_thread(build_memory)
     memory_llm = config.memory.llm
     llm_config = memory.llm.config
     if (
@@ -261,5 +268,5 @@ async def create_memory_instance(
         strict_embedder = create_configured_embedder(config, runtime_paths)
         cast("Any", memory).embedding_model = _Mem0StrictOpenAIEmbedder(strict_embedder)
 
-    logger.info("created_memory_instance", path=config_dict["vector_store"]["config"]["path"])
+    logger.info("created_memory_instance", path=store_path)
     return memory

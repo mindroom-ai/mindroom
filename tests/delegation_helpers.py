@@ -33,6 +33,7 @@ from mindroom.knowledge.utils import KnowledgeAccessSupport
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.providers import registry as provider_registry
 from mindroom.response_turn import PausedAnswer, ResponsePausedForApproval
@@ -147,6 +148,17 @@ class ScriptedAgents:
         if (session := execution_identity.session_id) is not None and session in self.by_session:
             return self.by_session[session]
         return self.models[execution_identity.agent_name]
+
+
+RECALLED_MEMORY = "Alice prefers short reports."
+
+
+def recall_memories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Have every agent turn recall ``RECALLED_MEMORY``, which its requests send as turn context no history keeps."""
+    monkeypatch.setattr(
+        "mindroom.ai.build_memory_prompt_parts",
+        AsyncMock(return_value=MemoryPromptParts(transient_turn_context=f"<memory>{RECALLED_MEMORY}</memory>")),
+    )
 
 
 def system_prompts(model: ScriptedModel) -> list[str]:
@@ -405,7 +417,7 @@ async def pause_parent(
         active_model_name=None,
     )
     session = new_scope_session(session_id=identity.session_id or "", scope_id=agent_name, is_team=False)
-    request = [prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
+    request = [*prompt_for_turn(build), OwnedMessage(role="user", content=prompt)]
     ctx = RunContext(run_id=run_id, session=UnstoredSession(session.session_id), user_id=identity.requester_id)
     record: RunRecord | None = None
     async for event in run_agent(

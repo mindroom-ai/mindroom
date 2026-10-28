@@ -81,22 +81,51 @@ def _reissue(error: ProviderError, *, request: ModelRequest, budget: _RetryBudge
         if budget.stalls >= _MAX_STALL_RETRIES:
             return None
         budget.stalls += 1
-        logger.warning("Retrying silent provider stream", model_id=model_id, error=str(error))
+        _log_retry(
+            error,
+            model_id=model_id,
+            reason=STREAM_STALLED,
+            attempt=budget.stalls,
+            max_retries=_MAX_STALL_RETRIES,
+            delay_seconds=0.0,
+        )
         return Retry(request)
     if budget.transient >= _MAX_TRANSIENT_RETRIES:
         return None
     delay = _retry_delay_seconds(budget.transient)
     budget.transient += 1
-    logger.warning(
-        "Retrying provider stream after transient model error",
+    _log_retry(
+        error,
         model_id=model_id,
-        status_code=error.status_code,
-        error=redact_sensitive_text(str(error), max_length=500),
+        reason="transient_error",
         attempt=budget.transient,
         max_retries=_MAX_TRANSIENT_RETRIES,
         delay_seconds=delay,
     )
     return Retry(request, delay)
+
+
+def _log_retry(
+    error: ProviderError,
+    *,
+    model_id: str,
+    reason: str,
+    attempt: int,
+    max_retries: int,
+    delay_seconds: float,
+) -> None:
+    """Log one reissued request as the documented operator event, the same fields for either reason."""
+    logger.warning(
+        "provider_request_retried",
+        model_id=model_id,
+        reason=reason,
+        error_type=type(error).__name__,
+        status_code=error.status_code,
+        error=redact_sensitive_text(str(error), max_length=500),
+        attempt=attempt,
+        max_retries=max_retries,
+        delay_seconds=delay_seconds,
+    )
 
 
 def retrying_stream(

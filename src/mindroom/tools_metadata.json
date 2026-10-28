@@ -2957,18 +2957,6 @@
           "required": false,
           "type": "text",
           "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": "Whether to add instructions to the agent",
-          "label": "Add Instructions",
-          "name": "add_instructions",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -5885,18 +5873,6 @@
           "authored_override": true,
           "default": false,
           "description": null,
-          "label": "Add Instructions",
-          "name": "add_instructions",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
           "label": "Add Few-Shot Examples",
           "name": "add_few_shot",
           "options": null,
@@ -7973,7 +7949,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Opt this agent's shell and python calls into Agent Keys and see which keys and accounts it can use",
+      "description": "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use",
       "display_name": "Egress Credentials",
       "docs_url": "https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
       "executes_code": false,
@@ -10471,18 +10447,6 @@
           "placeholder": null,
           "required": false,
           "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": false,
-          "description": null,
-          "label": "Add Instructions",
-          "name": "add_instructions",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "boolean",
           "validation": null
         },
         {

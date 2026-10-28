@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.constants import llm_request_log_dir
+from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
@@ -36,7 +37,7 @@ __all__ = ["RequestLog", "logged_stream"]
 logger = get_logger(__name__)
 
 # Message fields the request record leaves out: none of them reaches any wire.
-_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history"})
+_NON_API_MESSAGE_FIELDS = frozenset({"id", "tool_args", "stop_after_tool_call", "from_history", "add_to_agent_memory"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -77,7 +78,7 @@ def _write_request_record(
         for message in request.messages
     ]
     tools = [json_safe(tool) for tool in request.tools]
-    system_prompt = next((message.get_content_string() for message in request.messages if message.role == "system"), "")
+    system_prompt = system_text(request.messages)
     _write_line(
         path,
         {

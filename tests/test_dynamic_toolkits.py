@@ -28,6 +28,8 @@ from mindroom.desktop.credentials import (
     save_desktop_credentials,
 )
 from mindroom.history.prompt_tokens import build_static_token_estimator
+from mindroom.llm.messages import system_text
+from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.response_runner import _agent_has_matrix_messaging_tool
@@ -95,7 +97,7 @@ def _tool_payload(result: str) -> dict[str, object]:
 
 
 def _build_prompt(build: AgentBuild) -> str:
-    return str(prompt_for_turn(build).content)
+    return system_text(prompt_for_turn(build))
 
 
 def _toolkit_names(build: AgentBuild) -> set[str]:
@@ -1080,7 +1082,6 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         name="active",
         tools=[Function(name="shared_tool", entrypoint=active_tool)],
         instructions=active_toolkit_marker,
-        add_instructions=True,
     )
     deferred_function = Function(
         name="shared_tool",
@@ -1092,7 +1093,6 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         name="deferred",
         tools=[deferred_function],
         instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
-        add_instructions=True,
     )
     _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit))
 
@@ -1572,7 +1572,6 @@ class _CrmTools(Toolkit):
             name="crm",
             tools=[self.crm_lookup, self.crm_notes],
             instructions="Prefer exact customer IDs.",
-            add_instructions=True,
         )
 
     def crm_lookup(self, customer_id: int) -> str:
@@ -1780,13 +1779,17 @@ def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
     assert "properties" not in object_schema
 
 
-def test_call_tool_schema_converts_to_a_plain_gemini_object() -> None:
-    """Gemini conversion must not invent placeholder argument keys."""
-    converted = gemini_wire.convert_schema(adapt_function(_search_toolkit().functions["call_tool"]).parameters)
+def test_call_tool_schema_reaches_gemini_as_authored() -> None:
+    """Gemini receives ``call_tool``'s schema unchanged, so no placeholder argument key is invented."""
+    parameters = adapt_function(_search_toolkit().functions["call_tool"]).parameters
+    tool = ToolSpec(name="call_tool", description=None, parameters=parameters, strict=None)
 
-    assert converted is not None
-    assert "example_key" not in str(converted)
-    assert "JSON object" in converted["properties"]["arguments"]["description"]
+    declarations = gemini_wire.function_declarations([tool])
+
+    assert declarations == {
+        "function_declarations": [{"name": "call_tool", "parameters_json_schema": dict(parameters)}],
+    }
+    assert "example_key" not in str(declarations)
 
 
 class _DualTools(Toolkit):
@@ -1988,7 +1991,6 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
         tools=[Function.from_callable(lambda: "b", name="beta_tool")],
         instructions="Use beta.",
     )
-    first.add_instructions = second.add_instructions = True
     toolkit = _search_toolkit(_deferred(first, "Shared", "shared"), _deferred(second, "Shared", "shared"))
 
     payload = _tool_payload(toolkit.tool_search("shared"))

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session
+from mindroom.llm.messages import model_provenance
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.llm.runs import RunRecord
+    from mindroom.llm.usage import HelperUsage, RequestUsage
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.usage.storage import IndependentUsageKind
@@ -71,17 +73,35 @@ def helper_usage_owner_context(owner: HelperUsageOwner | None) -> Iterator[None]
 
 
 async def record_helper_usage(
-    response: RunRecord,
+    usage: HelperUsage,
     *,
     owner: HelperUsageOwner,
-    invocation_id: str,
     kind: IndependentUsageKind,
     requester_id: str | None,
 ) -> None:
     """Keep returned usage before output validation, without inventing request boundaries."""
-    if response.metrics is None:
-        return
-    run = response.to_dict()
+    await _save_usage(_usage_run(usage), usage.run_id, owner=owner, kind=kind, requester_id=requester_id)
+
+
+async def record_run_usage(
+    run: RunRecord,
+    *,
+    owner: HelperUsageOwner,
+    kind: IndependentUsageKind,
+    requester_id: str | None,
+) -> None:
+    """Keep the usage of a helper that ran as a whole agent run: a workflow participant's turn or a skill review."""
+    await _save_usage(run.to_dict(), run.run_id, owner=owner, kind=kind, requester_id=requester_id)
+
+
+async def _save_usage(
+    run: dict[str, object],
+    invocation_id: str,
+    *,
+    owner: HelperUsageOwner,
+    kind: IndependentUsageKind,
+    requester_id: str | None,
+) -> None:
     await run_session_storage_operation(
         owner.storage_factory,
         lambda storage: storage.save_independent_usage(
@@ -95,15 +115,37 @@ async def record_helper_usage(
     )
 
 
+def _usage_run(usage: HelperUsage) -> dict[str, object]:
+    """Return ``usage`` as the run dict the usage ledger projects: its model, time, metrics, and requests."""
+    # TODO(simplify): the ledger projects helper usage from a run dict, so each request is written as an assistant
+    # message. Have `save_independent_usage` project a `HelperUsage` itself (#3109). Stored rows would not notice.
+    attribution = {"model": usage.model, "model_provider": usage.provider}
+    return {
+        **{key: value for key, value in attribution.items() if value is not None},
+        "created_at": usage.created_at,
+        "metrics": usage.metrics.to_dict(),
+        "messages": [_request_message(request) for request in usage.requests],
+    }
+
+
+def _request_message(request: RequestUsage) -> dict[str, object]:
+    message: dict[str, object] = {
+        "role": "assistant",
+        "created_at": request.created_at,
+        "metrics": request.metrics.to_dict(),
+    }
+    if request.model is not None:
+        message["provider_data"] = model_provenance(request.model.model_id, request.model.provider)
+    return message
+
+
 async def record_system_usage(
-    response: RunRecord,
+    usage: HelperUsage,
     *,
     runtime_paths: RuntimePaths,
     kind: IndependentUsageKind,
 ) -> None:
     """Persist one internal provider result under an admin-only, content-free source that names no requester."""
-    if response.metrics is None:
-        return
     try:
         session_root = resolve_session_state_root(runtime_paths.storage_root, runtime_paths)
         owner = HelperUsageOwner(
@@ -114,12 +156,6 @@ async def record_system_usage(
             session_id=kind,
             initial_session=new_scope_session(session_id=kind, scope_id=SYSTEM_USAGE_ENTITY, is_team=False),
         )
-        await record_helper_usage(
-            response,
-            owner=owner,
-            invocation_id=response.run_id,
-            kind=kind,
-            requester_id=None,
-        )
+        await record_helper_usage(usage, owner=owner, kind=kind, requester_id=None)
     except Exception as exc:
         logger.warning("system_usage_recording_failed", kind=kind, error_type=type(exc).__name__)

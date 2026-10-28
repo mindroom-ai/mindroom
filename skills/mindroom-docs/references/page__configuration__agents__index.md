@@ -76,7 +76,7 @@ agents:
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
-| `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
+| `markdown` | bool | `null` | Tell the agent in its system prompt that its replies are shown as Markdown; chat replies are rendered as Markdown either way. Team leaders follow `defaults.markdown`, and voice calls leave the line out |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
 | `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
@@ -154,7 +154,7 @@ How a private agent behaves:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `private.per` | `user` or `user_agent` | *required* | Requester boundary that gets its own private instance; it also sets the agent's [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
+| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `mem0`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
 | `private.template_dir` | string | `null` | Directory copied into each private root; relative paths resolve from `config.yaml`, absolute paths are allowed, and a missing directory is a config error (`Agent '<name>' has invalid private.template_dir`) |
 | `private.context_files` | list | `null` | Private-root-relative files preloaded into the prompt; cannot escape the private root |
 | `private.knowledge` | object | `null` | Per-requester knowledge index built from the private root; see [Private Agent Knowledge](https://docs.mindroom.chat/knowledge/#private-agent-knowledge). Omit it or set `enabled: false` for no index |

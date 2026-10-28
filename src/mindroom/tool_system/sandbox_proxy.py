@@ -945,7 +945,7 @@ def _call_proxy_sync(
             and egress_broker_enabled(runtime_paths)
             and runtime_config is not None
             and agent_name is not None
-            and egress_agent_scope(runtime_config, agent_name) is not None
+            and egress_agent_scope(runtime_config, agent_name, runtime_paths) is not None
         ):
             # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
             from mindroom.egress_broker.service import execution_env_for_worker  # noqa: PLC0415
@@ -968,6 +968,8 @@ def _call_proxy_sync(
             payload["execution_env_set"] = execution_env_set
         if call_environment.removed:
             payload["execution_env_unset"] = sorted(call_environment.removed)
+        if call_environment.path_prepend:
+            payload["execution_path_prepend"] = list(call_environment.path_prepend)
         if extra_env_passthrough is not None:
             payload["extra_env_passthrough"] = extra_env_passthrough
         if tool_config_overrides:

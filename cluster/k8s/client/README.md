@@ -97,6 +97,23 @@ nginx then serves that well-known path even without MatrixRTC; route it from the
 Without administrators the item is called **Download bug report** and saves the report as a file.
 See [Bug Reports](../../../docs/bug-reports.md) for what a report contains and where it goes.
 
+## Operator Notices
+
+The web client shows banners from `basePath/notices.json`, which nginx serves without caching; the [MindRoom Chat README](https://github.com/mindroom-ai/mindroom-chat#notices) documents the file format.
+Store the list under the `notices.json` key of a ConfigMap and name it in `notices.existingConfigMap`:
+
+```bash
+kubectl -n mindroom create configmap mindroom-client-notices --from-file=notices.json
+```
+
+```yaml
+notices:
+  existingConfigMap: mindroom-client-notices
+```
+
+Edits to the ConfigMap reach running pods within one to two minutes without a restart, and open tabs pick them up within another minute.
+Without `notices.existingConfigMap` the client serves the image's empty list, and while the named ConfigMap does not exist it shows no notices.
+
 ## Base Path
 
 Set `basePath` to serve the client under a URL prefix instead of the origin root:
@@ -165,7 +182,9 @@ The chart serves the image's native `authentication-recovery.js` asset and a fix
 Changing `probeUrl` changes only the client bootstrap target; it does not create another nginx location.
 The selected client image must contain `/usr/share/nginx/html/authentication-recovery.js`.
 
-If an external gateway applies authentication, expose only the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes without authentication so cached application shells can load the configuration and recovery code.
+If an external gateway applies authentication, exempt the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes from it so cached application shells can load the configuration and recovery code.
+You may also exempt the service worker scripts at `basePath/sw.js` and, with `rootServiceWorkerCleanup`, `/sw.js`, so installed service workers can still update after the gateway session expires.
+Gateway rules that exempt a path usually exempt every path below it too, so the chart answers 404 below each of these files.
 Keep `/authentication-recovery-probe`, the configured navigation target, client routes, and API routes protected.
 Enabling this option does not change gateway authentication policies.
 
@@ -190,6 +209,7 @@ nginx:
 The chart rejects `nginx.serverSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
 
 The app shell responses send `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the signed-in client.
+The device pairing page at `basePath/connect` sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
 nginx ignores server-level `add_header` directives in any location that sets its own headers, as the app shell, configuration, and asset locations do, so response headers added through `nginx.serverSnippet` do not reach those responses.
 
 ## Custom nginx Config

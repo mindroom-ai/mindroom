@@ -27,7 +27,7 @@ pytestmark = pytest.mark.usefixtures("patch_vector_store")
 @dataclass
 class _Answer:
     content: str
-    record: object = None
+    usage: object = None
 
 
 @pytest.mark.asyncio
@@ -43,7 +43,7 @@ async def test_chunk_contexts_situate_each_chunk_in_its_document(
         prompts.append((instructions, prompt))
         return _Answer(content=f"  context {prompt.split('<chunk>', 1)[1].split(maxsplit=1)[0]}  ")
 
-    async def record(_record: object, *, runtime_paths: object, kind: str) -> None:
+    async def record(_usage: object, *, runtime_paths: object, kind: str) -> None:
         del runtime_paths
         usage_kinds.append(kind)
 

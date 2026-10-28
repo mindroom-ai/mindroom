@@ -19,11 +19,14 @@ if TYPE_CHECKING:
 __all__ = [
     "PERSONAL_WORKER_SCOPES",
     "EgressServiceStatus",
+    "OAuthAccess",
     "OAuthStatus",
     "OAuthStatusReader",
     "Secret",
     "SecretMissing",
     "SecretNeedsReconnect",
+    "SecretReadOnly",
+    "SecretRequest",
     "SecretResult",
     "SecretServiceChanged",
     "SecretUnavailable",
@@ -40,6 +43,10 @@ __all__ = [
 _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
 # Worker scopes whose sandbox and egress store belong to one requester.
 PERSONAL_WORKER_SCOPES: frozenset[str] = frozenset({"user", "user_agent"})
+
+# What Agent Keys may do with an allowed account: only read (the service's `read_only` says how its API reads), or
+# read and write.
+type OAuthAccess = Literal["read", "read_write"]
 
 
 def is_personal_target(target: ResolvedWorkerTarget | None) -> bool:
@@ -194,6 +201,20 @@ def delete_secret(
 
 
 @dataclass(frozen=True)
+class SecretRequest:
+    """What the broker knows about the request it resolves a secret for, which an access level can depend on.
+
+    `method` is the request's method as sent, `path` its path without the query, `websocket` whether it asks to switch
+    to a WebSocket, and `method_override` whether it carries a header that asks the server to read another method.
+    """
+
+    method: str
+    path: str
+    websocket: bool = False
+    method_override: bool = False
+
+
+@dataclass(frozen=True)
 class Secret:
     """The secret the broker injects for one request; its value never appears in a repr."""
 
@@ -208,12 +229,15 @@ class SecretMissing:
     connectable provider. The URL carries a one-time connect token, so it stays out of reprs and logs.
     `reuse_off` means nobody allowed Agent Keys to use the `provider` account for this service, so it was not read
     and there is no link; `requester_owned` says the account is the requester's own, which only they can allow.
+    `own_account` means the service's own account is not connected, or with `reuse_off` not allowed, which only its row
+    on the egress page does.
     """
 
     provider: str | None = None
     connect_url: str | None = field(default=None, repr=False)
     reuse_off: bool = False
     requester_owned: bool = False
+    own_account: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,11 +245,13 @@ class SecretNeedsReconnect:
     """The scope's OAuth connection cannot supply a token until the user reconnects: its grant was revoked.
 
     `reset_required` means the stored credential is unreadable and must be reset before reconnecting.
+    `requester_owned` says the account is the requester's own, which only they can reconnect.
     """
 
     provider: str
     connect_url: str | None = field(default=None, repr=False)
     reset_required: bool = False
+    requester_owned: bool = False
 
 
 @dataclass(frozen=True)
@@ -236,6 +262,17 @@ class SecretUnavailable:
 
 
 @dataclass(frozen=True)
+class SecretReadOnly:
+    """The `provider` account may only read for this service, and the request may write; the connection was not read.
+
+    `requester_owned` says the account is the requester's own, which only they can allow to write.
+    """
+
+    provider: str
+    requester_owned: bool = False
+
+
+@dataclass(frozen=True)
 class SecretServiceChanged:
     """The service no longer has the definition whose rule routed the request, so its credential may be for other hosts.
 
@@ -243,7 +280,9 @@ class SecretServiceChanged:
     """
 
 
-type SecretResult = Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretServiceChanged
+type SecretResult = (
+    Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretReadOnly | SecretServiceChanged
+)
 
 
 @dataclass(frozen=True)
@@ -256,7 +295,7 @@ class OAuthStatus:
     accounts in the scope (`shared_sandbox`: a requester's own account in a sandbox that several requesters share).
     `shared_worker_opt_in` marks such a sandbox where the service allows it anyway, so every user of the agent can
     act with the connected account. `reuse_enabled` says whether Agent Keys may use the connection for this service;
-    without it a connected account serves only its tools.
+    without it a connected account serves only its tools. `reuse_access` is the level it may use it at, None while off.
     """
 
     provider: str
@@ -269,6 +308,7 @@ class OAuthStatus:
     unavailable_reason: Literal["shared_sandbox"] | None = None
     shared_worker_opt_in: bool = False
     reuse_enabled: bool = False
+    reuse_access: OAuthAccess | None = None
 
 
 type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]
@@ -296,9 +336,14 @@ def service_status(
     """Return both secret sources of an egress service for a worker target or the global store.
 
     `oauth_status(provider_id, target)` reports the service's OAuth provider for the same target; it is not
-    called for services without one. Never returns a secret or token.
+    called for services without one. A service with its own account (`oauth_separate_account`) has no key, as the
+    broker never uses one for it. Never returns a secret or token.
     """
-    key = load_egress_document(manager, target, egress_credential_service(name))
+    key = (
+        None
+        if service.oauth_separate_account
+        else load_egress_document(manager, target, egress_credential_service(name))
+    )
     oauth = oauth_status(service.oauth_provider, target) if service.oauth_provider is not None else None
     active_source: Literal["key", "oauth"] | None = None
     if key is not None:

@@ -1,12 +1,12 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
 """Responses API request bodies and event parsing for the OpenAI and Codex routes.
 
-Stored responses continue with ``previous_response_id`` while the request's system text is the one the chain holds.
-``store: false`` responses and portable replay send the history explicitly, with ordered output items and encrypted
-reasoning so a later request can replay a tool loop exactly. A changed system text on a stored route without
-portable replay resends the history rebuilt from its text and calls, without reasoning, because those responses
-record neither ordered output nor reasoning. A turn ends only when ``response.completed`` or ``response.incomplete``
-arrives.
+Stored responses continue with ``previous_response_id`` while the conversation the chain holds is the one the request
+replays before that response. ``store: false`` responses and portable replay send the history explicitly, with
+ordered output items and encrypted reasoning so a later request can replay a tool loop exactly. A changed
+conversation on a stored route without portable replay resends the history rebuilt from its text and calls, without
+reasoning, because those responses record neither ordered output nor reasoning. A turn ends only when
+``response.completed`` or ``response.incomplete`` arrives.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
 from mindroom.providers.openai.tool_ids import reformat_tool_call_ids
 from mindroom.providers.openai.tool_search import request_params_with_deferred_tool_search
 from mindroom.providers.tool_policy import disable_tool_selection
-from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -65,12 +64,12 @@ __all__ = [
     "ResponsesStream",
     "ResponsesTurnParts",
     "ResponsesWire",
+    "conversation_digest",
     "request_store",
     "responses_input",
     "responses_replay",
     "responses_request_kwargs",
     "responses_stop_reason",
-    "system_text_digest",
     "usage_report",
 ]
 
@@ -84,7 +83,7 @@ _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
 _STORED_KEY = "mindroom_response_stored"
 _PORTABLE_KEY = "mindroom_portable_replay"
-_SYSTEM_DIGEST_KEY = "mindroom_system_sha256"
+_CONVERSATION_DIGEST_KEY = "mindroom_conversation_sha256"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -131,31 +130,59 @@ def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] 
     return None
 
 
-def system_text_digest(messages: Sequence[Message]) -> str:
-    """Return the digest of the system text in ``messages``, which each stored response records for its request."""
-    system_text = [message.content for message in messages if message.role == "system"]
-    return hashlib.sha256(json.dumps(system_text, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+def conversation_digest(messages: Sequence[Message]) -> str:
+    """Return the digest of the conversation ``messages`` hold, which each stored response records for its request.
 
-
-def _continuable(provider_data: dict[str, Any], messages: Sequence[Message]) -> bool:
-    """Return whether a request for ``messages`` can continue the response that recorded ``provider_data``.
-
-    The provider keeps a stored response's context, including the system text its request sent or continued, and a
-    continuing request never resends it, so the response continues only when that system text is the request's. Only
-    a stored response records its digest, so an unstored one never continues.
-    Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain, but
-    ``instructions`` cannot hold the explicit prompt-cache breakpoint of the shared system prefix, so a changed system
-    text replays the history instead.
+    It covers what a request sends of each message, the system text and the turn context no history keeps included,
+    and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning, and inline
+    media bytes, which a media item's id and source stand for.
     """
-    # LEGACY_COMPAT: Stored Responses replies without the digest of their system text.
+    sent = [
+        {
+            "role": message.role,
+            "content": message.content,
+            "tool_call_id": message.tool_call_id,
+            "tool_call_error": message.tool_call_error,
+            "tool_calls": message.tool_calls,
+            "media": [
+                item.to_dict(include_content=False)
+                for item in (
+                    *(message.images or ()),
+                    *(message.audio or ()),
+                    *(message.videos or ()),
+                    *(message.files or ()),
+                )
+            ],
+        }
+        for message in messages
+    ]
+    return hashlib.sha256(json.dumps(sent, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bool:
+    """Return whether a request can continue the response that recorded ``provider_data``, after the messages ``before``.
+
+    The provider keeps a stored response's context, the conversation its request sent or continued, and a continuing
+    request never resends it, so the response continues only when that conversation is what the request replays
+    before the response. A resumed run sends its paused request again, so it continues; a later turn whose replay
+    left out what that conversation held, such as a finished turn's memory results or approval receipt, a changed
+    system text, or history a replay limit or compaction dropped, replays the history instead. Only a stored response
+    records its digest, so an unstored one never continues.
+    Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain across a
+    changed system text, but ``instructions`` cannot hold the explicit prompt-cache breakpoint of the stable system
+    message.
+    """
+    # LEGACY_COMPAT: Stored Responses replies without the digest of their conversation.
     # Legacy format: a stored Responses reply, an assistant message whose ``provider_data`` records a ``response_id``
-    # but no ``mindroom_system_sha256`` and whose ``mindroom_response_stored`` is not false. An unstored reply records
-    # no digest by design and is not legacy.
-    # Last legacy release: v2026.10.525; replacement: v2026.10.526, which records the digest on every stored response.
+    # but no ``mindroom_conversation_sha256`` and whose ``mindroom_response_stored`` is not false: replies through
+    # v2026.10.525 recorded no digest, and replies from v2026.10.526 recorded only ``mindroom_system_sha256``, the
+    # digest of their system text. An unstored reply records no digest by design and is not legacy.
+    # Last legacy release: v2026.10.611, which recorded only the system-text digest; replacement: the first release
+    # after it, which records the conversation digest on every stored response.
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
-    # once, with the current system text, and continues the response it stores from then on.
-    # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_system_digest_replays_once
-    return provider_data.get(_SYSTEM_DIGEST_KEY) == system_text_digest(messages)
+    # once and continues the response it stores from then on; ``mindroom_system_sha256`` is ignored.
+    # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_conversation_digest_replays_once
+    return provider_data.get(_CONVERSATION_DIGEST_KEY) == conversation_digest(before)
 
 
 def responses_replay(
@@ -167,16 +194,16 @@ def responses_replay(
 ) -> ResponsesReplay:
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
-    Portable replay, an unstored request, and a history whose latest response was not stored or holds other system
-    text send the history explicitly, each reply with the ordered output and reasoning it recorded; a reply stored
-    without portable replay recorded neither, so it is rebuilt without reasoning. A stored request without a stored
-    response sends the history without reasoning.
+    Portable replay, an unstored request, and a history whose latest response was not stored or holds another
+    conversation send the history explicitly, each reply with the ordered output and reasoning it recorded; a reply
+    stored without portable replay recorded neither, so it is rebuilt without reasoning. A stored request without a
+    stored response sends the history without reasoning.
     """
     route = native_compaction.route if native_compaction is not None else None
     history = native_replay_messages(messages, route)
     latest = _latest_response(history)
     replay_reasoning = (
-        portable_replay or store is False or (latest is not None and not _continuable(latest[1], messages))
+        portable_replay or store is False or (latest is not None and not _continuable(latest[1], history[: latest[0]]))
     )
     chained = None if replay_reasoning else latest
     return ResponsesReplay(
@@ -253,25 +280,19 @@ def _input_items(replay: ResponsesReplay) -> list[Any]:
     return items
 
 
-def _with_shared_system_prefix(formatted_input: list[Any], *, explicit_breakpoint: bool) -> list[Any]:
-    """Split MindRoom's initial system text so the shared agent instructions stay a cacheable prefix."""
+def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
+    """Put an explicit cache breakpoint after the first system message, the stable prompt (``agent_loop.prompt``).
+
+    The turn's context follows in its own system message, so it can change without invalidating the prefix.
+    """
     first_message = formatted_input[0] if formatted_input else None
     if not isinstance(first_message, dict) or first_message.get("role") not in {"system", "developer"}:
         return formatted_input
     content = first_message.get("content")
-    if not isinstance(content, str):
+    if not isinstance(content, str) or not content.strip():
         return formatted_input
-    shared_text, boundary, session_text = content.partition(SESSION_CONTEXT_BOUNDARY)
-    if not boundary or not shared_text.strip():
-        return formatted_input
-    shared_block: dict[str, Any] = {"type": "input_text", "text": shared_text}
-    if explicit_breakpoint:
-        shared_block["prompt_cache_breakpoint"] = {"mode": "explicit"}
-    return [
-        {**first_message, "content": [shared_block]},
-        {**first_message, "content": boundary + session_text},
-        *formatted_input[1:],
-    ]
+    prefix_block = {"type": "input_text", "text": content, "prompt_cache_breakpoint": {"mode": "explicit"}}
+    return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
 
 
 def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, explicit_breakpoint: bool) -> list[Any]:
@@ -287,8 +308,8 @@ def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, expli
         native_route=replay.native_route,
         replay_reasoning=replay.replay_reasoning,
     )
-    if cache_system_prompt:
-        formatted = _with_shared_system_prefix(formatted, explicit_breakpoint=explicit_breakpoint)
+    if cache_system_prompt and explicit_breakpoint:
+        formatted = _with_system_prefix_breakpoint(formatted)
     return formatted
 
 
@@ -296,16 +317,8 @@ def responses_input(replay: ResponsesReplay, *, cache_system_prompt: bool, expli
 
 
 def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return tools sorted by name with function definitions flattened as Responses expects."""
-    functions: list[dict[str, Any]] = []
-    for tool in tools:
-        definition: dict[str, Any] = {**function_definition(tool), "type": "function"}
-        # TODO(simplify): A top-level parameter's list `type` keeps only its first entry, so ["string", "null"] loses
-        # null, while nested schemas and Chat routes send the list. Send the schema unchanged. Models.
-        for property_schema in definition.get("parameters", {}).get("properties", {}).values():
-            if isinstance(property_schema, dict) and isinstance(property_schema.get("type"), list):
-                property_schema["type"] = property_schema["type"][0]
-        functions.append(definition)
+    """Return tools sorted by name with function definitions flattened as Responses expects, schemas as authored."""
+    functions = [{**function_definition(tool), "type": "function"} for tool in tools]
     return sorted(functions, key=lambda tool: tool["name"])
 
 
@@ -413,7 +426,10 @@ def responses_request_kwargs(
     # ``store`` in request_params already became the route's storage setting.
     params.update({key: value for key, value in (settings.request_params or {}).items() if key != "store"})
     _add_replay_policy(params, request)
-    params = disable_tool_selection(request_params_with_deferred_tool_search(params, request.deferred_tools.names))
+    params = disable_tool_selection(
+        request_params_with_deferred_tool_search(params, request.deferred_tools.names),
+        request.tool_choice,
+    )
     if wire.route == "codex":
         _codex_params(params, settings, wire)
     formatted_input = responses_input(
@@ -493,7 +509,7 @@ class ResponsesStream:
     store: bool | None
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
-    system_digest: str
+    conversation_digest: str
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
     ended: bool = False
@@ -554,7 +570,7 @@ class ResponsesStream:
 
         A completed and an incomplete response both end the turn, and ``responses_stop_reason`` reads its stop from the
         status and the incomplete reason. Both record the response id, its storage provenance, and the
-        ``system_digest`` of its request when stored; only a completed response's output is recorded for replay.
+        ``conversation_digest`` of its request when stored; only a completed response's output is recorded for replay.
         """
         self.ended = True
         parts = self.parts
@@ -566,7 +582,7 @@ class ResponsesStream:
             parts.provider_data["response_id"] = response.id
         parts.provider_data[_STORED_KEY] = self.store is not False
         if self.store is not False:
-            parts.provider_data[_SYSTEM_DIGEST_KEY] = self.system_digest
+            parts.provider_data[_CONVERSATION_DIGEST_KEY] = self.conversation_digest
         if response.status != "completed":
             return
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [

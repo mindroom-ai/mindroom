@@ -1436,10 +1436,10 @@ async def _parse_workflow_schedule(
         response = await complete_prompt(
             provider,
             prompt,
-            role="Parse scheduling requests into structured workflows",
+            instructions=["Parse scheduling requests into structured workflows"],
             schema=ScheduledWorkflow,
         )
-        await record_system_usage(response.record, runtime_paths=runtime_paths, kind="schedule_parse")
+        await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="schedule_parse")
         result = response.content
 
         if isinstance(result, ScheduledWorkflow):

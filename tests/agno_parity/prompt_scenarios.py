@@ -84,6 +84,7 @@ from tests.conftest import (
     make_relation_lookup,
     make_turn_context,
     make_visible_message,
+    seed_session_row,
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
@@ -844,7 +845,7 @@ async def _knowledge_graph(config: Config, runtime_paths: RuntimePaths) -> None:
 async def _memory_flush(config: Config, runtime_paths: RuntimePaths) -> None:
     # Auto-flush extracts from a conversation the agent already stored.
     storage = create_session_storage("assistant", config, runtime_paths, execution_identity=None)
-    storage.ensure_session_row(ConversationSession(session_id=_SESSION_ID, kind="agent", owner_id="assistant"))
+    seed_session_row(storage, ConversationSession(session_id=_SESSION_ID, kind="agent", owner_id="assistant"))
     summary = await _extract_memory_summary(
         config=config,
         runtime_paths=runtime_paths,

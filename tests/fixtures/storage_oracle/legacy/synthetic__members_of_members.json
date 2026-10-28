@@ -1,0 +1,9 @@
+{"objects":{
+"24e9f503f70c":{"created_at":1750000000,"member_responses":[],"messages":[],"run_id":"t0","session_id":"session","status":"COMPLETED","team_id":"squad"},
+"301303968182":{"content":"question m0","created_at":1750000000,"from_history":false,"id":"m0.u","role":"user","stop_after_tool_call":false},
+"3065236d6e96":{"agent_id":"code","content":"answer mm0","created_at":1750000000,"messages":[{"$":"9061f7809156"}],"metadata":{"matrix_event_id":"$mm0","matrix_seen_event_ids":["$mm0"]},"parent_run_id":"m0","run_id":"mm0","session_id":"session","status":"COMPLETED"},
+"5b44281e0868":{"content":"probe","created_at":0,"from_history":false,"id":"probe","role":"user","stop_after_tool_call":false},
+"9061f7809156":{"content":"question mm0","created_at":1750000000,"from_history":false,"id":"mm0.u","role":"user","stop_after_tool_call":false},
+"eeed4cdfb4e1":{"agent_id":"code","content":"answer m0","created_at":1750000000,"messages":[{"$":"301303968182"}],"metadata":{"matrix_event_id":"$m0","matrix_seen_event_ids":["$m0"]},"parent_run_id":"t0","run_id":"m0","session_id":"session","status":"COMPLETED"}
+},
+"recording":{"sessions":{"session":{"observed":{"folded_tool_call_ids":{},"force_queued":false,"ledger":[],"list_runs":[{"$":"eeed4cdfb4e1"},{"$":"3065236d6e96"},{"$":"24e9f503f70c"}],"loaded_runs":[{"$":"eeed4cdfb4e1"},{"$":"3065236d6e96"},{"$":"24e9f503f70c"}],"redaction_candidates":[],"request":[{"$":"5b44281e0868"}],"resume_requests":{},"row":{"created_at":1750000000,"session_data":{"session_state":{}},"updated_at":1750000000,"user_id":null},"seen_event_ids":[],"session":{"created_at":1750000000,"kind":"team","metadata":null,"owner_id":"squad","session_state":{},"summary":null},"session_runs":[]},"run_ids":["m0","mm0","t0"],"scope":"team:squad"}},"storage_name":"code"}}

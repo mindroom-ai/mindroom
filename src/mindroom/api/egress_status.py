@@ -14,15 +14,16 @@ from mindroom.api import config_lifecycle, oauth
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
 from mindroom.config.egress_broker import RESERVED_PLACEHOLDER_NAMES, RESERVED_PLACEHOLDER_PREFIXES, EgressService
 from mindroom.egress_broker.env import egress_broker_enabled
-from mindroom.egress_broker.oauth_reuse import oauth_reuse_enabled
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
 from mindroom.egress_broker.oauth_source import (
     broker_credential_context,
     oauth_connection_for_display,
+    separate_account_provider,
     shared_worker_oauth,
     shared_worker_unavailable_status,
 )
 from mindroom.egress_broker.presets import EGRESS_PRESETS
-from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthStatus, service_status
+from mindroom.egress_broker.secrets import EgressServiceStatus, OAuthAccess, OAuthStatus, service_status
 from mindroom.egress_broker.user_services import (
     MAX_RULES_PER_SERVICE,
     MAX_SERVICE_BYTES,
@@ -53,7 +54,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+_RESTRICT_ONLY_KEY_REFUSAL = "This service only limits paths and never sends a key, so it cannot store one"
+_OWN_ACCOUNT_KEY_REFUSAL = "This service uses only its own account and never sends a key, so it cannot store one"
+_READ_ONLY_UNSUPPORTED = "This service does not offer read-only access"
 
 # Service status loads that may run at once on one event loop, across every egress listing on it. A load can hold an
 # OAuth store's SQLite connection open between its thread steps, so this bounds the open connections and file
@@ -190,10 +193,11 @@ class EgressPresetResponse(BaseModel):
 
 
 class EgressOAuthProviderOption(BaseModel):
-    """One OAuth provider a service's account login can name."""
+    """One OAuth provider a service's account login can name; `requester_scoped` accounts belong to each user."""
 
     id: str
     display_name: str
+    requester_scoped: bool
 
 
 class PlaceholderValidation(BaseModel):
@@ -276,7 +280,11 @@ def presets_response(oauth_providers: Mapping[str, OAuthProvider]) -> PresetsRes
             ),
         )
     providers = [
-        EgressOAuthProviderOption(id=provider_id, display_name=provider.display_name)
+        EgressOAuthProviderOption(
+            id=provider_id,
+            display_name=provider.display_name,
+            requester_scoped=provider.requester_scoped_credentials,
+        )
         for provider_id, provider in oauth_providers.items()
     ]
     return PresetsResponse(presets=presets, oauth_providers=providers, validation=_egress_validation())
@@ -323,15 +331,36 @@ class PutSecretRequest(BaseModel):
 
 
 class OAuthReuseRequest(BaseModel):
-    """Body that lets Agent Keys use a service's connected account.
+    """Body that lets Agent Keys use a service's connected account, or changes the level it may use it at.
 
     The account's tools ask for approval before they write, but the agent's shell and python then act as the account
-    with its full access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`).
+    with its access and no prompts, so the caller must confirm that (`acknowledge_approval_bypass`). `access` is
+    `read_write` or, for a service that declares `read_only`, `read` (see `require_access_offered`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     acknowledge_approval_bypass: Literal[True]
+    access: OAuthAccess = "read_write"
+
+
+def key_refusal(service: EgressService) -> str | None:
+    """Return why `service` cannot store a key, or None: a limit sends nothing, and an own-account service its account."""
+    if service.restrict_only:
+        return _RESTRICT_ONLY_KEY_REFUSAL
+    if service.oauth_separate_account:
+        return _OWN_ACCOUNT_KEY_REFUSAL
+    return None
+
+
+def require_access_offered(
+    service: EgressService,
+    access: OAuthAccess,
+    headers: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse read-only access with a 409 for a service that does not declare how its API reads."""
+    if access == "read" and service.read_only is None:
+        raise HTTPException(409, _READ_ONLY_UNSUPPORTED, headers=headers)
 
 
 class EgressSourceStatus(BaseModel):
@@ -339,6 +368,7 @@ class EgressSourceStatus(BaseModel):
 
     `configured` is true when either source is available. `active_source` says which source the broker uses: an
     explicit key wins over an OAuth connection, which counts only once Agent Keys may use it (`oauth.reuse_enabled`).
+    A service with its own account (`oauth_separate_account`) never has a key.
     """
 
     configured: bool
@@ -365,8 +395,8 @@ async def egress_oauth_status(
 
     `connection_status` loads the provider's state without a token refresh, so a stalled provider never stalls a page:
     the personal page passes the helper behind the portal's status route, the admin panel the dashboard's.
-    `reuse_target` returns the target whose connection that status shows, where `reuse_enabled` is read through
-    `broker_credential_context` as the broker reads it. A provider the broker refuses in a shared sandbox
+    `reuse_target` returns the target whose connection that status shows, where `reuse_enabled` and `reuse_access` are
+    read through `broker_credential_context` as the broker reads them. A provider the broker refuses in a shared sandbox
     (`shared_worker_oauth`) is reported unavailable before any state is read.
     Without a service account the status is what the Connections portal shows the same viewer; requester-scoped
     connections (GitHub, Atlassian) belong to the requester, so every user of the agent manages their own. A service
@@ -374,7 +404,7 @@ async def egress_oauth_status(
     personal connection, which the broker uses once allowed, and nothing is connectable. Any failure to read one provider's state, the worker
     backend check included, shows that service as not connectable instead of failing the page.
     """
-    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service)
+    provider = service_oauth_provider(config_lifecycle.bind_current_request_snapshot(request), service, name)
     if provider is None:
         return None
     try:
@@ -388,7 +418,13 @@ async def egress_oauth_status(
             return shared_worker_unavailable_status(provider, runtime_paths)
         result = await connection_status(provider)
         context = broker_credential_context(provider, config, runtime_paths, manager, reuse_target(provider))
-        reuse_enabled = await asyncio.to_thread(oauth_reuse_enabled, context, name, provider.id)
+        reuse_access = await asyncio.to_thread(
+            oauth_reuse_access,
+            context,
+            name,
+            provider.id,
+            separate_account=service.oauth_separate_account,
+        )
         if result.has_service_account_config:
             # Shown whether or not Agent Keys may use it, so the user can allow or disconnect it.
             connected, account_label = await asyncio.to_thread(oauth_connection_for_display, context)
@@ -400,7 +436,8 @@ async def egress_oauth_status(
                 can_connect=False,
                 reset_required=result.reset_required,
                 service_account=True,
-                reuse_enabled=reuse_enabled,
+                reuse_enabled=reuse_access is not None,
+                reuse_access=reuse_access,
             )
         else:
             view: oauth.PersonalConnectionView = oauth.personal_connection_view(
@@ -414,7 +451,8 @@ async def egress_oauth_status(
                 account_label=view.account_label,
                 can_connect=view.can_connect,
                 reset_required=view.reset_required,
-                reuse_enabled=reuse_enabled,
+                reuse_enabled=reuse_access is not None,
+                reuse_access=reuse_access,
             )
     except Exception as exc:
         # OAuth provider code, plugin providers included, can raise anything.
@@ -456,22 +494,29 @@ async def egress_service_status(
     )
 
 
-def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None) -> OAuthProvider | None:
-    """Return the registry's provider for an egress service, or None without a service or a known provider."""
+def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None, name: str) -> OAuthProvider | None:
+    """Return the provider whose connection egress service `name` uses, or None without a service or a known provider.
+
+    That is the registry's provider, or for a service with its own account the copy that stores it.
+    """
     if service is None or service.oauth_provider is None:
         return None
-    return load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
+    provider = load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
+    if provider is None or not service.oauth_separate_account:
+        return provider
+    return separate_account_provider(provider, name)
 
 
 def oauth_provider_of_service(
     request: Request,
+    name: str,
     service: EgressService,
     worker_target: ResolvedWorkerTarget | None,
     *,
     connecting: bool,
     headers: Mapping[str, str] | None = None,
 ) -> OAuthProvider:
-    """Return the OAuth provider of an egress service for the connect and disconnect routes.
+    """Return the provider of egress service `name` (`service_oauth_provider`) for the connect and disconnect routes.
 
     A service without a provider, or whose provider the registry does not know, is a 404. A provider that the broker
     refuses for `worker_target` (a requester's account in a sandbox several requesters share, see
@@ -481,7 +526,7 @@ def oauth_provider_of_service(
     A worker backend that cannot be read is a 503 for both actions.
     """
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    provider = service_oauth_provider(snapshot, service)
+    provider = service_oauth_provider(snapshot, service, name)
     if provider is None:
         raise HTTPException(404, "Service has no account connection", headers=headers)
     try:

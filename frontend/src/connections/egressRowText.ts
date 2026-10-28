@@ -46,8 +46,10 @@ export interface ServiceEditing {
    * GitHub, when the viewer can manage the agent.
    */
   onLimitToRepositories?: (service: EgressCredentialService) => void;
-  /** Turns Limit to repositories off while the editor is open. */
+  /** Turns Limit to repositories and Add another account off while the editor is open. */
   limitDisabled?: boolean;
+  /** Add another account on a row: opens Add service for another account of its provider; null where none can be added. */
+  addAccount?: (service: EgressCredentialService) => (() => void) | null;
 }
 
 /** Whether a service or limit gets its edit actions: it has the `editableSource` and the viewer manages it. */
@@ -86,6 +88,15 @@ function keySavedLabel(saved: string | null): string {
     : "Key saved";
 }
 
+/** An account allowed only to read where the service no longer offers read only: the broker refuses it everything. */
+export function refusedReadOnly(service: EgressCredentialService): boolean {
+  return (
+    service.active_source === "oauth" &&
+    service.oauth?.reuse_access === "read" &&
+    !service.read_only_supported
+  );
+}
+
 /** What the row's status label says about where the service's credential comes from. */
 export function statusLabel(service: EgressCredentialService): string {
   const oauth = service.oauth;
@@ -96,10 +107,17 @@ export function statusLabel(service: EgressCredentialService): string {
         ? "Using API key"
         : keySavedLabel(service.key_updated_at);
     // The row names the account below the status label.
-    if (service.active_source === "oauth") return "Using connected account";
+    if (service.active_source === "oauth")
+      return refusedReadOnly(service)
+        ? "Needs read and write"
+        : "Using connected account";
     if (oauth.connected && !oauth.reuse_enabled)
-      return "Connected for tools only";
-    return oauth.reset_required ? "Reset required" : "Not set";
+      // The tools never use a service's own account.
+      return service.separate_account
+        ? "Connected, not used for Agent Keys yet"
+        : "Connected for tools only";
+    if (oauth.reset_required) return "Reset required";
+    return service.separate_account ? "Not connected" : "Not set";
   }
   if (!service.configured) return "Not set";
   return keySavedLabel(service.key_updated_at);
@@ -147,11 +165,18 @@ export function serviceHosts(service: EgressCredentialService): string[] {
   return [...new Set(service.rules.map(hostPort))];
 }
 
-/** What happens to requests to its hosts while the service has no key or account; null once it has, and for a limit. */
+/** What happens to requests to its hosts while the service has no key or account it can use; null once it has, and for a limit. */
 export function unsetNote(service: EgressCredentialService): string | null {
+  if (refusedReadOnly(service))
+    return "Requests are refused until this account is changed to read and write.";
   if (service.configured || service.restrict_only || service.rules.length === 0)
     return null;
   const oauth = service.oauth;
+  // A service with its own account takes no key, only that account.
+  if (service.separate_account)
+    return oauth?.connected && !oauth.reset_required
+      ? "Requests are refused until this account is used for Agent Keys."
+      : "Requests are refused until its own account is connected.";
   // An account Agent Keys can use stops refusals as well as a key does. A service account is
   // never one, but a personal account connected before it still is.
   if (oauth) {

@@ -12,6 +12,7 @@ import {
   type PlaceholderForm,
   type RuleForm,
   emptyRule,
+  offersSeparateAccount,
   usesOwnRules,
 } from "./egressServiceForm";
 import { configPlaceholderWarning } from "./egressServiceNotes";
@@ -162,6 +163,7 @@ export function MoreOptions({
   configPlaceholders,
   ruleEditing,
   newService,
+  focusDisplayName,
 }: {
   /** The id of the section, which the toggle controls. */
   id: string;
@@ -186,6 +188,8 @@ export function MoreOptions({
   ruleEditing: (index: number, rule: RuleForm) => RuleEditing;
   /** The service is being added, so an empty display name is saved as its host; an edited one keeps none. */
   newService: boolean;
+  /** Focus the display name when the section opens, for a new service that starts from another, such as another account. */
+  focusDisplayName: boolean;
 }) {
   const primaryHost = (form.rules[0]?.host ?? "").trim().toLowerCase();
   const displayNameHint = preset
@@ -205,7 +209,7 @@ export function MoreOptions({
     <p className="text-xs text-muted-foreground">
       {sharedTarget
         ? "Accounts cannot be connected on a shared agent, so this service uses an API key."
-        : `Users can connect an account (${preset.oauth_provider}) instead of an API key.`}
+        : `Users can connect an account (${providers.find((provider) => provider.id === preset.oauth_provider)?.display_name ?? preset.oauth_provider}) instead of an API key.`}
     </p>
   ) : (
     !preset && (
@@ -215,7 +219,9 @@ export function MoreOptions({
         hint={
           sharedTarget
             ? "Accounts cannot be connected on a shared agent. Use an API key."
-            : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
+            : form.separateAccount
+              ? "Users can connect an account of this kind."
+              : "Users can connect an account of this kind instead of an API key. Leave it empty to use an API key."
         }
         error={problemAt("oauthProvider")}
       >
@@ -253,6 +259,7 @@ export function MoreOptions({
           {(control) => (
             <Input
               {...control}
+              autoFocus={focusDisplayName}
               className={inputClass}
               value={form.displayName}
               disabled={disabled}
@@ -323,7 +330,34 @@ export function MoreOptions({
         </p>
       </div>
 
-      {loginField}
+      {/* A service with its own account uses only that account, so no key is there to connect one instead of. */}
+      {!(preset?.oauth_provider && form.separateAccount) && loginField}
+
+      {offersSeparateAccount(
+        form,
+        { context, sharedTarget, providers },
+        preset,
+      ) && (
+        <div className="space-y-1">
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4"
+              checked={form.separateAccount}
+              disabled={disabled}
+              onChange={(event) =>
+                set({ separateAccount: event.target.checked })
+              }
+            />
+            <span className="font-medium">
+              Use its own account, not the one the agent's tools use
+            </span>
+          </label>
+          <p className="pl-6 text-xs text-muted-foreground">
+            {`Requests choose this service with the header X-Agent-Keys-Service: ${form.name || "<name>"}.`}
+          </p>
+        </div>
+      )}
 
       {/* The placeholder variables: what they are for, the rules for their names, one row each with its problem or warning. */}
       <div className="space-y-3">

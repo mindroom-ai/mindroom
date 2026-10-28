@@ -352,11 +352,10 @@ function ServiceSection({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Services you add here are offered to every user and to every agent with
-        the <code>egress_credentials</code> tool. Agents with a{" "}
-        <code>user</code> or <code>user_agent</code> worker scope and private
-        agents are not listed: each user sets their keys on the Connections
-        page&apos;s{" "}
+        Services you add here are offered to every user and to every agent that
+        uses Agent Keys. Agents with a <code>user</code> or{" "}
+        <code>user_agent</code> worker scope and private agents are not listed:
+        each user sets their keys on the Connections page&apos;s{" "}
         {personalPage ? (
           <>
             <a
@@ -379,7 +378,7 @@ function ServiceSection({
         <p className="text-xs text-muted-foreground">
           {personalAgents
             ? "Only agents whose keys each user sets use the broker, so no keys are set here."
-            : "No agent uses these keys. An agent uses them once it has shell or python and the egress_credentials tool."}
+            : "No agent uses these keys. An agent uses them once it has the egress_credentials tool and shell or python running in a worker."}
         </p>
       )}
       {error && (

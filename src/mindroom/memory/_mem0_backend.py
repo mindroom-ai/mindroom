@@ -18,7 +18,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.timing import timed
 
-from ._mem0_usage import counted_mem0_usage, mem0_usage_run
+from ._mem0_usage import counted_mem0_usage, mem0_usage
 from ._policy import (
     allowed_scope_storage_paths,
     build_team_user_id,
@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.messages import Message
+    from mindroom.llm.usage import RequestUsage
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -378,24 +378,18 @@ class Mem0MemoryBackend:
 
     async def _record_extraction_usage(
         self,
-        calls: list[Message],
+        calls: list[RequestUsage],
         owner: HelperUsageOwner | None,
         requester_id: str | None,
     ) -> None:
         """Count Mem0's extraction tokens toward the conversation, or as internal work, which names no requester."""
-        if (run := mem0_usage_run(calls)) is None:
+        if (usage := mem0_usage(calls)) is None:
             return
         try:
             if owner is None:
-                await record_system_usage(run, runtime_paths=self.runtime_paths, kind="memory_extraction")
+                await record_system_usage(usage, runtime_paths=self.runtime_paths, kind="memory_extraction")
             else:
-                await record_helper_usage(
-                    run,
-                    owner=owner,
-                    invocation_id=run.run_id,
-                    kind="memory_extraction",
-                    requester_id=requester_id,
-                )
+                await record_helper_usage(usage, owner=owner, kind="memory_extraction", requester_id=requester_id)
         except Exception:
             # Recording follows the memory write, which it must neither fail nor, after a failed write, replace.
             logger.exception("Memory extraction usage could not be recorded")

@@ -1,7 +1,7 @@
 """Which runs read the bound approval receipt, under which ids it names their calls: the binding a continuation sets.
 
 It imports nothing of the model loop, so the work the loop starts, such as a background job, can leave it.
-``mindroom.approval.receipt`` renders the receipt and projects it into a reader's first request.
+``mindroom.approval.receipt`` renders the receipt and adds it to a reader's messages before its first request.
 """
 
 from __future__ import annotations
@@ -47,9 +47,9 @@ def approval_receipt_context(calls: tuple[ApprovalCall, ...], *, run_id: str) ->
     ids, in pause order; a pending call fails the binding before anything runs. That run reads it, and so does every
     run that ``add_approval_receipt_reader`` names: one whose own paused calls the latest approval decided, one that
     continues with the result of a delegation call whose card or child's calls it decided, or a recovered CLI call's
-    follow-up. Each reads it once, in its first request as a reader. No other run reads it, such as a run the
-    continuation starts, a run of a background job it starts, or a member it continues with the result of a
-    delegation the latest approval did not decide.
+    follow-up. Each gets it once, before its first request as a reader, and keeps it for the rest of the run. No
+    other run reads it, such as a run the continuation starts, a run of a background job it starts, or a member it
+    continues with the result of a delegation the latest approval did not decide.
     """
     pending = next((call for call in calls if call.decision is None), None)
     if pending is not None:

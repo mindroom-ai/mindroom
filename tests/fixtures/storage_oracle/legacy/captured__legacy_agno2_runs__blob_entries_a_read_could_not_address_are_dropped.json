@@ -1,0 +1,7 @@
+{"objects":{
+"1f75d6c37cbb":{"agent_id":"code","content":"blob","created_at":1,"messages":[],"run_id":"ok","status":"RUNNING"},
+"45f20df0d9c1":{"metrics":{},"run_id":5},
+"5b44281e0868":{"content":"probe","created_at":0,"from_history":false,"id":"probe","role":"user","stop_after_tool_call":false},
+"5ee0104536ec":{"created_at":1,"metrics":{},"requests":[],"run_id":"ok"}
+},
+"recording":{"sessions":{"session-1":{"observed":{"folded_tool_call_ids":{},"force_queued":false,"ledger":[["ok",{"$":"5ee0104536ec"}],[null,null],[null,{"$":"45f20df0d9c1"}],[null,{"metrics":{}}]],"list_runs":[{"$":"1f75d6c37cbb"}],"loaded_runs":[{"$":"1f75d6c37cbb"}],"redaction_candidates":[],"request":[{"$":"5b44281e0868"}],"resume_requests":{},"row":{"created_at":1700000000,"session_data":"{\"session_state\": {}}","updated_at":1700000000,"user_id":"@alice:example.test"},"seen_event_ids":[],"session":{"created_at":1700000000,"kind":"agent","metadata":null,"owner_id":"code","session_state":{},"summary":null},"session_runs":[]},"run_ids":["ok"],"scope":"agent:code"}},"storage_name":"code"}}

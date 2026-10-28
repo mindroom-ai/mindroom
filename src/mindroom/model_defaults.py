@@ -14,6 +14,7 @@ __all__ = (
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
+    "CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES",
     "CLAUDE_PREFIX_CHECKED_THINKING_MODELS",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS",
     "CODEX_GPT_ALIAS",
@@ -110,6 +111,9 @@ CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-mythos-5",
     "claude-mythos-preview",
 )
+# Claude models that reject forced tool use on every request
+# (https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility).
+CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES = (_ANTHROPIC_OPUS, _ANTHROPIC_SONNET, _ANTHROPIC_FABLE, "claude-mythos-5-1")
 # Claude models that predate tool_search_tool_regex_20251119 (Opus 4.1 and
 # earlier — a closed set, so new releases take the native tool-search path
 # without a list update). Prefixes cover the aliases plus the dated

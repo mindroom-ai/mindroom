@@ -11,6 +11,7 @@ The [usage export service](../usage.md#usage-export-service) and the [budget ser
 The [Connections portal](../connections-portal.md#trusted-upstream-sign-in) can use it, and users signed in to MindRoom Chat can open it without a gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway that publishes a JWKS endpoint and adds a short-lived signed JWT to each authenticated browser request, such as an identity-aware proxy or an OAuth2 proxy.
+[Cloudflare Access & Tunnel](cloudflare-access.md) lists the values for Cloudflare Access.
 MindRoom takes the user only from the verified JWT claims and ignores identity headers, so a request that bypasses the gateway cannot pose as a user.
 While trusted upstream auth is enabled, it replaces Supabase platform auth and `MINDROOM_API_KEY` auth for the dashboard and its API.
 
@@ -52,7 +53,7 @@ Domain matching is case-insensitive, emails from any other domain or a subdomain
 
 ## Helm Charts
 
-For the hosted instance chart, set the equivalent values:
+For the hosted instance chart or the runtime chart, set the equivalent values:
 
 ```yaml
 trustedUpstreamAuth:
@@ -68,9 +69,9 @@ trustedUpstreamAuth:
   emailDomain: example.com
 ```
 
-The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
+Either chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables, and with `enabled` true the runtime chart fails to render when `env.extra` also sets one of those variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
-Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
+All three charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
 ## Dashboard On Its Own Host
 
@@ -85,7 +86,7 @@ With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open t
 
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
-With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal and the OAuth callback, success, and reset pages keep their own access checks.
+With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal, the OAuth callback, success, and reset pages, and [private Dynamic Workflow reports](../tools/agent-orchestration.md#dynamic_workflow) keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Connections session from MindRoom Chat](../connections-portal.md#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 

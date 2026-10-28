@@ -212,8 +212,9 @@ def _initial_agent_continuation(
 class _PreparedAgentRun:
     """Prepared agent invocation state after history planning.
 
-    ``spec`` is the build's spec with this turn's system message; ``history`` and ``summary`` are the stored
-    history the request replays under the resolved plan, and ``turn`` is the new input around the prompt.
+    ``spec`` is the build's spec with this turn's system messages, stable then turn; ``history`` and ``summary``
+    are the stored history the request replays under the resolved plan, and ``turn`` is the new input around the
+    prompt.
     ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
     """
 
@@ -756,7 +757,7 @@ class _TurnRunContinuation:
 
     The run keeps its hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
     compaction's stop, carries across its continuations. The resume replays the scope's history as the attempt did
-    and reuses the paused run's stored system message.
+    and reuses the paused run's stored system messages.
     """
 
     run_context: _AgentRunContext
@@ -863,8 +864,8 @@ def _mark_pipeline_timing(pipeline_timing: DispatchPipelineTiming | None, label:
         pipeline_timing.mark(label)
 
 
-def _turn_system_message(build: AgentBuild, ctx: ResponseTurnContext, session_preamble: str) -> Message:
-    """Render the turn's system message: the build's prompt, the memory preamble, and the turn's system enrichment."""
+def _turn_system_messages(build: AgentBuild, ctx: ResponseTurnContext, session_preamble: str) -> tuple[Message, ...]:
+    """Render the turn's system messages: the build's prompt, the memory preamble, and the turn's system enrichment."""
     return prompt_for_turn(
         build,
         session_preamble,
@@ -926,8 +927,8 @@ async def _prepare_turn_memory(
     )
 
 
-async def _system_message_after_compaction(
-    system_message: Message,
+async def _system_messages_after_compaction(
+    system_messages: tuple[Message, ...],
     build: AgentBuild,
     ctx: ResponseTurnContext,
     config: Config,
@@ -935,15 +936,15 @@ async def _system_message_after_compaction(
     execution_identity: ToolExecutionIdentity | None,
     scope_context: ScopeSessionContext | None,
     conversation: ConversationRef | None,
-) -> Message:
-    """Render the system message again with the current MEMORY.md when this turn's history preparation compacted.
+) -> tuple[Message, ...]:
+    """Render the system messages again with the current MEMORY.md when this turn's history preparation compacted.
 
     That compaction already changes the request after the system prompt, so reloading here costs nothing, while
     waiting for the next turn would make it miss the cache on the whole compacted history.
     """
     compacted = _memory_conversation(ctx, config, scope_context)
     if compacted is None or compacted == conversation:
-        return system_message
+        return system_messages
     fresh = await conversation_entrypoint_preamble(
         ctx.entity_label,
         runtime_paths.storage_root,
@@ -952,7 +953,7 @@ async def _system_message_after_compaction(
         execution_identity,
         conversation=compacted,
     )
-    return _turn_system_message(build, ctx, fresh)
+    return _turn_system_messages(build, ctx, fresh)
 
 
 @timed("system_prompt_assembly")
@@ -981,7 +982,7 @@ async def _prepare_agent_and_prompt(
     supports_native_tool_approval: bool,
     reusable_build: AgentBuild | None,
 ) -> _PreparedAgentRun:
-    """Prepare the agent build, this turn's system message, and its request input.
+    """Prepare the agent build, this turn's system messages (stable, then turn), and its request input.
 
     Returns the prepared run input plus history bookkeeping for one agent turn.
     """
@@ -1091,13 +1092,13 @@ async def _prepare_agent_and_prompt(
             system_enrichment=ctx.system_enrichment_items,
             transient_enrichment=ctx.transient_enrichment_items,
         )
-        system_message, transient_turn_context, cli_context = (
-            minimal.system_message,
+        system_messages, transient_turn_context, cli_context = (
+            minimal.system_messages,
             minimal.transient_context,
             minimal.context_documents,
         )
     else:
-        system_message = _turn_system_message(build, ctx, prompt_parts.session_preamble)
+        system_messages = _turn_system_messages(build, ctx, prompt_parts.session_preamble)
         transient_turn_context = render_transient_context(
             (prompt_parts.transient_turn_context, render_enrichment_block(list(ctx.transient_enrichment_items))),
         )
@@ -1106,7 +1107,7 @@ async def _prepare_agent_and_prompt(
         scope_context=scope_context,
         # A minimal turn's requests offer only Bash, so its history budget is sized with Bash alone.
         build=presented_build(build) if build.surface.mode == "minimal" else build,
-        system_message=system_message,
+        system_messages=system_messages,
         prompt=current_turn_prompt,
         transient_context_messages=(
             (Message(role="user", content=transient_turn_context, add_to_agent_memory=False),)
@@ -1125,8 +1126,8 @@ async def _prepare_agent_and_prompt(
         include_openai_compat_guidance=include_openai_compat_guidance,
         pipeline_timing=pipeline_timing,
     )
-    system_message = await _system_message_after_compaction(
-        system_message,
+    system_messages = await _system_messages_after_compaction(
+        system_messages,
         build,
         ctx,
         config,
@@ -1162,7 +1163,7 @@ async def _prepare_agent_and_prompt(
     )
     return _PreparedAgentRun(
         build=build,
-        spec=replace(build.spec, system_message=system_message),
+        spec=replace(build.spec, system_messages=system_messages),
         turn=turn,
         history=tuple(history),
         summary=summary,

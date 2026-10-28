@@ -455,26 +455,29 @@ async def _collect_environment(
     tool_name: str,
     registered_toolkit: str | None,
     timing: _ToolBridgeTiming,
-) -> ToolEnvironment:
-    """Run the environment hooks once for the call, timed, and return the environment its shell commands get."""
+) -> tuple[ToolEnvironment, str | None]:
+    """Run the environment hooks once for the call, timed.
+
+    Return the environment its shell commands get, and the declined result when one of the hooks declines the call.
+    """
     started_at = time.perf_counter()
-    environment = await emit_collect_environment(
-        hook_registry,
-        ToolEnvironmentContext(
-            function_name=tool_name,
-            registered_toolkit=registered_toolkit,
-            arguments=arguments,
-            agent_name=resolved_context.agent_name,
-            room_id=resolved_context.room_id,
-            requester_id=resolved_context.requester_id,
-            config=resolved_context.config,
-            runtime_paths=resolved_context.runtime_paths,
-            correlation_id=resolved_context.correlation_id,
-            _hook_registry_state=resolved_context.hook_registry_state,
-        ),
+    context = ToolEnvironmentContext(
+        function_name=tool_name,
+        registered_toolkit=registered_toolkit,
+        arguments=arguments,
+        agent_name=resolved_context.agent_name,
+        room_id=resolved_context.room_id,
+        requester_id=resolved_context.requester_id,
+        config=resolved_context.config,
+        runtime_paths=resolved_context.runtime_paths,
+        correlation_id=resolved_context.correlation_id,
+        _hook_registry_state=resolved_context.hook_registry_state,
     )
+    environment = await emit_collect_environment(hook_registry, context)
     timing.environment_hooks_ms = elapsed_ms_since(started_at, clock=time.perf_counter, ndigits=2)
-    return environment
+    if not context.declined:
+        return environment, None
+    return environment, _DECLINED_RESULT_TEMPLATE.format(tool_name=tool_name, reason=context.decline_reason)
 
 
 @dataclass(slots=True)
@@ -552,7 +555,7 @@ def _record_failure(
         )
         return
     logger.warning(
-        "Tool call failed",
+        "tool_call_failed",
         tool_name=tool_name,
         agent_name=resolved_context.agent_name or None,
         error_type=failure_record.error_type,
@@ -563,7 +566,7 @@ def _record_failure(
     )
 
 
-async def _execute_bridge(  # noqa: C901
+async def _execute_bridge(  # noqa: C901, PLR0915
     tool_name: str,
     func: Callable[..., Awaitable[_ToolHookResult]],
     args: dict[str, Any],
@@ -631,6 +634,11 @@ async def _execute_bridge(  # noqa: C901
         await finish(outcome, ready, result=_observed(result))
         return result
 
+    async def decline(outcome: str, declined_result: str) -> ToolOutcome:
+        await finish(outcome, timing.result_ready(), result=declined_result, blocked=True)
+        # The call answers as failed, so the model reads the decline as one.
+        return ToolOutcome(content=declined_result, is_error=True)
+
     if has_before_hooks:
         before_hooks_started_at = time.perf_counter()
         declined_result = await _run_before_hooks(
@@ -641,9 +649,7 @@ async def _execute_bridge(  # noqa: C901
         )
         timing.before_hooks_ms = elapsed_ms_since(before_hooks_started_at, clock=time.perf_counter, ndigits=2)
         if declined_result is not None:
-            await finish("blocked_before_hooks", timing.result_ready(), result=declined_result, blocked=True)
-            # The call answers as failed, so the model reads the decline as one.
-            return ToolOutcome(content=declined_result, is_error=True)
+            return await decline("blocked_before_hooks", declined_result)
 
     if origin is not None and approval_gate is not None:
         decision = await approval_gate(origin, tool_name, deepcopy(args))
@@ -653,8 +659,9 @@ async def _execute_bridge(  # noqa: C901
             await finish("blocked_approval", timing.result_ready(), result=declined_result, blocked=True)
             return BackgroundToolApprovalDenied(reason=reason)
 
-    # Collected only once the call may run, so a hook computes values such as short-lived tokens just before the body.
-    environment = (
+    # Collected only once the call may run, so a hook computes values such as short-lived tokens just before the body,
+    # and declines the call when it cannot.
+    environment, declined_result = (
         await _collect_environment(
             hook_registry=hook_registry,
             resolved_context=resolved_context,
@@ -664,8 +671,10 @@ async def _execute_bridge(  # noqa: C901
             timing=timing,
         )
         if has_environment_hooks
-        else ToolEnvironment()
+        else (ToolEnvironment(), None)
     )
+    if declined_result is not None:
+        return await decline("blocked_environment_hooks", declined_result)
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
@@ -756,12 +765,12 @@ def build_tool_hook_middleware(
 ) -> ToolMiddleware:
     """Return the tool-call policy as the middleware around every tool call, in the loop and outside it.
 
-    The call reaches its entrypoint only through ``call_next``, so a plugin before-hook that declines it, a
-    revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a declined call
-    returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its ``origin`` and the
-    ``approval_gate`` that asks its requester; a call its requester denied returns ``BackgroundToolApprovalDenied``
-    without running. A call that may run collects its environment hooks once, and the shell commands it runs, locally
-    or in a worker, get what they set.
+    The call reaches its entrypoint only through ``call_next``, so a plugin before-hook or environment hook that
+    declines it, a revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a
+    declined call returns a failed ``ToolOutcome`` with the decline's text. A background script's call passes its
+    ``origin`` and the ``approval_gate`` that asks its requester; a call its requester denied returns
+    ``BackgroundToolApprovalDenied`` without running. A call that may run collects its environment hooks once, and the
+    shell commands it runs, locally or in a worker, get what they set.
     """
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)

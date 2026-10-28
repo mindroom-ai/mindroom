@@ -48,12 +48,14 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, Mod
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.delegation.state import SubagentPersona
 from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
@@ -1088,7 +1090,6 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
-        list_mcp_functions: bool = False,
     ) -> Toolkit:
         del (
             _runtime_paths,
@@ -1104,7 +1105,6 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
-            list_mcp_functions,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -1148,7 +1148,6 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
-        list_mcp_functions: bool = False,
     ) -> Toolkit:
         del (
             _runtime_paths,
@@ -1164,7 +1163,6 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
-            list_mcp_functions,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -2824,7 +2822,6 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
-        list_mcp_functions: bool = False,
     ) -> Toolkit:
         del (
             _runtime_paths,
@@ -2838,7 +2835,6 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             agent_state_root,
             tool_output_auto_save_threshold_bytes,
             runtime_config,
-            list_mcp_functions,
         )
         credentials = load_scoped_credentials(
             tool_name,
@@ -4248,10 +4244,10 @@ def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(
     config.tool_approval = ToolApprovalConfig(default="require_approval")
     agent = _create_agent_for_test("general", config, knowledge=_knowledge("docs"))
 
-    message = prompt_for_turn(agent)
+    prompt = system_text(prompt_for_turn(agent))
 
     for advertised in ("<skills_system>", "get_skill_instructions", "get_skill_script", "search_knowledge_base"):
-        assert advertised not in str(message.content)
+        assert advertised not in prompt
 
 
 @pytest.mark.asyncio
@@ -4865,6 +4861,39 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
         "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
     ) in description
     assert "use search_memories" not in description
+
+
+@pytest.mark.parametrize("configured_base", [None, "engineering"])
+def test_graph_agent_knowledge_search_also_searches_its_graph(configured_base: str | None) -> None:
+    """A graph-enabled agent's knowledge search lists its graph beside any configured bases, or alone."""
+    config = _test_config()
+    config.agents["general"].knowledge_graph = True
+    knowledge = _knowledge(configured_base) if configured_base is not None else None
+
+    agent = _create_agent_for_test("general", config, knowledge=knowledge)
+
+    description = _offered(agent)["search_knowledge_base"].description
+    assert description is not None
+    assert "- knowledge_graph: " in description
+    assert (f"- {configured_base}: " in description) is (configured_base is not None)
+
+
+@pytest.mark.parametrize(("kept", "searches_graph"), [(("engineering",), False), (None, True)])
+def test_persona_searches_the_graph_only_when_it_keeps_every_source(
+    kept: tuple[str, ...] | None,
+    searches_graph: bool,
+) -> None:
+    """A persona that names the bases it keeps skips the graph, as it skips file memory; one that keeps all searches it."""
+    config = _test_config()
+    config.agents["general"].knowledge_graph = True
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", knowledge=kept)
+
+    agent = _create_agent_for_test("general", config, knowledge=_knowledge("engineering"), persona=persona)
+
+    description = _offered(agent)["search_knowledge_base"].description
+    assert description is not None
+    assert "- engineering: " in description
+    assert ("- knowledge_graph: " in description) is searches_graph
 
 
 def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(

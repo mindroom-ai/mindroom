@@ -43,9 +43,6 @@ def test_a_tool_definition_shows_the_model_its_name_description_and_schema_only(
         description=None,
         parameters=parameters,
         strict=True,
-        requires_confirmation=True,
-        external_execution=False,
-        approval_type="mindroom_policy",
     )
 
     definition = tool_definition(tool)

@@ -102,7 +102,7 @@ def run_agent(
     hooks: LoopHooks = NO_HOOKS,
     metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator[RunEvent]:
-    """Run one agent turn: the spec's system message, then ``run_input`` as the history subsystem built it.
+    """Run one agent turn: the spec's system messages, stable then turn, then ``run_input`` as history built it.
 
     ``metadata`` is stored on the run's record; the run's tool calls read ``ctx.metadata``, which a team's member runs
     share with the team run while their records store none of it.
@@ -117,7 +117,7 @@ def run_agent(
         agent_id=spec.id,
         agent_display_name=spec.name,
     )
-    messages = [*([] if spec.system_message is None else [spec.system_message]), *run_input]
+    messages = [*spec.system_messages, *run_input]
     return drive_run(
         spec,
         record,
@@ -415,8 +415,16 @@ async def _store_interrupted[R: AnyRunRecord](
 
 
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
-    """Snapshot the live messages the run stores, stamp its status, and close its duration."""
-    record.messages = [message for message in messages if message.add_to_agent_memory and not message.from_history]
+    """Snapshot the live messages the run stores, stamp its status, and close its duration.
+
+    Replayed history never stores. A paused run also stores, in place, the context its requests sent but no history
+    holds (``add_to_agent_memory=False``), such as memory results and the approval receipt, so its resume sends the
+    paused request unchanged; a run that ends otherwise drops it.
+    """
+    paused = status is RunStatus.paused
+    record.messages = [
+        message for message in messages if not message.from_history and (paused or message.add_to_agent_memory)
+    ]
     record.status = status
     assert record.metrics is not None
     record.metrics.duration = time.monotonic() - started

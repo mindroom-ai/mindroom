@@ -36,16 +36,16 @@ if TYPE_CHECKING:
     from mindroom.egress_broker.dial import DialPolicy
     from mindroom.egress_broker.messages import ScopeInfo
     from mindroom.egress_broker.rules import EgressRules
-    from mindroom.egress_broker.secrets import SecretResult
+    from mindroom.egress_broker.secrets import SecretRequest, SecretResult
     from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 
 __all__ = ["EgressBroker", "RulesProvider", "ScopeInfoProvider", "SecretResolver"]
 
 # Called in a thread with the verified requester's claims; returns the rules that requester's traffic matches.
 type RulesProvider = Callable[[WorkerClaims], EgressRules]
-# Awaited on the broker's loop with the matched service's name and the definition its rule came from: the resolver
-# chooses which executor each blocking lookup runs on.
-type SecretResolver = Callable[[WorkerClaims, str, EgressService], Awaitable[SecretResult]]
+# Awaited on the broker's loop with the matched service's name, the definition its rule came from, and the request's
+# facts: the resolver chooses which executor each blocking lookup runs on.
+type SecretResolver = Callable[[WorkerClaims, str, EgressService, SecretRequest], Awaitable[SecretResult]]
 # Called on the broker's loop when a refusal says who can add a missing key or change a path limit.
 type ScopeInfoProvider = Callable[[WorkerClaims], ScopeInfo]
 
@@ -244,7 +244,7 @@ class EgressBroker:
             return False
         path = target.split(b"?", 1)[0].decode("ascii")
         entry = AuditEntry(claims=claims, kind="request", method=request.method.decode("ascii"), host=host, path=path)
-        routed = await self._relay.route(client, entry, port)
+        routed = await self._relay.route(client, entry, port, request.headers)
         if routed is None:
             return False
         rules, route = routed

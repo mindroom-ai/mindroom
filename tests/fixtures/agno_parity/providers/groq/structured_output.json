@@ -47,14 +47,23 @@
   },
   "parsed": {
     "message": {
-      "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
       "provider_data": {
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
           "provider": "Groq"
         }
       },
-      "role": "assistant"
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+            "name": "structured_output"
+          },
+          "id": "call_parity_answer",
+          "type": "function"
+        }
+      ]
     },
     "metrics": {
       "input_tokens": 42,
@@ -67,11 +76,12 @@
       },
       "total_tokens": 54
     },
-    "stop_reason": "end"
+    "stop_reason": "tool_use"
   },
   "request": {
     "body": {
       "model": "openai/gpt-oss-120b",
+      "stream": true,
       "messages": [
         {
           "role": "system",
@@ -82,10 +92,42 @@
           "content": "What should I pack for Paris tomorrow?"
         }
       ],
-      "response_format": {
-        "type": "json_object"
+      "tool_choice": {
+        "type": "function",
+        "function": {
+          "name": "structured_output"
+        }
       },
-      "tools": []
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "structured_output",
+            "description": "Give your answer as this tool's arguments.",
+            "parameters": {
+              "description": "Structured output for routing decisions.",
+              "properties": {
+                "entity_name": {
+                  "description": "The name of the agent or team that should respond",
+                  "title": "Entity Name",
+                  "type": "string"
+                },
+                "reasoning": {
+                  "description": "Brief explanation of why this agent or team was chosen",
+                  "title": "Reasoning",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entity_name",
+                "reasoning"
+              ],
+              "title": "_RoutingSuggestion",
+              "type": "object"
+            }
+          }
+        }
+      ]
     },
     "headers": {
       "accept": "application/json",
@@ -96,40 +138,94 @@
   },
   "response_raw": {
     "headers": {
-      "content-type": "application/json"
+      "content-type": "text/event-stream"
     },
-    "json": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
-            "role": "assistant"
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "openai/gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"entity_name\": \"travel_agent\", \"reasoning\": \"The message asks about packing for a trip.\"}",
+                      "name": "structured_output"
+                    },
+                    "id": "call_parity_answer",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "openai/gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "tool_calls",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "openai/gpt-oss-120b",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "x_groq": {
+            "id": "req_parity",
+            "usage": {
+              "completion_time": 0.021,
+              "completion_tokens": 12,
+              "completion_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "prompt_time": 0.004,
+              "prompt_tokens": 42,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "queue_time": 0.011,
+              "total_time": 0.025,
+              "total_tokens": 54
+            }
           }
         }
-      ],
-      "created": 1792540800,
-      "id": "chatcmpl-parity",
-      "model": "openai/gpt-oss-120b",
-      "object": "chat.completion",
-      "system_fingerprint": "fp_parity",
-      "usage": {
-        "completion_time": 0.021,
-        "completion_tokens": 12,
-        "completion_tokens_details": {
-          "reasoning_tokens": 0
-        },
-        "prompt_time": 0.004,
-        "prompt_tokens": 42,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "queue_time": 0.011,
-        "total_time": 0.025,
-        "total_tokens": 54
+      },
+      {
+        "data": "[DONE]"
       }
-    },
+    ],
     "status": 200
   },
   "scenario": "structured_output"

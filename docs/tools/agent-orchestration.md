@@ -18,7 +18,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 
 Related tools documented elsewhere:
 
-- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
+- [`egress_credentials`](../deployment/egress-broker.md#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
 - [`oauth_connections`](../oauth-framework.md#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](../openclaw.md#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](../usage.md#usage_stats) - Read-only summaries of retained usage.
@@ -127,7 +127,7 @@ An agent whose own name is in `delegate_to` can write the prompt of a fresh copy
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](../knowledge.md) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
-Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](../memory.md#searching-file-memory) through `search_knowledge_base`.
+Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](../memory.md#searching-file-memory) and [knowledge graph](../knowledge-graph.md) through `search_knowledge_base`.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](../configuration/history.md), the summary of its earlier turns.
@@ -203,7 +203,7 @@ The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 

@@ -24,6 +24,7 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to, write_with_session_state
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
 from mindroom.tool_system.tool_function import ToolOutcome
+from tests.conftest import seed_session_state, stored_session_state
 from tests.test_agent_tool_calls import _catalog
 
 if TYPE_CHECKING:
@@ -111,10 +112,35 @@ async def test_checkpoint_captures_exact_batch_and_propagates_storage_failure(
         msg = "injected database failure"
         raise OSError(msg)
 
-    monkeypatch.setattr(ConversationStore, "save_runs", fail)
+    monkeypatch.setattr(ConversationStore, "save_run", fail)
     await _capture(checkpoint, record, messages)
     with pytest.raises(OSError, match="injected"):
         await checkpoint.persist("bash-1")
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_keeps_the_batch_s_calls_in_call_order(tmp_path: Path) -> None:
+    """A refused call between two Bash calls keeps its place in the saved record, as the loop recorded the batch."""
+    catalog = await _stored_catalog(tmp_path)
+    checkpoint = BatchCheckpoint(catalog)
+    record = _record()
+    record.tools = [
+        ToolExecution(tool_call_id="bash-1", tool_name="bash", tool_args={"command": "work"}),
+        ToolExecution(tool_call_id="bad-1", tool_name="missing", is_error=True, result="not offered"),
+        ToolExecution(tool_call_id="bash-2", tool_name="bash", tool_args={"command": "work"}),
+    ]
+    await _capture(checkpoint, record, [Message(role="user", content="do work"), _assistant("bash-1", "bash-2")])
+
+    await checkpoint.persist("bash-1")
+
+    assert catalog.store is not None
+    saved = catalog.store.get_run("run")
+    assert isinstance(saved, RunRecord)
+    assert [(tool.tool_call_id, tool.is_error) for tool in saved.tools or ()] == [
+        ("bash-1", None),
+        ("bad-1", True),
+        ("bash-2", None),
+    ]
 
 
 @pytest.mark.asyncio
@@ -142,9 +168,7 @@ async def test_approval_checkpoint_refreshes_mutable_session_state(tmp_path: Pat
     catalog.run.session_state["before_approval"] = "kept"
     await checkpoint.persist_approval("bash-1")
     assert catalog.store is not None
-    fields = catalog.store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state["before_approval"] == "kept"
+    assert stored_session_state(catalog.store, "session")["before_approval"] == "kept"
     saved = catalog.store.get_run("run")
     assert saved is not None
     assert saved.messages[0].tool_calls[0]["id"] == "bash-1"
@@ -161,16 +185,14 @@ async def test_a_checkpoint_and_the_state_its_calls_ran_with_are_stored_together
     assert store is not None
     with closing(sqlite3.connect(store.path)) as connection, connection:
         connection.execute(
-            f"CREATE TRIGGER refuse_run BEFORE UPDATE ON {store.names.runs} BEGIN SELECT RAISE(ABORT, 'run refused'); END",
+            f"CREATE TRIGGER refuse_run BEFORE UPDATE ON {store.names.log_runs} BEGIN SELECT RAISE(ABORT, 'run refused'); END",
         )
     catalog.run.session_state["before_approval"] = "kept"
 
     with pytest.raises(sqlite3.IntegrityError, match="run refused"):
         await checkpoint.persist_approval("bash-1")
 
-    fields = store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state == {}
+    assert stored_session_state(store, "session") == {}
     assert catalog.session.stored_session_state == {}
 
 
@@ -182,7 +204,7 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     assert store is not None
     session = catalog.session
     session.session_state["cwd"] = "/repo"
-    store.save_session_state(session, session_state_snapshot(session.session_state))
+    seed_session_state(store, session, session_state_snapshot(session.session_state))
     persist = persist_to(store, session)
     checkpoint = BatchCheckpoint(catalog)
     record = _record()
@@ -195,16 +217,12 @@ async def test_the_terminal_save_restores_a_session_state_a_checkpoint_stored_ch
     messages = [*messages, _assistant("bash-2")]
     await _capture(checkpoint, record, messages)
     await checkpoint.persist("bash-2")
-    fields = store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state == {"cwd": "/repo/sub"}
+    assert stored_session_state(store, "session") == {"cwd": "/repo/sub"}
     session.session_state["cwd"] = "/repo"
     record.status = RunStatus.completed
     await persist(record)
 
-    fields = store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state == {"cwd": "/repo"}
+    assert stored_session_state(store, "session") == {"cwd": "/repo"}
 
 
 @pytest.mark.asyncio
@@ -296,11 +314,9 @@ async def test_a_checkpoint_saves_a_session_state_another_thread_keeps_changing(
             await write_with_session_state(
                 store,
                 session,
-                lambda opened, state: opened.save_runs(session, [record], state=state),
+                lambda opened, state: opened.save_run(session, record, record_usage=False, state=state),
             )
-            fields = store.read_session_fields("session")
-            assert fields is not None
-            assert session.stored_session_state == fields.session_state
+            assert session.stored_session_state == stored_session_state(store, "session")
     finally:
         stop.set()
         changer.join()

@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import h11
 
+from mindroom.config.egress_broker import EGRESS_SERVICE_NAME_PATTERN
 from mindroom.egress_broker.audit import AuditRecord
 from mindroom.egress_broker.dial import DestinationBlockedError, DialPolicy, open_upstream
 from mindroom.egress_broker.messages import git_error_text, refusal_body
@@ -25,7 +26,7 @@ from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     import ssl
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.egress_broker.audit import AuditLog
     from mindroom.egress_broker.messages import ScopeInfo
@@ -66,6 +67,8 @@ _ECHO_METHODS = frozenset({"TRACE", "TRACK"})
 _ERROR_HEADER = b"x-mindroom-error"
 # One requester cannot hold more of the broker's destination lookups than this, even when its names never resolve.
 _MAX_CONCURRENT_LOOKUPS = 4
+# Names the one service whose rules may route a request (`route_request`); the broker never forwards it.
+_SERVICE_HEADER = b"x-agent-keys-service"
 
 logger = get_logger(__name__)
 
@@ -380,7 +383,7 @@ def upstream_request_headers(received: list[tuple[bytes, bytes]], *, host: bytes
     headers += [
         (name, value)
         for name, value in strip_hop_by_hop(received, keep_upgrade=False)
-        if name not in {b"host", b"expect", b"content-length"}
+        if name not in {b"host", b"expect", b"content-length", _SERVICE_HEADER}
     ]
     if chunked:
         headers.append((b"transfer-encoding", b"chunked"))
@@ -443,8 +446,18 @@ class Relay:
             await self.reject(client, entry, 502, refusal_body("broker_error"))
             return None
 
-    async def route(self, client: Peer, entry: AuditEntry, port: int) -> tuple[EgressRules, Route] | None:
+    async def route(  # noqa: PLR0911 - checks in order
+        self,
+        client: Peer,
+        entry: AuditEntry,
+        port: int,
+        headers: Sequence[tuple[bytes, bytes]],
+    ) -> tuple[EgressRules, Route] | None:
         """Return the rules and the route for the entry's host, `port`, and path; otherwise answer, audit, return None.
+
+        An `X-Agent-Keys-Service` header among the request's `headers` names the only service that may route it; one
+        that is repeated or holds no valid service name is a 400 `bad_request`, which never repeats what it held, and a
+        name none of whose rules matches a 403 `service_not_matched`.
 
         A host without rules is denied under `unmatched_hosts: deny`. On a host with rules, `TRACE` and `TRACK` (in any
         letter case) get 405 `method_not_allowed`, since the upstream would echo the injected credential back. A path
@@ -452,10 +465,15 @@ class Relay:
         restricting service of a `path_not_allowed` refusal, as a matched rule's row does. A failing rules provider or
         scope callback is a 502.
         """
+        named = [value.decode("latin-1") for name, value in headers if name == _SERVICE_HEADER]
+        if named and (len(named) > 1 or not EGRESS_SERVICE_NAME_PATTERN.fullmatch(named[0])):
+            await self.deny(client, entry, refusal_body("bad_request", service_header=True), status=400)
+            return None
+        requested = named[0] if named else None
         rules = await self.read_rules(client, entry)
         if rules is None:
             return None
-        route = route_request(rules, entry.host, port, entry.path)
+        route = route_request(rules, entry.host, port, entry.path, requested=requested)
         if not route.host_has_rules and rules.unmatched_hosts == "deny":
             await self.deny(client, entry, host_not_allowed(rules, entry.host))
             return None
@@ -474,6 +492,13 @@ class Relay:
             return None
         if route.refusal == "bad_request":
             await self.deny(client, entry, refusal_body("bad_request", path=entry.path), status=400)
+        elif route.refusal == "service_not_matched":
+            entry.service = requested
+            await self.deny(
+                client,
+                entry,
+                refusal_body("service_not_matched", host=entry.host, path=entry.path, service=requested),
+            )
         else:
             body = refusal_body(
                 "path_not_allowed",

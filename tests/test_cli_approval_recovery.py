@@ -67,8 +67,14 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
-from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
-from tests.conftest import install_model_providers, unwrap_extracted_collaborator
+from tests.approval_continuation_helpers import (
+    RECEIPT_CALLS,
+    RECEIPT_TEXT,
+    approval_continuation,
+    carries_approval_receipt,
+    receipts,
+)
+from tests.conftest import install_model_providers, stored_session_state, unwrap_extracted_collaborator
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import store_fold
 from tests.identity_helpers import persist_entity_accounts
@@ -118,9 +124,10 @@ def _with_toolkit(build: AgentBuild, toolkit: AdaptedToolkit) -> AgentBuild:
 
 def _saved(store: ConversationStore, session_id: str, record: RunRecord) -> tuple[RunRecord, ConversationSession]:
     """Store ``record`` as the run an approval paused in, and return it with its session as recovery reads them."""
-    store.save_runs(
+    store.save_run(
         ConversationSession(session_id=session_id, kind="agent", owner_id="helper"),
-        [record],
+        record,
+        record_usage=False,
     )
     session = store.load_session(session_id, "agent")
     persisted = store.get_run(record.run_id)
@@ -607,9 +614,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
 
     await persist_to(store, session)(RunRecord(run_id="later", session_id="session", agent_id="helper"))
 
-    fields = store.read_session_fields("session")
-    assert fields is not None
-    assert fields.session_state == {"recovered": "v"}
+    assert stored_session_state(store, "session") == {"recovered": "v"}
 
 
 def _outer_bash_approval(arguments: dict[str, object]) -> RunRequirement:
@@ -720,8 +725,8 @@ async def test_a_recovered_approval_saves_no_tool_call_its_fold_already_summariz
         result="nested tool output",
         is_error=False,
     )
-    # The fold took the earlier shell call out of the run's record and stored it on its summary row.
-    store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tools=[folded.to_dict()])
+    # A fold took the earlier shell call's result out of the run's replay view, and its summary holds it.
+    store_fold(store, "session", HistoryScope(kind="agent", scope_id="helper"), "run", tool_call_ids=["folded-bash"])
     arguments = {"command": "touch never"}
     requirement = _outer_bash_approval(arguments)
     persisted, session = _saved(
@@ -873,8 +878,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
 ) -> None:
     """An approved saved call keeps its exact owner, and its old Bash stays interrupted.
 
-    The follow-up turn sends the approval receipt the runner binds with its first request only. A shell that
-    ``openclaw_compat`` brings in is approved under the preset and still runs as the agent's shell.
+    The follow-up turn reads the approval receipt the runner binds after its input and keeps it for its later
+    requests. A shell that ``openclaw_compat`` brings in is approved under the preset and still runs as the agent's
+    shell.
     """
     runtime = _helper_runtime(tmp_path, tools=["openclaw_compat"] if preset else ["shell"])
     registry = TurnToolRegistry()
@@ -1132,10 +1138,11 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     assert published[0].tool_trace
     assert any("finished" in chunk.content for chunk in published)
     assert len(provider.requests) == (2 if nested == "approval" else 1)
-    assert [carries_approval_receipt(request) for request in provider.requests] == (
-        [True, False] if nested == "approval" else [True]
-    )
+    # The follow-up run reads the receipt after its input and keeps it, unchanged, in its later request.
     first = provider.requests[0]
+    assert (first.messages[-1].role, first.messages[-1].content) == ("user", RECEIPT_TEXT)
+    assert all(request.messages[: len(first.messages)] == first.messages for request in provider.requests[1:])
+    assert [len(receipts(request)) for request in provider.requests] == [1] * len(provider.requests)
     assert offered_tools(first) == ["bash"]
     assert sibling_image.url in str(first.messages)
     assert "completed sibling result" in str(first.messages)

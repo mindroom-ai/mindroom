@@ -104,15 +104,21 @@ export function overlapWarnings(
   });
 }
 
-/** Who uses a personal service, for the note under the form's title; null where nothing needs saying. */
+/**
+ * Who uses a personal service, for the note under the form's title; null where
+ * nothing needs saying. A service with its own account (`separateAccount`)
+ * has that account instead of a key.
+ */
 export function scopeNote(
   scope: EgressScope | undefined,
   agent: string,
   scopeAgents: readonly string[],
+  separateAccount = false,
 ): string | null {
+  const credential = separateAccount ? "account" : "key";
   if (scope === "user_agent")
-    return `Only your ${agent} uses this service and its key.`;
+    return `Only your ${agent} uses this service and its ${credential}.`;
   if (scope === "user")
-    return `All your agents that share your personal workspace use this service and its key: ${scopeAgents.join(", ")}.`;
+    return `All your agents that share your personal workspace use this service and its ${credential}: ${scopeAgents.join(", ")}.`;
   return null;
 }

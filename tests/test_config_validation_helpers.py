@@ -102,3 +102,18 @@ def test_history_limit_validators_preserve_error_message(factory: object, match:
     """Defaults, agents, and teams should reject ambiguous history limits consistently."""
     with pytest.raises(ValueError, match=match):
         factory()
+
+
+@pytest.mark.parametrize(
+    ("authored", "message"),
+    [
+        ({"mode": "broadcast"}, "Input should be 'coordinate' or 'collaborate'"),
+        ({"instructions": ["Be brief."]}, "Extra inputs are not permitted"),
+    ],
+    ids=["unknown-mode", "misplaced-key"],
+)
+def test_a_team_entry_with_an_unknown_mode_or_key_fails_naming_it(authored: dict[str, object], message: str) -> None:
+    """An invalid mode or a key a team does not have fails at load, naming the key, instead of running collaborate."""
+    with pytest.raises(ValueError, match=message) as raised:
+        TeamConfig.model_validate({"display_name": "Team", "role": "Work", "agents": ["code"], **authored})
+    assert next(iter(authored)) in str(raised.value)

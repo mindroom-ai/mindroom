@@ -95,11 +95,16 @@ Generate the topic:"""
 
     provider = provider_registry.build_model_provider(config, runtime_paths, "default")
     try:
-        response = await complete_prompt(provider, prompt, role="Generate contextual room topics", schema=_RoomTopic)
+        response = await complete_prompt(
+            provider,
+            prompt,
+            instructions=["Generate contextual room topics"],
+            schema=_RoomTopic,
+        )
     except Exception:
         logger.exception("room_topic_generation_failed", room_key=room_key)
         return None
-    await record_system_usage(response.record, runtime_paths=runtime_paths, kind="room_topic")
+    await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="room_topic")
     content = response.content
     if not isinstance(content, _RoomTopic):
         logger.warning(

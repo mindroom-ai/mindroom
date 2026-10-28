@@ -19,7 +19,6 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.api.dashboard_credential_scope import build_dashboard_execution_identity
 from mindroom.api.egress_status import (
-    RESTRICT_ONLY_KEY_REFUSAL,
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
@@ -30,9 +29,11 @@ from mindroom.api.egress_status import (
     effective_services,
     egress_oauth_status,
     egress_service_status,
+    key_refusal,
     load_concurrently,
     oauth_provider_of_service,
     presets_response,
+    require_access_offered,
     require_egress_broker_enabled,
     rule_summaries,
 )
@@ -47,6 +48,7 @@ from mindroom.oauth.registry import load_oauth_providers_for_snapshot
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
     from mindroom.config.egress_broker import EgressService
+    from mindroom.egress_broker.secrets import OAuthAccess
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -63,6 +65,7 @@ class _ServiceStatus(EgressSourceStatus):
     `source` is `config` for the administrator's services and `user` for services the selected scope defines for
     itself, which the panel shows read-only: they are edited on the personal egress page. `restrict_only` marks a
     service that only limits the paths of the other services on its hosts and never has a key or account.
+    `read_only_supported` says whether its account can be allowed read-only.
     """
 
     name: str
@@ -71,6 +74,7 @@ class _ServiceStatus(EgressSourceStatus):
     source: ServiceSource
     rules: list[EgressRuleSummary]
     restrict_only: bool
+    read_only_supported: bool
 
 
 class ServicesResponse(BaseModel):
@@ -131,6 +135,7 @@ async def _load_service_statuses_for_target(
             source=service_source(config.egress_broker, name),
             rules=rule_summaries(service_config),
             restrict_only=service_config.restrict_only,
+            read_only_supported=service_config.read_only is not None,
             **asdict(sources),
         )
 
@@ -176,7 +181,8 @@ def _config_service_provider(
     service = config.egress_broker.services.get(name) if config is not None else None
     if service is None:
         raise HTTPException(404, "Service is not configured")
-    return target, worker_target, oauth_provider_of_service(request, service, worker_target, connecting=connecting)
+    provider = oauth_provider_of_service(request, name, service, worker_target, connecting=connecting)
+    return target, worker_target, provider
 
 
 def _oauth_reuse_target(
@@ -200,11 +206,23 @@ def _oauth_reuse_target(
     return worker_target_for_credentials_target(requester)
 
 
-async def _set_service_account_reuse(request: Request, name: str, agent_name: str | None, *, enabled: bool) -> None:
-    """Allow or stop Agent Keys using a config service's account for the selected scope, as the broker reads it."""
+async def _set_service_account_reuse(
+    request: Request,
+    name: str,
+    agent_name: str | None,
+    *,
+    enabled: bool,
+    access: OAuthAccess = "read_write",
+) -> None:
+    """Allow or stop Agent Keys using a config service's account for the selected scope, as the broker reads it.
+
+    Allowing takes `access`, which a service must offer (`require_access_offered`).
+    """
     target, worker_target, provider = _config_service_provider(request, name, agent_name, connecting=False)
     config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
     assert config is not None  # `_config_service_provider` found the service in it.
+    if enabled:
+        require_access_offered(config.egress_broker.services[name], access)
     reuse_target = _oauth_reuse_target(request, target, worker_target, provider)
     identity = build_dashboard_execution_identity(
         request,
@@ -213,7 +231,15 @@ async def _set_service_account_reuse(request: Request, name: str, agent_name: st
         runtime_paths=target.runtime_paths,
     )
     context = broker_credential_context(provider, config, target.runtime_paths, target.base_manager, reuse_target)
-    await asyncio.to_thread(set_oauth_reuse, context, name, provider.id, enabled=enabled, by=identity.requester_id)
+    await asyncio.to_thread(
+        set_oauth_reuse,
+        context,
+        name,
+        provider.id,
+        enabled=enabled,
+        by=identity.requester_id,
+        access=access,
+    )
 
 
 @router.get("/services", response_model=ServicesResponse)
@@ -229,7 +255,11 @@ async def get_services(
 
     services = await _load_service_statuses_for_target(request, target)
     config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
-    scopes = {name: egress_agent_scope(config, name) for name in config.agents} if config is not None else {}
+    scopes = (
+        {name: egress_agent_scope(config, name, target.runtime_paths) for name in config.agents}
+        if config is not None
+        else {}
+    )
     return ServicesResponse(
         services=services,
         shared_agents=[name for name, scope in scopes.items() if scope == "shared"],
@@ -255,11 +285,11 @@ def put_service_secret(
     """Set an egress service secret.
 
     Raises 404 if the service is neither configured nor one of the selected scope's own services, 422 if the
-    secret is invalid or the service is `restrict_only`, which takes no key.
+    secret is invalid or the service takes no key (`key_refusal`).
     """
     target, worker_target, service = _resolve_scope_and_service(request, name, agent_name)
-    if service.restrict_only:
-        raise HTTPException(status_code=422, detail=RESTRICT_ONLY_KEY_REFUSAL)
+    if (refusal := key_refusal(service)) is not None:
+        raise HTTPException(status_code=422, detail=refusal)
 
     try:
         save_secret(target.base_manager, worker_target, name, body.secret)
@@ -312,15 +342,16 @@ async def disconnect_service_account(
 async def allow_service_account_reuse(
     request: Request,
     name: str,
-    _body: OAuthReuseRequest,
+    body: OAuthReuseRequest,
     agent_name: Annotated[str | None, Query()] = None,
 ) -> None:
-    """Let Agent Keys use a config service's connected account for the selected scope.
+    """Let Agent Keys use a config service's connected account for the selected scope, at the body's `access`.
 
     The body must confirm that the agent's shell and python then act as the account without approval prompts (422
-    without it). Raises 404 and 409 like the disconnect route. A requester-scoped account is the dashboard user's own.
+    without it). Raises 404 and 409 like the disconnect route, and 409 for `read` on a service that does not offer
+    it. Allowing it again changes the level. A requester-scoped account is the dashboard user's own.
     """
-    await _set_service_account_reuse(request, name, agent_name, enabled=True)
+    await _set_service_account_reuse(request, name, agent_name, enabled=True, access=body.access)
 
 
 @router.delete("/services/{name}/oauth-reuse", status_code=204)

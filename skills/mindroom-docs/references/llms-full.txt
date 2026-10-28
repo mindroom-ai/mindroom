@@ -972,6 +972,60 @@ For hosted MindRoom, the homeserver is `https://mindroom.chat`.
 
 To pair a local MindRoom runtime with that account, follow [Getting Started](https://docs.mindroom.chat/getting-started/#2-approve-pairing); on a computer, approve the pairing at `https://chat.mindroom.chat`.
 
+## Homeservers Behind Cloudflare Access
+
+The app cannot hold the [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/) cookie, so a homeserver behind Access redirects the app's requests to the Access login and sign-in fails.
+When the homeserver advertises a handoff page, the app instead sends the Access token in a `cf-access-token` header, which Access accepts.
+
+With the steps below in place, the sign-in screen asks for the organization's sign-in first, then shows the usual sign-in options.
+When the Access session ends, the bar at the top asks for that sign-in again.
+The organization's sign-in, and SSO sign-in to the homeserver, run in a private browser session, because Safari's cross-site tracking protection breaks the Access login in one that shares Safari's cookies.
+So with SSO the organization's full login comes up twice when adding the account (the organization's sign-in, then the SSO one), and it comes up once each time the Access session ends.
+An Access session revoked before it expires shows as a lost connection until the token's expiry time.
+Calls need `/.well-known/matrix/client`, which these steps leave behind Access, so calls do not work on iOS for such a homeserver.
+Push notifications for such a homeserver carry no message content and read "New message".
+The public push gateway still receives the event and room IDs, the unread count and the device's push token, and each push tells it that the homeserver is active; the advert can turn push off instead.
+
+Set up the homeserver (examples use `chat.example.com`):
+
+1. Publish the advert at `https://chat.example.com/.well-known/mindroom/cloudflare-access`, outside Access, as JSON with `Access-Control-Allow-Origin: *`:
+   `{"handoff_url": "https://chat.example.com/native/cloudflare-access"}`.
+   The handoff URL must use HTTPS on the homeserver's own origin.
+   Add `"push": false` to turn push off: the app then registers no pusher for the homeserver and hides the push setting.
+   Signed-in accounts pick up a change of the advert only when they sign out and in again.
+2. Serve the handoff page behind Access. It redirects to the app with the value of the `CF_Authorization` cookie:
+
+    ```nginx
+    location = /native/cloudflare-access {
+      add_header Cache-Control "no-store" always;
+      return 302 "mindroom://cloudflare-access#token=$cookie_CF_Authorization";
+    }
+    ```
+
+   If the same origin serves the MindRoom Chat web app, exclude `/native` from its service worker's navigation fallback (`serviceWorker.navigationFallbackExcludePaths` in the client chart, or `window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__`), or a Safari that has opened the web app answers the handoff with its own page.
+   The page also answers when opened in Safari, where iOS hands the token to whichever app handles `mindroom://`.
+   That token gets past Access for every host of the Access application until the session ends, so give the homeserver its own Access application.
+3. Turn on "Bypass OPTIONS requests to origin" (`options_preflight_bypass`) on the Access application, because browsers send CORS preflights without credentials.
+   Every `OPTIONS` request then reaches the origin without an Access session, so make sure no route answers `OPTIONS` with private content; nginx `return` answers any method.
+   Leave the application's binding cookie off, because the app sends only the token.
+4. Let the advert path, `/_matrix/client/versions`, `/_matrix/client/v1/media` and `/_matrix/media/v3/upload` bypass Access.
+   The app checks `/versions` before the organization's sign-in, images and uploads cannot carry the header, and the homeserver refuses the media paths without a Matrix access token.
+   A bypass covers everything below its path, so answer 404 for anything below the advert path.
+   Cloudflare also matches a bypass before nginx decodes `%2F` and resolves `..`, so `/.well-known/mindroom/cloudflare-access/..%2F..%2Fsecret` would reach `/secret` without Access.
+   Reject such requests in the nginx `server` block, before any `location`; the check looks only at the path, so encoded URLs in query strings still pass:
+
+    ```nginx
+    if ($request_uri ~* "^[^?#]*(?:%2f|%5c|%2e|/\.\.?(?:[/?#]|$))") { return 404; }
+    ```
+
+   If `/_matrix` also passes through this nginx, the check refuses Matrix requests that encode `/` in a path parameter, such as some state keys, so send `/_matrix` to the homeserver without this nginx where you can.
+5. Run a homeserver that allows the `cf-access-token` header in CORS, such as the MindRoom fork of Tuwunel (`v1.9.4-mindroom.18` or later).
+
+Before moving an existing homeserver behind Access, delete its pushers for the app (app ID `chat.mindroom.app`) that point at the public push gateway, for example with Tuwunel's `!admin query pusher get-pushers <user>` and `!admin query pusher remove-pusher <user> <pushkey>`.
+Those pushers send full message content, and an account signed in before the move cannot remove them, because its sign-out cannot pass Access.
+Such accounts need to sign out and in again.
+To take a homeserver off Access later, keep answering the advert path with a 404 and `Access-Control-Allow-Origin: *`, and have iOS accounts sign out and in again; until then the app keeps waiting for an Access sign-in that can no longer finish.
+
 ## Reporting Issues
 
 Report problems through the [support page](https://docs.mindroom.chat/support/#what-to-include-in-a-support-request), which lists the device, app, and homeserver details to include.
@@ -1715,7 +1769,7 @@ agents:
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](https://docs.mindroom.chat/configuration/models/#cold-cache-model) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
 | `room_thread_modes` | map | `{}` | Per-room `thread` or `room` overrides keyed by room key, alias, or Matrix room ID; see [Thread Mode Resolution](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) |
-| `markdown` | bool | `null` | Instruct the agent to format replies as Markdown |
+| `markdown` | bool | `null` | Tell the agent in its system prompt that its replies are shown as Markdown; chat replies are rendered as Markdown either way. Team leaders follow `defaults.markdown`, and voice calls leave the line out |
 | `knowledge_graph` | bool | `null` | Build a [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) from this agent's conversations and give it the `knowledge_graph` tool |
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](https://docs.mindroom.chat/knowledge-graph/#letting-the-agent-fix-its-graph) |
 | `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](https://docs.mindroom.chat/scheduling/#timezone) |
@@ -1793,7 +1847,7 @@ How a private agent behaves:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `private.per` | `user` or `user_agent` | *required* | Requester boundary that gets its own private instance; it also sets the agent's [worker scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes) |
-| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
+| `private.root` | string | `<agent_name>_data` | Relative directory name of the private root; cannot be absolute, contain `..`, or start with `sessions`, `learning`, `chroma`, `mem0`, `knowledge_db`, `memory_files`, `calls`, `agent_modes.json`, `agent_modes.lock`, `browser`, `browser-profiles`, or `.sessions-recovery.lock` |
 | `private.template_dir` | string | `null` | Directory copied into each private root; relative paths resolve from `config.yaml`, absolute paths are allowed, and a missing directory is a config error (`Agent '<name>' has invalid private.template_dir`) |
 | `private.context_files` | list | `null` | Private-root-relative files preloaded into the prompt; cannot escape the private root |
 | `private.knowledge` | object | `null` | Per-requester knowledge index built from the private root; see [Private Agent Knowledge](https://docs.mindroom.chat/knowledge/#private-agent-knowledge). Omit it or set `enabled: false` for no index |
@@ -1975,12 +2029,15 @@ models:
       project_id: your-gcp-project
       region: global
 
-  # Local via Ollama
+  # Local via Ollama (see Ollama Context Size)
   local:
     provider: ollama
     id: qwen3.8:27b
-    context_window: 256000
+    context_window: 32768
     host: http://localhost:11434
+    extra_kwargs:
+      options:
+        num_ctx: 32768
 
   # OpenRouter (access to many model providers)
   openrouter:
@@ -2041,7 +2098,7 @@ They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effor
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
 Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because that turn had context of its own, such as memory search results or enrichment, or because the date in the system prompt has changed.
 With Sonnet 5.5's `between_tools` or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
-A reply that resumes after a tool approval or a delegation can also answer without earlier reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
+A reply that resumes after a tool approval or a delegation keeps its reasoning, unless its history was trimmed to fit the context window or another reply or a compaction ran in the conversation while it waited; then it answers without that reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
 ## Environment Variables
 
@@ -2305,6 +2362,13 @@ models:
 Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
 The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so confirm access, or switch to its `fable` alternative or `id: anthropic.claude-sonnet-5`.
 
+## Ollama Context Size
+
+Unless `extra_kwargs.options.num_ctx` is set, MindRoom sends Ollama no context size, so Ollama runs each model with its own default, which depends on the Ollama version and server and is often only a few thousand tokens.
+When a conversation is longer, Ollama drops its oldest messages to fit, without an error, so the model answers without seeing them.
+Set `extra_kwargs.options.num_ctx` to the context size Ollama should use, and `context_window` to the same value so MindRoom fits history into it (see [Context Window](https://docs.mindroom.chat/configuration/history/#context-window)), as the `local` model in [Configuration Examples](#configuration-examples) does.
+A larger `num_ctx` needs more memory on the Ollama server.
+
 ## Built-In Synthetic Model
 
 Use `provider: synthetic` to run normal MindRoom conversations without an API key or model server, for example for load testing.
@@ -2378,16 +2442,16 @@ Some models reject sampling controls:
 
 ## Prompt Caching
 
-Claude and OpenAI Responses models keep shared agent instructions (identity, role, workspace context files, and tool instructions) separate from the current date and session context, so the shared part can be reused across conversations when the provider cache allows it.
+An agent's system prompt has a stable part (identity, role, instructions, workspace context files, tool instructions, skills, and knowledge bases) and a turn part (the current date, file memory, and system enrichment); the stable part stays the same across turns and conversations, so providers that cache prompts can reuse it.
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
 
 The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable prompt caching with a one-hour lifetime by default.
 The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching); other OpenRouter model families cache implicitly.
 Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's Claude cache breakpoints, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
 
-The `openai` Responses API and `codex` providers rely on provider-managed caching; on the public OpenAI API, GPT-5.6 and later also get an explicit cache breakpoint after the shared instructions.
+The `openai` Responses API and `codex` providers rely on provider-managed caching; on the public OpenAI API, GPT-5.6 and later also get an explicit cache breakpoint after the stable part of the system prompt.
 See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching) for eligibility and accounting.
-Set `extra_kwargs.cache_system_prompt: false` on a Responses model to send the instructions as one undivided system message.
+Set `extra_kwargs.cache_system_prompt: false` on a Responses model to send no explicit breakpoint.
 Chat Completions providers other than OpenRouter Claude routes keep their usual request format.
 
 Kimi Code caches repeated request prefixes automatically and reports them as `cached_tokens`.
@@ -2604,9 +2668,9 @@ teams:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `display_name` | string | *required* | Name shown in Matrix |
-| `role` | string | *required* | Description of the team's purpose |
+| `role` | string | *required* | Description of the team's purpose, which the team model reads beside each member agent's own `role` when it chooses whom to delegate to |
 | `agents` | list | *required* | Names of agents under `agents:` that form the team; at least one, no duplicates |
-| `mode` | string | `coordinate` | `coordinate` or `collaborate` |
+| `mode` | string | `coordinate` | `coordinate` or `collaborate`; any other value fails config validation |
 | `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs the team joins and responds in |
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID; this is separate from the members' own settings. Joining a room never grants its members access; see [Invitations](https://docs.mindroom.chat/authorization/#invitations) |
 | `access` | object | `null` | Who may converse with the team: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the team's own managed `rooms` have access. See [Responder access](https://docs.mindroom.chat/authorization/#responder-access) |
@@ -2615,6 +2679,7 @@ teams:
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history`, `compaction` | | | History replay and compaction for the team's shared history; see [Team History and Compaction](https://docs.mindroom.chat/configuration/history/#team-history-and-compaction) |
 
 Team keys follow the agent [naming rules](https://docs.mindroom.chat/configuration/agents/#naming-rules), and a key cannot be used under both `agents:` and `teams:`.
+A field a team entry does not have, such as an agent-only field placed under a team, fails config validation with an error that names it; move it to the right entry or remove it.
 Private agents, and agents that can reach a private agent through `delegate_to`, cannot be team members; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
 
 ## Ad Hoc Teams
@@ -3229,7 +3294,7 @@ memory:
       host: http://localhost:11434
 ```
 
-MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
+MindRoom installs the optional `sentence_transformers` extra the first time the `sentence_transformers` or `huggingface` embedder is used.
 
 Some models expect a prompt in front of each text, different for queries and documents.
 With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
@@ -3727,7 +3792,6 @@ Each requester's private knowledge path becomes `<their private root>/memory`, a
 The fields are listed under [Private Fields](https://docs.mindroom.chat/configuration/agents/#private-fields).
 `private.knowledge.path` is required unless `private.knowledge.enabled` is `false`; it must be relative to the private root (`.` allowed) and cannot be absolute or escape with `..`.
 Private knowledge has no background file watcher: with `watch: true` or `git`, it refreshes when the agent uses it, and with `watch: false` and no `git`, external edits are not picked up automatically.
-A private knowledge base can hold 256 MiB of vectors, about 43,000 chunks with the default `text-embedding-3-small` embedder; past that its searches fail until files are removed.
 An agent can combine private knowledge with shared top-level `knowledge_bases`, which stay the mechanism for documents shared across agents or users.
 Private knowledge is available in normal agent conversations, not through the OpenAI-compatible `/v1` API.
 With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoom rejects `.` and any path that overlaps private file memory (`memory/`, `MEMORY.md`) or content copied from `template_dir`.
@@ -3738,7 +3802,8 @@ With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoo
 One compares the query's embedding with every chunk's embedding, exactly rather than approximately.
 The other scores the query's words with BM25 over a keyword index that matches English word forms, so `leads` finds `lead`.
 Reciprocal rank fusion merges them, so a chunk that names the exact command, setting, or error message in the query ranks high even when its embedding is not the closest.
-Each result still reports its cosine distance as `distances`.
+Each result still reports its cosine distance as `distance`.
+A base whose folder sandboxed workers can write, or that contains such a folder, such as private knowledge or a base inside an agent workspace or shared directory, can hold 256 MiB of vectors, about 43,000 chunks with the default `text-embedding-3-small` embedder; past that its searches fail until files are removed and the base is refreshed.
 
 ### Reranking
 
@@ -4087,7 +4152,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 - Every finished turn of the agent's Matrix conversations: what people said, what the agent answered, and the tool calls it made with their results.
 - From [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) threads, tasks another agent delegated to it, and an automation's turn inside an ordinary conversation, only the tool calls and their results, never the agent's own summary.
 
-Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
+Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, knowledge searches through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
 A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
 
@@ -4134,6 +4199,7 @@ graph_entity("Project Atlas")
 ```
 
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
+A graph-enabled agent's `search_knowledge_base` also returns matching graph facts, labelled `knowledge_graph`, beside its knowledge-base results, so the agent has that tool even without knowledge bases.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
 `graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
@@ -6762,7 +6828,7 @@ Changing `matrix_sync` through config reload restarts running agents.
 If a large initial sync exceeds the response limit, raise `max_response_bytes` enough to fit it.
 If processing received events exceeds the pending limit, raise `max_pending_bytes`; stored events can take more space than the HTTP response, so raising the response limit may also require raising the pending limit.
 Each bot has its own sync session, so allow enough memory and disk space when raising these limits.
-Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance, and the runtime Helm chart's `probes.startup` values set the Kubernetes startup probe allowance.
+Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance.
 
 # Rooms & Spaces
 
@@ -7477,6 +7543,7 @@ agents:
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
+The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, `slack`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
 
 ## Browse By Topic
 
@@ -9550,6 +9617,7 @@ is_prime(97)
 `think()` records an intermediate thought and an optional next action.
 `analyze()` records the result of a step and a `next_action` of `continue`, `validate`, or `final_answer`.
 Steps are kept for the current run, so later steps see earlier ones.
+The agent's prompt includes the default reasoning instructions, which tell the model to call `think()` before every tool call or reply, only while both `think()` and `analyze()` are enabled; instructions you set with `instructions` are always included.
 
 ### Configuration
 
@@ -9557,8 +9625,7 @@ Steps are kept for the current run, so later steps see earlier ones.
 | --- | --- | --- | --- | --- |
 | `enable_think` | `boolean` | `no` | `true` | Enable `think()`. |
 | `enable_analyze` | `boolean` | `no` | `true` | Enable `analyze()`. |
-| `add_instructions` | `boolean` | `no` | `false` | Add the toolkit's reasoning instructions to the prompt. |
-| `add_few_shot` | `boolean` | `no` | `false` | Also add few-shot examples when instructions are added. |
+| `add_few_shot` | `boolean` | `no` | `false` | Add few-shot examples to the default reasoning instructions. |
 | `instructions` | `text` | `no` | `null` | Replace the default reasoning instructions entirely. |
 | `few_shot_examples` | `text` | `no` | `null` | Replace the built-in few-shot examples; used only when few-shot examples are added. |
 | `all` | `boolean` | `no` | `false` | Enable all reasoning functions. |
@@ -9570,7 +9637,6 @@ agents:
   researcher:
     tools:
       - reasoning:
-          add_instructions: true
           add_few_shot: true
 ```
 
@@ -12046,6 +12112,7 @@ Use channel IDs rather than names, especially for threaded replies and history r
 To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
 A user token stored as the primary `token` also works for search.
 `search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
+Slack's tool-selection guide reaches the agent's prompt only while every function it names is enabled, and with messaging enabled it names `list_users()`, so set `enable_list_users: true` to include it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13554,7 +13621,7 @@ API keys are `password` fields, so set them in the dashboard or through the envi
 `mem0` gives the agent `add_memory()`, `search_memory()`, `get_all_memories()`, and `delete_all_memories()` backed by the `mem0ai` client.
 With an API key, it uses the hosted Mem0 Platform; without one, it uses Mem0's default setup, which stores memories locally but calls OpenAI for embeddings and memory extraction.
 That default setup requires `OPENAI_API_KEY` even when the agent itself uses another provider; without it, the `mem0` tool fails to load.
-Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `~/.mem0/history.db`, so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
+Local memories live outside MindRoom's storage directory, in `/tmp/qdrant` with history in `history.db` in Mem0's directory (`~/.mem0/`, or `MEM0_DIR` when set), so persist and back up those paths separately or the memories can be lost on reboot or container recreation.
 A custom local Mem0 config object cannot be set through MindRoom.
 
 Memories are stored per user.
@@ -13594,6 +13661,7 @@ It requires a Zep API key from `api_key` or `ZEP_API_KEY`; without one, the agen
 Set `user_id` and `session_id` to keep using the same Zep user and thread across conversations.
 Without them, the tool generates a new Zep user and thread, so it does not find earlier memory.
 A `user_id` that does not exist yet in Zep is created automatically.
+The agent's prompt includes the default Zep usage instructions only while all three functions are enabled; instructions you set with `instructions` are always included.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13605,7 +13673,6 @@ A `user_id` that does not exist yet in Zep is created automatically.
 | `enable_get_zep_memory` | `boolean` | `true` | Enable `get_zep_memory()`. |
 | `enable_search_zep_memory` | `boolean` | `true` | Enable `search_zep_memory()`. |
 | `instructions` | `text` | `null` | Replace the default Zep usage instructions. |
-| `add_instructions` | `boolean` | `false` | Add the Zep usage instructions to the agent's prompt. |
 | `all` | `boolean` | `false` | Enable every function regardless of the individual flags. |
 
 ```yaml
@@ -13633,7 +13700,7 @@ These built-in tools let an agent hand tasks to other agents, build and run reus
 
 Related tools documented elsewhere:
 
-- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
+- [`egress_credentials`](https://docs.mindroom.chat/deployment/egress-broker/#agent-tool) - Opt this agent's worker-routed `shell` and `python` calls into Agent Keys, and list which services have a key or connected account for it and where to add missing ones.
 - [`oauth_connections`](https://docs.mindroom.chat/oauth-framework/#oauth_connections) - Issue a browser-confirmed reset for one OAuth connection.
 - [`openclaw_compat`](https://docs.mindroom.chat/openclaw/#openclaw_compat) - Config-only preset that expands to native MindRoom tools.
 - [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) - Read-only summaries of retained usage.
@@ -13742,7 +13809,7 @@ An agent whose own name is in `delegate_to` can write the prompt of a fresh copy
 Pass that prompt as `system_prompt`, and optionally pass `tools` with a subset of the caller's toolkit names or single functions such as `gmail.search_emails`.
 Omitting `tools` keeps all of the caller's tools, and `tools=[]` gives the child none.
 Pass `skills` with a subset of the caller's skill names and `knowledge` with a subset of its `semantic` [knowledge base](https://docs.mindroom.chat/knowledge/) IDs, or `[]` for none; omitting either keeps all of the caller's only when `tools` is omitted too, so a child with a `tools` list has only the skills and knowledge bases it names.
-Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) through `search_knowledge_base`.
+Only a child that omits both `tools` and `knowledge` also searches the caller's [semantic file memory](https://docs.mindroom.chat/memory/#searching-file-memory) and [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) through `search_knowledge_base`.
 The child runs as the caller, with the caller's workspace, credentials, file access, and approval rules, so it never reaches more than the caller can.
 The authored prompt leads its system message in place of the agent's role, instructions, personality, and context files, and recalled memories are left out.
 The runtime guidance every agent gets still follows, such as its tool execution environment, the date, tool guidance, and, after [compaction](https://docs.mindroom.chat/configuration/history/), the summary of its earlier turns.
@@ -13818,7 +13885,7 @@ The name `background_after` is reserved on managed tools.
 If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; the affected call is rejected before execution without breaking the agent's other tools.
 Tools that stop the current model step, such as model switching, stay inline so the continuation receives their actual control result.
 Their schemas omit `background_after`, and a value for it is rejected before execution.
-Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres`, `redshift`, and Agno MCP toolkits, always run inline without `background_after`.
+Knowledge search, skill access, team delegation, and toolkits whose connection lasts only for one run, such as `postgres` and `redshift`, always run inline without `background_after`.
 
 Exclude complete toolkits in YAML when they should retain native execution:
 
@@ -14474,6 +14541,7 @@ With `persistent: true`, the same sandbox is reused across calls within one repl
 The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
+The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
 
 `verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
@@ -14497,7 +14565,6 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | `persistent` | `boolean` | `true` | Reuse one sandbox across calls within one reply. |
 | `sandbox_public` | `boolean` | `null` | Make created sandboxes public. |
 | `instructions` | `text` | `null` | Custom toolkit instructions replacing the bundled write, run, and show-results guidance. |
-| `add_instructions` | `boolean` | `false` | Add the toolkit instructions to the agent prompt. |
 
 ```yaml
 agents:
@@ -14506,7 +14573,6 @@ agents:
       - daytona:
           api_url: https://api.daytona.io
           auto_stop_interval: 30
-          add_instructions: true
 ```
 
 ## [`composio`]
@@ -15673,6 +15739,8 @@ The config sent to runners with each request, and the config file projected into
 
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
+Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
+The one-time conversion of a database from an earlier release reads its rows as untrusted input and writes its `.pre-storage-v2` backup without following links, so a database worker code changed fails only its own agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
@@ -15685,6 +15753,8 @@ Broker refusals never carry a secret, token, query string, or connect link, but 
 Agents without a worker scope all share the global store, so a token from any of them reaches the same global keys.
 A service can also take its secret from an OAuth account that a user connected (GitHub, Google, Atlassian) when no API key is stored for the scope, and an explicit key always wins over the account.
 The broker uses such an account for a service only after someone allowed Agent Keys to use it, an opt-in kept primary-only beside the connection, so connecting an account for its tools, whose writes may ask for approval, never by itself lets an agent's commands act as it.
+A user's own service on a personal agent can instead have an account of its own (`oauth_separate_account`), stored and allowed the same way beside the tools' connection, which the provider's tools never use.
+An opt-in allowed read only, for a service that declares `read_only`, gets the token only for `GET`, `HEAD`, and `POST` to the service's listed read paths, and never for a WebSocket upgrade or a request with a method-override header; that limit holds only as far as the upstream API keeps its writes off those methods and paths.
 The primary fetches and refreshes those access tokens through the OAuth credential lifecycle and the broker injects them as the matched rule's auth type; workers never receive an OAuth access token or a refresh token, only the proxy token and placeholder values, and the broker's logs and audit records never contain them.
 Account scope follows each provider's own policy: GitHub and Atlassian are requester-scoped, so a worker's requests use the requester named in its verified proxy token, while the Google providers follow the agent's worker scope.
 The broker uses a requester-scoped account only on `user` and `user_agent` workers that run on a dedicated (Docker or Kubernetes) worker backend by default.
@@ -15758,7 +15828,7 @@ Reads of worker-controlled files are capped per surface.
 | Workspace subagent profiles (`subagents/*.md`) | 64 KiB per file; names 64 characters; descriptions 1024 characters; the listing reads at most 256 profiles and 1 MiB; 1,024 examined entries in `subagents/` | An oversized or unreadable file is listed as invalid and cannot run, and profiles past the listing limits are left out of it but still load by name |
 | Call transcripts sent to Mem0 | 64 MiB | Truncated |
 | Knowledge sources, including operator-managed ones | 64 MiB | Left out of the listing with a warning |
-| Vectors one search loads from private knowledge or semantic file memory | 256 MiB per base | The search fails before loading them, so memory search falls back to keyword matching and `search_knowledge_base` leaves that base out of its results, or reports the error when no other base answers |
+| Vectors one search loads from a base whose path lies in, or holds, storage that workers write: private knowledge, semantic file memory, and shared bases inside a workspace or shared directory | 256 MiB per base | The search fails before loading them, so memory search falls back to keyword matching and `search_knowledge_base` leaves that base out of its results, or reports the error when no other base answers |
 | Scheduled-run receipts, `file` and `coding` reads, `airflow` DAG reads | 64 MiB | Refused with a logged error |
 | `e2b` uploads, sandbox files that `e2b` downloads or reads, and `e2b` command and code output | 64 MiB | Refused with a tool error; `stream_command()` returns its first 64 MiB |
 | `microsoft_files` uploads | 250 MB, Microsoft Graph's single-request limit | Refused with a tool error before any request |
@@ -15844,6 +15914,10 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   By default these tools run in a worker, where they see only what the worker already mounts.
 - Knowledge Git commands refuse a worktree whose path goes through a link, but Git then reopens that worktree by path.
   For a Git-backed knowledge base inside a workspace a worker writes, swapping the knowledge folder for a link between that check and the Git command can make that one sync check out or update files at the link target with the primary's permissions; the next sync refuses the link.
+- Opening a conversation store checks for links only once, because Python's `sqlite3` cannot open a database without following links.
+  A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name: a file there already in the current layout opens as the store, a file in an older layout stops at the conversion's backup, which follows no link, and a missing or empty one gets the storage v2 tables.
+  An open store then reconnects by path for each operation for the rest of the turn, so a swap made after the open is followed: that operation fails on the missing tables, and it can leave an empty `<name>.db` at the link's target.
+  Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
 
 ## Intentional behaviors
 
@@ -16003,7 +16077,22 @@ The egress pages still show whether an account is connected, through the Connect
 The opt-in lives in the store of the connection it unlocks, and the broker and both APIs resolve that store through one function, so an opt-in cannot unlock another requester's or scope's account; a round-trip test per scope kind guards this.
 Requester-scoped providers get one opt-in per requester and service name, covering all of that requester's agents, because the account itself is the requester's.
 It names the provider, not the account: it covers whatever account of that provider the scope connects, a later connection made for the tools included, until someone stops it, and it does not apply while the service's `oauth_provider` names another provider.
+It does name the connection, the tools' or the service's own, so switching a service between the two never carries it across, even for a request routed while the switch is saved.
 Rejected: keeping connections already in use working after the upgrade, because that would silently keep the bypass this removes.
+
+**An opt-in carries an access level, read or read and write, and only a service that declares how its API reads offers read.**
+An opt-in otherwise hands the agent's commands the connection's full access, so a routine that only reads had to be granted writes or nothing.
+HTTP methods map onto reads and writes only for APIs that follow REST conventions, so a service offers read-only access only through its `read_only` declaration, whose `post_paths` name the endpoints that read with `POST`; `github` declares none, because git clone and fetch read with `POST` to `git-upload-pack`, which a path prefix cannot name.
+The broker checks the level right after the opt-in and before reading the connection, and refuses a WebSocket upgrade and any method-override header under read, since either can write whatever the method says; an entry stored as read on a service that later drops `read_only` gets no token at all, so it never fails open.
+An entry without a level reads as read and write, so existing opt-ins keep working unmigrated, and a stored API key is never limited, since a key is scoped where it is issued.
+The record is [Read-Only Access for Agent Keys Account Opt-Ins](https://docs.mindroom.chat/dev/2026-10-27-agent-keys-read-only-access-design/).
+
+**A service of a user's own can have its own account, and a request picks such a service by naming it.**
+Agent Keys hands commands the scope's one connection per provider, the one the tools use, so a second account of a provider, such as a shared mailbox, had no place.
+The service's connection is the provider with only its stored name changed, so connecting, refreshing, allowing, and removing it reuse the per-service paths and the tools never see it; the broker offers no connect link for it, since the provider's link connects the tools' account.
+Such a service usually ties with an operator's service on host and path, and the operator's wins a tie, so a request picks it with `X-Agent-Keys-Service` rather than by a changed tie-break, which would move other requests onto a user's service unasked.
+Rejected: labelled accounts beside each provider connection, which made each account a second kind of thing to list, connect, allow, and remove.
+The record is [Separate Accounts for Agent Keys Services](https://docs.mindroom.chat/dev/2026-10-27-agent-keys-separate-accounts-design/).
 
 **Requester-scoped accounts (GitHub, Atlassian) are used only in a requester's own sandbox.**
 In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
@@ -16316,6 +16405,8 @@ def greeter_tools() -> type[Toolkit]:
 
     return GreeterTools
 ```
+
+Pass `instructions="..."` to `Toolkit.__init__` for guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions, while each function's docstring is that function's description.
 
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
@@ -16790,46 +16881,10 @@ Build clients only from the credentials the helpers return, without copies such 
 Use `AtlassianConnectionConfig` the same way to add another Atlassian Cloud site alongside the built-in `atlassian` tool.
 See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-connections) for the plugin example, fields, and callback setup.
 
-## MCP via plugins (advanced)
+## MCP servers
 
-Configure MCP servers directly in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
-Use a plugin only when you need a custom wrapper around Agno `MCPTools`:
-
-```python
-from agno.tools.mcp import MCPTools
-from mindroom.plugin_api import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolStatus,
-    register_tool_with_metadata,
-)
-
-
-class FilesystemMCPTools(MCPTools):
-    def __init__(self, **kwargs):
-        super().__init__(
-            command="npx -y @modelcontextprotocol/server-filesystem /path/to/dir",
-            **kwargs,
-        )
-
-
-@register_tool_with_metadata(
-    name="mcp_filesystem",
-    # The filesystem server reads local paths that file_access cannot confine.
-    file_access=ToolFileAccess.UNCONFINED,
-    display_name="MCP Filesystem",
-    description="Tools from an MCP filesystem server",
-    category=ToolCategory.DEVELOPMENT,
-    status=ToolStatus.AVAILABLE,
-    setup_type=SetupType.NONE,
-)
-def mcp_filesystem_tools():
-    return FilesystemMCPTools
-```
-
-Add the plugin and assign `mcp_filesystem` to agents as in the [minimal example](#minimal-example).
-MindRoom connects and disconnects the MCP session around each agent run.
+Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
+MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## Plugin skills
 
@@ -17134,7 +17189,7 @@ async def block_secret_reads(ctx):
 | `agent:started` | Observer | `AgentLifecycleContext` | After the bot logs in, sets presence, and registers callbacks | None | 5000 |
 | `bot:ready` | Observer | `AgentLifecycleContext` | After the bot finishes room joins and initial sync | None | 5000 |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
-| `session:started` | Observer | `SessionHookContext` | Once when a response creates a new persisted session | None | 5000 |
+| `session:started` | Observer | `SessionHookContext` | Once per new persisted session, when the reply that created it ends, even a failed or stopped one, and before that reply's `message:after_response` or `message:cancelled` | None | 5000 |
 | `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
 | `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
@@ -17143,7 +17198,7 @@ async def block_secret_reads(ctx):
 | `room:member_left` | Observer | `RoomMemberLeftContext` | On the router, after a human leaves a room | None | 3000 |
 | `config:reloaded` | Observer | `ConfigReloadedContext` | After a new config is applied and affected entities restart or update in place | None | 5000 |
 | `tool:before_call` | Gate | `ToolBeforeCallContext` | Immediately before each tool call | `decline()` | 200 |
-| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()` | 200 |
+| `tool:environment` | Collector | `ToolEnvironmentContext` | Before each tool call runs, after `tool:before_call` hooks and any approval | `set_env()`, `unset_env()`, `pass_through()`, `prepend_path()`, `decline()` | 200 |
 | `tool:after_call` | Observer | `ToolAfterCallContext` | After each tool call returns, raises, or is declined | None | 300 |
 
 Custom events default to 1000 ms.
@@ -17274,10 +17329,16 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.unset_env(name)` keeps `name` away from the command, including a variable the command would inherit, such as `HTTPS_PROXY` or `LANG`, or get from the shell tool's `extra_env_passthrough` or the workspace's `.mindroom/worker-env.sh`.
   `PATH` cannot be removed, because no command would run without it; `ctx.set_env("PATH", ...)` replaces it instead.
 - `ctx.pass_through(name)` also gives the command the variables of MindRoom's process environment that `name`, a variable name or glob pattern, matches, as `extra_env_passthrough` would for every call.
+- `ctx.prepend_path(directory)` puts `directory`, an absolute path, first on the command's `PATH`, ahead of the shell tool's `shell_path_prepend`, the entries a worker adds, and a `PATH` a hook sets, so a wrapper such as a `gh` there is the one the command runs.
+  A later call or hook puts its directory ahead of earlier ones; only a locally run command's [agent CLI](https://docs.mindroom.chat/tools/agent-cli/) directory comes before them all, and in a worker a hook's directory comes first.
+- `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
+  When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
 - Only the `shell` tool's commands receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
-- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, the `PATH` entries MindRoom adds, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes.
-- A failing or timed-out hook loses its changes and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+- The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
+- A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
+  A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
+  A hook that waits on the network bounds that wait below its `timeout_ms`, because a timeout also discards its decline.
 
 ## Custom events
 
@@ -17375,7 +17436,7 @@ All contexts except the three tool contexts include these fields:
 | `CustomEventContext` | `payload`, `source_plugin`, `room_id`, `thread_id`, `sender_id` |
 | `ToolBeforeCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `declined`, `decline_reason`, `decline(reason)` |
 | `ToolAfterCallContext` | `tool_name`, `arguments`, `agent_name`, `room_id`, `thread_id`, `requester_id`, `session_id`, `result`, `error`, `blocked`, `duration_ms` |
-| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)` |
+| `ToolEnvironmentContext` | `function_name`, `registered_toolkit` (the registered tool the function comes from, such as `shell`, or `None` for a function MindRoom generates), `arguments`, `agent_name`, `room_id`, `requester_id`, `declined`, `decline_reason`, `set_env(name, value)`, `unset_env(name)`, `pass_through(name)`, `prepend_path(directory)`, `decline(reason)` |
 
 Tool hooks receive copies of `arguments`, and `tool:after_call` receives copies of `result` and `error`, so changing them does not affect the call.
 `blocked` is true when the tool did not run, for example because a gate hook declined it.
@@ -17932,6 +17993,7 @@ When routing itself fails, the request goes to the first available agent.
 ## Teams
 
 Teams appear as `team/<team_name>` models, and selecting one runs the team in its configured `coordinate` or `collaborate` mode.
+A team completion's content is the team model's answer, written from its members' results, whether or not it streams; members' own text is not sent.
 A team is not listed when any member agent, or any agent a member delegates to, uses a requester-private scope (see [Model selection](#model-selection)).
 For mapped callers, the team's own `access` decides whether they can use it, and that grant covers its member agents for the request.
 
@@ -18412,6 +18474,7 @@ Every environment variable is listed in [Configuration — Environment Variables
 ## Related Setup
 
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - connect Telegram and other messaging platforms to Matrix.
+- [Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) - Chat, Matrix, calls, and the runtime on one host behind Cloudflare Access.
 - [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Google tools on a paired local install, with no Google Cloud setup.
 - [Google OAuth Apps & Scopes](https://docs.mindroom.chat/deployment/google-services-oauth/) - your own Google OAuth client for remote, public, or shared deployments.
 - [Upgrade Notes](https://docs.mindroom.chat/deployment/upgrades/) - required steps when upgrading, including the [Nio 1.0 cutover](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-nio-10).
@@ -18651,7 +18714,7 @@ curl http://localhost:8765/api/health
 curl http://localhost:8765/api/ready
 ```
 
-Use `/api/health` for liveness and `/api/ready` for readiness; responses are described in [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness).
+[Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness) says which endpoint each probe should ask and what each answers.
 A hosted container waiting for pairing approval is live but not ready; find the approval link with `docker logs mindroom`.
 
 ## Building from Source
@@ -18970,6 +19033,54 @@ Everything else on the storage, sessions, state, and journal volumes is not rebu
 If the runtime log shows `The bound Matrix device store is missing`, `Matrix stream changed`, or `IngestionBatchSequenceError`, the device stores do not match the journal; an event journal binding error means `tracking/` and the journal database do not match.
 Restore the matching backups instead of deleting state, because automatic device replacement is unsupported.
 See [Moving a journal safely](https://docs.mindroom.chat/deployment/storage/#moving-a-journal-safely) for copying or adopting a journal database, and [Device recovery after the upgrade](https://docs.mindroom.chat/deployment/upgrades/#device-recovery-after-the-upgrade) for device-store recovery.
+
+### Checking a restore
+
+Before letting users back in, check that:
+
+1. Files on the restored volumes keep the owners and modes of the backup, by default uid and gid 1000 for the runtime's files.
+2. Every database under `tracking/` and a sample of session databases pass `PRAGMA quick_check`, with no `-journal` file beside them (see [Inspecting copies](#inspecting-copies)).
+3. Tuwunel runs the image it ran when the backup was taken, so its first start runs no database migration, and answers `/_matrix/client/versions`.
+4. The runtime becomes ready and logs none of the errors named under [Restore units](#restore-units) and [Restoring](#restoring).
+5. A message to an agent in a test room gets exactly one reply, and older messages are not answered again.
+6. A tool that uses a connected account works, and `!list_schedules` shows the expected schedules.
+7. Your backup schedule covers the restored volumes.
+
+### Inspecting copies
+
+Run bulk reads, such as scans across session databases, on a restored copy instead of the live volumes.
+Session databases use SQLite's rollback journal, so a long read of a live one blocks the agent's writes and can make them fail.
+
+Copy each database together with any `-journal`, `-wal`, or `-shm` file beside it.
+A `-journal` file left beside a database means a write was cut off: SQLite undoes it the next time the database is opened read-write, and refuses to read it read-only until then.
+Check a copy with Python's `sqlite3` module, which the runtime image includes; it prints `ok` for an intact database:
+
+```bash
+python3 -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA quick_check").fetchone()[0])' /copy/path/to/database.db
+```
+
+On a read-only mount, open databases as `file:<path>?immutable=1`, which reads without locks or side files, and only when no `-journal` or `-wal` file sits beside them.
+
+One-off pods that mount the storage volume, for example to copy or inspect it, should run as uid and gid 1000, the runtime image's user, so files they create stay writable for MindRoom.
+Give them `fsGroupChangePolicy: OnRootMismatch`, as the chart's own pods have, or no `fsGroup`.
+Otherwise, on volume types that support it, the kubelet changes the group of every file on the volume before the pod starts and gives that group read and write access, including to private files, which on a large volume also delays the start for a long time.
+
+### Starting a copy beside the original
+
+A restored copy holds the original's Matrix accounts, OAuth tokens, and schedules, so a copy with network access acts as the original:
+
+- With the original's homeserver in reach, it answers messages and runs due schedules in real rooms.
+- With a provider that rotates refresh tokens, the copy's first token refresh invalidates the token the original holds, and the user has to connect that account again.
+- Tools with outside effects, such as sending email, run for real.
+
+Start a copy while the original runs only in isolation:
+
+- Its own namespaces for the runtime and its workers, each with a default-deny egress NetworkPolicy and rules that allow only cluster DNS and traffic within the copy's namespaces, on a cluster that enforces NetworkPolicy.
+  Before starting MindRoom, check from a test pod in each namespace that outside connections fail.
+- No cloud identity: no workload identity annotations on its service accounts and no access to the node's metadata server.
+- Dummy values for provider API keys and other Secrets, except the keys the copied data needs, such as the credentials encryption key from [Restore units](#restore-units).
+- With `appservice` accounts, new tokens in the copied homeserver's registration and the runtime, so the copy cannot sign in to the original homeserver as the application service.
+- No Ingress, LoadBalancer Service, CronJobs, or tunnel connector; a connector started with the original's tunnel credentials joins that tunnel and receives users' traffic.
 
 See [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/#secrets-management) and [Database Migrations](https://docs.mindroom.chat/deployment/saas-platform/#database-migrations).
 
@@ -19635,6 +19746,7 @@ The service name is yours to choose; it names the stored `egress_<name>` credent
 Placeholder values are `mindroom-brokered`.
 Presets without a connected account take an API key only.
 A preset's connected account is used only after someone allows Agent Keys to use it; see [Using a connected account](#using-a-connected-account).
+The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` does not, because git clone and fetch read with `POST`.
 
 Several Google presets share `www.googleapis.com`.
 Longest path prefix matching picks the right service, and a request to another path on that host is forwarded without injection, because the host has rules and so does not count as unmatched.
@@ -19670,9 +19782,11 @@ egress_broker:
 | `rules` | Yes, unless a preset supplies them | Routing rules for the service. Every rule needs `auth`, unless the service sets `restrict_only` |
 | `placeholder_env` | No | Variables set in workers whose scope has a key or account for the service, so CLIs that refuse to run without a token, such as `gh`, work; any placeholder value, conventionally `mindroom-brokered` |
 | `oauth_provider` | No | MindRoom OAuth provider id (such as `github`, `google_drive`, `atlassian`) whose connected account supplies the secret when no API key is stored, once someone allows Agent Keys to use it; see [Secret sources](#secret-sources) |
+| `read_only` | No | Default none. `{post_paths: [...]}` lets the service's connected account be allowed read only, which then gets its token only for `GET`, `HEAD`, and `POST` to the `post_paths` (path prefixes matched like a rule's `path_prefix`, for endpoints that read with `POST`); see [Read-only accounts](#read-only-accounts). Set it only for an API whose writes never use `GET` or `HEAD` |
 | `oauth_on_shared_workers` | No | Default `false`. Set `true` to use a requester's own GitHub or Atlassian account in shared sandboxes too; see [Personal accounts and shared sandboxes](#personal-accounts-and-shared-sandboxes). Only `config.yaml` may set it, and presets never do |
 | `restrict_to_rules` | No | Default `false`. Set `true` to refuse, with 403 `path_not_allowed`, a request to this service's hosts whose path matches none of its party's rules there, instead of forwarding it without credentials; see [Limiting paths and repositories](#limiting-paths-and-repositories). Presets never set it |
 | `restrict_only` | No | Default `false`. Only for user services; see [Limiting in place](#limiting-in-place) |
+| `oauth_separate_account` | No | Default `false`. Only for user services with an `oauth_provider` other than `github` or `atlassian` on `user` and `user_agent` agents; see [A service's own account](#a-services-own-account) |
 
 **Rule fields:**
 
@@ -19767,7 +19881,7 @@ The helper writes:
 A service with `restrict_only: true` only limits paths, and only users' own services may set it.
 It is how a user narrows an administrator's service, such as GitHub, to some repositories: its rules count in the requester's check like those of a user service with `restrict_to_rules`, but they never choose a credential, so the administrator's service keeps sending the user's own connected account or API key for the paths the limit allows.
 For example, with the administrator's `github: {preset: github}` and a limit to `octo-org/octo-repo`, `api.github.com/repos/octo-org/octo-repo/pulls` gets the administrator's credential and `api.github.com/user` gets 403 `path_not_allowed` naming the limit.
-A limit has no key, account login, or placeholder variables (it may not set `oauth_provider`, `placeholder_env`, or `oauth_on_shared_workers`, and its rules need no `auth`), the broker refuses to store a key for it, and the [`egress_credentials` tool](#agent-tool) leaves it out.
+A limit has no key, account login, or placeholder variables (it may not set `oauth_provider`, `placeholder_env`, `oauth_on_shared_workers`, or `read_only`, and its rules need no `auth`), the broker refuses to store a key for it, and the [`egress_credentials` tool](#agent-tool) leaves it out.
 On the personal page, users who can manage the agent get **Limit to repositories** on an administrator's service with a rule on `github.com`, `api.github.com`, or `uploads.github.com`, which opens the [limit editor](#the-limit-editor) and saves one.
 
 ### Private networks
@@ -19809,6 +19923,7 @@ For each request the broker picks the secret in this order:
 
 1. The API key stored for the scope, if there is one.
    An explicit key always wins over a connected account, and removing the key falls back to the account.
+   A service with [its own account](#a-services-own-account) skips this step.
 2. Otherwise, the connected account's access token, if Agent Keys may use the account for the service; the primary refreshes the token when it is near expiry.
 3. Otherwise, a 403 `credential_not_configured`, with `oauth_reuse: "off"` when nobody allowed the account, or a connect link when the user can connect an account Agent Keys may use (see [Error responses](#error-responses)).
 
@@ -19878,7 +19993,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell` or `python`) and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell` or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -19919,14 +20034,24 @@ Whoever may connect the account may allow it (see **Who may connect and set keys
 Allowing a GitHub or Atlassian account covers every agent of that requester with a service of the same name, because the account is the requester's own; allowing any other account covers the scope of the service's keys (see [Secret management](#secret-management)), so on a shared agent everyone using it gets it.
 **Stop using <provider> account** turns it off again and keeps the connection for the tools.
 An allowance covers that provider's account for that scope until someone stops it: disconnecting keeps it, so an account of the same provider connected later, also one connected for the tools on the Connections portal, is used at once.
-It does not apply while the service's `oauth_provider` names another provider.
+It does not apply while the service's `oauth_provider` names another provider, or while the service uses [its own account](#a-services-own-account) instead of the one it was allowed for, or the reverse.
 A script can allow an account with `PUT /api/connections/egress/agents/<agent>/<service>/oauth-reuse`, or `PUT /api/egress-broker/services/<name>/oauth-reuse?agent_name=<agent>` on the dashboard, and the body `{"acknowledge_approval_bypass": true}`, and stop it with `DELETE` on the same URL.
+The body's `access` is `read_write` (the default) or `read`, which is a 409 for a service without `read_only`; sending it again for an allowed account changes the level.
+
+#### Read-only accounts
+
+Where a service sets `read_only`, as the Google presets and `atlassian` do, allowing its account, also through **Connect**, asks for **Read only**, chosen by default, or **Read and write**.
+Read only gives the agent's commands the account only for `GET` and `HEAD` requests and for `POST` to the service's `post_paths`, such as Calendar's free/busy query.
+Any other request is refused with 403 `read_only` before the account is used, and so is a WebSocket upgrade or a request with an `X-HTTP-Method-Override`, `X-HTTP-Method`, or `X-Method-Override` header; batch and GraphQL endpoints mix reads and writes in one `POST`, so they stay refused unless `post_paths` lists them.
+The row shows the level and offers **Change to read and write**, which asks for confirmation first, or **Change to read only**.
+The level is per service, so one account can be read only for Calendar and read and write for Gmail.
+It limits only the connected account: an API key stored for the service is used for every request.
 
 ## User services
 
 A user service is a service the user defines for their own scope instead of an administrator defining it in `config.yaml`.
 Users manage them on the personal egress page at `/connections/egress`, which needs one of the [sign-ins above](#connecting-an-account).
-They have the same fields and validators as a config service (a preset or `rules`, `placeholder_env`, `oauth_provider`, `restrict_to_rules`), plus [`restrict_only`](#limiting-in-place), but not `oauth_on_shared_workers`.
+They have the same fields and validators as a config service (a preset or `rules`, `placeholder_env`, `oauth_provider`, `restrict_to_rules`), plus [`restrict_only`](#limiting-in-place) and [`oauth_separate_account`](#a-services-own-account), but not `oauth_on_shared_workers`.
 
 On `user` and `user_agent` agents each requester adds their own, which apply only to that requester's workers.
 On `shared` and unscoped agents administrators and the agent's `credential_managers` add them, the same rule as for keys, and other users of the agent can read but not change them.
@@ -19957,10 +20082,29 @@ A shadowed entry becomes active again if the config service is removed.
   Saving one with another host or a wildcard is refused with a message that names the allowed hosts, and a provider no preset is bound to, such as `google_cloud`, is refused on every host.
   Services in `config.yaml` and user services that use an API key are not limited this way.
 
-**Keys.** A new service never inherits an old key stored under its name, editing a service keeps its key, a limit never keeps one, and deleting a service deletes its key unless a config service now shadows the entry.
+**Keys.** A new service never inherits an old key stored under its name, editing a service keeps its key, a limit or a service with [its own account](#a-services-own-account) never keeps one, and deleting a service deletes its key unless a config service now shadows the entry.
 
 **Placeholder variables.** A user service's placeholder names must look like credential variable names, such as `MY_API_KEY`, and values are short plain strings such as `mindroom-brokered`; the editor says why a name or value is refused.
 When a config service sets the same variable, the config value wins, and the editor warns about it.
+
+### A service's own account
+
+A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Use its own account, not the one the agent's tools use**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
+A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
+A row's **Add another account** opens **Add service** with that row's preset and **Use its own account** ticked: save it, then use **Connect** on the new row.
+That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
+It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account instead.
+Deleting the service, unticking the box, or changing its account login also removes its own account and its opt-in.
+
+Such a service usually covers the same hosts and paths as a service of your administrator's, which wins a tie, so a request picks it by name with the `X-Agent-Keys-Service` header:
+
+```bash
+curl -H 'X-Agent-Keys-Service: team_calendar' https://www.googleapis.com/calendar/v3/users/me/calendarList
+```
+
+The header can name any of your own services (`source: user` in the [agent tool](#agent-tool)), on hosts that a service's rules name: only the named service's rules then match, after the same [path limits](#limiting-paths-and-repositories), and a request none of them matches, or one naming an administrator's service, is refused with 403 `service_not_matched`.
+On those hosts the broker removes the header before forwarding the request.
+On any other host the header selects nothing, and an HTTPS request, which the broker tunnels without reading, carries it to the host as sent.
 
 ## Services editor
 
@@ -19976,7 +20120,7 @@ One editor adds, edits, and deletes services in two places:
 On the personal page the editor saves the service and its key in one step.
 Pick a **Preset**, or **Custom** and fill in the website (the host of the first rule), how the key is sent (bearer token, header, basic auth, query parameter, or a custom header template), and the header, username, or parameter name.
 The **Name** is fixed once saved.
-**More options** holds the display name, description, path prefix, port, extra rules, **Replace the preset's rules with my own**, **Refuse other paths on these hosts** (`restrict_to_rules`), the account login (for a **Custom** service), and the placeholder variables.
+**More options** holds the display name, description, path prefix, port, extra rules, **Replace the preset's rules with my own**, **Refuse other paths on these hosts** (`restrict_to_rules`), the account login (for a **Custom** service), **Use its own account, not the one the agent's tools use** (for a service of your own with an account login, see [A service's own account](#a-services-own-account)), and the placeholder variables.
 
 ### The limit editor
 
@@ -20015,6 +20159,7 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: only such agents' worker-routed `shell` and `python` calls go through the broker and get keys, and only they appear on the Agent Keys pages.
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
+So does an agent whose `shell` and `python` run in the primary process, for example because its `worker_tools` leave them out: the broker never sees those calls, so the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 It replaces `agent_vault_access` for the native broker.
 
@@ -20032,12 +20177,12 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
 {
   "tool": "egress_credentials",
   "services": [
-    {"name": "github", "display_name": "GitHub", "source": "config", "configured": true, "active_source": "oauth",
-     "oauth_reuse": true},
+    {"name": "calendar", "display_name": "Google Calendar", "source": "config", "configured": true,
+     "active_source": "oauth", "oauth_reuse": true, "oauth_access": "read"},
     {"name": "gmail", "display_name": "Gmail", "source": "config", "configured": false, "active_source": null,
-     "oauth_reuse": false, "can_connect_account": false, "provider": "google_gmail"},
+     "oauth_reuse": false, "oauth_access": null, "can_connect_account": false, "provider": "google_gmail"},
     {"name": "openai", "display_name": "OpenAI", "source": "user", "configured": false, "active_source": null,
-     "oauth_reuse": null, "can_connect_account": false, "provider": null}
+     "oauth_reuse": null, "oauth_access": null, "can_connect_account": false, "provider": null}
   ],
   "manage_url": "https://mindroom.example/connections/egress",
   "note": "..."
@@ -20051,6 +20196,8 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   The tool reports the scope the broker uses, so each requester sees only their own keys and, for GitHub and Atlassian, their own account, and an agent with no worker scope reads the global store.
 - `oauth_reuse` says whether Agent Keys may use the service's account (see [Using a connected account](#using-a-connected-account)); it is `null` for a service without an account provider or whose GitHub or Atlassian account the broker never uses in a [shared sandbox](#personal-accounts-and-shared-sandboxes).
   When it is `false`, `provider` names the account to allow, and the note tells the agent that allowing it lets its commands act as the account without the approval prompts the account's tools ask for, and who may allow it.
+- `oauth_access` is `read` or `read_write` for an account Agent Keys may use, and `null` otherwise; under `read`, writes fail with `read_only` until the account is allowed read and write (see [Read-only accounts](#read-only-accounts)).
+- `separate_account: true` marks a service with [its own account](#a-services-own-account), and the note tells the agent to name one of the user's own services with the `X-Agent-Keys-Service` header.
 - A service with nothing configured also reports `can_connect_account`.
   When it is `true`, the user can connect an account Agent Keys may use instead of adding a key, and `provider` names the OAuth provider id.
   It is `false` when the account is not allowed, the service has no account provider, the provider's OAuth client is not set up, a shared service account serves the provider, a stored connection needs a reset first, or the provider is GitHub or Atlassian in a [shared sandbox](#personal-accounts-and-shared-sandboxes); `provider` is then `null` unless the account is not allowed.
@@ -20150,13 +20297,16 @@ The broker returns these errors to worker code:
 | Plain HTTP request matching a rule | 403 JSON `{"error": "tls_required", "service": "<name>", "message": "..."}` |
 | `Host` header inside an intercepted tunnel naming a different host than the CONNECT target | 403 JSON `{"error": "host_mismatch", "message": "..."}` |
 | Client TLS server name (SNI) that differs from the CONNECT host | No response: the TLS handshake is aborted with an `unrecognized_name` alert, and nothing is forwarded |
-| Request the broker cannot read unambiguously, such as an invalid CONNECT target or an HTTP protocol error | 400 JSON `{"error": "bad_request", "message": "..."}`; 431 with the same body when the request head is over 64 KiB, usually a huge `Cookie` or custom header |
+| Request the broker cannot read unambiguously, such as an invalid CONNECT target, an HTTP protocol error, or an `X-Agent-Keys-Service` header sent twice or without a valid service name | 400 JSON `{"error": "bad_request", "message": "..."}`; 431 with the same body when the request head is over 64 KiB, usually a huge `Cookie` or custom header |
 | Ambiguous path on a host with rules (see [Limiting paths and repositories](#limiting-paths-and-repositories)) | 400 JSON `{"error": "bad_request", "message": "..."}` with the ambiguous-path text |
 | `TRACE` or `TRACK` request to a host with rules | 405 JSON `{"error": "method_not_allowed", "message": "..."}`; the upstream would echo the injected credential back |
+| `X-Agent-Keys-Service` naming no service of the user's own whose rules match the request (see [A service's own account](#a-services-own-account)) | 403 JSON `{"error": "service_not_matched", "service": "<name>", "message": "..."}` |
 | Path that fails a restriction (see [Limiting paths and repositories](#limiting-paths-and-repositories)) | 403 JSON `{"error": "path_not_allowed", "service": "<restricting service>", "manage_url": "<link>", "message": "..."}` |
 | Destination fails dial guard (private/metadata/link-local) | 403 JSON `{"error": "destination_blocked", "message": "..."}` |
 | Unmatched host under `deny` policy | 403 JSON `{"error": "host_not_allowed", "services": [...], "message": "..."}` with the operator's service names as a hint |
+| Request that an account allowed read only may not make (see [Read-only accounts](#read-only-accounts)) | 403 JSON `{"error": "read_only", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; allow read and write at `manage_url` |
 | Matched service, no key, and an account provider nobody allowed Agent Keys to use | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "provider": "<id>", "oauth_reuse": "off", "manage_url": "<link>", "message": "..."}` with no `connect_url`; add a key or allow the account at `manage_url` |
+| Matched service whose [own account](#a-services-own-account) is not connected or not allowed | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}` with no `connect_url`, plus `"provider": "<id>"` and `"oauth_reuse": "off"` while nobody allowed it; connect and allow the service's own account at `manage_url` |
 | Matched service, no key and no connected account in scope | 403 JSON `{"error": "credential_not_configured", "service": "<name>", "manage_url": "<link>", "message": "..."}`, plus `"provider": "<id>"` and `"connect_url": "<link>"` when the user can connect an account that is not shared by everyone using the agent |
 | Connected account revoked, rejected by the provider, or unreadable | 403 JSON `{"error": "oauth_connection_required", "service": "<name>", "provider": "<id>", "connect_url": "<link>", "manage_url": "<link>", "message": "..."}`; `connect_url` is `null` for a shared connection, and an unreadable stored credential adds `"reset_required": true` and has a `null` `connect_url` until it is reset |
 | Provider outage, timeout, or network failure while refreshing the account's token | 503 JSON `{"error": "oauth_refresh_failed", "service": "<name>", "provider": "<id>", "manage_url": "<link>", "message": "..."}`; retry later, do not reconnect |
@@ -20219,7 +20369,7 @@ Each of these is a choice you make, so make it on purpose.
 - **Write access to the configuration.** `config_manager`, and any other way to write the `egress_broker` config, can point a service at another host, and the broker then sends that service's key there.
   It can also add [`private_networks`](#private-networks) that open your local network to every agent that uses Agent Keys, and writing an agent's tools can give it the `egress_credentials` tool.
   Give config write access only to people and agents you would trust with every key.
-- **Agents with Agent Keys.** An agent with the [`egress_credentials` tool](#agent-tool) can send any request that the keys of its scope and the connected accounts allowed for Agent Keys allow from its commands, with the account's full permissions and without the read-only limits or approvals of native tools such as `gmail` or `google_drive`.
+- **Agents with Agent Keys.** An agent with the [`egress_credentials` tool](#agent-tool) can send any request that the keys of its scope and the connected accounts allowed for Agent Keys allow from its commands, with the account's full permissions (only its reads for an account allowed [read only](#read-only-accounts)) and without the read-only limits or approvals of native tools such as `gmail` or `google_drive`.
   Add the tool only to agents you would trust with those keys, and allow an account only where its commands may act without those approvals.
 - **Hosts that echo requests.** A host that sends the request back to the caller, such as a debug endpoint that echoes headers (`httpbin.org/headers`) or an error page with the full URL, hands the injected key to the agent.
   `query` auth is the most exposed, because a redirect `Location`, an error page, or a log line that echoes the URL can hand the key back; use it only for APIs that accept nothing else.
@@ -20247,7 +20397,7 @@ A shell opened with `docker exec` does not have that per-call environment.
 
 **403 `destination_blocked` for a LAN or Tailscale service.** Add its range to [`private_networks`](#private-networks).
 
-**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool), so its calls get no broker environment; add the tool.
+**An agent's requests carry no key and the request log has no rows for it.** The agent does not have the [`egress_credentials` tool](#agent-tool), or its `shell` and `python` run in the primary process, so its calls get no broker environment; add the tool, or route `shell` or `python` to a worker with `worker_tools`.
 
 **403 `credential_not_configured` errors.** The service is matched but the worker's scope has neither an API key nor a connected account for it.
 Connect an account (when the response has `provider` and `connect_url`) or set a key: for shared and unscoped agents through the dashboard (or by their credential managers on the Connections page), for personal agents on the personal egress page when it is served.
@@ -20518,6 +20668,7 @@ The [usage export service](https://docs.mindroom.chat/usage/#usage-export-servic
 The [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in) can use it, and users signed in to MindRoom Chat can open it without a gateway.
 
 Trusted upstream auth is disabled by default and works with any gateway that publishes a JWKS endpoint and adds a short-lived signed JWT to each authenticated browser request, such as an identity-aware proxy or an OAuth2 proxy.
+[Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) lists the values for Cloudflare Access.
 MindRoom takes the user only from the verified JWT claims and ignores identity headers, so a request that bypasses the gateway cannot pose as a user.
 While trusted upstream auth is enabled, it replaces Supabase platform auth and `MINDROOM_API_KEY` auth for the dashboard and its API.
 
@@ -20559,7 +20710,7 @@ Domain matching is case-insensitive, emails from any other domain or a subdomain
 
 ## Helm Charts
 
-For the hosted instance chart, set the equivalent values:
+For the hosted instance chart or the runtime chart, set the equivalent values:
 
 ```yaml
 trustedUpstreamAuth:
@@ -20575,9 +20726,9 @@ trustedUpstreamAuth:
   emailDomain: example.com
 ```
 
-The chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables.
+Either chart sets the matching `MINDROOM_TRUSTED_UPSTREAM_*` environment variables, and with `enabled` true the runtime chart fails to render when `env.extra` also sets one of those variables.
 When instances come from the platform provisioner, put the same values under `provisioner.trustedUpstreamAuth` in the platform chart, which passes them to the provisioner as `INSTANCE_TRUSTED_UPSTREAM_*` variables.
-Both charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
+All three charts fail to render when `enabled` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, and `jwtIssuer`, or when `emailToMatrixUserIdTemplate` is set without `emailDomain`.
 
 ## Dashboard On Its Own Host
 
@@ -20592,7 +20743,7 @@ With `MINDROOM_CONNECTIONS_AGENT` set, users outside `administrators` who open t
 
 Dashboard configuration is an operator capability.
 Without `MINDROOM_CONNECTIONS_AGENT`, every user the upstream authenticates can read and change dashboard configuration regardless of the Matrix `administrators` list, so admit only trusted operators through the gateway in that mode.
-With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal and the OAuth callback, success, and reset pages keep their own access checks.
+With `MINDROOM_CONNECTIONS_AGENT` set, ordinary dashboard pages and APIs also require a Matrix identity listed in `administrators`, while the Connections portal, the OAuth callback, success, and reset pages, and [private Dynamic Workflow reports](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) keep their own access checks.
 A user outside `administrators` who opens a dashboard page in a browser is redirected with 303 to `/connections?notice=admin-only`, where the Connections page says the dashboard is for administrators; API calls keep the 403 JSON.
 A [Connections session from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access) reaches dashboard routes only for a user in `administrators` whose token the homeserver bound to this deployment.
 
@@ -20621,6 +20772,114 @@ Host the dashboard on the app's public origin or on [its own host](#dashboard-on
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |
 
+# Cloudflare Access & Tunnel
+
+This page puts MindRoom Chat, the Tuwunel homeserver, MatrixRTC calls, and the MindRoom runtime on one host behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/), reached through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
+Examples use `chat.example.com` for that host, `admin.example.com` for the dashboard, and the Service names of the [Kubernetes charts](https://docs.mindroom.chat/deployment/kubernetes/#charts).
+
+## Tunnel
+
+`cloudflared` uses the first ingress rule that matches, so order the rules for `chat.example.com` like this:
+
+| Order | Paths | Service |
+| --- | --- | --- |
+| 1 | Paths with a `.` or `..` segment between `/` or `\` separators, or with a control character | `http_status:404` |
+| 2 | `/_matrix/`, `/_synapse/`, `/_tuwunel/`, and `/.well-known/matrix/server` with everything below it | Tuwunel |
+| 3 | The public paths of each runtime feature you use, as that feature's page lists them | MindRoom runtime |
+| 4 | Everything else, including `/.well-known/matrix/client`, `/livekit/jwt/`, and `/livekit/sfu/` | MindRoom Chat |
+
+The first rule keeps a request from passing Access as one path and reaching a service as another, because Access, the tunnel, and the origin can resolve such paths differently.
+The client chart serves `/.well-known/matrix/client` only with MatrixRTC or bug reports enabled; otherwise send it to Tuwunel as well.
+Runtime features with public paths include the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), the [Connections portal](https://docs.mindroom.chat/connections-portal/#trusted-upstream-sign-in), the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic), the [worker computer](https://docs.mindroom.chat/tools/worker-computer/#reverse-proxy-and-host-routing), [external triggers](https://docs.mindroom.chat/external-triggers/), the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services, and [published](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) and [private](https://docs.mindroom.chat/tools/agent-orchestration/#dynamic_workflow) reports.
+`admin.example.com` sends every path to the runtime, as described in [Dashboard On Its Own Host](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#dashboard-on-its-own-host), behind the same first rule.
+
+```yaml
+ingress:
+  - hostname: chat.example.com
+    path: '[/\\][.]{1,2}([/\\]|$)|[\x00-\x1F\x7F]'
+    service: http_status:404
+  - hostname: chat.example.com
+    path: ^/(_matrix|_synapse|_tuwunel)/|^/\.well-known/matrix/server(/|$)
+    service: http://matrix-mindroom-tuwunel:8008
+  - hostname: chat.example.com
+    path: ^/(connections|api/connections)(/.*)?$|^/api/oauth/
+    service: http://mindroom-runtime:8765
+  - hostname: chat.example.com
+    service: http://mindroom-client:80
+  - hostname: admin.example.com
+    path: '[/\\][.]{1,2}([/\\]|$)|[\x00-\x1F\x7F]'
+    service: http_status:404
+  - hostname: admin.example.com
+    service: http://mindroom-runtime:8765
+  - service: http_status:404
+```
+
+The example routes only the Connections paths to the runtime; add a rule like it for each other feature you use.
+
+Point the runtime's `MATRIX_HOMESERVER` (runtime chart `matrix.homeserverUrl`) at Tuwunel's in-cluster Service, as in [Pairing With mindroom-runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#pairing-with-mindroom-runtime), because its Matrix, OpenID, and `/_matrix/client/versions` requests carry no Access session.
+
+## Paths That Bypass Access
+
+Protect both hosts with one Access application that covers each host as a whole, then add an application with a Bypass policy for each path below.
+Access applies the most specific path application, so every other path keeps the host's policy.
+
+| Path | Requested without an Access session by |
+| --- | --- |
+| `/runtime-config.js`, `/authentication-recovery.js` | A cached Chat page whose Access session expired, to [recover sign-in](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery) |
+| `/sw.js`, under `basePath` when set | The browser's service worker update check, which after the session expires gets the Access login instead of the script, so an old worker keeps serving its cached app |
+| `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
+| `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
+| The MCP paths that the [route table](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](https://docs.mindroom.chat/deployment/mcp-gateway/#external-authorization) instead |
+| `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
+
+Machine callers of runtime routes need their own Access application with a service token, as the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](https://docs.mindroom.chat/external-triggers/) or the API keys of the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
+Everything else stays behind Access, including `/authentication-recovery-probe` and `/connections`.
+Published reports under `/reports/public/` need no MindRoom login, so behind Access only the people Access admits can open them.
+An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery), and the tunnel sends everything below `/.well-known/matrix/server` to Tuwunel, which answers 404.
+
+## Service Worker
+
+Chat's service worker answers browser navigations on its origin with its cached app.
+Chat images built from [mindroom-chat#516](https://github.com/mindroom-ai/mindroom-chat/pull/516) or later leave `/connections`, `/mcp`, and `/reports` to the network, so list only the other browser pages on this host in the client chart:
+
+```yaml
+serviceWorker:
+  navigationFallbackExcludePaths:
+    - /cdn-cgi
+    - /_tuwunel
+```
+
+`/cdn-cgi` holds Access's own pages on the host, such as `/cdn-cgi/access/logout`, and `/_tuwunel` holds Tuwunel's browser pages, such as its OIDC sign-in and account pages.
+
+## Edge Settings
+
+- **Managed WAF rules** can block Matrix media uploads, which then fail at Cloudflare although the homeserver would accept them.
+  Add a WAF skip rule for `POST` requests to `/_matrix/media/v3/upload` and `/_matrix/media/r0/upload`; Tuwunel still requires a Matrix access token for them.
+- **Browser Cache TTL** on the zone overrides the `max-age=0` that Chat sends for `/runtime-config.js`, `/authentication-recovery.js`, and `/sw.js` with its own longer lifetime, so browsers can keep stale copies.
+  Set it to Respect Existing Headers, or add a response header rule that sets `Cache-Control: no-store, max-age=0` on those paths.
+- **Health checks** from scripts can get a Cloudflare challenge instead of the page when they send no User-Agent or a non-standard one, such as a scripting library's default, while browsers pass.
+  Send curl's or a browser's User-Agent, and point external checks at a bypassed path such as `/_matrix/client/versions`.
+
+## MindRoom Settings
+
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup) with the Access assertion:
+
+```bash
+MINDROOM_PUBLIC_URL=https://chat.example.com
+MINDROOM_DASHBOARD_URL=https://admin.example.com
+MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
+MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=Cf-Access-Jwt-Assertion
+MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://<team>.cloudflareaccess.com/cdn-cgi/access/certs
+MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://<team>.cloudflareaccess.com
+MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=<AUD tag>
+```
+
+`<team>` is the Zero Trust team name, and `<AUD tag>` is the Application Audience (AUD) tag of the host-wide application, which must cover both hosts.
+Each feature behind its own Access application, such as MCP external authorization or the usage export and budget services, takes that application's AUD tag as its audience.
+
+For voice agents, set `calls.livekit_service_url: https://chat.example.com/livekit/jwt` in `config.yaml`, because the runtime cannot read `/.well-known/matrix/client` through Access and agents otherwise ignore calls ([Calls configuration](https://docs.mindroom.chat/voice-calls/#calls-configuration)).
+Desktop bridge clients sign in through Access as described in [Homeservers Behind an Identity-Aware Proxy](https://docs.mindroom.chat/tools/desktop/#homeservers-behind-an-identity-aware-proxy).
+
 # Data Storage & Journal
 
 This page covers where MindRoom keeps its data, what to back up, how to configure the event journal, and how to move or rebind the journal with `mindroom journal adopt`.
@@ -20631,6 +20890,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
+- `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories and the recent conversation messages Mem0 reads when it extracts memories
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
@@ -20653,6 +20913,7 @@ Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to 
 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
+The [conversation storage v2 upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) cover the `<name>.db.pre-storage-v2` backups it leaves beside each conversation database and what a database restored from a backup taken before that upgrade needs when it converts again.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
@@ -20919,7 +21180,7 @@ If the YAML fails to parse, the failure has no fingerprint, so a wait for a spec
 
 # Operational Log Events
 
-This page covers how to monitor a running MindRoom: the health and readiness endpoints, the structured log events that are stable enough for metrics and alerts, and the debug logging you can turn on while troubleshooting.
+This page covers how to monitor a running MindRoom: the health and readiness endpoints, the structured log events that are stable enough for metrics and alerts, the container metrics worth alerting on, and the debug logging you can turn on while troubleshooting.
 Most other log event names are internal diagnostics and can change in any release.
 
 See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Threads, Replies & Participation](https://docs.mindroom.chat/configuration/threads/), and [Access Control](https://docs.mindroom.chat/authorization/).
@@ -20931,7 +21192,9 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 | GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
-Use `/api/health` for liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
+Never point a startup probe at `/api/ready`: the one-time conversion after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) keeps the process not ready for as long as it takes, a probe restart rolls back the database being converted, and a database larger than the probe allows never finishes converting.
+A startup probe on `/api/health` passes as soon as the process answers, as the bundled Helm charts configure it.
 
 The `/api/health` body also contains:
 
@@ -20949,7 +21212,7 @@ The `/api/ready` phases are:
 | `ready` | Startup finished and requests are being served |
 | `failed` | Startup or runtime failure; `detail` gives the cause |
 
-While `mindroom run` waits for hosted pairing approval, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval`.
+While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
 When an agent, team, or router receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
@@ -20966,12 +21229,12 @@ Every record carries `event`, `level`, `logger`, and `timestamp` next to its own
 ```
 
 `event_loop_scheduler_lag_summary` is an `info` record, so keep `LOG_LEVEL` at `INFO` or lower, or raise only that logger with `MINDROOM_LOGGER_LEVELS=mindroom.event_loop_stall:INFO`.
-The other events on this page are `warning` records.
+`agent_error`, `event_loop_stall_detected`, and `event_loop_stall_ongoing` are `error` records, and the other stable events below are `warning` records.
 See [Environment Variables](https://docs.mindroom.chat/configuration/#environment-variables) for the logging controls.
 
 ## Events
 
-The event names and fields below are stable operator signals.
+The event names and fields below are stable operator signals; a record can carry further diagnostic fields that are not listed and can change.
 Each section lists the fields, a suggested alert, and where to look when it fires.
 The thresholds are starting points to tune against your own baseline, and the queries are generic pseudo-queries to translate into your log platform's syntax.
 
@@ -21001,7 +21264,7 @@ alert if  median(metric) over 10 minutes > 20
           for 30 minutes
 ```
 
-When it fires, look for `event_loop_stall_detected` and `event_loop_stall_ongoing` records, which include the blocking stack when one stall exceeds `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`).
+When it fires, look for [`event_loop_stall_detected`](#event_loop_stall_detected) records, which carry the blocking stack of long stalls.
 Every stall above `MINDROOM_EVENT_LOOP_STALL_STACK_THRESHOLD_SECONDS` (default `0.25`, `0` or a negative value disables) also logs one `event_loop_stall_stack` record with the blocking stack and the stall's `lag_ms` once it ends, at most once every 10 seconds.
 Compare the frequency of `event_loop_gc_collection` records, which report garbage collections slower than 50 ms.
 Repeated `large_streaming_edit_preview_prepared` records with a growing `original_size_bytes` in one room point at one long streaming response.
@@ -21011,6 +21274,34 @@ Once agents are ready, and then every `MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS` 
 This keeps routine collections short on large processes at the cost of one full collection per interval.
 After the first refreeze, MindRoom also raises CPython's full-collection threshold and logs `gc_full_collection_threshold_raised`, so routine full collections run less often, by an amount that depends on the workload; unreachable reference cycles then wait longer to be freed.
 Memory held by objects that become garbage while frozen, such as agents a config reload replaced, is reclaimed only at the next refreeze, so resident memory can stay higher for up to one interval.
+
+### `event_loop_stall_detected`
+
+Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and router is frozen until it ends.
+While the stall lasts, an `event_loop_stall_ongoing` record with the same fields follows every 30 seconds.
+
+| Field | Meaning |
+|-------|---------|
+| `stalled_for_seconds` | Seconds since the last heartbeat |
+| `threshold_seconds` | The configured stall threshold |
+| `stack_capture_suppressed` | `true` when a stack was already captured in the last 30 seconds; the record then lacks the four fields below |
+| `stack` | Stack of the code blocking the event loop |
+| `process_cpu_seconds_since_heartbeat` | CPU seconds the process used since the last heartbeat |
+| `other_thread_stacks` | Stacks of up to eight other threads |
+| `omitted_thread_stack_count` | Number of other threads whose stacks were left out |
+
+Count the records and alert when stalls repeat, since each one delays every reply in the process.
+The `stack` names the blocking code; a `process_cpu_seconds_since_heartbeat` close to `stalled_for_seconds` points at CPU-bound work, and one near `0` at a blocking call such as file or network I/O.
+
+### `event_loop_stall_ended`
+
+Logged when a stall that `event_loop_stall_detected` reported ends.
+
+| Field | Meaning |
+|-------|---------|
+| `stall_duration_seconds` | Seconds the event loop went without a heartbeat |
+
+Sum `stall_duration_seconds` over a window to see how long agents were frozen in it.
 
 ### `matrix_sync_stall_diagnostics`
 
@@ -21036,6 +21327,41 @@ alert if  sum(metric) over 15 minutes >= 5 for any agent
 Read the `await_chain` snapshots to see where each task is waiting.
 Reports for every entity at once usually point at the homeserver or at a saturated event loop, so check `event_loop_scheduler_lag_summary` as well.
 
+### `matrix_event_decryption_failed`
+
+Logged when an agent cannot decrypt a new message, in a room it has joined, from a sender it may reply to.
+Every agent in the room that receives the message logs it, and a burst of failures in one encryption session can log fewer records than messages, so count distinct `event_id` values to approximate affected messages.
+[Troubleshooting Undecryptable Messages](https://docs.mindroom.chat/matrix/#troubleshooting-undecryptable-messages) explains the usual cause and fix.
+
+| Field | Meaning |
+|-------|---------|
+| `room_id` | Room of the message |
+| `event_id` | Event ID of the message |
+| `sender` | Matrix user ID of the sender |
+| `sender_device_id` | Device the sender encrypted the message on |
+| `session_id` | Encryption session of the message |
+| `agent` | Agent that could not decrypt it |
+| `key_request_already_sent` | Whether a key request for that session was already pending |
+| `hint` | Fixed explanation of the usual cause |
+
+Count it grouped by `agent` and alert on a sustained rate.
+Failures from one `sender_device_id` point at that client, while failures across many senders for one agent point at that agent's device.
+
+### `conversation_converted`
+
+Logged once for each conversation database the first start after [upgrading to conversation storage v2](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) converts, or that converts at its first use later, such as a restored backup.
+
+| Field | Meaning |
+|-------|---------|
+| `path` | The converted database file |
+| `runs` | Runs in the converted database |
+| `messages` | Stored messages in the converted database |
+| `compacted` | Whether the file was compacted to return the space its old tables used |
+| `duration_seconds` | Time the conversion and compaction took |
+
+`compacted` is `false` when compacting would return little or the directory lacked the space the [upgrade notes](https://docs.mindroom.chat/deployment/upgrades/#upgrading-to-conversation-storage-v2) give for it; a `conversation_compaction_failed` warning names the database when compacting failed, and the conversion still stands.
+A database that could not convert at startup logs `conversation_conversion_skipped_store` instead.
+
 ### `tool_call_limit_reached`
 
 Each agent or team run has a tool-call budget, normally the entity's [`max_tool_calls_per_turn`](https://docs.mindroom.chat/configuration/agents/#configuration-options).
@@ -21056,6 +21382,96 @@ Check whether the run was a runaway loop, such as the same tool call repeated or
 Each call to a tool the run does not offer logs a `tool_not_offered` warning, and each call whose arguments cannot be decoded logs an `invalid_tool_arguments` warning with `reason` `decode` or `not_object`; both carry `entity` and `tool_name`, never the arguments.
 For legitimate long work, raise that entity's `max_tool_calls_per_turn`.
 Skill reviews also log this record under the reviewed agent's name, with a fixed `budget` of 16 that `max_tool_calls_per_turn` does not change.
+
+### `tool_call_failed`
+
+Logged each time a tool call raises an error.
+A call stopped together with its turn logs `error_type` `CancelledError`.
+
+| Field | Meaning |
+|-------|---------|
+| `tool_name` | Name of the tool function |
+| `agent_name` | Agent that made the call, or `null` |
+| `error_type` | Class name of the error the tool raised |
+| `error_message` | The error's message, with credentials redacted |
+| `duration_ms` | Milliseconds from the call's start until it failed |
+| `correlation_id` | ID shared by the tool calls that answer one message |
+| `channel` | `matrix`, `openai_compat`, `mcp`, or `null` |
+
+Count it grouped by `tool_name` and alert when one tool fails far more often than usual.
+Failures that share a `correlation_id` came from a single turn, and `error_type` and `error_message` give the cause.
+For a tool that uses an OAuth connection, also check for [`oauth_credentials_refresh_failed`](#oauth_credentials_refresh_failed) records.
+
+### `oauth_credentials_refresh_failed`
+
+Logged when MindRoom cannot refresh the access token of a stored [OAuth connection](https://docs.mindroom.chat/oauth-framework/), for a tool or an MCP server.
+
+| Field | Meaning |
+|-------|---------|
+| `provider_id` | OAuth provider ID |
+| `credential_service` | Credential service the connection is stored under |
+| `reason` | `refresh_rejected`, `token_endpoint_changed`, or `provider_refresh_failed`, described below |
+| `error_type` | `OAuthRefreshRejectedError` for the first two reasons, `OAuthProviderError` for `provider_refresh_failed` |
+| `oauth_error` | The provider's OAuth error code, such as `invalid_grant`, `unrecognized` for a nonstandard code, or `null` |
+| `has_refresh_token` | Whether the stored connection had a refresh token |
+| `expires_at` | Expiry of the stored access token as a Unix timestamp, or `null` |
+
+- `refresh_rejected`: the provider rejected the refresh grant, for example because it was revoked or expired; MindRoom removes the connection, and the account must be connected again.
+- `token_endpoint_changed`: the provider's token endpoint changed since the account was connected, as [Troubleshooting OAuth Connections](https://docs.mindroom.chat/oauth-framework/#troubleshooting-oauth-connections) describes.
+- `provider_refresh_failed`: any other failure, such as a network error or a provider outage; the connection is kept, so a later refresh can succeed.
+
+A failure caused by an HTTP or network error also carries `transport_error_category`, `transport_error_type`, and, for an HTTP error, `http_status_code`.
+Count it grouped by `provider_id` and `reason`.
+Each `refresh_rejected` record is one connection that must be connected again, while repeated `provider_refresh_failed` records for one provider point at that provider, the network, or the OAuth client settings, which `oauth_error` `invalid_client` names.
+
+### `provider_request_retried`
+
+Logged each time MindRoom sends a model request again: after a transient provider failure, such as a rate limit, an overload, a server error, or a dropped connection, or after a [stalled stream](https://docs.mindroom.chat/configuration/models/#stalled-streams).
+Each retry delays the reply, and a reply whose request fails every retry logs [`agent_error`](#agent_error).
+
+| Field | Meaning |
+|-------|---------|
+| `model_id` | Model ID the request was sent to |
+| `reason` | `transient_error` for a failure the provider or the network reported, `stream_stalled` for a stream that went silent past its idle limit |
+| `error_type` | `RateLimited` for a throttled request, otherwise `ProviderUnavailable` |
+| `status_code` | HTTP status of the failure, `504` for a stalled stream, or `null` when there is none, as for a dropped connection |
+| `error` | The failure's message, redacted and truncated |
+| `attempt` | Number of this retry for its `reason`, starting at `1` |
+| `max_retries` | Retries allowed for its `reason` |
+| `delay_seconds` | Seconds waited before this retry |
+
+Count it grouped by `model_id` and alert when one model is retried far more often than usual.
+`error_type`, `status_code`, and `error` tell throttling apart from an outage or an unresponsive endpoint.
+
+### `agent_error`
+
+Logged each time an agent's or team's reply fails and the user gets an error message instead.
+
+| Field | Meaning |
+|-------|---------|
+| `agent` | Agent or team name |
+| `error_type` | Class name of the error that ended the reply |
+| `error` | The error's repr, with credentials redacted |
+
+These `error_type` values are stable; any other value is the class name of an unexpected error and can change:
+
+- `RateLimited`: the provider throttled the request, after any retries that were safe.
+- `ProviderUnavailable`: the provider or the network failed, or the stream stalled, after any retries that were safe.
+- `AuthenticationFailed`: the provider rejected the credentials, or none are set up.
+- `ContextWindowExceeded`: the conversation no longer fits the model's context window.
+- `InvalidRequest`: the provider rejected the request, such as a malformed or oversized body or an unknown model.
+- `ModelSafeguardRefusal`: the model's safeguards refused the request.
+- `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
+- `ProviderError`: any other provider rejection, such as an HTTP `403`.
+
+Count it grouped by `error_type` and alert when one value is far more frequent than usual.
+`RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.
+
+## Container Metrics
+
+With the [Kubernetes worker backend](https://docs.mindroom.chat/deployment/kubernetes/#dedicated-worker-mode), idle worker Deployments scale to zero replicas by design, so exclude Deployments labelled `mindroom.ai/component=worker` from alerts on Deployments without an available replica.
+Judge container memory by resident memory (RSS) or working set, not by total usage: total usage also counts the page cache that session databases, knowledge files, and logs fill, which the kernel reclaims under memory pressure.
+The [heap probe](#memory-growth) reports the primary process's own `rss_bytes`.
 
 ## Debug Logging
 
@@ -21096,6 +21512,46 @@ Unset or `0` disables the probe (the default), and any other value below `60` fa
 Use this page when upgrading an existing deployment across a release that needs operator action.
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
+
+## Upgrading from `MCPTools` plugin toolkits
+
+MindRoom no longer runs plugin toolkits that subclass Agno `MCPTools` (see [MCP servers](https://docs.mindroom.chat/plugins/#mcp-servers)).
+Before upgrading, configure each such server under `mcp_servers:` in `config.yaml` as [MCP](https://docs.mindroom.chat/mcp/) describes, and replace the plugin tool's name with `mcp_<server_id>` in agents' `tools:` lists and in `defaults.tools`.
+The [community plugins](https://docs.mindroom.chat/plugins/#community-plugins) are not affected.
+
+## Upgrading to conversation storage v2
+
+The first start after this upgrade converts the conversation database of every agent and team, private instances included, and the internal usage database under `system/`, to a new layout before any agent comes online.
+Each converted database logs one `conversation_converted` record (see [Events](https://docs.mindroom.chat/deployment/operational-log-events/#conversation_converted)).
+The process stays live but becomes ready only after the conversion and the rest of startup finish; [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness) says what each endpoint answers meanwhile.
+The conversion is one-way, and downgrading afterwards is not supported.
+
+### Before upgrading
+
+Check that every startup probe asks `/api/health`, as the bundled Helm charts do and [Health & Readiness](https://docs.mindroom.chat/deployment/operational-log-events/#health-readiness) requires.
+A deploy that rolls back when readiness times out, such as `helm upgrade --atomic` with its default 5-minute timeout, can roll back mid-conversion and start the older release on converted databases (see [Downgrading](#downgrading)), so raise the timeout or drop `--atomic` for this upgrade.
+Make sure each disk that holds conversation databases, under the storage directory or `MINDROOM_SESSION_STORAGE_PATH`, has free space of about two and a half times the total size of their `.db` files.
+A database that no release since v2026.10.341 has opened can still hold Agno 2 run blobs or the compaction archive, which the conversion copies first, so it needs up to about three and a half times its size.
+A database whose directory lacks the space it needs is not converted: startup logs `conversation_conversion_skipped_store` for it, and every use of it fails with an error naming the database and the bytes it needs until you free the space, after which its next use converts it.
+
+### What carries over
+
+Conversation history, compaction summaries, pending tool approvals, and usage records carry over.
+Before converting a database, MindRoom copies it byte for byte to `<name>.db.pre-storage-v2` beside it and never deletes that copy.
+A stored run whose data cannot be read is left out of the converted database, logged as `conversation_run_left_out` with its run ID, and kept in the backup.
+A crash or restart during the upgrade leaves the database being converted unchanged, and the next start converts it.
+Right after converting a database, MindRoom compacts it to return the space its old tables used, when its directory has free space of about twice the converted data.
+Without that space the file keeps it until later writes reuse it; with MindRoom stopped, `sqlite3 <name>.db VACUUM` returns it.
+
+### Downgrading
+
+The only way back is to stop MindRoom, replace each `<name>.db` with its `<name>.db.pre-storage-v2` backup, delete any `<name>.db-journal` beside it, and start the older release.
+Everything written since the upgrade is lost: replies, summaries, session state, approvals requested since then, and usage records for that period.
+The older release drops messages redacted since the upgrade from the restored history before it next replies in that conversation, but edits made since the upgrade are not applied again, so the earlier reply to an edited message can return to the agent's history.
+An older release started on converted databases without restoring the backups archives each agent's or team's `sessions/` directory, backups included, as [Incompatible session databases](https://docs.mindroom.chat/deployment/storage/#incompatible-session-databases) describes; move the backups back out of that archive and restore them as above.
+Upgrading again converts each restored database again and writes a new backup.
+
+Once you are sure you will not downgrade, delete the `.pre-storage-v2` backups.
 
 ## Upgrading to OpenAI SDK 3
 
@@ -21227,6 +21683,8 @@ Smaller changes that need operator action:
   The proxy must allow `CONNECT` to ports 80 and 443, and for the primary also to IP addresses; the chart-managed approved egress proxy needs the [minimum proxy image version](https://docs.mindroom.chat/deployment/approved-egress/#enable-with-the-runtime-chart).
   In a sandbox runner, set every proxy variable, or only `all_proxy`, to the same HTTP(S) proxy, or the browser does not start.
   See [Egress Proxy for Browsers](https://docs.mindroom.chat/tools/web-scraping-and-browser/#egress-proxy-for-browsers) for the full rules.
+- **Mem0 history file**: Mem0 memory keeps its history in `mem0/` in each agent's state root, and stored memories carry over; MindRoom does not read the `history.db` in Mem0's own directory (`~/.mem0/`, or `MEM0_DIR` when set), which can hold the text of deleted memories, so delete that file unless an agent uses the [`mem0` tool](https://docs.mindroom.chat/tools/memory-and-storage/#mem0) without an API key, which keeps its history there.
+  `mem0` is now a reserved name, so an agent whose `private.root` starts with `mem0` fails config load until you rename it.
 - **Boolean tool settings**: stored tool config values for boolean fields, including credential seeds read from environment variables or files, must be JSON booleans, JSON `null`, or exactly `true` or `false`; any other value makes the tool fail to load with an error naming the field.
 - **Retired Agno settings and unsupported model keys**: when you upgrade, delete `learning` and `learning_mode` (see [Agno Learning](https://docs.mindroom.chat/memory/#agno-learning)), `compress_tool_results` (see [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings)), and the `website` tool's `knowledge` option (see [`website`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#website)) from `config.yaml`.
   Configs created by older `mindroom config init` runs set `learning: false` on the `mind` agent.
@@ -21604,6 +22062,7 @@ It checks, in one pass:
 
 - **Config file**: exists, is valid YAML, and matches the config schema.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
+  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.

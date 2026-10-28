@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, MODEL_PROVENANCE_KEY, read_model_provenance
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, read_model_provenance, usage_sums_attempts
 from mindroom.llm.usage import TOKEN_FIELDS
 
 if TYPE_CHECKING:
@@ -152,10 +152,7 @@ def project_requests(messages: object) -> list[dict[str, object]] | None:
         if message.get("role") != "assistant" or message.get("from_history", False) is not False:
             continue
         provider_data = message.get("provider_data")
-        if (
-            isinstance(provider_data, dict)
-            and cast("dict[str, object]", provider_data).get(AGGREGATE_USAGE_KEY) is True
-        ):
+        if isinstance(provider_data, dict) and usage_sums_attempts(cast("dict[str, object]", provider_data)):
             # Retried attempts have aggregate counters, not one request's price or timestamp.
             continue
         message_metrics = message.get("metrics")

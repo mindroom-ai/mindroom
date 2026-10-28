@@ -23,9 +23,7 @@
     "tool_choice": null,
     "tools": [
       {
-        "approval_type": null,
         "description": "Return the forecast for one city.",
-        "external_execution": false,
         "name": "get_weather",
         "parameters": {
           "properties": {
@@ -47,13 +45,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       },
       {
-        "approval_type": "mindroom_policy",
         "description": "Email the invoice for one order.",
-        "external_execution": false,
         "name": "send_invoice",
         "parameters": {
           "properties": {
@@ -67,13 +62,10 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": true,
         "strict": null
       },
       {
-        "approval_type": null,
         "description": "Run a task with another agent and return its answer.",
-        "external_execution": true,
         "name": "run_subagent",
         "parameters": {
           "properties": {
@@ -92,7 +84,6 @@
           ],
           "type": "object"
         },
-        "requires_confirmation": false,
         "strict": null
       }
     ]
@@ -168,9 +159,7 @@
                 "city"
               ],
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": false
+            }
           }
         },
         {
@@ -194,9 +183,7 @@
                 "task"
               ],
               "type": "object"
-            },
-            "requires_confirmation": false,
-            "external_execution": true
+            }
           }
         },
         {
@@ -215,10 +202,7 @@
                 "order_id"
               ],
               "type": "object"
-            },
-            "requires_confirmation": true,
-            "external_execution": false,
-            "approval_type": "mindroom_policy"
+            }
           }
         }
       ]

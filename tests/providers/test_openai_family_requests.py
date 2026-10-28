@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from dataclasses import replace
@@ -15,41 +16,46 @@ from openai.types.responses.response_input_item_param import ResponseInputItemPa
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from mindroom.agent_loop.model_loop import LoopHooks
-from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec
-from mindroom.approval.receipt import approval_receipt_hook, messages_with_approval_receipt
+from mindroom.approval.receipt import approval_receipt_hook, build_approval_receipt
 from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.attachments.media import attachment_records_to_media
 from mindroom.attachments.storage import AttachmentRecord
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.event_journal import ApprovalCall, ApprovalDecision
-from mindroom.llm.media import File
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
+from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, scope_history_messages
+from mindroom.history.types import HistoryScope
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
+from mindroom.llm.runs import RunRecord
+from mindroom.media_inputs import MediaInputs
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatStream, chat_request_kwargs
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
+from mindroom.providers.openai.media import chat_file_part, responses_file_part
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import (
     ResponsesStream,
+    conversation_digest,
     responses_input,
     responses_replay,
     responses_request_kwargs,
-    system_text_digest,
 )
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import ChatSettings
 from mindroom.providers.openai.tool_search import openai_native_tool_search_supported
-from mindroom.system_prompt import render_session_context
-from tests.agent_loop.helpers import collect, context
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.types import ConversationSession
+from tests.agent_loop.helpers import collect, context, gated
 from tests.providers.golden_support import responses_events, streamed_reply
 from tests.providers.openai_family_support import openai_family_adapter, provider_runtime, responses_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     import httpx
@@ -133,7 +139,7 @@ def _streamed(
         store=store,
         portable_replay=portable_replay,
         native_compaction=native_compaction,
-        system_digest=system_text_digest([]),
+        conversation_digest=conversation_digest([]),
     )
     for event in responses_events(response.model_dump(mode="json", exclude_none=True)):
         stream.add(_STREAM_EVENT.validate_python(event))
@@ -495,9 +501,9 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
 
-def _stored_response(response_id: str, prompt: list[Message] | None = None) -> dict[str, Any]:
-    """Return the provider data of a stored response whose request sent ``prompt``'s system text."""
-    return {"response_id": response_id, "mindroom_system_sha256": system_text_digest(prompt or [])}
+def _stored_response(response_id: str, before: list[Message] | None = None) -> dict[str, Any]:
+    """Return the provider data of a stored response whose request sent the conversation ``before``."""
+    return {"response_id": response_id, "mindroom_conversation_sha256": conversation_digest(before or [])}
 
 
 def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) -> None:
@@ -542,8 +548,11 @@ async def _reply(adapter: ResponsesAdapter, messages: list[Message]) -> Message:
     return next(event.message for event in events if isinstance(event, TurnCompleted))
 
 
-def _dated_prompt(day: str) -> Message:
-    return Message(role="system", content="You are Parity.\n" + render_session_context(f"Today is {day}."))
+def _dated_prompt(day: str) -> list[Message]:
+    return [
+        Message(role="system", content="You are Parity."),
+        Message(role="system", content=f"Today is {day}."),
+    ]
 
 
 @pytest.mark.asyncio
@@ -551,9 +560,9 @@ async def test_a_reply_with_an_unchanged_prompt_continues_the_stored_chain(tmp_p
     """A stored chain holds the prompt it started with, so the same prompt sends only what follows the stored reply."""
     adapter, sent = _stored_reply_route(tmp_path)
     question = Message(role="user", content="Plan my day.")
-    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+    reply = await _reply(adapter, [*_dated_prompt("Monday"), question])
 
-    await _reply(adapter, [_dated_prompt("Monday"), question, reply, Message(role="user", content="And tomorrow?")])
+    await _reply(adapter, [*_dated_prompt("Monday"), question, reply, Message(role="user", content="And tomorrow?")])
 
     assert (sent[1]["previous_response_id"], sent[1]["input"]) == (
         "resp_1",
@@ -562,60 +571,45 @@ async def test_a_reply_with_an_unchanged_prompt_continues_the_stored_chain(tmp_p
 
 
 def _next_day(history: list[Message]) -> list[Message]:
-    return [_dated_prompt("Tuesday"), *history[1:]]
-
-
-def _with_receipt(history: list[Message]) -> list[Message]:
-    return messages_with_approval_receipt(history, "trusted approval receipt")
+    return [*_dated_prompt("Tuesday"), *history[2:]]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("change_prompt", "sent_system_text"),
-    [
-        pytest.param(_next_day, "Today is Tuesday.", id="next day"),
-        pytest.param(_with_receipt, "trusted approval receipt", id="approval receipt"),
-    ],
-)
-async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(
-    tmp_path: Path,
-    change_prompt: Callable[[list[Message]], list[Message]],
-    sent_system_text: str,
-) -> None:
+async def test_a_reply_after_the_system_prompt_changes_sends_the_new_prompt(tmp_path: Path) -> None:
     """A stored chain holds the prompt it started with, so a changed prompt replays the history instead of chaining."""
     adapter, sent = _stored_reply_route(tmp_path)
     question = Message(role="user", content="Plan my day.")
-    reply = await _reply(adapter, [_dated_prompt("Monday"), question])
+    reply = await _reply(adapter, [*_dated_prompt("Monday"), question])
     follow_up = Message(role="user", content="And tomorrow?")
 
-    await _reply(adapter, change_prompt([_dated_prompt("Monday"), question, reply, follow_up]))
+    await _reply(adapter, _next_day([*_dated_prompt("Monday"), question, reply, follow_up]))
 
     assert "previous_response_id" not in sent[1]
     assert [item["role"] for item in sent[1]["input"]] == ["developer", "developer", "user", "assistant", "user"]
-    assert sent_system_text in sent[1]["input"][1]["content"]
+    assert "Today is Tuesday." in sent[1]["input"][1]["content"]
 
 
 @pytest.mark.asyncio
-async def test_an_approval_resume_on_a_stored_chain_replays_its_tool_loop(tmp_path: Path) -> None:
-    """The receipt changes the prompt mid tool loop, so the resumed request replays the loop, still stored.
+async def test_an_approval_resume_on_a_stored_chain_continues_it_with_the_result_and_the_receipt(
+    tmp_path: Path,
+) -> None:
+    """The receipt follows the decided call's result and leaves the prompt as the chain stored it, so the chain goes on.
 
-    The route recorded no reasoning for the stored call, so the replayed call drops the item ID its reasoning owns.
+    The resumed request sends only what follows the stored reply: the result, then the receipt.
     """
     adapter, sent = _stored_reply_route(tmp_path, [{"type": "reasoning", "id": "rs_first", "summary": []}, _CALL])
     prompt = _dated_prompt("Monday")
     question = Message(role="user", content="Look it up.")
-    call = await _reply(adapter, [prompt, question])
+    call = await _reply(adapter, [*prompt, question])
     result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
+    receipt = Message(role="user", content="trusted approval receipt", add_to_agent_memory=False)
 
-    await _reply(adapter, _with_receipt([prompt, question, call, result]))
+    await _reply(adapter, [*prompt, question, call, result, receipt])
 
-    assert sent[1]["store"] is True
-    assert "previous_response_id" not in sent[1]
-    assert "trusted approval receipt" in sent[1]["input"][1]["content"]
-    assert sent[1]["input"][2:] == [
-        {"role": "user", "content": "Look it up."},
-        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+    assert (sent[1]["store"], sent[1]["previous_response_id"]) == (True, "resp_1")
+    assert sent[1]["input"] == [
         {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+        {"role": "user", "content": "trusted approval receipt"},
     ]
 
 
@@ -645,14 +639,15 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 ) -> None:
     """The receipt names each call by the ``call_id`` the replayed call and its result keep, not its item id.
 
-    Two calls of one tool are told apart only by their ids, and the replay drops each call's ``fc_`` item id.
+    Two calls of one tool are told apart only by their ids, and the replay drops each call's ``fc_`` item id. The
+    stored reply's prompt has changed since, so the request replays the calls instead of continuing the chain.
     """
     adapter, sent = _stored_reply_route(tmp_path)
     prompt = Message(role="system", content="You are Code.")
     calls = Message(
         role="assistant",
         tool_calls=[_lookup("first"), _lookup("second")],
-        provider_data=_stored_response("resp_1", [prompt]),
+        provider_data=_stored_response("resp_1", [Message(role="system", content="You were Code.")]),
     )
     history = [
         Message(role="user", content="Look up both orders."),
@@ -661,7 +656,7 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
         Message(role="tool", tool_call_id="fc_second", content="Declined"),
     ]
     decided = (_decided("fc_first", ApprovalDecision.APPROVED), _decided("fc_second", ApprovalDecision.DENIED))
-    spec = AgentSpec(id="code", name="Code", model=adapter, system_message=prompt, toolkits=())
+    spec = AgentSpec(id="code", name="Code", model=adapter, system_messages=(prompt,), toolkits=())
 
     with approval_receipt_context(decided, run_id="run-1"):
         await collect(
@@ -677,11 +672,188 @@ async def test_an_approval_resume_on_a_stored_chain_names_each_receipt_call_as_i
 
     [request] = sent
     assert "previous_response_id" not in request
-    receipt_ids = re.findall(r"tool call id `([^`]+)`", request["input"][0]["content"])
+    assert request["input"][-1]["role"] == "user"
+    receipt_ids = re.findall(r"tool call id `([^`]+)`", request["input"][-1]["content"])
     assert receipt_ids == ["call_first", "call_second"]
     for item_type in ("function_call", "function_call_output"):
         assert [item["call_id"] for item in request["input"] if item.get("type") == item_type] == receipt_ids
     assert "fc_" not in json.dumps(request["input"])
+
+
+def _stored(tmp_path: Path, run: RunRecord) -> RunRecord:
+    """Save ``run`` to a conversation store and return it as the store loads it."""
+    store = create_state_storage("code", tmp_path / "state")
+    store.save_run(ConversationSession(session_id="session-1", kind="agent", owner_id="code"), run, record_usage=False)
+    stored = store.get_run(run.run_id)
+    assert isinstance(stored, RunRecord)
+    return stored
+
+
+@pytest.mark.asyncio
+async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continuing_the_chain_it_left(
+    tmp_path: Path,
+) -> None:
+    """A stored chain continues only while it holds the conversation the request replays before it.
+
+    The resumed run sends its paused request again, memory results included, so it continues the chain with the
+    result and the receipt. Once the run finishes, history keeps neither, so the next turn's replay no longer matches
+    what the chain holds: it sends its history explicitly, and the memory results and the receipt never reach it.
+    """
+    adapter, sent = _stored_reply_route(tmp_path, [_CALL])
+
+    def lookup() -> str:
+        """Look the order up."""
+        return "Found it"
+
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=adapter,
+        system_messages=(Message(role="system", content="You are Code."),),
+        toolkits=(gated(lookup),),
+    )
+    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", add_to_agent_memory=False)
+    first_turn = TurnMessages(prompt=Message(role="user", content="Look it up."), transient=(memory,))
+    _, paused = await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=[], turn=first_turn, media=MediaInputs()),
+            ctx=context(),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+    stored = _stored(tmp_path, paused)
+    approval = ApprovalCall(
+        tool_call_id="fc_lookup",
+        tool_name="lookup",
+        invoking_agent="code",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+        toolkit_name="gated",
+        arguments_digest=approval_arguments_digest({}),
+    )
+    with approval_receipt_context((approval,), run_id=stored.run_id):
+        _, finished = await collect(
+            resume_agent(
+                spec,
+                stored,
+                build_resume_request(paused=stored.messages, summary=None, history=[]),
+                approved=[approval],
+                denied={},
+                external_results={},
+                context=lambda run_id: context(run_id=run_id),
+                hooks=LoopHooks(before_request=(approval_receipt_hook,)),
+                persist=None,
+                request_template=ModelRequest(messages=()),
+            ),
+        )
+    history = scope_history_messages(
+        [_stored(tmp_path, finished)],
+        scope=HistoryScope(kind="agent", scope_id="code"),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    next_turn = TurnMessages(prompt=Message(role="user", content="And the next one?"))
+    await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=history, turn=next_turn, media=MediaInputs()),
+            ctx=context(run_id="run-2"),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+
+    _, resumed, later = sent
+    assert resumed["previous_response_id"] == "resp_1"
+    assert resumed["input"] == [
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+        # The receipt names the call by the ``call_id`` its result references.
+        {"role": "user", "content": build_approval_receipt((replace(approval, tool_call_id="call_lookup"),))},
+    ]
+    assert "previous_response_id" not in later
+    assert [item.get("role", item.get("type")) for item in later["input"]] == [
+        "developer",
+        "user",
+        "function_call",
+        "function_call_output",
+        "assistant",
+        "user",
+    ]
+    assert "Alice prefers short answers." not in json.dumps(later)
+    assert "TOOL APPROVAL RECEIPT" not in json.dumps(later)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("image", "continues"),
+    [
+        (Image(id="att_car", url="https://example.org/car.png"), False),
+        (Image(id=f"{VIEWED_IMAGE_ID_PREFIX}car", content=b"car pixels", mime_type="image/png"), True),
+    ],
+    ids=["attachment", "viewed-image"],
+)
+async def test_a_follow_up_to_a_photo_continues_the_chain_only_while_history_replays_the_photo(
+    tmp_path: Path,
+    image: Image,
+    *,
+    continues: bool,
+) -> None:
+    """A stored chain holds the photo its turn sent, so a follow-up continues it only while history replays the photo.
+
+    History replays an earlier turn's attachment as its text alone, so the follow-up sends its history explicitly and
+    the photo leaves the conversation; a viewed image that history keeps replays as it was sent, so the chain goes on.
+    """
+    adapter, sent = _stored_reply_route(tmp_path)
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=adapter,
+        system_messages=(Message(role="system", content="You are Code."),),
+        toolkits=(),
+    )
+    photo_turn = TurnMessages(prompt=Message(role="user", content="What is this?"))
+    _, answered = await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=[], turn=photo_turn, media=MediaInputs(images=[image])),
+            ctx=context(),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+    history = scope_history_messages(
+        [_stored(tmp_path, answered)],
+        scope=HistoryScope(kind="agent", scope_id="code"),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    follow_up = TurnMessages(prompt=Message(role="user", content="What color is the car?"))
+    await collect(
+        run_agent(
+            spec,
+            build_request(summary=None, history=history, turn=follow_up, media=MediaInputs()),
+            ctx=context(run_id="run-2"),
+            persist=None,
+            request_template=ModelRequest(messages=()),
+        ),
+    )
+
+    photo, later = sent
+    assert "input_image" in json.dumps(photo["input"])
+    if continues:
+        assert (later["previous_response_id"], later["input"]) == (
+            "resp_1",
+            [{"role": "user", "content": "What color is the car?"}],
+        )
+    else:
+        assert "previous_response_id" not in later
+        assert [item["role"] for item in later["input"]] == ["developer", "user", "assistant", "user"]
+        assert "input_image" not in json.dumps(later["input"])
 
 
 @pytest.mark.asyncio
@@ -695,10 +867,10 @@ async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_witho
     output = [_REASONING, _SEARCH_CALL, _SEARCH_OUTPUT, {**_REASONING, "id": "rs_second"}, _CALL]
     adapter, sent = _stored_reply_route(tmp_path, output)
     question = Message(role="user", content="Look it up.")
-    call = await _reply(adapter, [_dated_prompt("Monday"), question])
+    call = await _reply(adapter, [*_dated_prompt("Monday"), question])
     result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
 
-    await _reply(adapter, _next_day([_dated_prompt("Monday"), question, call, result]))
+    await _reply(adapter, _next_day([*_dated_prompt("Monday"), question, call, result]))
 
     assert sent[1]["store"] is True
     assert "previous_response_id" not in sent[1]
@@ -711,16 +883,33 @@ async def test_a_replay_after_the_prompt_changes_sends_hosted_search_items_witho
     ]
 
 
+def _legacy_system_text_digest(messages: list[Message]) -> str:
+    """Return the system-text digest a stored reply recorded before replies recorded their conversation's."""
+    system_text = [message.content for message in messages if message.role == "system"]
+    return hashlib.sha256(json.dumps(system_text, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 @pytest.mark.asyncio
-async def test_a_reply_stored_without_a_system_digest_replays_once(tmp_path: Path) -> None:
-    """A reply an older release stored replays its history once, then the route continues the reply it stores."""
+@pytest.mark.parametrize("system_digest", [False, True], ids=["no-digest", "system-text-digest"])
+async def test_a_reply_stored_without_a_conversation_digest_replays_once(
+    tmp_path: Path,
+    *,
+    system_digest: bool,
+) -> None:
+    """A reply an older release stored replays its history once, then the route continues the reply it stores.
+
+    Releases before the conversation digest recorded no digest, or only the digest of their request's system text,
+    which matched here.
+    """
     adapter, sent = _stored_reply_route(tmp_path)
+    before = [*_dated_prompt("Monday"), Message(role="user", content="What should I pack?")]
+    legacy = {"mindroom_system_sha256": _legacy_system_text_digest(before)} if system_digest else {}
     older = Message(
         role="assistant",
         content="Pack a jacket.",
-        provider_data={"response_id": "resp_older", "mindroom_response_stored": True},
+        provider_data={"response_id": "resp_older", "mindroom_response_stored": True, **legacy},
     )
-    history = [_dated_prompt("Monday"), Message(role="user", content="What should I pack?"), older]
+    history = [*before, older]
     follow_up = Message(role="user", content="And shoes?")
 
     reply = await _reply(adapter, [*history, follow_up])
@@ -789,18 +978,19 @@ def test_only_a_completed_response_records_its_replay_policy(*, portable: bool, 
         assert "mindroom_portable_replay" not in parts.provider_data
 
 
-# --- The shared instruction prefix ----------------------------------------------------------------------------
+# --- The stable prompt prefix ---------------------------------------------------------------------------------
 
 
 def _messages(day: str) -> list[Message]:
     return [
-        Message(role="system", content="Shared agent instructions.\n" + render_session_context(f"Current day: {day}.")),
+        Message(role="system", content="Shared agent instructions."),
+        Message(role="system", content=f"Current day: {day}."),
         Message(role="user", content="Write an introduction."),
     ]
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_the_shared_instructions_are_independent_of_the_session_context(*, explicit: bool) -> None:
+def test_the_stable_prompt_is_independent_of_the_turn_context(*, explicit: bool) -> None:
     """A changed date leaves the first developer message, the cacheable prefix, byte-identical."""
     original = _messages("Monday")
     snapshot = [message.to_dict() for message in original]
@@ -810,11 +1000,13 @@ def test_the_shared_instructions_are_independent_of_the_session_context(*, expli
 
     assert first[0] == second[0]
     assert first[0]["role"] == first[1]["role"] == "developer"
-    assert first[0]["content"][0]["text"] == "Shared agent instructions.\n"
-    assert "Current day: Monday." in first[1]["content"]
-    assert first[0]["content"][0]["text"] + first[1]["content"] == original[0].content
+    assert first[0]["content"] == (
+        [{"type": "input_text", "text": "Shared agent instructions.", "prompt_cache_breakpoint": {"mode": "explicit"}}]
+        if explicit
+        else "Shared agent instructions."
+    )
+    assert first[1]["content"] == original[1].content
     assert first[2] == {"role": "user", "content": "Write an introduction."}
-    assert ("prompt_cache_breakpoint" in first[0]["content"][0]) is explicit
     assert [message.to_dict() for message in original] == snapshot
 
 
@@ -843,37 +1035,34 @@ def test_explicit_breakpoints_need_a_supported_model_on_the_public_api(
     assert responses_adapter(tmp_path, model_id=model_id, **extra_kwargs).wire.explicit_breakpoint is supported
 
 
-def test_codex_sends_the_shared_prefix_without_an_explicit_breakpoint(tmp_path: Path) -> None:
+def test_codex_sends_the_stable_prompt_without_an_explicit_breakpoint(tmp_path: Path) -> None:
     """The Codex endpoint caches the prefix implicitly."""
     adapter = _codex(tmp_path)
 
     first = _request(adapter, _messages("Monday"))["input"][0]
 
-    assert first["content"][0]["text"] == "Shared agent instructions.\n"
-    assert "prompt_cache_breakpoint" not in first["content"][0]
+    assert first == {"role": "developer", "content": "Shared agent instructions."}
 
 
-def test_a_disabled_cache_boundary_sends_the_instructions_unsplit() -> None:
-    """``cache_system_prompt: false`` keeps the wire prompt as one developer message."""
+def test_a_disabled_cache_sends_each_system_message_without_a_breakpoint() -> None:
+    """``cache_system_prompt: false`` sends each system message as its own developer message, as authored."""
     messages = _messages("Monday")
 
-    assert _input(messages, cache_system_prompt=False) == [
+    assert _input(messages, cache_system_prompt=False, explicit_breakpoint=True) == [
         {"role": "developer", "content": messages[0].content},
-        {"role": "user", "content": messages[1].content},
+        {"role": "developer", "content": messages[1].content},
+        {"role": "user", "content": messages[2].content},
     ]
 
 
-def test_only_the_initial_text_system_message_is_split() -> None:
-    """Custom system content and a boundary inside a user message are sent as authored."""
-    custom = [{"type": "input_text", "text": render_session_context("Custom content.")}]
-    messages = [
-        Message(role="system", content=custom),
-        Message(role="user", content=render_session_context("User text.")),
-    ]
+def test_a_system_message_with_custom_content_goes_as_authored() -> None:
+    """Only a text system message takes the breakpoint; custom content blocks are sent as they are."""
+    custom = [{"type": "input_text", "text": "Custom content."}]
+    messages = [Message(role="system", content=custom), Message(role="user", content="User text.")]
 
-    assert _input(messages, cache_system_prompt=True) == [
+    assert _input(messages, cache_system_prompt=True, explicit_breakpoint=True) == [
         {"role": "developer", "content": custom},
-        {"role": "user", "content": messages[1].content},
+        {"role": "user", "content": "User text."},
     ]
 
 
@@ -939,6 +1128,26 @@ def test_an_attachment_s_type_comes_from_its_original_filename(
             "file_data": f"data:{expected_mime};base64,{base64.b64encode(payload).decode()}",
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("file", "expected_mime"),
+    [
+        (File(content=b"a,b", filename="report.csv.gz"), "application/octet-stream"),
+        (File(content=b"notes", filename="notes.txt", mime_type="application/octet-stream"), "text/plain"),
+        (File(content=b"%PDF", filename="report.pdf"), "application/pdf"),
+    ],
+)
+def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: str) -> None:
+    """Both wires name a file by its original filename and type it by the same rule; a compressed name has no type."""
+    chat = chat_file_part(file)
+    responses = responses_file_part(file)
+
+    assert chat is not None
+    assert responses is not None
+    assert chat["file"]["filename"] == responses["filename"] == file.filename
+    assert chat["file"]["file_data"].startswith(f"data:{expected_mime};base64,")
+    assert responses["file_data"] == chat["file"]["file_data"]
 
 
 def test_an_attachment_without_a_filename_is_named_by_its_stored_file(tmp_path: Path) -> None:

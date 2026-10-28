@@ -565,9 +565,6 @@ def _tool(name: str) -> ToolSpec:
         description=name,
         parameters={"type": "object"},
         strict=None,
-        requires_confirmation=None,
-        external_execution=None,
-        approval_type=None,
     )
 
 
@@ -817,6 +814,24 @@ async def test_request_log_keeps_the_fields_a_wire_sends(tmp_path: Path) -> None
     assistant, tool = record["messages"][1:]
     assert assistant["reasoning_content"] == "Check the city first."
     assert (tool["tool_name"], tool["tool_call_error"]) == ("get_weather", True)
+
+
+@pytest.mark.asyncio
+async def test_request_log_leaves_out_the_fields_no_wire_sends(tmp_path: Path) -> None:
+    """A replayed message's and turn context's storage flags stay out of the record, as their ids do."""
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=[
+            Message(role="user", content="Earlier.", from_history=True),
+            _user(),
+            Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False),
+        ],
+    )
+
+    await _drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert [sorted(message) for message in record["messages"]] == [["content", "created_at", "role"]] * 3
 
 
 @pytest.mark.asyncio
@@ -1343,7 +1358,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
         id="code",
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
-        system_message=None,
+        system_messages=(),
         toolkits=(),
     )
 
@@ -1394,7 +1409,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         id="code",
         name="Code",
         model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
-        system_message=None,
+        system_messages=(),
         toolkits=(),
     )
 

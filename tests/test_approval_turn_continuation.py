@@ -210,7 +210,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
 ) -> None:
     """A fresh continuation attempt retains history and may pause again without replaying approved work.
 
-    Each approval's receipt goes with the resumed run's first request only, never with a fresh attempt after it.
+    Each resumed run reads its approval's receipt, and a fresh attempt after it does not.
     """
     switch_when = {"switch_after": "after-toolcall", "switch_next": "next-turn"}.get(outcome)
     paths = resolve_runtime_paths(

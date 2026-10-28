@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.egress_broker.secrets import SecretRequest
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
@@ -257,12 +258,13 @@ def _routed_key(
 ) -> Secret | SecretServiceChanged | None:
     """Return the scope's key for `name` if, once it is read, the effective config still defines `name` as `routed`.
 
-    None without a key. Under `consistent_read` no user-service write lands during the read and the check. A config
-    change does not take that lock, so the check reads the current config after the key: a key saved after the config
-    moved `name` to other hosts is only read once the new config is current, and the check then refuses it.
+    None without a key, and for a service with its own account (`oauth_separate_account`), which uses only that
+    account. Under `consistent_read` no user-service write lands during the read and the check. A config change does
+    not take that lock, so the check reads the current config after the key: a key saved after the config moved `name`
+    to other hosts is only read once the new config is current, and the check then refuses it.
     """
     with consistent_read():
-        key = load_secret(credentials_manager, target, name)
+        key = None if routed.oauth_separate_account else load_secret(credentials_manager, target, name)
         current = config.current()
         effective = None if current is None else effective_config(current.egress_broker, credentials_manager, target)
         if effective is None or effective.services.get(name) != routed:
@@ -274,6 +276,7 @@ async def _resolve_secret(
     claims: WorkerClaims,
     name: str,
     routed: EgressService,
+    request: SecretRequest,
     *,
     config: _LastGoodConfig,
     runtime_paths: RuntimePaths,
@@ -282,11 +285,14 @@ async def _resolve_secret(
 ) -> SecretResult:
     """Return the secret for service `name` in the claims' scope: the stored key, else the OAuth connection's token.
 
+    A service with its own account gets only that account's token, never a key stored under its name.
+
     `routed` is the definition of `name` whose rule routed the request. The requester's effective config (the
     config's services plus the scope's own) must still define `name` as `routed`, or the result is
     `SecretServiceChanged`: a service saved since routing may be meant for other hosts. The key read and that check
     run in one call on the loop's default executor (`_routed_key`); the OAuth lookup, which may refresh, then
-    runs on `oauth_executor` with the provider of the checked definition.
+    runs on `oauth_executor` with the provider and `read_only` of the checked definition and the `request` facts, which
+    an account allowed only to read is checked against. A stored key is never limited by that.
     """
     target = claims.to_worker_target()
     stored = await asyncio.to_thread(_routed_key, config, credentials_manager, target, name, routed)
@@ -306,6 +312,9 @@ async def _resolve_secret(
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=target,
+        request=request,
+        read_only=routed.read_only,
+        separate_account=routed.oauth_separate_account,
     )
     return await asyncio.get_running_loop().run_in_executor(oauth_executor, lookup)
 
@@ -527,6 +536,7 @@ def execution_env_for_worker(
         read_oauth_status = functools.partial(
             oauth_status,
             service=name,
+            separate_account=egress_service.oauth_separate_account,
             config=config,
             runtime_paths=runtime_paths,
             credentials_manager=runtime.credentials_manager,
