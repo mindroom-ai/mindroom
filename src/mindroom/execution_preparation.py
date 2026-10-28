@@ -31,6 +31,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
+from mindroom.history.conversation_text import thread_context_note
 from mindroom.history.policy import context_budget_after_reserve, resolve_replay_window
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
@@ -245,19 +246,17 @@ def _context_message_from_visible_message(
     event_id = message.event_id or None
     speaker_label = _relayed_sender(message) or message.sender or missing_sender_label
     if speaker_label == _IN_PROGRESS_REPLY_LABEL and response_sender_id is not None:
-        content = render_msg_tag(
-            sender=response_sender_id,
-            body=f"{speaker_label}: {body}",
-            event_id=event_id,
+        # The turn still writing this reply stores it, so this copy is context, not the agent's words.
+        return thread_context_note(
+            render_msg_tag(sender=response_sender_id, body=f"{speaker_label}: {body}", event_id=event_id),
         )
-    else:
-        sender = speaker_label or ""
-        content = render_msg_tag(
-            sender=sender,
-            body=body,
-            event_id=event_id,
-            display_name=member_display_names.get(sender),
-        )
+    sender = speaker_label or ""
+    content = render_msg_tag(
+        sender=sender,
+        body=body,
+        event_id=event_id,
+        display_name=member_display_names.get(sender),
+    )
     return Message(role="user", content=content)
 
 
@@ -315,7 +314,7 @@ def _messages_with_capped_context(
     for start in range(len(context_messages), 0, -1):
         # Tell the agent older messages were dropped; the marker counts against the same budget.
         marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
-        messages = with_context([Message(role="user", content=marker), *context_messages[start:]])
+        messages = with_context([thread_context_note(marker), *context_messages[start:]])
         if not fits(messages):
             break
         selected_messages = messages
@@ -398,7 +397,7 @@ def _build_unseen_context_messages(
     # Unseen context keeps only in-progress drafts of this sender, so only their header can apply.
     if in_progress_event_ids:
         context_messages = (
-            Message(role="user", content=config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),
+            thread_context_note(config.get_prompt("IN_PROGRESS_PARTIAL_REPLY_HEADER")),
             *context_messages,
         )
     return (

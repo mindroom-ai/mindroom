@@ -259,8 +259,7 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000_000,
         static_prompt_tokens=10,
@@ -426,8 +425,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.timeout_seconds == 75.0
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=resolved,
-        has_authored_compaction_config=True,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
@@ -445,114 +443,45 @@ def test_compaction_timeout_defaults_to_ten_minutes_and_must_be_positive() -> No
         CompactionOverrideConfig(timeout_seconds=-1)
 
 
-def test_authored_empty_defaults_compaction_enables_text_compaction(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
+@pytest.mark.parametrize(
+    ("defaults", "agent", "automatic"),
+    [
+        pytest.param({}, {}, True, id="omitted-defaults"),
+        pytest.param({"compaction": {}}, {}, True, id="empty-defaults"),
+        pytest.param({"compaction": {"enabled": False}}, {"compaction": {}}, False, id="disabled-defaults"),
+        pytest.param({"compaction": None}, {}, False, id="null-defaults"),
+    ],
+)
+def test_only_an_authored_enabled_compaction_config_compacts_automatically(
+    tmp_path: Path,
+    defaults: dict[str, object],
+    agent: dict[str, object],
+    *,
+    automatic: bool,
+) -> None:
+    """The settings own whether compaction runs on its own, and the plan carries their answer.
+
+    ``defaults.compaction: null`` leaves the built-in config, which is enabled but authored by nobody.
+    """
     config = Config.validate_with_runtime(
         {
-            "agents": {
-                "test_agent": {
-                    "display_name": "Test Agent",
-                },
-            },
-            "defaults": {
-                "tools": [],
-                "compaction": {},
-            },
-            "models": {
-                "default": {
-                    "provider": "openai",
-                    "id": "test-model",
-                    "context_window": 48_000,
-                },
-            },
+            "agents": {"test_agent": {"display_name": "Test Agent", **agent}},
+            "defaults": {"tools": [], **defaults},
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 48_000}},
         },
-        runtime_paths,
+        _runtime_paths(tmp_path),
     )
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=2_000,
     )
 
-    assert execution_plan.authored_compaction_enabled is True
-
-
-def test_omitted_defaults_compaction_enables_text_compaction(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "test_agent": {
-                    "display_name": "Test Agent",
-                },
-            },
-            "defaults": {
-                "tools": [],
-            },
-            "models": {
-                "default": {
-                    "provider": "openai",
-                    "id": "test-model",
-                    "context_window": 48_000,
-                },
-            },
-        },
-        runtime_paths,
-    )
-
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
-        active_model_name="default",
-        active_context_window=48_000,
-        static_prompt_tokens=2_000,
-    )
-
-    assert execution_plan.authored_compaction_enabled is True
-
-
-def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "test_agent": {
-                    "display_name": "Test Agent",
-                    "compaction": {},
-                },
-            },
-            "defaults": {
-                "tools": [],
-                "compaction": {
-                    "enabled": False,
-                },
-            },
-            "models": {
-                "default": {
-                    "provider": "openai",
-                    "id": "test-model",
-                    "context_window": 48_000,
-                },
-            },
-        },
-        runtime_paths,
-    )
-
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
-        active_model_name="default",
-        active_context_window=48_000,
-        static_prompt_tokens=2_000,
-    )
-
-    assert execution_plan.authored_compaction_enabled is False
+    assert _agent_settings(config).automatic_compaction is automatic
+    assert execution_plan.automatic_compaction is automatic
 
 
 def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
@@ -816,8 +745,7 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=True,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
         static_prompt_tokens=1_000,
@@ -854,8 +782,7 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=True,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000_000,
         static_prompt_tokens=10_000,
@@ -984,8 +911,7 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=None,
         static_prompt_tokens=2_000,
@@ -1087,8 +1013,7 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=4_096,
         static_prompt_tokens=500,
@@ -1120,8 +1045,7 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=context_window_tokens,
         static_prompt_tokens=10,
@@ -1165,8 +1089,7 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000,
         static_prompt_tokens=10,
@@ -1197,8 +1120,7 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=_agent_settings(config).compaction_config,
-        has_authored_compaction_config=_agent_settings(config).has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=active_context_window,
         static_prompt_tokens=10_000,
@@ -1224,7 +1146,7 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
 
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -1271,7 +1193,7 @@ def test_classify_compaction_decision_compacts_at_trigger_only_without_native_co
 ) -> None:
     """Native compaction owns the range between the trigger and hard budgets, so runs without it compact there."""
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",

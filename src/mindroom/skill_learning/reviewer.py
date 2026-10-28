@@ -17,8 +17,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from pydantic import validate_call
-
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, EndRun, LoopHooks, SendRequest, run_model_loop
 from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.run import own_model_messages
@@ -27,6 +25,7 @@ from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_run_usage
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
@@ -38,6 +37,7 @@ from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_c
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_schema import validated_entrypoint
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -129,10 +129,10 @@ def _review_tools(
     # The functions run the review's own methods, which validate their arguments as the agent's coercing functions
     # would, such as refusing an action outside the enum.
     entrypoints: dict[str, Callable[..., Any]] = {
-        "skill_manage": validate_call(tools.skill_manage),
-        "get_skill_instructions": validate_call(tools.get_skill_instructions),
-        "get_skill_reference": validate_call(tools.get_skill_reference),
-        "get_skill_script": validate_call(tools.get_skill_script),
+        "skill_manage": validated_entrypoint(tools.skill_manage),
+        "get_skill_instructions": validated_entrypoint(tools.get_skill_instructions),
+        "get_skill_reference": validated_entrypoint(tools.get_skill_reference),
+        "get_skill_script": validated_entrypoint(tools.get_skill_script),
     }
     answered = {definition.name: definition for definition in definitions if definition.name not in awaiting_decision}
     runnable = [name for name in _SKILL_TOOL_LINES if name in answered]
@@ -274,7 +274,7 @@ async def _replay(
     )
     if session is None:
         return None
-    messages = await asyncio.to_thread(conversation_messages, session)
+    messages = await asyncio.to_thread(conversation_messages, session, HistoryScope(kind="agent", scope_id=agent_name))
     transcript = await asyncio.to_thread(
         render_transcript,
         messages,

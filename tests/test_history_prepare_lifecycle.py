@@ -611,7 +611,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -729,7 +729,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -829,7 +829,7 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     # A summary exactly at the trigger already leaves no room for anything compaction keeps.
     trigger_budget = summary_tokens
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=False,
         compaction_model_name="summary-model",
@@ -928,7 +928,7 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     trigger_budget = history_tokens // 2
     hard_budget = history_tokens * 2
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=False,
         compaction_model_name="summary-model",
@@ -1070,7 +1070,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     assert before_tokens > replay_budget
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -1239,7 +1239,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
     )
 
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -1361,7 +1361,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         == 1
     )
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -1440,7 +1440,7 @@ async def test_prepare_history_for_run_compacts_on_primary_when_fallback_constru
     session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
     seed_session(storage, session)
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
@@ -1863,7 +1863,7 @@ async def test_prepare_history_for_run_without_context_window_skips_auto_compact
 
 # Three runs of 2,000 + 2,000 characters estimate to 3,000 history tokens at chars / 4, under the trigger.
 _REPORTED_USAGE_PLAN = ResolvedHistoryExecutionPlan(
-    authored_compaction_enabled=True,
+    automatic_compaction=True,
     text_compaction_available=True,
     explicit_compaction_model=True,
     compaction_model_name="summary-model",

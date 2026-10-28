@@ -192,8 +192,7 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
     )
     execution_plan = resolve_history_execution_plan(
         config=_config(),
-        compaction_config=compaction_config,
-        has_authored_compaction_config=False,
+        history_settings=history_settings,
         active_model_name="test-model",
         active_context_window=10_000,
         static_prompt_tokens=10,

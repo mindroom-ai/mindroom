@@ -23,6 +23,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
 from mindroom.execution_preparation import _PreparedExecutionContext
+from mindroom.history.conversation_text import utterances
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import load_scope_session
@@ -58,6 +59,7 @@ from tests.history_helpers import (
     _runtime_paths,
     _session,
     seed_summary,
+    stored_turn,
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.turn_model_helpers import turn_model
@@ -390,6 +392,12 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
     )
     assert "Old context" not in prepared_run.prompt_text
     assert estimate_text_tokens(prepared_run.prompt_text) <= 48
+    # The omission note is MindRoom's, so readers of the stored turn never quote it as anyone's words.
+    assert [said.unredacted for said in utterances(stored_turn(prepared_run.turn, requester="carol"))] == [
+        "Recent context",
+        "Current prompt",
+        "Answered.",
+    ]
 
 
 @pytest.mark.asyncio
