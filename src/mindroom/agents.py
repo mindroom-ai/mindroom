@@ -21,7 +21,7 @@ from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     tool_may_require_approval,
 )
-from mindroom.config.resolution import agent_knowledge_base_ids, memory_backend, show_tool_calls
+from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
@@ -549,7 +549,7 @@ def _render_preloaded_files(
 
 
 def _file_mode_knowledge_instruction_block(
-    agent_name: str,
+    knowledge_base_ids: tuple[str, ...],
     config: Config,
     agent_runtime: ResolvedAgentRuntime,
 ) -> str | None:
@@ -561,7 +561,7 @@ def _file_mode_knowledge_instruction_block(
         "Available file-only sources:",
     ]
     source_lines: list[str] = []
-    for base_id in agent_knowledge_base_ids(config, agent_name):
+    for base_id in knowledge_base_ids:
         base_config = config.get_knowledge_base_config(base_id)
         if base_config.mode != "files":
             continue
@@ -1517,7 +1517,7 @@ def _skill_usage_instructions(
 
 
 def _build_agent_instructions(
-    agent_name: str,
+    agent: ResolvedAgent,
     configured_instructions: Sequence[str],
     config: Config,
     agent_runtime: ResolvedAgentRuntime,
@@ -1555,12 +1555,12 @@ def _build_agent_instructions(
     file_mode_knowledge_instruction = (
         None
         if disable_runtime_capabilities
-        else _file_mode_knowledge_instruction_block(agent_name, config, agent_runtime)
+        else _file_mode_knowledge_instruction_block(agent.knowledge_base_ids, config, agent_runtime)
     )
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
-    if not show_tool_calls(config, agent_name):
+    if not agent.show_tool_calls:
         instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
 
     if include_interactive_questions:
@@ -1874,7 +1874,7 @@ def create_agent(
     )
 
     instructions = _build_agent_instructions(
-        agent_name,
+        agent,
         agent_config.instructions if persona is None else (),
         config,
         agent_runtime,

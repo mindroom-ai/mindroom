@@ -752,7 +752,7 @@ def _memory_conversation(
         or scope_context is None
     ):
         return None
-    entity = config.resolve_entity(ctx.entity_label)
+    entity = config.resolve_scope(ctx.entity_label)
     settings = entity.history_settings
     if entity.memory_backend != "file" or not settings.replays_whole_history or not settings.automatic_compaction:
         return None

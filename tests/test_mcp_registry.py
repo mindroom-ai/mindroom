@@ -157,11 +157,21 @@ def test_mcp_toolkits_stay_in_the_primary_when_every_tool_routes(
         runtime_paths,
     )
     sync_mcp_tool_registry(config)
-    placement = tool_placement(runtime_paths)
-    agent_tools = resolve_agent_tools(config, "code")
 
-    assert placement.runs_in_worker("mcp_demo", agent_tools.facts.worker_tools) is True
-    assert agent_tools.runs_in_worker("mcp_demo", placement) is False
+    assert resolve_agent_tools(config, "code").runs_in_worker("mcp_demo", tool_placement(runtime_paths)) is False
+
+
+def test_an_mcp_file_access_override_says_no_worker_can_isolate_it(tmp_path: Path) -> None:
+    """A stdio MCP server is unconfined and cannot run in a worker, so the refusal does not offer worker_tools."""
+    with pytest.raises(ConfigRuntimeValidationError, match="It cannot run in a worker"):
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+                "agents": {"code": {"display_name": "Code", "tools": [{"mcp_demo": {"file_access": "workspace"}}]}},
+            },
+            _runtime_paths(tmp_path),
+        )
 
 
 @pytest.mark.parametrize(
