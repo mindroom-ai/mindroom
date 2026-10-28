@@ -216,9 +216,17 @@ async def test_compact_context_sets_force_flag_for_agent_scope(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_request_compaction_before_next_reply_is_public_manual_seam(tmp_path: Path) -> None:
-    """Manual compaction scheduling should be available without going through the tool adapter."""
-    config, runtime_paths = _make_config(tmp_path)
+@pytest.mark.parametrize(
+    "compaction",
+    [None, CompactionConfig(enabled=False), CompactionConfig()],
+    ids=["built-in", "disabled", "enabled"],
+)
+async def test_request_compaction_before_next_reply_is_public_manual_seam(
+    tmp_path: Path,
+    compaction: CompactionConfig | None,
+) -> None:
+    """Manual compaction is scheduled without the tool adapter, whether or not compaction runs automatically."""
+    config, runtime_paths = _make_config_with_context_window(tmp_path, context_window=48_000, compaction=compaction)
     identity = _execution_identity()
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=identity)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1", agent_id="test_agent")]))
