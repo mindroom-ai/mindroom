@@ -10,11 +10,11 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom.approval import manager as approval_manager
-from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.failure import prepare_approval_failure
 from mindroom.approval.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
+    human_gate,
     resolve_tool_approval_approver,
 )
 from mindroom.cancellation import cancel_source_from_failure_reason
@@ -185,13 +185,8 @@ async def plan_approval_calls(
     room_id: str | None,
     thread_id: str | None,
 ) -> _ApprovalPausePlan:
-    """Evaluate policy once and normalize exact calls with integer deadlines.
-
-    The approver's auto-approve window in the conversation approves every call that would ask them.
-    A call that would ask in a room without the router is denied with a reason, so the agent can invite the router.
-    """
+    """Evaluate policy once and normalize exact calls with integer deadlines; ``human_gate`` decides what policy gates."""
     approver_id = resolve_tool_approval_approver(config, runtime_paths, requester_id)
-    manager = approval_manager.get_approval_store()
     decisions: dict[str, tuple[ContinuationDecision | None, float, bool, str | None]] = {}
     for tool, invoking_agent in identified:
         requires_approval, timeout_seconds = await evaluate_tool_approval(
@@ -205,21 +200,15 @@ async def plan_approval_calls(
             tool.requires_confirmation is True and tool.approval_type != POLICY_CONFIRMATION_APPROVAL_TYPE
         )
         requires_approval = requires_approval or tool_authored_confirmation
-        # Read after the awaited policy, so a window that ended meanwhile approves nothing.
-        window_open = requires_approval and (
-            auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
-            is not None
-        )
-        decision, reason = None, None
-        if not requires_approval or window_open:
-            decision = ContinuationDecision.APPROVED
-        elif approver_id is None:
+        decision, reason = ContinuationDecision.APPROVED, None
+        if requires_approval:
+            # Read after the awaited policy, so a window that ended meanwhile approves nothing.
+            gate = human_gate(runtime_paths, approver_id=approver_id, room_id=room_id, thread_id=thread_id)
             decision, reason = (
-                ContinuationDecision.DENIED,
-                "No approval recipient is configured; the tool was denied safely.",
+                (None, None)
+                if gate is None
+                else (ContinuationDecision.APPROVED if gate.approved else ContinuationDecision.DENIED, gate.reason)
             )
-        elif room_id is not None and manager is not None and manager.transport.router_missing(room_id):
-            decision, reason = ContinuationDecision.DENIED, approval_manager.DEFAULT_ROUTER_MANAGED_ROOM_REASON
         decisions[tool.tool_call_id] = (decision, timeout_seconds, requires_approval, reason)
     now = datetime.now(UTC)
     calls = tuple(

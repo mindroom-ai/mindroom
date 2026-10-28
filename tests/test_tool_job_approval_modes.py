@@ -31,6 +31,7 @@ from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, registe
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_approval_helpers import gated_functions
@@ -191,8 +192,7 @@ class _Cards:
     grants: list[tuple[str | None, ApprovalOperation | None]] = field(default_factory=list)
     settled: list[str] = field(default_factory=list)
     cards: object = field(default_factory=object)
-    send_delivery: object = field(default_factory=object)
-    router_missing: None = None
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(
         self,

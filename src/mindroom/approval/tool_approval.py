@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.approval import manager as approval_manager
+from mindroom.approval.auto_approve_windows import auto_approve_expires_at
 from mindroom.approval.manager import (
     DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     ApprovalActionResult,
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_APPROVAL_TYPE",
+    "NO_APPROVER_REASON",
     "POLICY_CONFIRMATION_APPROVAL_TYPE",
     "ApprovalActionResult",
     "BackgroundScriptToolOrigin",
@@ -55,6 +57,7 @@ __all__ = [
     "claim_scheduled_call",
     "evaluate_tool_approval",
     "handle_matrix_approval_action",
+    "human_gate",
     "is_process_active_approval_card",
     "record_scheduled_call_outcome",
     "request_scheduled_call_approval",
@@ -70,6 +73,7 @@ __all__ = [
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
 # A policy-gated call whose approval is the first phase of the background job it runs as, instead of a paused run.
 JOB_APPROVAL_TYPE = "mindroom_job"
+NO_APPROVER_REASON = "No approval recipient is configured; the tool was denied safely."
 # The terminal card edit carries the reason twice, and nio encrypts it as ASCII-escaped JSON that base64 grows by 4/3.
 # Escaping turns one emoji into 12 bytes, so the reply is bounded by escaped size to keep the edit below the event limit.
 _MAX_RESOLUTION_REASON_JSON_BYTES = 2000
@@ -185,6 +189,31 @@ def resolve_tool_approval_approver(
     if not is_human_requester_id(canonical_requester_id, config, runtime_paths):
         return None
     return canonical_requester_id
+
+
+def human_gate(
+    runtime_paths: RuntimePaths,
+    *,
+    approver_id: str | None,
+    room_id: str | None,
+    thread_id: str | None,
+) -> ToolApprovalDecision | None:
+    """Decide a gated call that no person needs to or can answer, or return None to ask its approver.
+
+    The approver's auto-approve window in the conversation approves it. A call no one may approve, or one in a room
+    without the router, is denied with a reason; the router's tells the agent how to invite it.
+    """
+    if (
+        auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=approver_id)
+        is not None
+    ):
+        return ToolApprovalDecision(approved=True)
+    if approver_id is None:
+        return ToolApprovalDecision(approved=False, reason=NO_APPROVER_REASON)
+    manager = approval_manager.get_approval_store()
+    if room_id is not None and manager is not None and manager.transport.router_missing(room_id):
+        return ToolApprovalDecision(approved=False, reason=DEFAULT_ROUTER_MANAGED_ROOM_REASON)
+    return None
 
 
 async def evaluate_tool_approval(

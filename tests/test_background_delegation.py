@@ -62,6 +62,7 @@ from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
+from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.scripted_agent_helpers import registered_toolkit
@@ -292,8 +293,7 @@ class _JobApprovalCards:
     requested: list[tuple[str, str, str]] = field(default_factory=list)
     settled: list[str] = field(default_factory=list)
     cards: object = field(default_factory=object)
-    send_delivery: object = field(default_factory=object)
-    router_missing: None = None
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(
         self,

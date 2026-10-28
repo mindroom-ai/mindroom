@@ -39,7 +39,7 @@ from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -2883,7 +2883,7 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         )
 
     assert plan.calls[0].decision is ApprovalDecision.DENIED
-    assert plan.calls[0].reason == "No approval recipient is configured; the tool was denied safely."
+    assert plan.calls[0].reason == NO_APPROVER_REASON
     assert plan.calls[0].human_approval_required is True
 
 

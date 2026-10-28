@@ -37,6 +37,7 @@ from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, 
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
+from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.tool_job_helpers import DelegatingLeader, lookup, run_journal_statements_inline, tool_job_runtime
@@ -97,8 +98,7 @@ class _Cards:
     """The approval store a job posts its child's cards to: each card stays answerable until decided or settled."""
 
     cards: list[_Card] = field(default_factory=list)
-    send_delivery: object = field(default_factory=object)
-    router_missing: None = None
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
 
     async def request_background_approval(
         self,
