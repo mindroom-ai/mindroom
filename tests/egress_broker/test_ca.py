@@ -5,9 +5,11 @@ from __future__ import annotations
 import socket
 import ssl
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 - Required at runtime for test fixtures
 
 import pytest
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -88,12 +90,13 @@ def _handshake(
     client_ctx: ssl.SSLContext,
     *,
     server_hostname: str | None,
-) -> str | None:
-    """Perform a TLS handshake over a socketpair and return the ALPN protocol the client selected."""
+) -> tuple[str | None, bytes | None]:
+    """Perform a TLS handshake over a socketpair; return the ALPN protocol the client selected and the leaf it got."""
     server_sock, client_sock = socket.socketpair()
     server_error = None
     client_error = None
     selected_protocol = None
+    presented_leaf = None
 
     def server_side() -> None:
         nonlocal server_error
@@ -104,7 +107,7 @@ def _handshake(
             server_error = e
 
     def client_side() -> None:
-        nonlocal client_error, selected_protocol
+        nonlocal client_error, selected_protocol, presented_leaf
         try:
             client_ssl = client_ctx.wrap_socket(
                 client_sock,
@@ -112,6 +115,7 @@ def _handshake(
                 server_hostname=server_hostname,
             )
             selected_protocol = client_ssl.selected_alpn_protocol()
+            presented_leaf = client_ssl.getpeercert(binary_form=True)
             client_ssl.close()
         except Exception as e:
             client_error = e
@@ -132,7 +136,7 @@ def _handshake(
         raise server_error
     if client_error:
         raise client_error
-    return selected_protocol
+    return selected_protocol, presented_leaf
 
 
 @pytest.mark.parametrize("strict", [False, True], ids=["default", "strict"])
@@ -145,6 +149,22 @@ def test_leaf_verifies_against_ca_for_dns_and_ip(ca: BrokerCA, *, strict: bool) 
     _handshake(ca.server_context("127.0.0.1"), client_ctx, server_hostname=None)
 
 
+def test_new_certificates_verify_on_a_clock_behind_the_broker(ca_dir: Path) -> None:
+    """A CA and leaf issued just now verify on clocks that read behind the broker's, such as the coarse clock OpenSSL reads."""
+    issued_at = datetime.now(UTC)
+    ca = BrokerCA.load_or_create(ca_dir, key_password=None)
+    _protocol, leaf = _handshake(
+        ca.server_context("api.github.com"),
+        _client_context(ca),
+        server_hostname="api.github.com",
+    )
+    assert leaf is not None
+
+    behind = issued_at - timedelta(minutes=1)
+    for certificate in (x509.load_pem_x509_certificate(ca.cert_pem.encode()), x509.load_der_x509_certificate(leaf)):
+        assert certificate.not_valid_before_utc <= behind, certificate.subject
+
+
 def test_server_context_is_cached(ca: BrokerCA) -> None:
     """server_context returns cached context for same host."""
     assert ca.server_context("a.test") is ca.server_context("a.test")
@@ -152,7 +172,7 @@ def test_server_context_is_cached(ca: BrokerCA) -> None:
 
 def test_alpn_is_http11_only(ca: BrokerCA) -> None:
     """Server context negotiates http/1.1 only, even when the client offers h2 first."""
-    selected_protocol = _handshake(
+    selected_protocol, _leaf = _handshake(
         ca.server_context("test.example.com"),
         _client_context(ca, alpn=["h2", "http/1.1"]),
         server_hostname="test.example.com",

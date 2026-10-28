@@ -39,6 +39,7 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    TranscriptLine,
 )
 from .decorators import get_hook_metadata, hook, iter_module_hooks
 from .enrichment import render_enrichment_block, render_system_enrichment_block, render_transient_context
@@ -157,6 +158,7 @@ __all__ = [
     "ToolAfterCallContext",
     "ToolBeforeCallContext",
     "ToolEnvironmentContext",
+    "TranscriptLine",
     "TurnIntent",
     "TurnOrigin",
     "TurnTrust",

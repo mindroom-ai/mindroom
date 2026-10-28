@@ -86,7 +86,7 @@ class UserFilterMem0Tools(Mem0Tools):
         # and client.get_all(user_id=...); Mem0 2.0 and later, both the local Memory and the platform
         # MemoryClient, reject top-level entity parameters there and take them in filters, so both tool
         # functions return Mem0's ValueError text instead of memories.
-        # Upstream issue: Tracking gap; no matching agno-agi/agno issue found on October 27, 2026.
+        # Upstream issue: https://github.com/agno-agi/agno/issues/11340, open on October 27, 2026.
         # Upstream PR: None identified; the open async Mem0Tools PR, https://github.com/agno-agi/agno/pull/5886,
         # keeps the top-level user_id.
         # Remove when: Agno's Mem0Tools passes filters={"user_id": ...} to search and get_all; keep redacting
