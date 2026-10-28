@@ -75,6 +75,9 @@ SECRET = "s3cret"  # noqa: S105 - test credential the fake upstream expects
 RECONNECT_MESSAGE = (
     "The github account for svc must be connected again. Ask the user to reconnect at connect_url or manage_url."
 )
+RECONNECT_WITHOUT_LINK_MESSAGE = (
+    "The github account for svc must be connected again. Ask the user to reconnect it at manage_url."
+)
 
 
 async def _exchange(broker: BrokerFactory, port: int, *messages: bytes) -> list[RawResponse]:
@@ -802,7 +805,7 @@ async def test_missing_secret_on_a_shared_agent_names_its_credential_managers(
                 "connect_url": None,
                 "manage_url": MANAGE_URL,
                 "reset_required": True,
-                "message": RECONNECT_MESSAGE,
+                "message": RECONNECT_WITHOUT_LINK_MESSAGE,
             },
         ),
     ],

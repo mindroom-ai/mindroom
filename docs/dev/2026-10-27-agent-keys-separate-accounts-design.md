@@ -27,7 +27,8 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
   Saving a service with the box ticked that did not already have its own account of that provider also clears any left under its name first, such as by a delete while a config service shadowed the name, so an old account never comes back.
 - **A request picks such a service with a header.** Routing is unchanged without it, so a user service that ties with an operator's service on host and path is never chosen by accident.
   A request may add `X-Agent-Keys-Service: <name>`; routing then matches only that service's rules, after the same restriction checks as today, and a request no rule of that service matches is refused with 403 `service_not_matched`.
-  A header sent twice, or whose value is not a valid service name (empty included), is a 400 `bad_request` whose message names the header and never repeats the value. The broker removes the header before forwarding.
+  A header sent twice, or whose value is not a valid service name (empty included), is a 400 `bad_request` whose message names the header and never repeats the value.
+  The broker removes the header before forwarding.
   This holds on hosts with rules, the only ones whose HTTPS the broker reads: a request to another host is tunneled blind, so the header selects nothing there and reaches the host as sent, which exposes only a service name the agent itself chose.
   The header names one of the requester's own (user) services, separate-account or not, so an agent can also pick a user service with its own API key the same way.
   An operator's service cannot be named: the most specific operator rule keeps choosing among the operator's credentials, and an agent cannot override it.
@@ -45,11 +46,3 @@ This design reuses the one thing Agent Keys already manages per row, a service: 
 
 - Every place that reads or writes a connection resolves its store through the provider's `credential_service`; the refresh backoff is keyed by it, not by the provider id.
 - Squid hands the broker every credentialed request with its headers intact.
-
-## Testing
-
-- Config: `oauth_separate_account` needs `oauth_provider`, is refused on config services and shared scopes, and names `f"{base}__{service}_oauth"`.
-- Connect and disconnect through the service's Agent Keys routes store and remove only the separate connection; the provider's own connection and the tools are untouched; status shows the separate account's label.
-- Broker: no header routes as today; `X-Agent-Keys-Service` picks the named service and its separate connection's token, under the opt-in's access level; a name whose rules do not match is 403 `service_not_matched`; a bad header is 400; the header is never forwarded.
-- Deleting the service, unticking the box, or changing its provider removes its own connection and opt-in.
-- Tool and editor: the flag and header appear in `list_egress_credentials`, and the checkbox saves `oauth_separate_account`.

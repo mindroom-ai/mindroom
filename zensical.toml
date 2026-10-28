@@ -116,6 +116,7 @@ nav = [
     { "Agent Keys" = "deployment/egress-broker.md" },
     { "Approved Egress" = "deployment/approved-egress.md" },
     { "Trusted Upstream Auth" = "deployment/trusted-upstream-auth.md" },
+    { "Cloudflare Access & Tunnel" = "deployment/cloudflare-access.md" },
     { "Data Storage & Journal" = "deployment/storage.md" },
     { "Config Bundles" = "deployment/config-bundles.md" },
     { "Logs & Monitoring" = "deployment/operational-log-events.md" },
