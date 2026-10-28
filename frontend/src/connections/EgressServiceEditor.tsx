@@ -340,8 +340,8 @@ export function EgressServiceEditor({
 
   // A new service starts on an account of its own where another service of
   // the agent already uses the tools' one, again each time its login can
-  // change; an edited one keeps its choice while its login can have an
-  // account of its own.
+  // change. An edited one has none where its login cannot have one, gets its
+  // saved choice back on its saved login, and keeps the current one otherwise.
   const startsOnOwnAccount = (next: EgressServiceForm) => {
     const fresh = { ...next, separateAccount: false };
     const nextPreset = presetOf(presets, next.preset);
@@ -351,20 +351,30 @@ export function EgressServiceEditor({
         .usedBy !== null
     );
   };
+  const savedLogin =
+    editing && service
+      ? serviceLogin(
+          formFromService("", service),
+          presetOf(presets, service.preset ?? ""),
+        )
+      : null;
   const set = (changes: Partial<EgressServiceForm>) => {
     setConfirmingSave(false);
     setForm((previous) => {
       const next = { ...previous, ...changes };
       if ("preset" in changes || "oauthProvider" in changes) {
+        const nextPreset = presetOf(presets, next.preset);
         if (!editing) next.separateAccount = startsOnOwnAccount(next);
         else if (
           !offersSeparateAccount(
             { ...next, separateAccount: false },
             options,
-            presetOf(presets, next.preset),
+            nextPreset,
           )
         )
           next.separateAccount = false;
+        else if (serviceLogin(next, nextPreset) === savedLogin)
+          next.separateAccount = service?.oauth_separate_account === true;
       }
       return nameLocked || nameTyped || "name" in changes
         ? next
@@ -492,8 +502,7 @@ export function EgressServiceEditor({
 
   // Another preset has its own defaults, so what the loaded service emptied on
   // purpose no longer applies to it. Back on the loaded preset, its own login
-  // and its account choice apply again, as the save writes them, whatever was
-  // picked on the way.
+  // applies again, as the save writes it, whatever login was picked under Custom.
   const choosePreset = (value: string) => {
     // The rules the helper wrote are gone with the preset's own, so typed
     // repositories are to be applied again when the form is saved.
@@ -503,10 +512,7 @@ export function EgressServiceEditor({
       preset: value,
       replacePresetRules: false,
       rules: form.rules.length > 0 ? form.rules : [emptyRule()],
-      ...(loaded && {
-        oauthProvider: service.oauth_provider ?? "",
-        separateAccount: service.oauth_separate_account === true,
-      }),
+      ...(loaded && { oauthProvider: service.oauth_provider ?? "" }),
       explicitlyEmpty: {
         ...NOT_EXPLICITLY_EMPTY,
         presetLogin: loaded && service.oauth_provider !== undefined,

@@ -3632,102 +3632,12 @@ describe("the Account choice", () => {
     expect(screen.queryByText(line)).toBeNull();
   });
 
-  it("drops the service's own account when an edit leaves it without a login", async () => {
-    const first = await renderEditor({
-      ...withGmail,
-      name: "mail",
-      service: { preset: "google_gmail", oauth_separate_account: true },
-    });
-    // Another login keeps the choice.
-    type("Preset", "google_calendar");
-    expect(
-      screen.getByLabelText("Another Google Calendar account"),
-    ).toBeChecked();
-    // A preset without a login has no account to choose.
-    type("Preset", "openai");
-    expect(accountChoice()).toBeNull();
-    save();
-    await waitFor(() =>
-      expect(first.onSave).toHaveBeenCalledWith("mail", { preset: "openai" }),
-    );
-    cleanup();
+  describe("editing through the Preset and Account login selects", () => {
     const rules = [
       { host: "api.example.com", auth: { type: "bearer" as const } },
     ];
-    const second = await renderEditor({
-      ...withGmail,
-      name: "mine",
-      service: {
-        rules,
-        oauth_provider: "google_gmail",
-        oauth_separate_account: true,
-      },
-    });
-    expect(accountChoice()).toBeVisible();
-    type("Account login (optional)", "");
-    expect(accountChoice()).toBeNull();
-    save();
-    await waitFor(() =>
-      expect(second.onSave).toHaveBeenCalledWith("mine", { rules }),
-    );
-  });
-
-  it("drops the service's own account when an edit moves it to a login whose accounts are each user's", async () => {
-    const first = await renderEditor({
-      ...withGmail,
-      name: "mail",
-      service: { preset: "google_gmail", oauth_separate_account: true },
-    });
-    type("Preset", "github");
-    expect(accountChoice()).toBeNull();
-    save();
-    await waitFor(() =>
-      expect(first.onSave).toHaveBeenCalledWith("mail", { preset: "github" }),
-    );
-    cleanup();
-    const rules = [
-      { host: "api.example.com", auth: { type: "bearer" as const } },
-    ];
-    const second = await renderEditor({
-      ...withGmail,
-      name: "mine",
-      service: {
-        rules,
-        oauth_provider: "google_gmail",
-        oauth_separate_account: true,
-      },
-    });
-    type("Account login (optional)", "github");
-    expect(accountChoice()).toBeNull();
-    save();
-    await waitFor(() =>
-      expect(second.onSave).toHaveBeenCalledWith("mine", {
-        rules,
-        oauth_provider: "github",
-      }),
-    );
-  });
-
-  it("restores the saved choice when an edit comes back to the loaded preset", async () => {
-    const { onSave } = await renderEditor({
-      ...withGmail,
-      name: "mail",
-      service: { preset: "google_gmail", oauth_separate_account: true },
-    });
-    type("Preset", "openai");
-    type("Preset", "google_gmail");
-    expect(another()).toBeChecked();
-    save();
-    await waitFor(() =>
-      expect(onSave).toHaveBeenCalledWith("mail", {
-        preset: "google_gmail",
-        oauth_separate_account: true,
-      }),
-    );
-  });
-
-  it("says saving disconnects the own account where the form no longer asks which account", async () => {
-    const connected = credentialService({
+    // The listed row of each saved service: own accounts are connected, so a save that removes one says so.
+    const ownRow = credentialService({
       name: "mail",
       display_name: "Gmail",
       source: "user",
@@ -3741,35 +3651,213 @@ describe("the Account choice", () => {
         account_label: "team@example.com",
       }),
     });
-    const line = "Saving disconnects team@example.com.";
-    await renderEditor({
-      ...withGmail,
-      agentServices: [gmail, connected],
-      name: "mail",
-      service: { preset: "google_gmail", oauth_separate_account: true },
-    });
-    expect(screen.queryByText(line)).toBeNull();
-    type("Preset", "openai");
-    expect(accountChoice()).toBeNull();
-    expect(screen.getByText(line)).toBeVisible();
-    cleanup();
-    const rules = [
-      { host: "api.example.com", auth: { type: "bearer" as const } },
-    ];
-    await renderEditor({
-      ...withGmail,
-      agentServices: [gmail, connected],
-      name: "mail",
-      service: {
-        rules,
-        oauth_provider: "google_gmail",
-        oauth_separate_account: true,
+    const toolsRow = { ...ownRow, separate_account: false };
+    const starts = {
+      ownPreset: {
+        service: { preset: "google_gmail", oauth_separate_account: true },
+        row: ownRow,
       },
+      ownCustom: {
+        service: {
+          rules,
+          oauth_provider: "google_gmail",
+          oauth_separate_account: true,
+        },
+        row: ownRow,
+      },
+      toolsPreset: { service: { preset: "google_gmail" }, row: toolsRow },
+    };
+    type Step = ["preset" | "login" | "website", string];
+    type End = {
+      choice: "own" | "tools" | null;
+      button: "Save and sign in" | "Save service";
+      flag: boolean;
+      disconnects: boolean;
+    };
+    const own = (button: End["button"], disconnects: boolean): End => ({
+      choice: "own",
+      button,
+      flag: true,
+      disconnects,
     });
-    expect(screen.queryByText(line)).toBeNull();
-    type("Account login (optional)", "");
-    expect(accountChoice()).toBeNull();
-    expect(screen.getByText(line)).toBeVisible();
+    const tools: End = {
+      choice: "tools",
+      button: "Save service",
+      flag: false,
+      disconnects: false,
+    };
+    // The server removes the own account when the flag goes off or the login changes.
+    const none = (disconnects: boolean): End => ({
+      choice: null,
+      button: "Save service",
+      flag: false,
+      disconnects,
+    });
+    const toCustom: Step[] = [
+      ["preset", ""],
+      ["website", "mail.example.com"],
+    ];
+    it.each<[string, keyof typeof starts, Step[], End]>([
+      ["own preset, unchanged", "ownPreset", [], own("Save service", false)],
+      ["own preset to OpenAI", "ownPreset", [["preset", "openai"]], none(true)],
+      ["own preset to GitHub", "ownPreset", [["preset", "github"]], none(true)],
+      [
+        "own preset to Calendar",
+        "ownPreset",
+        [["preset", "google_calendar"]],
+        own("Save and sign in", true),
+      ],
+      [
+        "own preset to OpenAI and back",
+        "ownPreset",
+        [
+          ["preset", "openai"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own preset to GitHub and back",
+        "ownPreset",
+        [
+          ["preset", "github"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own preset to Calendar and back",
+        "ownPreset",
+        [
+          ["preset", "google_calendar"],
+          ["preset", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own preset to a custom service without a login",
+        "ownPreset",
+        toCustom,
+        none(true),
+      ],
+      [
+        "own preset to a custom Gmail login",
+        "ownPreset",
+        [...toCustom, ["login", "google_gmail"]],
+        own("Save service", false),
+      ],
+      [
+        "own preset to a custom GitHub login",
+        "ownPreset",
+        [...toCustom, ["login", "github"]],
+        none(true),
+      ],
+      ["own custom, unchanged", "ownCustom", [], own("Save service", false)],
+      ["own custom to no login", "ownCustom", [["login", ""]], none(true)],
+      ["own custom to GitHub", "ownCustom", [["login", "github"]], none(true)],
+      [
+        "own custom to Calendar",
+        "ownCustom",
+        [["login", "google_calendar"]],
+        own("Save and sign in", true),
+      ],
+      [
+        "own custom to no login and back",
+        "ownCustom",
+        [
+          ["login", ""],
+          ["login", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own custom to GitHub and back",
+        "ownCustom",
+        [
+          ["login", "github"],
+          ["login", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own custom to Calendar and back",
+        "ownCustom",
+        [
+          ["login", "google_calendar"],
+          ["login", "google_gmail"],
+        ],
+        own("Save service", false),
+      ],
+      [
+        "own custom to the Gmail preset",
+        "ownCustom",
+        [["preset", "google_gmail"]],
+        own("Save service", false),
+      ],
+      ["own custom to OpenAI", "ownCustom", [["preset", "openai"]], none(true)],
+      [
+        "tools' preset to Calendar",
+        "toolsPreset",
+        [["preset", "google_calendar"]],
+        tools,
+      ],
+      [
+        "tools' preset to OpenAI and back",
+        "toolsPreset",
+        [
+          ["preset", "openai"],
+          ["preset", "google_gmail"],
+        ],
+        tools,
+      ],
+      [
+        "tools' preset to GitHub",
+        "toolsPreset",
+        [["preset", "github"]],
+        none(false),
+      ],
+      [
+        "tools' preset to a custom Gmail login",
+        "toolsPreset",
+        [...toCustom, ["login", "google_gmail"]],
+        tools,
+      ],
+    ])("%s", async (_, start, steps, end) => {
+      const { service, row } = starts[start];
+      const { onSave } = await renderEditor({
+        ...withGmail,
+        agentServices: [gmail, row],
+        name: "mail",
+        service,
+      });
+      for (const [kind, value] of steps) {
+        if (kind === "preset") type("Preset", value);
+        else if (kind === "website") type("Website", value);
+        else {
+          if (!screen.queryByLabelText("Account login (optional)"))
+            openMoreOptions();
+          type("Account login (optional)", value);
+        }
+      }
+      if (end.choice === null) expect(accountChoice()).toBeNull();
+      else
+        expect(
+          end.choice === "own"
+            ? screen.getByRole("radio", { name: /^Another / })
+            : toolsAccount(),
+        ).toBeChecked();
+      if (end.choice === "own")
+        expect(
+          screen.queryByText(/You sign in right after saving/) !== null,
+        ).toBe(end.button === "Save and sign in");
+      expect(
+        screen.queryByText("Saving disconnects team@example.com.") !== null,
+      ).toBe(end.disconnects);
+      fireEvent.click(screen.getByRole("button", { name: end.button }));
+      await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+      const body = vi.mocked(onSave).mock.calls[0][1] as AuthoredEgressService;
+      expect(body.oauth_separate_account === true).toBe(end.flag);
+    });
   });
 
   it("says <name> in the header while the name is empty", async () => {
@@ -3850,28 +3938,6 @@ describe("the Account choice", () => {
     type("Preset", "google_gmail");
     expect(toolsAccount()).toBeChecked();
     fireEvent.click(another());
-    expect(
-      screen.getByRole("button", { name: "Save and sign in" }),
-    ).toBeVisible();
-  });
-
-  it("signs in again when an edited own account changes its login", async () => {
-    await renderEditor({
-      ...withGmail,
-      name: "mail",
-      service: { preset: "google_gmail", oauth_separate_account: true },
-    });
-    type("Preset", "google_calendar");
-    expect(
-      screen.getByLabelText("Another Google Calendar account"),
-    ).toBeChecked();
-    expect(
-      screen.getByText(
-        wholeText(
-          "You sign in right after saving. Agents choose it with X-Agent-Keys-Service: mail",
-        ),
-      ),
-    ).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Save and sign in" }),
     ).toBeVisible();
