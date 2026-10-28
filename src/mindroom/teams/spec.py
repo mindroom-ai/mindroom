@@ -28,7 +28,7 @@ class TeamMode(StrEnum):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MemberBuild:
-    """One member as its runs in one team run it: the agent with this turn's system messages, and its run settings.
+    """One built member as its runs in one team use it: its agent with this turn's system messages, and run settings.
 
     ``new_hooks`` builds the hooks of one run of this member; a run takes its hooks only through ``hooks(run_id)``,
     which keeps them across the run's continuations in this team. ``request_template`` applies to every run and resume.
