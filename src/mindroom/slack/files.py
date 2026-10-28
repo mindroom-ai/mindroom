@@ -30,7 +30,7 @@ _NOT_THE_FILE = "Slack returned a page instead of the file; reconnect Slack and 
 # Canvases and posts are Slack documents, which no download link serves as a file.
 _DOCUMENT_REFUSAL = "Slack canvases and posts can't be downloaded as files; open them in Slack"
 _DOCUMENT_MIMETYPE = "application/vnd.slack-docs"
-_DOCUMENT_FILETYPES = frozenset({"quip", "canvas", "space"})
+_DOCUMENT_FILETYPES = frozenset({"quip", "canvas", "space", "post"})
 
 
 class SlackFileError(Exception):

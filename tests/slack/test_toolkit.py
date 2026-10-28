@@ -608,8 +608,15 @@ _DOCUMENT_KINDS = pytest.mark.parametrize(
         ("application/vnd.slack-docs", None),
         ("text/plain", "canvas"),
         ("text/plain", "space"),
+        ("text/plain", "post"),
     ],
-    ids=["canvas by mimetype and quip", "by mimetype", "canvas by filetype", "post by filetype"],
+    ids=[
+        "canvas by mimetype and quip",
+        "by mimetype",
+        "canvas by filetype",
+        "space by filetype",
+        "legacy post by filetype",
+    ],
 )
 
 
