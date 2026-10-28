@@ -19,7 +19,7 @@ from mindroom.config.slack import slack_answering_agents
 from mindroom.delivery_replay import DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
-from mindroom.slack.api import SlackApiError, slack_call
+from mindroom.slack.api import SlackApiError, neutralize_broadcasts, slack_call
 from mindroom.slack.app import load_slack_app, slack_bot_identity
 from mindroom.tool_system.events import strip_visible_tool_markers
 from mindroom.turn_origin import SenderKind, TurnIntent
@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 
 # The hook source of a project turn, as delivery writes it: the channel, then the thread's root `ts`.
 _HOOK_SOURCE = re.compile(r"slack/([CG][A-Z0-9]{8,})/(\d+\.\d+)", re.ASCII)
-# Slack's limit for one markdown block.
+# Slack's limit for one markdown block, counted in UTF-16 code units.
 _BLOCK_LIMIT = 12_000
 _ELLIPSIS = "…"
 
@@ -64,10 +64,21 @@ def _answers_here(envelope: MessageEnvelope, channel_id: str, config: Config, ru
     )
 
 
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _visible_text(response_text: str) -> str:
-    """Return the reply without its tool markers, cut to fit one markdown block."""
-    text = strip_visible_tool_markers(response_text).strip()
-    return text if len(text) <= _BLOCK_LIMIT else text[: _BLOCK_LIMIT - len(_ELLIPSIS)] + _ELLIPSIS
+    """Return the reply without its tool markers and broadcast mentions, cut to fit one markdown block.
+
+    The cut keeps whole characters: a character outside the basic plane takes two UTF-16 code units, and a cut between
+    them drops the half.
+    """
+    text = neutralize_broadcasts(strip_visible_tool_markers(response_text).strip())
+    if _utf16_length(text) <= _BLOCK_LIMIT:
+        return text
+    kept = text.encode("utf-16-le")[: 2 * (_BLOCK_LIMIT - _utf16_length(_ELLIPSIS))]
+    return kept.decode("utf-16-le", errors="ignore") + _ELLIPSIS
 
 
 async def mirror_reply_to_slack(

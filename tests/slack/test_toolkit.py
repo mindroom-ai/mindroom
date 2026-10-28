@@ -663,6 +663,20 @@ async def test_post_reply_from_permalink_uses_thread_root(paths: RuntimePaths, m
 
 
 @pytest.mark.asyncio
+async def test_post_cannot_notify_a_whole_channel(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Broadcast mentions in an agent's text reach Slack defused, so a post never notifies everyone."""
+    _connect_alice(paths)
+    fake = FakeSlack({"chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS}}).install(monkeypatch)
+
+    await _tools(paths).slack_post(CHANNEL, "<!channel> <!here> <!everyone> <!subteam^S0123ABCD> hi")
+
+    (sent,) = (_form(request) for request in fake.requests)
+    assert all("<!" not in value for value in sent.values())
+    assert sent["text"].endswith(" hi")
+    assert sent["text"].count("!") == 4
+
+
+@pytest.mark.asyncio
 async def test_post_to_a_conversation_starts_a_top_level_message(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,

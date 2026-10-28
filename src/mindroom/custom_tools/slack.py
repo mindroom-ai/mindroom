@@ -33,7 +33,14 @@ from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_r
 from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.slack.api import SlackApiError, parse_slack_target, reply_root, slack_call, slack_http_client
+from mindroom.slack.api import (
+    SlackApiError,
+    neutralize_broadcasts,
+    parse_slack_target,
+    reply_root,
+    slack_call,
+    slack_http_client,
+)
 from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, SlackAppCredentials, load_slack_app, slack_bot_identity
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.render import (
@@ -668,7 +675,12 @@ class SlackTools(Toolkit):
                 channel_id = parsed.channel_id
                 await self._require_project_channel(session, channel_id)
             root = reply_root(parsed)
-            posted = await session.call("chat.postMessage", channel=channel_id, text=text, thread_ts=root)
+            posted = await session.call(
+                "chat.postMessage",
+                channel=channel_id,
+                text=neutralize_broadcasts(text),
+                thread_ts=root,
+            )
             return {"channel_id": channel_id, "ts": posted.get("ts"), "thread_ts": root}
 
         return await self._run("slack_post", operation)

@@ -12,6 +12,7 @@ import pytest
 from mindroom.slack.api import (
     SlackApiError,
     SlackTarget,
+    neutralize_broadcasts,
     parse_slack_target,
     reply_root,
     slack_call,
@@ -222,3 +223,22 @@ async def test_slack_call_keeps_a_rate_limit_without_an_integer_retry_after(
             await slack_call(client, "auth.test", "xoxb-test")
 
     assert (limited.value.error, limited.value.retry_after) == ("ratelimited", retry_after)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["<!channel>", "<!here|here>", "<!everyone>", "<!subteam^S0123ABCD|@team>", "<!date^1700000000^{date}|today>"],
+)
+def test_neutralize_broadcasts_defuses_every_control_sequence(text: str) -> None:
+    """Every `<!` form stays readable once the word joiner is removed, and none is a control sequence."""
+    neutral = neutralize_broadcasts(f"ping {text} now")
+
+    assert "<!" not in neutral
+    assert neutral.replace("\u2060", "") == f"ping {text} now"
+
+
+def test_neutralize_broadcasts_keeps_other_text() -> None:
+    """User and channel mentions, links and stray angle brackets pass through unchanged."""
+    plain = "Ask <@U0123ABCD> in <#C0123ABCD> about a < b, c <d> and e! <https://example.com|link>"
+
+    assert neutralize_broadcasts(plain) == plain

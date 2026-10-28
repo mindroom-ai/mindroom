@@ -135,3 +135,13 @@ def slack_permalink(workspace_url: str, channel_id: str, ts: str, *, thread_ts: 
 def reply_root(target: SlackTarget) -> str | None:
     """Return the thread root a reply to this target posts under."""
     return target.thread_ts or target.ts
+
+
+def neutralize_broadcasts(text: str) -> str:
+    """Defuse Slack's `<!...>` control sequences, such as `<!channel>`, `<!here>` and `<!subteam^...>`.
+
+    Text an agent writes may repeat what untrusted people or documents said, and Slack turns these sequences into
+    notifications for everyone in a channel or a user group.
+    A word joiner between `<` and `!` keeps them readable but makes Slack treat them as plain text.
+    """
+    return text.replace("<!", "<\u2060!")

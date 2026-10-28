@@ -75,6 +75,10 @@ TOOL_MARKER = "🔧 `search` [1]"
 BLOCK_LIMIT = 12_000
 
 
+def utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 @dataclass
 class World:
     """A runtime-bound config with its Slack app, in which `launch` answered a Slack mention that opened a thread."""
@@ -350,6 +354,49 @@ async def test_long_reply_truncated(world: World) -> None:
     (block,) = json.loads(post["blocks"])
     assert block == {"type": "markdown", "text": "x" * (BLOCK_LIMIT - 1) + "…"}
     assert post["text"] == block["text"]
+
+
+@pytest.mark.asyncio
+async def test_reply_cannot_notify_a_whole_channel(world: World) -> None:
+    """Broadcast mentions in an agent's reply reach Slack defused, in the text and in the markdown block."""
+    await world.mirror(world.envelope(), "<!channel> <!here> <!everyone> <!subteam^S0123ABCD> the beta is blocked")
+
+    (post,) = world.posts()
+    assert all("<!" not in value for value in post.values())
+    (block,) = json.loads(post["blocks"])
+    assert block["text"] == post["text"]
+    assert post["text"].endswith(" the beta is blocked")
+
+
+@pytest.mark.asyncio
+async def test_broadcast_neutralizing_happens_before_truncation(world: World) -> None:
+    """Each defused `<!` is one character longer, so a reply of broadcasts still fits the block."""
+    await world.mirror(world.envelope(), "<!here>" * 3_000)
+
+    (post,) = world.posts()
+    assert "<!" not in post["text"]
+    assert utf16_length(post["text"]) <= BLOCK_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_long_emoji_reply_is_cut_by_utf16_length(world: World) -> None:
+    """Slack counts UTF-16 code units, so an emoji outside the basic plane counts twice and is never split."""
+    await world.mirror(world.envelope(), "😀" * 7_000)
+
+    (post,) = world.posts()
+    (block,) = json.loads(post["blocks"])
+    assert block["text"] == "😀" * 5_999 + "…"
+    assert utf16_length(block["text"]) == BLOCK_LIMIT - 1
+    assert post["text"] == block["text"]
+
+
+@pytest.mark.parametrize(("emoji", "kept"), [(6_000, 6_000), (6_001, 5_999)])
+@pytest.mark.asyncio
+async def test_emoji_reply_at_the_utf16_limit(world: World, emoji: int, kept: int) -> None:
+    await world.mirror(world.envelope(), "😀" * emoji)
+
+    (post,) = world.posts()
+    assert post["text"] == "😀" * kept + ("" if kept == emoji else "…")
 
 
 @pytest.mark.asyncio
