@@ -113,7 +113,8 @@ def mentioned_user_ids(text: str) -> frozenset[str]:
     return frozenset(_USER_MENTION.findall(text))
 
 
-def _is_direct(event: SlackMessageEvent) -> bool:
+def is_direct_message(event: SlackMessageEvent) -> bool:
+    """Return whether an event is in a direct message or a group direct message."""
     return event.channel_type in _DIRECT_CHANNEL_TYPES
 
 
@@ -124,7 +125,7 @@ def project_thread_key(event: SlackMessageEvent) -> str:
 
 def watch_thread_key(watch_id: str, event: SlackMessageEvent) -> str:
     """Return the key of the Slack thread an event belongs to for one watch; a direct message conversation is one thread."""
-    if _is_direct(event):
+    if is_direct_message(event):
         return f"{watch_id}:{event.channel_id}"
     return f"{watch_id}:{event.channel_id}:{event.thread_ts or event.ts}"
 
@@ -151,7 +152,7 @@ def _watch_wants(watch: SlackWatch, event: SlackMessageEvent, *, bound: bool) ->
     if watch.team_id != event.team_id or watch.slack_user_id == event.user_id:
         return False
     mentioned = watch.mentions and watch.slack_user_id in mentioned_user_ids(event.text)
-    if _is_direct(event):
+    if is_direct_message(event):
         return watch.direct_messages or mentioned
     if watch.channels and event.channel_id not in watch.channels:
         return False

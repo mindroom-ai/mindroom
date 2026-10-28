@@ -1,16 +1,20 @@
-"""Plain dictionaries for agents from Slack Web API answers: messages, people, and conversations.
+"""Plain data for agents from Slack: messages, people, and conversations as dictionaries, and message text as text.
 
 Slack's answers are untrusted JSON, so every reader tolerates a missing or mistyped field.
 """
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from mindroom.slack.api import parse_slack_target, slack_permalink
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+# Slack's markup for mentions, channels, special mentions and links: `<target>` or `<target|label>`.
+_SLACK_MARKUP = re.compile(r"<([^<>|]*)(?:\|([^<>]*))?>")
 
 
 def json_objects(payload: Mapping[str, Any], field: str) -> list[dict[str, Any]]:
@@ -35,6 +39,27 @@ def slack_display_name(user: Mapping[str, Any]) -> str:
     profile = json_object(user, "profile")
     names = (profile.get("display_name"), profile.get("real_name"), user.get("real_name"), user.get("name"))
     return next((name for name in (*names, user.get("id")) if isinstance(name, str) and name), "")
+
+
+def _plain_markup(match: re.Match[str]) -> str:
+    target, label = match.group(1), match.group(2)
+    if target.startswith("@"):
+        return target
+    if target.startswith("#"):
+        return f"#{label}" if label else target
+    if target.startswith("!"):
+        return label or f"@{target[1:]}"
+    return f"{label} ({target})" if label else target
+
+
+def slack_plain_text(text: str) -> str:
+    """Return Slack message text (mrkdwn) as plain text, looking up no names.
+
+    A mention keeps the person's ID (`@U0123ABCD`), a channel shows the name Slack sends with it, a special mention
+    shows its label or name (`@here`), and a link shows `label (url)`.
+    """
+    plain = _SLACK_MARKUP.sub(_plain_markup, text)
+    return plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 def render_person(user: Mapping[str, Any]) -> dict[str, object]:

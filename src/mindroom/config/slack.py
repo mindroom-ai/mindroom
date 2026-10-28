@@ -69,6 +69,16 @@ def slack_answering_agents(config: Config) -> tuple[SlackAnsweringAgent, ...]:
     return tuple(answering)
 
 
+def has_personal_slack(config: Config, agent_name: str) -> bool:
+    """Return whether an agent has the `slack` tool in personal mode, which reads each requester's own Slack."""
+    agent = config.agents.get(agent_name)
+    return (
+        agent is not None
+        and _SLACK_TOOL_NAME in config.resolve_entity(agent_name).available_tools
+        and not _slack_overrides(agent).get("channels")
+    )
+
+
 def _check_channels(path: str, channels: object) -> None:
     """Reject anything but a non-empty list of Slack channel IDs."""
     if not isinstance(channels, list):

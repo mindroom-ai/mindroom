@@ -56,3 +56,31 @@ def test_bound_thread_roundtrip(tmp_path: Path) -> None:
         now=2,
         pending_ttl_seconds=60,
     ) == (DeliveryThreadKeyClaim.BOUND, "$root", None)
+
+
+def test_bound_thread_root_reads_only_live_bindings(tmp_path: Path) -> None:
+    """Only a bound, unexpired key names its room and root; looking claims nothing."""
+    store = DeliveryReplayStore(root=tmp_path / "replay")
+    assert store.bound_thread_root("scope", "thread", now=0) is None
+    _claim, _root, reservation = store.claim_thread_key(
+        "scope",
+        "thread",
+        room_id="!room:localhost",
+        now=0,
+        pending_ttl_seconds=60,
+    )
+    assert store.bound_thread_root("scope", "thread", now=1) is None
+
+    store.bind_thread_root(
+        "scope",
+        "thread",
+        "$root",
+        room_id="!room:localhost",
+        reservation=reservation,
+        now=1,
+        ttl_seconds=600,
+    )
+
+    assert store.bound_thread_root("scope", "thread", now=601) == ("!room:localhost", "$root")
+    assert store.bound_thread_root("scope", "thread", now=602) is None
+    assert store.bound_thread_root("scope", "other", now=1) is None

@@ -357,9 +357,18 @@ async def test_startup_room_setup_binds_external_trigger_runtime_after_setup(tmp
         patch.object(orchestrator, "_setup_rooms_and_memberships", side_effect=setup_rooms),
         patch.object(orchestrator._external_trigger_runtime, "bind_if_ready", side_effect=bind_runtime),
     ):
-        await orchestrator._setup_startup_rooms_and_memberships([bot])
+        try:
+            await orchestrator._setup_startup_rooms_and_memberships([bot])
+            slack_runtime = config_lifecycle.app_state(api_main.app).slack_runtime
+            # Slack events reach the live bot mapping, so setup that runs again keeps the same runtime.
+            assert slack_runtime is not None
+            assert slack_runtime.bots is orchestrator.agent_bots
+            await orchestrator._setup_startup_rooms_and_memberships([bot])
+            assert config_lifecycle.app_state(api_main.app).slack_runtime is slack_runtime
+        finally:
+            api_main.unbind_slack_runtime(api_main.app)
 
-    assert call_order == ["setup", "bind"]
+    assert call_order == ["setup", "bind", "setup", "bind"]
 
 
 @pytest.mark.asyncio

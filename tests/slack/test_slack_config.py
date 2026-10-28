@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.config.slack import SlackAnsweringAgent, SlackConfig, slack_answering_agents
+from mindroom.config.slack import SlackAnsweringAgent, SlackConfig, has_personal_slack, slack_answering_agents
 from mindroom.constants import resolve_runtime_paths
 
 if TYPE_CHECKING:
@@ -196,3 +196,20 @@ def test_teams_and_defaults_tools_are_considered(tmp_path: Path) -> None:
             {"defaults": {"tools": [{"slack": {"channels": ["C0123ABCD"]}}]}},
             runtime_paths,
         )
+
+
+def test_has_personal_slack_needs_the_tool_without_channels() -> None:
+    """Only an agent with `slack` and no `channels` reads its requesters' own Slack; unknown names have none."""
+    config = _config(
+        {
+            "personal": {"display_name": "Personal", "tools": ["slack"]},
+            "project": _agent(rooms=["launch"], channels=["C0123ABCD"]),
+            "none": {"display_name": "None"},
+        },
+        **_MAPPING,
+    )
+
+    assert has_personal_slack(config, "personal")
+    assert not has_personal_slack(config, "project")
+    assert not has_personal_slack(config, "none")
+    assert not has_personal_slack(config, "missing")

@@ -52,6 +52,7 @@ from mindroom.api.schedules import router as schedules_router
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.api.skills import router as skills_router
+from mindroom.api.slack_events import router as slack_events_router
 from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
@@ -78,16 +79,18 @@ from mindroom.private_storage.legacy_private_storage import migrate_private_stor
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
+from mindroom.slack.delivery import SlackRuntime
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import lease_configured_primary_worker_manager, shutdown_primary_worker_manager
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from pathlib import Path
 
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+    from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.response_admission import ResponseAdmissionGate
@@ -643,6 +646,26 @@ def unbind_external_trigger_runtime(api_app: FastAPI) -> None:
     config_lifecycle.app_state(api_app).external_trigger_runtime = None
 
 
+def bind_slack_runtime(
+    api_app: FastAPI,
+    *,
+    bots: Mapping[str, AgentBot | TeamBot],
+    agent_reply_memberships: AgentReplyMembershipIndex,
+) -> SlackRuntime:
+    """Let Slack events reach the orchestrator's live bots; binding the same bots again keeps the runtime."""
+    state = config_lifecycle.app_state(api_app)
+    if state.slack_runtime is None or state.slack_runtime.bots is not bots:
+        state.slack_runtime = SlackRuntime(bots, agent_reply_memberships)
+    return state.slack_runtime
+
+
+def unbind_slack_runtime(api_app: FastAPI) -> SlackRuntime | None:
+    """Refuse Slack events from now on and return the runtime that owns the deliveries still running."""
+    state = config_lifecycle.app_state(api_app)
+    runtime, state.slack_runtime = state.slack_runtime, None
+    return runtime
+
+
 def _api_docs_kwargs(runtime_paths: constants.RuntimePaths) -> dict[str, str | None]:
     """Return generated-docs routes for this runtime."""
     docs_enabled = runtime_paths.env_flag(
@@ -778,6 +801,7 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
+app.include_router(slack_events_router)  # Slack signs each request with the app's signing secret.
 app.include_router(computers_router)
 app.include_router(script_gateway_router)
 app.include_router(agent_cli_router)

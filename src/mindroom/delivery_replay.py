@@ -170,6 +170,17 @@ class DeliveryReplayStore:
             self._write_store(path, store)
             return DeliveryThreadKeyClaim.FRESH, None, reservation
 
+    def bound_thread_root(self, replay_scope: str, thread_key: str, *, now: int) -> tuple[str, str] | None:
+        """Return the room and Matrix thread root one thread key is bound to, without claiming anything.
+
+        A key that is unknown, expired, or still pending its first root is not bound.
+        """
+        with self._scope_lock(replay_scope) as path:
+            record = self._read_store(path)["threads"].get(thread_key)
+        if record is None or record["thread_event_id"] is None or record["expires_at"] < now:
+            return None
+        return record["room_id"], record["thread_event_id"]
+
     def bind_thread_root(
         self,
         replay_scope: str,

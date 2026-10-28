@@ -182,6 +182,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+    from mindroom.slack.delivery import SlackRuntime
 
     from .constants import RuntimePaths
     from .event_journal import EventJournalStore
@@ -766,6 +767,27 @@ class _MultiAgentOrchestrator:
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._bind_slack_runtime()
+
+    def _bind_slack_runtime(self) -> None:
+        """Let Slack events reach the live agent bots; `self.agent_bots` stays current, so one binding lasts."""
+        if not self.api_enabled:
+            return
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        api_main.bind_slack_runtime(
+            api_main.app,
+            bots=self.agent_bots,
+            agent_reply_memberships=self.agent_reply_memberships,
+        )
+
+    def _unbind_slack_runtime(self) -> SlackRuntime | None:
+        """Refuse new Slack events, so Slack resends them after the restart, and return the deliveries' owner."""
+        if not self.api_enabled:
+            return None
+        from mindroom.api import main as api_main  # noqa: PLC0415
+
+        return api_main.unbind_slack_runtime(api_main.app)
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
@@ -2513,6 +2535,7 @@ class _MultiAgentOrchestrator:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
+        slack_runtime = self._unbind_slack_runtime()
         try:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
@@ -2536,6 +2559,12 @@ class _MultiAgentOrchestrator:
                 shutdown_intent=ORDERLY_SHUTDOWN,
             ),
         )
+        if slack_runtime is not None:
+            # Acknowledged Slack deliveries still retrying after this are cancelled: the documented accepted loss.
+            await _run_shutdown_step(
+                "slack_events",
+                wait_for_background_tasks(5.0, owner=slack_runtime, shutdown_intent=ORDERLY_SHUTDOWN),
+            )
         await _run_shutdown_step("startup_maintenance", self._startup_maintenance.cancel())
         await _run_shutdown_step("todo_poke", self._todo_poke_runtime.stop())
         await _run_shutdown_step("thread_exports", self._thread_export_runner.stop())
