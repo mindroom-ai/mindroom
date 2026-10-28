@@ -226,6 +226,8 @@ def _bind_runtime(
 ) -> object:
     client = object()
     admission_gate = response_admission_gate or ResponseAdmissionGate()
+    runtime_config = config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config
+    assert runtime_config is not None
 
     async def is_trigger_snapshot_ready(snapshot: TriggerDeliverySnapshot) -> bool:
         ready_snapshots.append(snapshot)
@@ -239,6 +241,7 @@ def _bind_runtime(
         api_main.app,
         client=client,
         conversation_reader=object(),
+        runtime_config=runtime_config,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
         response_admission_gate=admission_gate,

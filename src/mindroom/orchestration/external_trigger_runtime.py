@@ -47,6 +47,7 @@ class ExternalTriggerRuntimeCoordinator:
             api_main.app,
             client=router_bot.client,
             conversation_reader=router_bot._conversation_reader,
+            runtime_config=config,
             is_trigger_snapshot_ready=is_trigger_snapshot_ready,
             agent_reply_memberships=self.agent_reply_memberships,
             response_admission_gate=router_bot.admission_gate,

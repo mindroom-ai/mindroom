@@ -606,17 +606,28 @@ def bind_external_trigger_runtime(
     client: object,
     conversation_reader: object,
     *,
+    runtime_config: Config,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
     agent_reply_memberships: AgentReplyMembershipIndex,
     response_admission_gate: ResponseAdmissionGate,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
 ) -> None:
-    """Attach router Matrix delivery runtime to one API app."""
-    api_state = config_lifecycle.require_api_state(api_app)
-    config_lifecycle.app_state(api_app).external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+    """Attach router Matrix delivery runtime to one API app while it serves the config the bots run.
+
+    The trigger endpoint authorizes against the API snapshot and the receiving
+    bot enforces its own config, so while a dashboard save the runtime has not
+    applied yet is published, delivery stays unavailable; the reload that
+    applies the save binds again.
+    """
+    snapshot = config_lifecycle.require_api_state(api_app).snapshot
+    app_state = config_lifecycle.app_state(api_app)
+    if snapshot.runtime_config is None or snapshot.runtime_config.model_dump() != runtime_config.model_dump():
+        app_state.external_trigger_runtime = None
+        return
+    app_state.external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
         client=client,
         conversation_reader=conversation_reader,
-        config_generation=api_state.snapshot.generation,
+        config_generation=snapshot.generation,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
         agent_reply_memberships=agent_reply_memberships,
         response_admission_gate=response_admission_gate,

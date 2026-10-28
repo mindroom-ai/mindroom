@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mindroom.api import config_lifecycle
 from mindroom.api import main as api_main
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
 from tests.authorization_helpers import (
     make_test_external_trigger_runtime_coordinator,
 )
+from tests.conftest import test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config() -> Config:
@@ -75,6 +81,35 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate() -> None
     assert mock_bind.call_args.kwargs["client"] is router_bot.client
     assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot._conversation_reader
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
+
+
+def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_dashboard_config(
+    tmp_path: Path,
+) -> None:
+    """A dashboard save the bots have not applied yet must not authorize triggers the receiving bot would refuse."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    api_main.initialize_api_app(api_main.app, runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
+    running_config = load_config(runtime_paths)
+    saved_payload = {**running_config.authored_model_dump(), "timezone": "Europe/Amsterdam"}
+    config_lifecycle._build_and_commit_replacement(api_main.app, saved_payload, error_prefix="save")
+    router_bot = MagicMock()
+    router_bot.running = True
+    router_bot.client = object()
+    bots = {ROUTER_AGENT_NAME: router_bot}
+    coordinator = make_test_external_trigger_runtime_coordinator()
+    try:
+        coordinator.bind_if_ready(running_config, bots)
+        assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is None
+
+        snapshot = config_lifecycle.require_api_state(api_main.app).snapshot
+        assert snapshot.runtime_config is not None
+        coordinator.bind_if_ready(snapshot.runtime_config, bots)
+        runtime = config_lifecycle.app_state(api_main.app).external_trigger_runtime
+        assert runtime is not None
+        assert runtime.config_generation == snapshot.generation
+    finally:
+        coordinator.unbind()
 
 
 @pytest.mark.asyncio
