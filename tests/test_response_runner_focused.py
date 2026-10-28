@@ -6416,64 +6416,53 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
     turn_visibility: bool,
     reloaded_visibility: bool,
 ) -> None:
-    """A config reload after generation cannot reinterpret the committed pause snapshot."""
-    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    request = _plain_request(_target(thread_id="$thread"))
+    """A config reload during the turn cannot reinterpret the pause the turn hands to its approval."""
+    bot = _bot(tmp_path)
+    unique_room_send_responses(bot.client)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    agent_config = coordinator.deps.runtime.config.agents[coordinator.deps.agent_name]
+    agent_config.show_tool_calls = turn_visibility
     tool = ToolExecution(tool_call_id="call-1", tool_name="inspect")
     trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
     marker = "\n\n🔧 `inspect` [1] ⏳"
+    shown = f"Before.{marker}" if turn_visibility else "Before."
     error = ResponsePausedForApproval(
         PausedAttempt(
             session_id="session-1",
             run_id="run-1",
             tools=(tool,),
-            response_text=f"Before.{marker}" if turn_visibility else "Before.",
+            response_text=shown,
             tool_trace=(trace,),
             toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     error.capture_presentation(
-        StreamingPresentation(
-            response_text=f"Before.{marker}" if turn_visibility else "Before.",
-            tool_trace=(trace,) if turn_visibility else (),
-        ),
+        StreamingPresentation(response_text=shown, tool_trace=(trace,) if turn_visibility else ()),
     )
-    handed_off: list[PausedAttempt] = []
 
     async def pause_after_reload(**_kwargs: object) -> None:
-        coordinator.deps.runtime.config.agents[coordinator.deps.agent_name].show_tool_calls = reloaded_visibility
+        agent_config.show_tool_calls = reloaded_visibility
         raise error
 
-    async def suspend(pause: ResponsePausedForApproval) -> FinalDeliveryOutcome:
-        # The turn's handler builds the pause with the visibility its turn froze, not the reloaded one.
-        handed_off.append(response_runner._paused_with_committed_presentation(pause, show_tool_calls=turn_visibility))
-        return FinalDeliveryOutcome(
-            terminal_status="suspended",
-            event_id="$response",
-            is_visible_response=True,
-        )
-
-    progress = response_runner._DeliveryProgress()
-    lifecycle = coordinator._build_lifecycle(
-        identity=coordinator._response_identity(request, response_kind="ai"),
-        request=request,
+    suspend = AsyncMock(
+        return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id="$response", is_visible_response=True),
     )
-    with patch.object(coordinator, "_run_cancellable_response", new=pause_after_reload):
-        await coordinator._run_and_settle_locked_response(
-            request,
-            target=request.response_envelope.target,
-            lifecycle=lifecycle,
-            progress=progress,
-            response_function=AsyncMock(),
-            user_id=request.user_id,
-            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
-            approval_suspension_handler=suspend,
-        )
+    with (
+        patch.object(coordinator, "_run_cancellable_response", new=pause_after_reload),
+        patch.object(coordinator, "_suspend_for_approval", new=suspend),
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+            apply_post_response_effects=AsyncMock(),
+        ),
+    ):
+        await coordinator.generate_response(_plain_request(_target(thread_id="$thread")))
 
-    assert len(handed_off) == 1
-    assert handed_off[0].response_text == (f"Before.{marker}" if turn_visibility else "Before.")
-    assert handed_off[0].tool_trace == (trace,)
+    [handoff] = suspend.await_args_list
+    paused = handoff.args[0]
+    assert handoff.kwargs["show_tool_calls"] is turn_visibility
+    assert paused.response_text == shown
+    assert paused.tool_trace == (trace,)
 
 
 @pytest.mark.asyncio
