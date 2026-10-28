@@ -1200,7 +1200,12 @@ async def test_shared_local_watch_index_refreshes_on_access_without_blocking_rea
         ).knowledge
         assert knowledge is not None
         await asyncio.wait_for(refresh_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-        assert [document.content for document in await knowledge.asearch("shared", 5)] == ["shared local old"]
+        try:
+            # Below the search's own 30 s deadline, so a read that waits for the held refresh fails here.
+            first_read = await asyncio.wait_for(knowledge.asearch("shared", 5), timeout=10)
+        except TimeoutError:
+            pytest.fail("the read waited for the in-flight refresh")
+        assert [document.content for document in first_read] == ["shared local old"]
         release_refresh.set()
 
         try:
