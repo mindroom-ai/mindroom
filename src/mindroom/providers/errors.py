@@ -18,6 +18,7 @@ import httpx
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
+    QUOTA_EXHAUSTED,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -50,6 +51,18 @@ _INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
 _HTTP_CLIENT_ERROR_RANGE = range(400, 500)
 # The names providers give a throttled request: Anthropic's error type and the Responses code.
 _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+# The codes OpenAI sends with the 429 of an account that only a change to its billing or limits lets through: prepaid
+# credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned usage limit, besides
+# ``insufficient_quota``, the older code of an account without credit and still the error type of the others.
+_QUOTA_EXHAUSTED_NAMES = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+        "organization_usage_limit_exceeded",
+    },
+)
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
@@ -137,6 +150,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
     as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
 
+    Before any rule below, a name that says the account has no credit left or reached a spend or usage limit makes a
+    final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, whatever its status: no wait lets the request through.
+
     1. A 429 status or a rate-limit name is ``RateLimited``, unless its wording says the request alone is larger than
        the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``: only a smaller request passes.
     2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``.
@@ -154,15 +170,18 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
     lowered = message.casefold()
     client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
 
-    def typed(kind: type[ProviderError]) -> ProviderError:
+    def typed(kind: type[ProviderError], *, marker: str | None = None) -> ProviderError:
         return kind(
             message,
             provider=provider,
             status_code=status_code,
+            code=marker,
             provider_code=code,
             retry_after_seconds=retry_after_seconds,
         )
 
+    if names & _QUOTA_EXHAUSTED_NAMES:
+        return typed(ProviderError, marker=QUOTA_EXHAUSTED)
     if status == _RATE_LIMIT_STATUS or names & _RATE_LIMIT_NAMES:
         return typed(ContextWindowExceeded if _REQUEST_TOO_LARGE in lowered else RateLimited)
     if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:

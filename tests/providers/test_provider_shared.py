@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from mindroom.llm.errors import (
+    QUOTA_EXHAUSTED,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -118,6 +119,36 @@ def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
     error = classify_provider_error("upstream busy", provider="Test", status_code=500, code=TRANSPORT_TIMEOUT)
 
     assert (type(error), error.code, error.provider_code) == (ProviderUnavailable, None, TRANSPORT_TIMEOUT)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "error_type"),
+    [
+        (429, "insufficient_quota", "insufficient_quota"),
+        (429, "credit_balance_exhausted", None),
+        (429, "organization_spend_limit_exceeded", None),
+        (429, "project_spend_limit_exceeded", None),
+        (429, "organization_usage_limit_exceeded", None),
+        (None, "insufficient_quota", None),
+        (None, None, "insufficient_quota"),
+    ],
+)
+def test_an_account_out_of_credit_or_past_its_limits_fails_at_once(
+    status: int | None,
+    code: str | None,
+    error_type: str | None,
+) -> None:
+    """No wait lets the request through until the account's billing or limits change, so the error is final."""
+    message = "You exceeded your current quota, please check your plan and billing details."
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code, error_type=error_type)
+
+    assert (type(error), error.retryable, error.code, error.provider_code) == (
+        ProviderError,
+        False,
+        QUOTA_EXHAUSTED,
+        code,
+    )
+    assert (str(error), error.status_code) == (message, status)
 
 
 @pytest.mark.parametrize(

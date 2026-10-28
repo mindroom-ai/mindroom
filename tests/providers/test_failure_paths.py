@@ -31,6 +31,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     MALFORMED_TOOL_CALL,
+    QUOTA_EXHAUSTED,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -770,6 +771,35 @@ _OPENAI_HTTP_CASES = [
         ProviderError,
         ERROR,
         1,
+    ),
+    # An account without credit, or past its spend or usage limit, fails every time until its billing changes, so the
+    # reply shows the provider's text. ``insufficient_quota`` is the older code and still the type of the others.
+    _Case(
+        "http_429_insufficient_quota",
+        _openai_status(
+            429,
+            "You exceeded your current quota, please check your plan and billing details. For more information on "
+            "this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.",
+            "insufficient_quota",
+            "insufficient_quota",
+        ),
+        ProviderError,
+        f"{ERROR}You exceeded your current quota, please check your plan and billing details.",
+        1,
+        code=QUOTA_EXHAUSTED,
+    ),
+    _Case(
+        "http_429_credit_balance_exhausted",
+        _openai_status(
+            429,
+            "Your organization has no prepaid credits remaining.",
+            "insufficient_quota",
+            "credit_balance_exhausted",
+        ),
+        ProviderError,
+        f"{ERROR}Your organization has no prepaid credits remaining.",
+        1,
+        code=QUOTA_EXHAUSTED,
     ),
     _Case(
         "http_404",
