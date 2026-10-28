@@ -482,16 +482,21 @@ class DockerProjectionManager:
         try:
             roster = read_personal_agent_roster_file(paths)
             data = cast("dict[str, object]", expand_personal_agents(config_data, roster.entries).data)
-            if roster.created or any(entry.edits is not None for entry in roster.entries):
-                # Owners' edits and created agents are built from the validated config, so take them from loading.
-                config = Config.validate_with_runtime(config_data, paths, tolerate_plugin_load_errors=True)
-                agents = cast("dict[str, object]", config.runtime_model_dump().get("agents", {}))
-                generated = {name: agent for name, agent in agents.items() if config.generated_agent(name) is not None}
-                data = {**data, "agents": {**cast("dict[str, object]", data.get("agents", {})), **generated}}
         except (OSError, ValueError) as exc:
             msg = f"Failed to add personal agents to the Docker worker config: {exc}"
             raise WorkerBackendError(msg) from exc
-        return data
+        if not roster.created and all(entry.edits is None for entry in roster.entries):
+            return data
+        try:
+            # Owners' edits and created agents are built from the validated config, so take them from loading.
+            config = Config.validate_with_runtime(config_data, paths, tolerate_plugin_load_errors=True)
+        except (OSError, ValueError) as exc:
+            # A file the reload rejected must not stop every worker; generated agents wait for a fix, as at load.
+            logger.warning("Docker worker config left out generated agents", error=str(exc))
+            return data
+        agents = cast("dict[str, object]", config.runtime_model_dump().get("agents", {}))
+        generated = {name: agent for name, agent in agents.items() if config.generated_agent(name) is not None}
+        return {**data, "agents": {**cast("dict[str, object]", data.get("agents", {})), **generated}}
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()

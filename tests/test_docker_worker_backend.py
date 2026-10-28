@@ -736,6 +736,41 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
     assert list(projected_agents("v1:default:shared:helper_research")) == ["helper_research"]
 
 
+def test_docker_worker_projection_keeps_working_when_the_config_file_does_not_validate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A config edit the reload rejected leaves out the generated agents instead of stopping every worker."""
+    paths = test_runtime_paths(tmp_path)
+    helper = {"display_name": "Helper", "model": "default", "tools": ["shell"], "worker_scope": "shared"}
+    broken = {"display_name": "Broken", "model": "default", "delegate_to": ["nobody"]}
+    config_data = PERSONAL_AGENTS_BASE | {
+        "agents": {"helper": helper | {"created_agents_per_owner": 1}, "broken": broken},
+    }
+    created = CreatedAgentEntry(
+        agent_name="helper_research",
+        creator="helper",
+        owner="@alice:example.org",
+        edits=GeneratedAgentEdits(display_name="Research"),
+    )
+    _write_personal_agent_roster(paths, PersonalAgentRoster(created=[created]))
+    backend, _fake_client, _credential_sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=yaml.safe_dump(config_data),
+        runtime_paths=paths,
+        storage_path=paths.storage_root,
+    )
+    state = local_worker_state_paths_for_root(tmp_path / "workers" / "helper")
+    projection = backend._projection_manager._projected_config(
+        state,
+        worker_key="v1:default:shared:helper",
+        materialize=True,
+    )
+
+    assert list(yaml.safe_load((projection.root / "config.yaml").read_text(encoding="utf-8"))["agents"]) == ["helper"]
+
+
 def test_docker_worker_projection_sees_roster_change_while_config_is_cached(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
