@@ -30,6 +30,7 @@ from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.entity_resolution import EntityIdentityRegistry, entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.media import Audio, canonical_mime_type
+from mindroom.llm.messages import ModelProvenance
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
@@ -534,7 +535,13 @@ def _transcription_usage(
         model=model,
         provider=provider,
         metrics=RunMetrics(tokens=usage),
-        requests=(RequestUsage(created_at=created_at, metrics=MessageMetrics(tokens=usage)),),
+        requests=(
+            RequestUsage(
+                created_at=created_at,
+                metrics=MessageMetrics(tokens=usage),
+                model=ModelProvenance(model_id=model, provider=provider) if model and provider else None,
+            ),
+        ),
         created_at=created_at,
     )
 

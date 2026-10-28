@@ -594,12 +594,6 @@ def _copy_annotations_with_output_path(
     wrapper.__annotate__ = annotate
 
 
-def _docstring_with_output_path(original_doc: str | None) -> str:
-    base = (original_doc or "MindRoom wrapped tool entrypoint.").strip()
-    output_arg_doc = f"Args:\n    {OUTPUT_PATH_ARGUMENT}: {_OUTPUT_PATH_ARGUMENT_DESCRIPTION}"
-    return f"{base}\n\n{output_arg_doc}"
-
-
 def prepare_tool_output_file(
     policy: ToolOutputFilePolicy,
     *,
@@ -660,7 +654,8 @@ def _wrap_entrypoint(
         wrapper = sync_wrapper
 
     wrapper.__name__ = getattr(entrypoint, "__name__", "tool_entrypoint")
-    wrapper.__doc__ = _docstring_with_output_path(getattr(entrypoint, "__doc__", None))
+    # The schema finisher describes the output path, so the docstring, whose Args describe the other arguments, stays.
+    wrapper.__doc__ = entrypoint.__doc__
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)

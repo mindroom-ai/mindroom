@@ -128,10 +128,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -179,7 +181,8 @@
             "type": "object",
             "properties": {
               "task_id": {
-                "type": "string"
+                "type": "string",
+                "description": "The ID of the task to cancel (from list_schedules)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -206,10 +209,12 @@
             "type": "object",
             "properties": {
               "subagent_id": {
-                "type": "string"
+                "type": "string",
+                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
               },
               "message": {
-                "type": "string"
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -237,10 +242,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Numerator."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Denominator."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -268,10 +275,12 @@
             "type": "object",
             "properties": {
               "task_id": {
-                "type": "string"
+                "type": "string",
+                "description": "The ID of the task to edit (from list_schedules)."
               },
               "request": {
-                "type": "string"
+                "type": "string",
+                "description": "The new scheduling request, e.g. \"tomorrow at 9am check deployment\""
               },
               "history_limit": {
                 "anyOf": [
@@ -281,7 +290,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history. Leave unset to keep the task's\nexisting history limit. To restore full history, say so in request."
               },
               "silent": {
                 "anyOf": [
@@ -291,7 +301,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Whether to update quiet delivery. Silent tasks hide their trigger\nand omit empty, whitespace-only, or exact `NO_REPLY` finals while\nkeeping findings, failures, and independently sent tool messages\nvisible. Leave unset to preserve the existing mode."
               },
               "model": {
                 "anyOf": [
@@ -301,7 +312,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Configured model alias for each run, including team members.\nLeave unset to preserve the existing choice. Use an empty string\nto restore normal agent, room, and thread model selection."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -329,10 +341,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Base."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Exponent."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -360,7 +374,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -387,7 +402,8 @@
             "type": "object",
             "properties": {
               "skill_name": {
-                "type": "string"
+                "type": "string",
+                "description": "The name of the skill to get instructions for."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -414,7 +430,8 @@
             "type": "object",
             "properties": {
               "skill_name": {
-                "type": "string"
+                "type": "string",
+                "description": "The name of the skill."
               },
               "reference_path": {
                 "anyOf": [
@@ -424,7 +441,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "The filename of the reference document."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -451,7 +469,8 @@
             "type": "object",
             "properties": {
               "skill_name": {
-                "type": "string"
+                "type": "string",
+                "description": "The name of the skill."
               },
               "script_path": {
                 "anyOf": [
@@ -461,7 +480,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "The filename of the script."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -510,7 +530,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "integer"
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -559,10 +580,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -594,7 +617,8 @@
                 "enum": [
                   "members",
                   "computer"
-                ]
+                ],
+                "description": "'computer' for your worker browser, or 'members' (the default) for this room's members."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -653,7 +677,8 @@
             "type": "object",
             "properties": {
               "task_id": {
-                "type": "string"
+                "type": "string",
+                "description": "The scheduled task's ID from its message."
               },
               "arguments_json": {
                 "anyOf": [
@@ -663,7 +688,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Optional replacement arguments as a JSON object string,\nonly when the requester approved any arguments."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -741,10 +767,12 @@
             "type": "object",
             "properties": {
               "request": {
-                "type": "string"
+                "type": "string",
+                "description": "The scheduling request, e.g. \"in 5 minutes remind me to check logs\""
               },
               "new_thread": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Required delivery choice. Use `False` to post in the current\nroom/thread scope. Use `True` to start a fresh thread per fire: each\nfire posts a room-level root and the responding agent answers in a\nnew thread under it with a fresh session. When `silent=True`, the\ntrigger stays hidden instead, and any finding or failure is posted\nas a room-level root rather than beneath the hidden trigger."
               },
               "history_limit": {
                 "anyOf": [
@@ -754,7 +782,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Max recent thread messages included as context each time\nthe task fires. Use 0 for no history (recommended for recurring\npolling tasks), or leave unset for full history."
               },
               "silent": {
                 "anyOf": [
@@ -764,7 +793,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Keep the trigger hidden and omit a final response when it is empty,\nwhitespace-only, or exactly `NO_REPLY`. Findings, failures, and\nindependently sent tool messages remain visible. Leave unset to infer\nthe mode from the scheduling request."
               },
               "model": {
                 "anyOf": [
@@ -774,7 +804,8 @@
                   {
                     "type": "null"
                   }
-                ]
+                ],
+                "description": "Configured model alias for each scheduled run (including team\nmembers), e.g. \"cheap\". Leave unset to use normal agent, room, and\nthread model selection. This does not change the conversation model."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -802,16 +833,20 @@
             "type": "object",
             "properties": {
               "tool_name": {
-                "type": "string"
+                "type": "string",
+                "description": "One of your tool functions, e.g. \"post_slack_message\"."
               },
               "arguments_json": {
-                "type": "string"
+                "type": "string",
+                "description": "The call's arguments as a JSON object string."
               },
               "execute_at": {
-                "type": "string"
+                "type": "string",
+                "description": "When to run, as ISO 8601 with a UTC offset,\ne.g. \"2026-10-04T09:00:00-04:00\"."
               },
               "description": {
-                "type": "string"
+                "type": "string",
+                "description": "Short description of the scheduled action; if the requester\napproves any arguments, it tells you what the call should do when it runs."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -880,7 +915,8 @@
             "type": "object",
             "properties": {
               "n": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -907,10 +943,12 @@
             "type": "object",
             "properties": {
               "a": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) First number."
               },
               "b": {
-                "type": "number"
+                "type": "number",
+                "description": "(float) Second number."
               },
               "mindroom_output_path": {
                 "anyOf": [

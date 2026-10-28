@@ -590,7 +590,6 @@ async def compact_scope_mid_turn(
     basis: FoldBasis,
     fold: Fold,
     snapshots: Sequence[AnyRunRecord],
-    folded_messages: Sequence[Message],
     before_tokens: int,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -613,7 +612,6 @@ async def compact_scope_mid_turn(
             basis=basis,
             fold=fold,
             snapshots=snapshots,
-            folded_messages=folded_messages,
             summarizer=load_summarizer(
                 resolved_inputs.execution_plan,
                 resolved_inputs.history_settings,

@@ -130,12 +130,7 @@ class GeminiProvider:
         """Return the generation config of one request."""
         settings = self.settings
         overrides = request.overrides
-        # TODO(simplify): an authored ``generation_config`` key that has a dedicated field, such as temperature, is
-        # dropped when that field is unset. Let a dedicated field replace the key only when it is set. Operators and
-        # models would notice.
-        config: dict[str, Any] = {
-            **(settings.generation_config or {}),
-            **(settings.generative_model_kwargs or {}),
+        dedicated = {
             "safety_settings": settings.safety_settings,
             "temperature": settings.temperature if overrides.temperature is None else overrides.temperature,
             "top_p": settings.top_p,
@@ -147,6 +142,12 @@ class GeminiProvider:
             "frequency_penalty": settings.frequency_penalty,
             "seed": settings.seed,
             "cached_content": settings.cached_content,
+        }
+        # A dedicated setting replaces the authored ``generation_config`` key of the same name only when it is set.
+        config: dict[str, Any] = {
+            **(settings.generation_config or {}),
+            **(settings.generative_model_kwargs or {}),
+            **{key: value for key, value in dedicated.items() if value is not None},
         }
         if system_instruction is not None:
             config["system_instruction"] = system_instruction
