@@ -14,6 +14,7 @@ export function EgressAccountChoice({
   toolsAddress,
   usedBy,
   disconnects,
+  removesKey,
   signsIn,
   disabled,
   onChange,
@@ -30,6 +31,8 @@ export function EgressAccountChoice({
   usedBy: string | null;
   /** The address of the service's own connected account that saving as chosen removes. */
   disconnects: string | null;
+  /** Saving as chosen removes the API key the service has, which an account of its own replaces. */
+  removesKey: boolean;
   /** Saving with another account signs in to it next: the service has none of its own yet. */
   signsIn: boolean;
   disabled: boolean;
@@ -83,6 +86,11 @@ export function EgressAccountChoice({
       {disconnects && (
         <p className="text-xs text-muted-foreground">
           Saving disconnects {disconnects}.
+        </p>
+      )}
+      {removesKey && (
+        <p className="text-xs text-muted-foreground">
+          Saving removes its API key.
         </p>
       )}
     </div>

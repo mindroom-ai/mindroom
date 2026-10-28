@@ -3580,6 +3580,58 @@ describe("the Account choice", () => {
     expect(screen.queryByText(/Saving disconnects/)).toBeNull();
   });
 
+  it("says when saving removes the API key of a service that moves to its own account", async () => {
+    const listed = credentialService({
+      name: "mail",
+      display_name: "Gmail",
+      source: "user",
+      configured: true,
+      active_source: "key",
+      key_configured: true,
+      oauth: oauthStatus({ provider: "google_gmail", display_name: "Gmail" }),
+    });
+    const line = "Saving removes its API key.";
+    await renderEditor({
+      ...withGmail,
+      agentServices: [gmail, listed],
+      name: "mail",
+      service: { preset: "google_gmail" },
+    });
+    expect(toolsAccount()).toBeChecked();
+    expect(screen.queryByText(line)).toBeNull();
+    fireEvent.click(another());
+    expect(screen.getByText(line)).toBeVisible();
+    fireEvent.click(toolsAccount());
+    expect(screen.queryByText(line)).toBeNull();
+    cleanup();
+    // Without a stored key there is nothing to remove.
+    await renderEditor({
+      ...withGmail,
+      agentServices: [
+        gmail,
+        {
+          ...listed,
+          configured: false,
+          active_source: null,
+          key_configured: false,
+        },
+      ],
+      name: "mail",
+      service: { preset: "google_gmail" },
+    });
+    fireEvent.click(another());
+    expect(screen.queryByText(line)).toBeNull();
+    cleanup();
+    // A new service has no key yet, whatever another row has.
+    await renderEditor({
+      ...withGmail,
+      agentServices: [{ ...gmail, key_configured: true }, listed],
+    });
+    type("Preset", "google_gmail");
+    expect(another()).toBeChecked();
+    expect(screen.queryByText(line)).toBeNull();
+  });
+
   it("says <name> in the header while the name is empty", async () => {
     await renderEditor(withGmail);
     type("Preset", "google_gmail");

@@ -182,13 +182,13 @@ export function unsetNote(service: EgressCredentialService): string | null {
   // A service with its own account takes no key, only that account.
   if (service.separate_account)
     return oauth?.connected && !oauth.reset_required
-      ? "The agent's commands are refused until you let them use this account."
+      ? "The agent's commands cannot use this account until you let them."
       : "Requests are refused until its own account is connected.";
   // An account Agent Keys can use stops refusals as well as a key does. A service account is
   // never one, but a personal account connected before it still is. One the sandbox refuses is none.
   if (oauth?.unavailable_reason === null) {
     if (oauth.connected && !oauth.reset_required)
-      return "The agent's commands are refused until you let them use this account.";
+      return "The agent's commands cannot use this account until you let them.";
     // The server only says an account can be connected where this viewer may connect one.
     if (!oauth.service_account && (oauth.can_connect || oauth.reset_required))
       return "Requests are refused until a key is set or an account is connected.";

@@ -377,15 +377,21 @@ export function EgressServiceEditor({
   const takesKey = !limiting && !choosesAccount;
   const toolsAccount = toolsAccountUse(login, agentServices, name);
   const signsIn = signsInAfterSave(form, initial, presets);
-  // The service's own connected account, which a save to the tools' account
-  // or to another login removes.
-  const ownAddress = agentServices.find(
-    (other) => other.name === name && other.separate_account,
-  )?.oauth?.account_label;
+  // What a save removes from the service as listed: its own connected
+  // account, on a switch to the tools' account or to another login, and its
+  // API key, on a switch to its own account, which takes none.
+  const listed = editing
+    ? agentServices.find((other) => other.name === name)
+    : undefined;
+  const ownAddress = listed?.separate_account
+    ? listed.oauth?.account_label
+    : null;
   const disconnects =
-    editing && ownAddress && (!form.separateAccount || signsIn)
-      ? ownAddress
-      : null;
+    ownAddress && (!form.separateAccount || signsIn) ? ownAddress : null;
+  const removesKey =
+    form.separateAccount &&
+    initial?.oauth_separate_account !== true &&
+    listed?.key_configured === true;
   const accountChoice = choosesAccount && (
     <EgressAccountChoice
       id={`${id}-account`}
@@ -398,6 +404,7 @@ export function EgressServiceEditor({
       toolsAddress={toolsAccount.address}
       usedBy={toolsAccount.usedBy}
       disconnects={disconnects}
+      removesKey={removesKey}
       signsIn={signsInAfterSave(
         { ...form, separateAccount: true },
         initial,

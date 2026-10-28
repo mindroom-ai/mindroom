@@ -2395,7 +2395,7 @@ describe("what a row says about how the key is sent", () => {
     [
       "a connected account only its tools use",
       toolsOnly,
-      "The agent's commands are refused until you let them use this account.",
+      "The agent's commands cannot use this account until you let them.",
     ],
     [
       "a connected account while connecting another is unavailable",
@@ -2403,7 +2403,7 @@ describe("what a row says about how the key is sent", () => {
         ...toolsOnly,
         can_connect: false,
       },
-      "The agent's commands are refused until you let them use this account.",
+      "The agent's commands cannot use this account until you let them.",
     ],
     [
       "a connection that needs a reset",
@@ -2436,7 +2436,7 @@ describe("what a row says about how the key is sent", () => {
         service_account: true,
         can_connect: false,
       },
-      "The agent's commands are refused until you let them use this account.",
+      "The agent's commands cannot use this account until you let them.",
     ],
     [
       "a service account beside a personal connection that needs a reset",
@@ -2466,7 +2466,7 @@ describe("what a row says about how the key is sent", () => {
     [
       "its own account, connected but not used yet",
       toolsOnly,
-      "The agent's commands are refused until you let them use this account.",
+      "The agent's commands cannot use this account until you let them.",
     ],
     [
       "its own account that cannot be connected here",
