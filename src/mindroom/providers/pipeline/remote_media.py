@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 import httpx2
 
@@ -19,6 +18,7 @@ from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource, url_file_name
 from mindroom.logging_config import get_logger
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.redaction import redact_url_credentials
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -103,12 +103,11 @@ async def _download(url: str, kind: MediaKind, provider: str) -> tuple[bytes, st
 
 
 def _log_unavailable(url: str, kind: MediaKind, error: Exception) -> None:
-    """Log a failed download by the URL's scheme, host, and path, since a signed URL's credentials ride in the rest.
+    """Log a failed download by the URL's scheme, host and port, and path (``redact_url_credentials``).
 
     A refused download logs its status, because the status error's text repeats the whole URL.
     """
-    parts = urlsplit(url)
-    logged_url = f"{parts.scheme}://{parts.hostname or ''}{parts.path}"
+    logged_url = redact_url_credentials(url)
     if isinstance(error, httpx2.HTTPStatusError):
         logger.warning("remote_media_unavailable", kind=kind, url=logged_url, status_code=error.response.status_code)
     else:

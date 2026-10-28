@@ -22,6 +22,7 @@ from mindroom.redaction import (
     redact_log_event,
     redact_sensitive_data,
     redact_sensitive_text,
+    redact_url_credentials,
 )
 from tests.cpu_budget_helpers import cpu_budget
 
@@ -1530,3 +1531,19 @@ def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
         redacted = redact_sensitive_data({"content": f"A private key follows.\n{certificates}{key * key_count}"})
 
     assert redacted == {"content": f"A private key follows.\n{certificates}{(REDACTED + chr(10)) * key_count}"}
+
+
+@pytest.mark.parametrize(
+    ("url", "redacted"),
+    [
+        ("https://user:token@git.example/org/repo.git", "https://***@git.example/org/repo.git"),
+        ("http://127.0.0.1:8188/view?filename=cat.png#preview", "http://127.0.0.1:8188/view"),
+        ("http://[::1]:9000/bucket/cat.png?X-Amz-Signature=abc", "http://[::1]:9000/bucket/cat.png"),
+        ("https://media.example/a;session=abc/cat.png;v=1", "https://media.example/a"),
+        ("relative/path?token=abc", "relative/path?token=abc"),
+    ],
+    ids=["userinfo", "port", "ipv6", "path-parameters", "no-scheme"],
+)
+def test_a_redacted_url_keeps_its_scheme_host_port_and_path(url: str, redacted: str) -> None:
+    """Userinfo is masked, and path parameters, query, and fragment go; a value without a scheme or host is kept."""
+    assert redact_url_credentials(url) == redacted

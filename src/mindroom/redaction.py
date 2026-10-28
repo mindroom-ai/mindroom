@@ -27,6 +27,7 @@ __all__ = [
     "redact_private_keys",
     "redact_sensitive_data",
     "redact_sensitive_text",
+    "redact_url_credentials",
     "truncate_review_text",
 ]
 _TRUNCATED = "... [truncated]"
@@ -534,6 +535,25 @@ def _redact_url(value: str) -> str:
     if not changed:
         return value
     return urlunparse(parsed._replace(netloc=netloc, path=path, query=query))
+
+
+def redact_url_credentials(value: str) -> str:
+    """Return a URL as scheme, masked userinfo, host and port, and path, without path parameters, query, or fragment.
+
+    Any of those can carry a credential, such as a signed URL's signature, while what is kept still names the server.
+    Never raises. A URL that cannot be parsed is replaced wholesale rather than returned unchanged: unparseable is not
+    the same as credential-free, because the thing defeating the parse can be the userinfo separator itself. A value
+    without a scheme or host is returned as it is.
+    """
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return "***"
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    netloc = f"***@{parsed.netloc.rsplit('@', 1)[1]}" if "@" in parsed.netloc else parsed.netloc
+    path = parsed.path.split(";", 1)[0]
+    return urlunparse(parsed._replace(netloc=netloc, path=path, params="", query="", fragment=""))
 
 
 def _redact_query_fragment(value: str, *, max_length: int | None) -> str:
