@@ -30,11 +30,6 @@ logger = get_logger(__name__)
 _pending_cleanups: weakref.WeakKeyDictionary[Toolkit, asyncio.Task[None]] = weakref.WeakKeyDictionary()
 
 
-def connects_per_run(toolkit: Toolkit) -> bool:
-    """Whether ``toolkit`` holds a connection for one run, so each of its calls must finish inside that run."""
-    return run_connection(toolkit) is not None
-
-
 def run_connection(toolkit: Toolkit) -> ToolkitConnect | None:
     """Return how a run connects ``toolkit`` before its first request, or None for a toolkit that holds no connection."""
     if toolkit.requires_connect:

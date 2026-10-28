@@ -8722,7 +8722,6 @@ depends_on = [
     "mindroom.session_storage.types",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
-    "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.call_record",
     "mindroom.failure_text",
     "mindroom.tool_system.invocation",
