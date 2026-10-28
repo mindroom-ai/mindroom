@@ -798,6 +798,7 @@ depends_on = [
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.minimal_agent",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -1352,6 +1353,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.agent_cli.approval",
+    "mindroom.turn_model",
 ]
 visibility = ["mindroom.response_runner"]
 
@@ -1699,6 +1701,7 @@ depends_on = [
     "mindroom.tool_system.skills",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -1920,6 +1923,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.config.resolution",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -2627,6 +2631,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.runtime_context",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -2722,6 +2727,7 @@ depends_on = [
     "mindroom.history.storage",
     "mindroom.logging_config",
     "mindroom.session_storage.lanes",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -2992,6 +2998,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.failure_text",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -3337,6 +3344,7 @@ depends_on = [
     "mindroom.user_turn_time",
     "mindroom.tool_system.agent_tools",
     "mindroom.config.resolution",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -3421,6 +3429,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.tool_system.events",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -3479,6 +3488,7 @@ depends_on = [
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
     "mindroom.config.resolution",
+    "mindroom.turn_model",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -4675,6 +4685,7 @@ depends_on = [
     "mindroom.session_storage.types",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tools",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -5771,6 +5782,15 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.declarations",
+]
+
+[[modules]]
+path = "mindroom.turn_model"
+depends_on = [
+    "mindroom.budgets.monitor",
+    "mindroom.entity_resolution",
+    "mindroom.room_model_overrides",
+    "mindroom.thread_models",
 ]
 
 [[modules]]
@@ -7966,6 +7986,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_routing",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -8289,6 +8310,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.llm",
+    "mindroom.turn_model",
 ]
 visibility = [
     "mindroom.ai",
@@ -8460,6 +8482,7 @@ depends_on = [
     "mindroom.model_catalog",
     "mindroom.model_selection_scope",
     "mindroom.thread_models",
+    "mindroom.turn_model",
 ]
 
 [[modules]]
@@ -9545,6 +9568,7 @@ depends_on = [
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",
+    "mindroom.turn_model",
 ]
 visibility = ["mindroom.skill_learning.runner"]
 
