@@ -65,10 +65,10 @@ from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
     build_team_spec,
-    materialize_team_members,
     materialized_team_label,
     requested_team_agent_names,
     resolve_team_member_model_names,
+    resolve_team_members,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -360,7 +360,8 @@ class _TeamTurn:
     """The constants of one team turn, shared by its attempts.
 
     ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
-    agent turn runs on the config it was given; ``orchestrator`` says which agents are running now.
+    agent turn runs on the config it was given; ``orchestrator`` supplies the runtime paths and the knowledge refresh
+    scheduler.
     """
 
     ctx: ResponseTurnContext
@@ -380,7 +381,6 @@ class _TeamTurn:
     configured_team_name: str | None
     pipeline_timing: DispatchPipelineTiming | None
     turn_recorder: TurnRecorder
-    reason_prefix: str
     holder: _TeamTurnHolder
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
@@ -797,7 +797,7 @@ def _team_turn(
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
-        team_members = materialize_team_members(
+        team_members = resolve_team_members(
             requested_agent_names,
             orchestrator,
             execution_identity,
@@ -835,7 +835,6 @@ def _team_turn(
         configured_team_name=configured_team_name,
         pipeline_timing=pipeline_timing,
         turn_recorder=turn_recorder,
-        reason_prefix=reason_prefix,
         holder=_TeamTurnHolder(members=team_members),
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=config.get_entity_timezone(ctx.entity_label),

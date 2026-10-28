@@ -34,8 +34,8 @@ from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     build_team_spec,
-    materialize_exact_team_members,
     materialized_team_label,
+    resolve_exact_team_members,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -341,7 +341,7 @@ async def continue_paused_team_run(
                 for name in member_names
             }
         members = await asyncio.to_thread(
-            materialize_exact_team_members,
+            resolve_exact_team_members,
             list(member_names),
             config=config,
             runtime_paths=runtime_paths,

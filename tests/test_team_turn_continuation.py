@@ -22,7 +22,7 @@ from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.room_model_overrides import set_room_model_override
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import resolve_exact_team_members
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call
 from tests.team_turn_helpers import (
@@ -422,7 +422,7 @@ def test_members_built_without_a_resumable_driver_leave_out_their_approval_gated
     team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
 
     def tool_names(**kwargs: Any) -> set[str]:  # noqa: ANN401
-        members = materialize_exact_team_members(
+        members = resolve_exact_team_members(
             ["general"],
             config=team.config,
             runtime_paths=team.runtime_paths,

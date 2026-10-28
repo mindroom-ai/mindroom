@@ -3395,7 +3395,7 @@ def _scripted_team(
 
 
 def _resolved_members(members: Sequence[tuple[str, str, ScriptedModel]]) -> ResolvedExactTeamMembers:
-    """Return the member set ``materialize_exact_team_members`` resolves for the ``(id, name, model)`` members."""
+    """Return the member set ``resolve_exact_team_members`` resolves for the ``(id, name, model)`` members."""
     return resolved_members({member_id: name for member_id, name, _model in members})
 
 
@@ -3932,7 +3932,7 @@ class TestTeamCompletion:
 
         config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
         with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", side_effect=fake_materialize),
+            patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
             patch(
                 "mindroom.api.openai_compat.prepare_materialized_team_execution",
@@ -4991,7 +4991,7 @@ class TestTeamCompletion:
         )
         assert scope_context is not None
         with (
-            patch("mindroom.api.openai_compat.materialize_exact_team_members", return_value=members),
+            patch("mindroom.api.openai_compat.resolve_exact_team_members", return_value=members),
             patch("mindroom.api.openai_compat.build_team_spec", side_effect=RuntimeError("team build failed")),
             pytest.raises(RuntimeError, match="team build failed"),
         ):

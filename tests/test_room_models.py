@@ -25,7 +25,7 @@ from mindroom.room_model_overrides import (
     resolve_room_model_override,
     set_room_model_override,
 )
-from mindroom.teams.members import materialize_exact_team_members
+from mindroom.teams.members import resolve_exact_team_members
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_command_handler_context
@@ -377,7 +377,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         model_name="large",
     )
 
-    members = materialize_exact_team_members(
+    members = resolve_exact_team_members(
         ["assistant"],
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -403,7 +403,7 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         entity_names=("assistant",),
         config=context.config,
     )
-    thread_members = materialize_exact_team_members(
+    thread_members = resolve_exact_team_members(
         ["assistant"],
         config=context.config,
         runtime_paths=context.runtime_paths,

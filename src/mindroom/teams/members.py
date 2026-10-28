@@ -75,7 +75,7 @@ class TeamTurnModelSelection:
     member_model_names: dict[str, str]
 
 
-def materialize_exact_team_members(
+def resolve_exact_team_members(
     requested_agent_names: list[str],
     *,
     config: Config,
@@ -84,22 +84,15 @@ def materialize_exact_team_members(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     active_model_names: Mapping[str, str] | None,
     include_openai_compat_guidance: bool = False,
-    materializable_agent_names: set[str] | None = None,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
-    reason_prefix: str = "Team request",
     supports_native_tool_approval: bool = False,
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
-    """Resolve the exact team-member set without silent fallback: each member's model and knowledge, and its build.
+    """Resolve the exact team-member set: each member's model and knowledge, and its build.
 
-    A member outside ``materializable_agent_names`` rejects the set with a ``ValueError`` naming it, before anything
-    resolves. Each member's knowledge resolves now, so ``unavailable_bases`` collects what the leader's turn is told is
+    Each member's knowledge resolves now, so ``unavailable_bases`` collects what the leader's turn is told is
     unavailable; the members themselves build on their first delegation.
     """
-    if materializable_agent_names is not None:
-        missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
-        if missing_agent_names:
-            raise ValueError(not_materializable_team_agents_message(missing_agent_names, prefix=reason_prefix))
     knowledge: dict[str, AgentKnowledge | None] = {}
     for agent_name in requested_agent_names:
         knowledge_resolution = resolve_agent_knowledge_access(
@@ -174,7 +167,7 @@ def resolve_team_member_model_names(
     }
 
 
-def materialize_team_members(
+def resolve_team_members(
     agent_names: list[str],
     orchestrator: OrchestratorRuntime,
     execution_identity: ToolExecutionIdentity | None,
@@ -187,8 +180,10 @@ def materialize_team_members(
 ) -> ResolvedExactTeamMembers:
     """Resolve the exact requested team-member set under the turn's ``config`` without silent fallback.
 
-    The orchestrator says which shared agents are running now; a requested member that is not rejects the set.
+    The orchestrator says which shared agents are running now; a requested member that is not, or that this request
+    may not reach, rejects the set with a ``ValueError`` naming it under ``reason_prefix``, before anything resolves.
     """
+    requested_agent_names = requested_team_agent_names(agent_names)
     materializable_agent_names = resolve_team_materializable_agent_names(
         config,
         resolve_live_shared_agent_names(orchestrator),
@@ -197,17 +192,19 @@ def materialize_team_members(
             configured_team_name=configured_team_name,
         ),
     )
-    return materialize_exact_team_members(
-        requested_team_agent_names(agent_names),
+    if materializable_agent_names is not None:
+        missing_agent_names = [name for name in requested_agent_names if name not in materializable_agent_names]
+        if missing_agent_names:
+            raise ValueError(not_materializable_team_agents_message(missing_agent_names, prefix=reason_prefix))
+    return resolve_exact_team_members(
+        requested_agent_names,
         config=config,
         runtime_paths=orchestrator.runtime_paths,
         execution_identity=execution_identity,
-        materializable_agent_names=materializable_agent_names,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
         supports_native_tool_approval=True,
         active_model_names=active_model_names,
-        reason_prefix=reason_prefix,
     )
 
 
@@ -499,11 +496,11 @@ __all__ = [
     "TeamTurnModelSelection",
     "allow_direct_private_team_agents",
     "build_team_spec",
-    "materialize_exact_team_members",
-    "materialize_team_members",
     "materialized_team_label",
     "requested_team_agent_names",
+    "resolve_exact_team_members",
     "resolve_team_member_model_names",
+    "resolve_team_members",
     "resolve_team_turn_models",
     "select_model_for_team",
 ]

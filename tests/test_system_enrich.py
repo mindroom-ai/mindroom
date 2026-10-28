@@ -39,7 +39,7 @@ from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
-from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -353,7 +353,7 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
 def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:
     """Materialize the code and research members on scripted providers, as a team reply does."""
     install_model_providers(monkeypatch, {"default": ScriptedModel([])})
-    return materialize_exact_team_members(
+    return resolve_exact_team_members(
         ["code", "research"],
         config=config,
         runtime_paths=runtime_paths_for(config),

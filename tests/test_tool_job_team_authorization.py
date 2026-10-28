@@ -18,7 +18,7 @@ from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn,
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
-from mindroom.teams.members import _team_member, build_team_spec, materialize_exact_team_members
+from mindroom.teams.members import _team_member, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.conversation import current_conversation
@@ -469,7 +469,7 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
         return BackgroundOutcome("completed", "Member result")
 
     try:
-        members = materialize_exact_team_members(
+        members = resolve_exact_team_members(
             ["alpha", "zeta"],
             config=config,
             runtime_paths=runtime_paths,
@@ -554,7 +554,7 @@ async def test_the_member_that_posts_an_ad_hoc_teams_replies_hears_when_its_jobs
         return BackgroundOutcome("completed", "Member result")
 
     try:
-        members = materialize_exact_team_members(
+        members = resolve_exact_team_members(
             ["alpha", "zeta"],
             config=config,
             runtime_paths=runtime_paths,

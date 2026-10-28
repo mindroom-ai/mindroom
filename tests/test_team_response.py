@@ -50,7 +50,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, Response
 from mindroom.session_storage.store import ConversationStore
 from mindroom.teams.envelope import prepare_materialized_team_execution, team_response, team_response_stream
 from mindroom.teams.formation import resolve_live_shared_agent_names
-from mindroom.teams.members import build_team_spec, materialize_team_members
+from mindroom.teams.members import build_team_spec, resolve_team_members
 from mindroom.teams.presentation import TeamStreamPresentation, url_safe_member_id
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
@@ -970,7 +970,7 @@ async def test_preparing_a_team_turn_directly_recovers_an_earlier_reply_s_notice
     """A caller that prepares the turn itself, as the OpenAI-compatible API does, recovers the live notice too."""
     team = _team(tmp_path, monkeypatch)
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
-    members = materialize_team_members(
+    members = resolve_team_members(
         list(team.member_names),
         team.orchestrator,
         team.identity,
@@ -1022,7 +1022,7 @@ def test_a_member_s_roster_role_is_its_authored_role_not_its_rendered_prompt(
 ) -> None:
     """The leader reads the role the member's config authors, whatever the member's own prompt renders around it."""
     team = _team(tmp_path, monkeypatch)
-    members = materialize_team_members(
+    members = resolve_team_members(
         list(team.member_names),
         team.orchestrator,
         team.identity,
@@ -1589,7 +1589,7 @@ async def test_a_resume_whose_history_cannot_be_opened_builds_no_member(
     team = _team(tmp_path, monkeypatch)
 
     with (
-        patch("mindroom.teams.resume.materialize_exact_team_members") as materialize,
+        patch("mindroom.teams.resume.resolve_exact_team_members") as materialize,
         patch("mindroom.teams.resume.load_scope_session", side_effect=RuntimeError("scope load failed")),
         pytest.raises(RuntimeError, match="scope load failed"),
     ):
