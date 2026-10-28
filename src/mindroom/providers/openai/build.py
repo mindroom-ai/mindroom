@@ -377,6 +377,12 @@ def _chat_client_factory(
     )
 
 
+def _with_cli_home(extra_kwargs: dict[str, Any], setting: str, variable: str, runtime: ProviderRuntime) -> None:
+    """Fill a CLI login's home directory from the runtime env, the ``.env`` beside the config included, unless set."""
+    if setting not in extra_kwargs and (home := runtime.runtime_paths.env_value(variable)):
+        extra_kwargs[setting] = home
+
+
 def _with_agent_cache_key(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) -> None:
     """Share cache accounting across one agent's threads unless the config sets its own key."""
     if "prompt_cache_key" in extra_kwargs or runtime.execution_identity is None:
@@ -407,6 +413,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     model_id = model_config.id
     if route_key == "kimi":
         model_id = normalize_kimi_model_id(model_id)
+        _with_cli_home(extra_kwargs, "kimi_home", "KIMI_CODE_HOME", runtime)
         _with_agent_cache_key(extra_kwargs, runtime)
     if route_key == "azure":
         _populate_azure_env(extra_kwargs, runtime)
@@ -490,6 +497,7 @@ def _build_responses(
     model_id = model_config.id
     if route_key == "codex":
         model_id = normalize_codex_model_id(model_id)
+        _with_cli_home(extra_kwargs, "codex_home", "CODEX_HOME", runtime)
         _with_agent_cache_key(extra_kwargs, runtime)
         if runtime.execution_identity is not None:
             extra_kwargs["session_id"] = derive_session_routing_key(

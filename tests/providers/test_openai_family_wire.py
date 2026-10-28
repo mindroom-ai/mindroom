@@ -56,6 +56,7 @@ from tests.providers.openai_family_support import (
     openai_family_adapter,
     provider_runtime,
     unsigned_jwt,
+    write_cli_logins,
 )
 
 if TYPE_CHECKING:
@@ -817,6 +818,50 @@ def test_a_proxy_error_page_becomes_a_retryable_error_with_its_text() -> None:
 
     assert type(error) is ProviderUnavailable
     assert (str(error), error.status_code, error.retryable) == (page, 502, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_config", "variable", "reply", "authorization"),
+    [
+        (
+            {"provider": "codex", "id": "gpt-6.1-sol"},
+            "CODEX_HOME",
+            _responses_reply(*_text_events("ok"), _completed()),
+            "Bearer eyJ",
+        ),
+        (
+            {"provider": "kimi", "id": "k3"},
+            "KIMI_CODE_HOME",
+            _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+            "Bearer parity-kimi-token",
+        ),
+    ],
+    ids=["codex", "kimi"],
+)
+async def test_a_cli_login_home_set_in_the_env_file_is_read(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+    variable: str,
+    reply: dict[str, Any],
+    authorization: str,
+) -> None:
+    """``CODEX_HOME`` and ``KIMI_CODE_HOME`` in the ``.env`` beside the config locate the CLI's saved login."""
+    homes = {"CODEX_HOME": "<codex_home>", "KIMI_CODE_HOME": "<kimi_home>"}
+    login_home = write_cli_logins(tmp_path)[homes[variable]]
+    (tmp_path / ".env").write_text(f"{variable}={login_home}\n", encoding="utf-8")
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(reply)
+
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
+    runtime = provider_runtime(paths, http_client=httpx2.AsyncClient(transport=httpx2_transport(respond)))
+
+    await complete(build_provider(ModelConfig(**model_config), runtime), ModelRequest(messages=[_user()]))
+
+    assert sent[0].headers["authorization"].startswith(authorization)
 
 
 @pytest.mark.asyncio
