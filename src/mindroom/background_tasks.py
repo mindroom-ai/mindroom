@@ -105,9 +105,16 @@ def retry_delay_seconds(
     initial_delay_seconds: float,
     max_delay_seconds: float,
 ) -> float:
-    """Return capped exponential backoff delay for a retry attempt."""
-    exponent = max(0, attempt - 1)
-    return min(max_delay_seconds, initial_delay_seconds * (2**exponent))
+    """Return capped exponential backoff delay for a retry attempt.
+
+    Doubling stops at the cap, so an owner that retries for days never overflows.
+    """
+    delay = initial_delay_seconds
+    for _ in range(max(0, attempt - 1)):
+        if delay >= max_delay_seconds:
+            break
+        delay *= 2
+    return min(max_delay_seconds, delay)
 
 
 class SupervisedLoop:

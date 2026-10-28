@@ -12,7 +12,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from mindroom import background_tasks
-from mindroom.background_tasks import SupervisedLoop, create_background_task, wait_for_future_until_complete
+from mindroom.background_tasks import (
+    SupervisedLoop,
+    create_background_task,
+    retry_delay_seconds,
+    wait_for_future_until_complete,
+)
 
 
 @pytest.mark.asyncio
@@ -259,3 +264,13 @@ async def test_supervised_loop_backoff_grows_and_resets_after_a_healthy_run(
         await loop.stop()
 
     assert restart_attempts == [1, 2, 3, 1, 2]
+
+
+def test_retry_delay_doubles_to_its_cap_and_stays_there_for_any_attempt() -> None:
+    """A start retry blocked for days keeps getting the capped delay instead of overflowing."""
+    delays = [
+        retry_delay_seconds(attempt, initial_delay_seconds=2.0, max_delay_seconds=60.0) for attempt in (1, 2, 5, 6)
+    ]
+
+    assert delays == [2.0, 4.0, 32.0, 60.0]
+    assert retry_delay_seconds(10_000, initial_delay_seconds=2.0, max_delay_seconds=60.0) == 60.0
