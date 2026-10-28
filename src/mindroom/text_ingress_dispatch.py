@@ -358,7 +358,7 @@ def _ensure_response_admission_open(controller: TurnController) -> None:
         raise ResponseAdmissionRefusedError
 
 
-async def _apply_turn_plan(  # noqa: C901
+async def _apply_turn_plan(
     controller: TurnController,
     room: nio.MatrixRoom,
     prepared: _PreparedTextDispatch,
@@ -432,9 +432,6 @@ async def _apply_turn_plan(  # noqa: C901
         response_claim_released = True
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 
-    async def response_recovery_ready() -> bool:
-        return await controller.deps.response_recovery_ready(handled_turn)
-
     response_task = controller.deps.response_runner.track_inbox_response(
         _run_lazily_claimed_response(
             controller,
@@ -456,7 +453,7 @@ async def _apply_turn_plan(  # noqa: C901
         ),
         name=f"inbox_response:{prepared.event.event_id}",
         room_id=room.room_id,
-        recovery_proof_ready=response_recovery_ready,
+        recovery_proof_ready=lambda: controller.deps.turn_store.response_recovery_ready(handled_turn),
         on_failure=lambda: (
             controller.deps.retry_dispatch_sources(room.room_id, handled_turn.source_event_ids)
             if response_started.is_set()

@@ -1590,6 +1590,7 @@ async def test_runtime_redaction_observer_rejects_recovered_revision_without_phy
             state_writer=Mock(spec=ConversationStateWriter),
             resolver=_redaction_observer_store().deps.resolver,
             tool_runtime=Mock(spec=ToolRuntimeSupport),
+            response_recovery_state=AsyncMock(),
         ),
     )
     await store.warm()

@@ -19,7 +19,6 @@ import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.bot import AgentBot
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -62,7 +61,6 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
-from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -95,7 +93,6 @@ if TYPE_CHECKING:
         PrincipalStore,
     )
     from mindroom.event_journal.backend import Transaction
-    from mindroom.turn_store import TurnStore
 
 
 async def _empty_stream() -> AsyncIterator[str]:
@@ -264,27 +261,6 @@ async def _turn_row(principal: PrincipalStore, stage: DeliveryStage, turn_id: st
     row = await principal.load_matrix_delivery(delivery_id=turn_id, stage=stage)
     assert row is not None
     return row
-
-
-def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnStore) -> AgentBot:
-    """Return the minimal real proof owner used by delivery integration tests."""
-    bot = object.__new__(AgentBot)
-    bot._journal_store = journal_store
-    bot._journal_principal_id = "agent@alice"
-    bot._turn_store = turn_store
-    bot._response_recovery_diagnostic_classes = set()
-    bot.logger = MagicMock()
-    # No reply runs here, so a deletion ends none and nothing owes debt.
-    bot._reply_runtime = ReplyRuntime(
-        store=journal_store.principal("agent@alice"),
-        entity_name="agent",
-        generation="gen-1",
-        retry_sources=lambda _room_id, _sources: None,
-        complete_turn=AsyncMock(),
-        hold_conversation=lambda _continuation: None,
-        approval_ended=lambda _ended: None,
-    )
-    return bot
 
 
 @pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
@@ -2133,7 +2109,7 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
             },
         ),
     )
-    bot = _response_recovery_bot(journal_store, await _store(journal_store))
+    turn_store = await _store(journal_store)
 
     backend = journal_store.backend
     ordinary_capacity = (
@@ -2159,7 +2135,7 @@ async def test_process_shutdown_recovery_bypasses_saturated_ordinary_journal_rea
         assert await asyncio.to_thread(ordinary_started.wait, SETTLE_TIMEOUT_SECONDS), (
             "ordinary journal reads did not saturate"
         )
-        proof = asyncio.create_task(bot._response_recovery_ready(turn))
+        proof = asyncio.create_task(turn_store.response_recovery_ready(turn))
         ready = await asyncio.wait_for(asyncio.shield(proof), timeout=SETTLE_TIMEOUT_SECONDS)
     finally:
         release_ordinary.set()
@@ -2992,7 +2968,6 @@ class TestTurnDeliverySerialization:
             terminal_turn_committed=turn_store.publish_completed_turn,
             turn_handoff=handoff,
         )
-        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -3012,7 +2987,7 @@ class TestTurnDeliverySerialization:
                 payload={"msgtype": "m.text", "body": "answer"},
             ),
             name="test_process_shutdown_completed_final",
-            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
             room_id=_ROOM_ID,
         )
         await send_started.wait()
@@ -3081,7 +3056,6 @@ class TestTurnDeliverySerialization:
             terminal_turn_committed=publish_completed_turn,
             turn_handoff=handoff,
         )
-        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -3101,7 +3075,7 @@ class TestTurnDeliverySerialization:
                 payload={"msgtype": "m.text", "body": "answer"},
             ),
             name="test_process_shutdown_repeated_cancel_after_final_ack",
-            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
             room_id=_ROOM_ID,
         )
         await send_started.wait()
@@ -3185,7 +3159,6 @@ class TestTurnDeliverySerialization:
             terminal_turn_committed=turn_store.publish_completed_turn,
             turn_handoff=handoff,
         )
-        bot = _response_recovery_bot(journal_store, turn_store)
         send_started = asyncio.Event()
         finish_send = asyncio.Event()
 
@@ -3206,7 +3179,7 @@ class TestTurnDeliverySerialization:
                 edits_event_id=placeholder_event_id,
             ),
             name="test_process_shutdown_completed_final_edit",
-            recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+            recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
             room_id=_ROOM_ID,
         )
         await send_started.wait()

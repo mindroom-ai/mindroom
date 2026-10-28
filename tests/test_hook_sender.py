@@ -1020,7 +1020,7 @@ async def test_payload_enrichment_timing_reports_hook_counts(tmp_path: Path) -> 
 
     bot.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich, system_enrich])])
 
-    with patch("mindroom.turn_policy.emit_elapsed_timing") as mock_emit:
+    with patch("mindroom.hooks.ingress.emit_elapsed_timing") as mock_emit:
         prepared = await bot._ingress_hook_runner.apply_message_enrichment(
             dispatch,
             DispatchPayload(prompt="hello"),

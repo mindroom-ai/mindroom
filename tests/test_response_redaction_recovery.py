@@ -8,11 +8,12 @@ import json
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
 
+from mindroom.bot import AgentBot
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, journal
 from mindroom.handled_turns import TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
@@ -21,6 +22,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.message_target import MessageTarget
+from mindroom.reply_scope import ReplyRuntime
 from mindroom.response_runner import ResponseRunner
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
@@ -29,7 +31,6 @@ from tests.conftest import seed_session
 from tests.journal_helpers import admit_dispatch_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 from tests.test_orderly_shutdown_recovery import _dispatcher
-from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _next_request, _seeded_storage, _store, _store_with_storage
 
 if TYPE_CHECKING:
@@ -44,6 +45,23 @@ ROOM = "!redaction:localhost"
 SOURCE = "$deleted"
 REDACTION = "$redaction"
 pytestmark = pytest.mark.ledger_loads_from_disk
+
+
+def _redaction_callback_bot(journal_store: EventJournalStore, turn_store: TurnStore) -> AgentBot:
+    """Return the minimal bot whose redaction callback these tests hand the journal dispatcher."""
+    bot = object.__new__(AgentBot)
+    bot._turn_store = turn_store
+    # No reply runs here, so a deletion ends none and nothing owes debt.
+    bot._reply_runtime = ReplyRuntime(
+        store=journal_store.principal("agent@alice"),
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        complete_turn=AsyncMock(),
+        hold_conversation=lambda _continuation: None,
+        approval_ended=lambda _ended: None,
+    )
+    return bot
 
 
 def _message(event_id: str = SOURCE, body: str = "deleted prompt") -> nio.RoomMessageText:
@@ -82,7 +100,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
     """Admission retires generation while the replayable callback still owns cleanup."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store, store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -125,7 +143,7 @@ async def test_pending_redaction_owns_interrupted_initial_response(  # noqa: PLR
     response = runner.track_inbox_response(
         generate(),
         name="inbox_response:deleted",
-        recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+        recovery_proof_ready=lambda: store.response_recovery_ready(turn),
         source_event_ids=turn.source_event_ids,
         room_id=ROOM,
     )
@@ -204,11 +222,11 @@ async def test_restart_survivor_cleans_pending_redaction_before_generation(  # n
     )
     await store.record_pending_turn(turn)
     await admit_dispatch_event(initial_dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
-    assert await _response_recovery_bot(journal_store, store)._response_recovery_ready(turn)
+    assert await store.response_recovery_ready(turn)
     _reset_handled_turn_ledger_runtime()
     reopened = TurnStore(store.deps)
     await reopened.warm()
-    bot = _response_recovery_bot(journal_store, reopened)
+    bot = _redaction_callback_bot(journal_store, reopened)
     requests: list[str] = []
     survivor_delivered = asyncio.Event()
 
@@ -279,7 +297,7 @@ async def test_completed_redaction_requires_current_tombstone_authority(
     """The ledger tombstone in the source's room proves the redaction before and after late registration."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store, store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -323,7 +341,7 @@ async def test_completed_redaction_requires_current_tombstone_authority(
             ),
         )
     # History cleanup no longer depends on the record's conversation context, so losing it changes nothing.
-    assert await bot._response_recovery_ready(turn) is (fault in {"none", "missing_context"})
+    assert await store.response_recovery_ready(turn) is (fault in {"none", "missing_context"})
 
 
 @pytest.mark.asyncio
@@ -347,7 +365,6 @@ async def test_redaction_proof_rejects_inexact_callback_debt(journal_store: Even
     """Pending cleanup counts only when the exact retained callback can perform it."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
     dispatcher = _dispatcher(principal, MagicMock())
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
     await admit_dispatch_event(dispatcher, room, _message(), EventKind.MESSAGE, EventClass.ACTIONABLE)
@@ -395,7 +412,7 @@ async def test_redaction_proof_rejects_inexact_callback_debt(journal_store: Even
                 (source_json, REDACTION),
             ),
         )
-    assert not await bot._response_recovery_ready(turn)
+    assert not await store.response_recovery_ready(turn)
 
 
 @pytest.mark.asyncio
@@ -407,7 +424,6 @@ async def test_mixed_response_needs_independent_ownership_for_every_source(
     """A pending survivor cannot excuse an unrelated settled sibling."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
     dispatcher = _dispatcher(principal, MagicMock())
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
     sources = (SOURCE, "$survivor", "$uncovered") if uncovered_sibling else (SOURCE, "$survivor")
@@ -418,7 +434,7 @@ async def test_mixed_response_needs_independent_ownership_for_every_source(
     await admit_dispatch_event(dispatcher, room, _redaction(), EventKind.REDACTION, EventClass.ACTIONABLE)
     if uncovered_sibling:
         await principal.settle("$uncovered")
-    assert await bot._response_recovery_ready(turn) is not uncovered_sibling
+    assert await store.response_recovery_ready(turn) is not uncovered_sibling
     assert await principal.is_pending("$survivor")
     assert await principal.is_pending(REDACTION)
 
@@ -431,7 +447,7 @@ async def test_redaction_callback_settlement_cannot_split_recovery_snapshot(
     """One read sees pending cleanup or its committed marker across the callback transition."""
     principal = journal_store.principal("agent@alice")
     store = await _store(journal_store)
-    bot = _response_recovery_bot(journal_store, store)
+    bot = _redaction_callback_bot(journal_store, store)
     dispatcher = _dispatcher(principal, MagicMock())
     dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=bot._on_redaction)
     room = nio.MatrixRoom(ROOM, "@bot:localhost")
@@ -473,7 +489,7 @@ async def test_redaction_callback_settlement_cannot_split_recovery_snapshot(
     assert snapshot.redacted_sources == (True,)
     assert snapshot.turn_records[0] is not None
     assert snapshot.turn_records[0].redacted_source_event_ids == ()
-    assert await bot._response_recovery_ready(turn)
+    assert await store.response_recovery_ready(turn)
 
 
 @pytest.mark.asyncio

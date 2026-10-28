@@ -42,7 +42,6 @@ from tests.test_edit_regenerator import (
     _turn_record,
 )
 from tests.test_response_attempt import _Span
-from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _store, _store_with_storage
 
 if TYPE_CHECKING:
@@ -306,8 +305,7 @@ async def test_recovery_proof_rejects_settlement_without_final_output(journal_st
         ),
     )
     await principal.settle("$missing-output")
-    proof_owner = _response_recovery_bot(journal_store, store)
-    assert not await proof_owner._response_recovery_ready(record)
+    assert not await store.response_recovery_ready(record)
 
 
 @pytest.mark.asyncio

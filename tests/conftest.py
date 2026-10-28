@@ -87,7 +87,6 @@ from mindroom.dispatch_handoff import (
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.edit_regenerator import EditRegenerator
 from mindroom.embeddings.openai_embedder import OpenAIEmbedder
-from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.event_journal import (
     AdmissionResult,
     ConversationPage,
@@ -112,7 +111,7 @@ from mindroom.event_journal.matrix_delivery import TurnHandoff
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
+from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -2720,27 +2719,6 @@ async def finish_edit_regenerations(bot: RuntimeBot) -> None:
     """Wait for the regenerations edits started off the room's lane, as a test checks their effects."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await asyncio.gather(*tuple(runner._inbox_response_tasks), return_exceptions=True)
-
-
-def journal_edit_regenerator_deps(bot: RuntimeBot, principal: PrincipalStore) -> dict[str, object]:
-    """Return the edit regenerator collaborators that read ``principal``, for a test that moved the bot's replies there."""
-
-    async def later_human_message(record: TurnRecord) -> bool:
-        target = record.conversation_target
-        assert target is not None
-        return await principal.later_message_exists(
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            source_event_ids=record.source_event_ids,
-            excluded_senders=persisted_bot_user_ids(bot.runtime_paths),
-            whole_room=bot._room_scope_is_single_conversation(target.room_id),
-        )
-
-    return {
-        "generate_response": bot._run_regenerated_response,
-        "reply_for_sources": principal.replies.for_sources,
-        "later_human_message": later_human_message,
-    }
 
 
 def replace_edit_regenerator_deps(bot: RuntimeBot, **changes: object) -> EditRegenerator:

@@ -17,6 +17,7 @@ import asyncio
 import inspect
 import json
 from dataclasses import dataclass, field, fields, replace
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,7 +31,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing.batch import (
     CoalescingKey,
@@ -88,6 +88,7 @@ from mindroom.hooks import (
     MessageReceivedContext,
     hook,
 )
+from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     InboundTurnNormalizerDeps,
@@ -98,6 +99,7 @@ from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
+from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.large_messages import prepare_large_message
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
@@ -113,7 +115,7 @@ from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 from mindroom.turn_controller import TurnController, TurnControllerDeps
 from mindroom.turn_origin import TurnIntent
-from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
@@ -552,6 +554,11 @@ def _build_harness(
             state_writer=state_writer,
             resolver=resolver,
             tool_runtime=tool_runtime,
+            response_recovery_state=partial(
+                journal_principal.response_recovery_state,
+                agent_name=agent_name,
+                redaction_target=replayable_redaction_target,
+            ),
         ),
     )
     policy = _SpyTurnPolicy(
@@ -692,7 +699,6 @@ def _build_harness(
             ),
             visible_responses=visible_responses,
             retry_dispatch_sources=_retry_dispatch_sources,
-            response_recovery_ready=AsyncMock(return_value=False),
             settle_dispatch_sources=_settle_ignored_dispatch_sources,
             dispatch_source_is_terminal=_dispatch_source_is_terminal,
         ),
@@ -3932,11 +3938,12 @@ async def test_handled_thread_alone_does_not_prove_recovery(
 async def test_response_recovery_proof_uses_durable_owner_callback(
     config: Config,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The inbox owner asks the durable journal/outbox boundary after it exits."""
     harness = _build_harness(config, tmp_path)
     durable_recovery_ready = AsyncMock(return_value=True)
-    object.__setattr__(harness.controller.deps, "response_recovery_ready", durable_recovery_ready)
+    monkeypatch.setattr(harness.turn_store, "response_recovery_ready", durable_recovery_ready)
     event = _text_event("recover me after process shutdown")
 
     await harness.deliver(_room_with_members(config, "general"), event)
@@ -3952,15 +3959,13 @@ async def test_response_recovery_proof_uses_durable_owner_callback(
 async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
     config: Config,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A terminal response is safe only while one durable owner still owes it."""
     harness = _build_harness(config, tmp_path)
-    bot = object.__new__(AgentBot)
-    bot._journal_store = harness.journal_store
-    bot._journal_principal_id = harness.controller.deps.matrix_id.full_id
-    bot._turn_store = harness.turn_store
-    bot.logger = MagicMock()
-    bot._response_recovery_diagnostic_classes = set()
+    store = harness.turn_store
+    diagnostics = MagicMock()
+    monkeypatch.setattr("mindroom.turn_store.logger", diagnostics)
 
     journal_source_id = "$journal-owned:localhost"
     journal_turn = TurnRecord.create([journal_source_id])
@@ -3978,13 +3983,13 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         ),
     )
     assert harness.turn_store.try_claim_turn(journal_turn)
-    assert await bot._response_recovery_ready(journal_turn) is False
+    assert await store.response_recovery_ready(journal_turn) is False
     harness.turn_store.release_pending_turn_claim(journal_turn)
-    assert await bot._response_recovery_ready(journal_turn) is True
+    assert await store.response_recovery_ready(journal_turn) is True
 
     await harness.journal_principal.settle(journal_source_id)
-    assert await bot._response_recovery_ready(journal_turn) is False
-    assert await bot._response_recovery_ready(replace(journal_turn, anchor_event_id=None)) is False
+    assert await store.response_recovery_ready(journal_turn) is False
+    assert await store.response_recovery_ready(replace(journal_turn, anchor_event_id=None)) is False
 
     mixed_source_ids = ("$mixed-pending:localhost", "$mixed-settled:localhost")
     mixed_turn = TurnRecord.create(mixed_source_ids)
@@ -4003,7 +4008,7 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
             ),
         )
     await harness.journal_principal.settle(mixed_source_ids[1])
-    assert await bot._response_recovery_ready(mixed_turn) is False
+    assert await store.response_recovery_ready(mixed_turn) is False
 
     outbox_source_id = "$outbox-owned:localhost"
     outbox_turn = TurnRecord.create([outbox_source_id])
@@ -4033,7 +4038,7 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         )
         is not None
     )
-    assert await bot._response_recovery_ready(outbox_turn) is True
+    assert await store.response_recovery_ready(outbox_turn) is True
     await harness.journal_principal.claim_matrix_delivery(
         delivery_id=outbox_turn_id,
         stage=DeliveryStage.FINAL,
@@ -4044,7 +4049,7 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
         event_id="$acknowledged:localhost",
         delivered_projections=(),
     )
-    assert await bot._response_recovery_ready(outbox_turn) is False
+    assert await store.response_recovery_ready(outbox_turn) is False
     await harness.turn_store.record_responded_turn(
         replace(
             outbox_turn,
@@ -4052,9 +4057,9 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
             response_event_id="$different:localhost",
         ),
     )
-    assert await bot._response_recovery_ready(outbox_turn) is False
+    assert await store.response_recovery_ready(outbox_turn) is False
     diagnostic_calls = [
-        call for call in bot.logger.info.call_args_list if call.args == ("response_recovery_proof_not_ready",)
+        call for call in diagnostics.info.call_args_list if call.args == ("response_recovery_proof_not_ready",)
     ]
     assert [call.kwargs["reason"] for call in diagnostic_calls] == [
         "live_turn_claim",
@@ -4065,6 +4070,7 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
     ]
     terminal_mismatch = diagnostic_calls[-1]
     assert terminal_mismatch.kwargs == {
+        "agent": "general",
         "reason": "terminal_turn_mismatch",
         "source_event_ids": ("$outbox-owned:localhost",),
         "anchor_event_id": "$outbox-owned:localhost",
@@ -4079,6 +4085,7 @@ async def test_process_shutdown_recovery_requires_exact_journal_or_outbox_owner(
     assert all(
         set(call.kwargs)
         <= {
+            "agent",
             "reason",
             "source_event_ids",
             "anchor_event_id",

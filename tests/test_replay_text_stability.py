@@ -100,6 +100,7 @@ async def _persist_and_reload(journal_store: EventJournalStore, record: TurnReco
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            response_recovery_state=AsyncMock(),
         ),
     )
     await store.warm()
@@ -130,8 +131,7 @@ def _regeneration_prompt(record: TurnRecord) -> str:
             stop_reply=AsyncMock(),
             receipt_order=AsyncMock(return_value=1),
             timestamp_formatter=_timestamp_formatter,
-            reply_for_sources=AsyncMock(),
-            later_human_message=AsyncMock(),
+            store=MagicMock(),
         ),
     )
     body = (record.source_event_prompts or {})[record.replay_source_event_ids[-1]]

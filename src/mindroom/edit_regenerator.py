@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
+from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
@@ -26,15 +27,17 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.coalescing.batch import TimestampFormatter
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.event_journal import PrincipalStore
     from mindroom.handled_turns import SourceEventRevision, TurnRecord
     from mindroom.hooks import MessageEnvelope
+    from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
-    from mindroom.turn_policy import IngressHookRunner
     from mindroom.turn_store import TurnStore
 
 
@@ -73,11 +76,9 @@ class EditRegeneratorDeps:
     # Records a Stop on a reply that still runs, as a Stop reaction would.
     stop_reply: Callable[[Reply, int], Awaitable[object]]
     receipt_order: Callable[[], Awaitable[int]]
-    timestamp_formatter: Callable[[float | None], str | None]
-    # The newest reply answering any of these sources, from the reply records.
-    reply_for_sources: Callable[[tuple[str, ...]], Awaitable[Reply | None]]
-    # Whether a human wrote in the turn's conversation after its sources.
-    later_human_message: Callable[[TurnRecord], Awaitable[bool]]
+    timestamp_formatter: TimestampFormatter
+    # The reply records and the stored conversation an edit is checked against.
+    store: PrincipalStore
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,24 @@ class EditRegenerator:
             requires_model_history_refresh=context.requires_model_history_refresh,
         )
 
+    async def _later_human_message(self, record: TurnRecord) -> bool:
+        """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""
+        target = record.conversation_target
+        assert target is not None, "an edit regenerates only a turn with a conversation"
+        return await self.deps.store.later_message_exists(
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            source_event_ids=record.source_event_ids,
+            excluded_senders=persisted_bot_user_ids(self.deps.runtime_paths),
+            # In room mode the room is one conversation, threads included.
+            whole_room=self.deps.runtime.config.get_entity_thread_mode(
+                self.deps.agent_name,
+                self.deps.runtime_paths,
+                room_id=target.room_id,
+            )
+            == "room",
+        )
+
     async def handle_message_edit(  # noqa: C901, PLR0911, PLR0912
         self,
         room: nio.MatrixRoom,
@@ -193,9 +212,9 @@ class EditRegenerator:
             return None
         if original_event_id in turn_record.redacted_source_event_ids:
             return None
-        reply = await self.deps.reply_for_sources(turn_record.source_event_ids)
+        reply = await self.deps.store.replies.for_sources(turn_record.source_event_ids)
         reason = _not_regenerable(reply) or (
-            "later_human_message" if await self.deps.later_human_message(turn_record) else None
+            "later_human_message" if await self._later_human_message(turn_record) else None
         )
         if reason is not None:
             logger.info("edit_not_regenerated", room_id=room.room_id, source_event_id=original_event_id, reason=reason)

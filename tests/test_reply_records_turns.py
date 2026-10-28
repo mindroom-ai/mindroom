@@ -268,7 +268,7 @@ async def test_an_answered_turn_is_ready_for_shutdown_from_its_reply_alone(tmp_p
     record = bot._turn_store.get_turn_record("$event")
     assert record is not None
     assert record.response_event_id is None
-    assert await bot._response_recovery_ready(record)
+    assert await bot._turn_store.response_recovery_ready(record)
 
 
 async def test_a_turn_whose_reply_still_owes_a_row_is_ready_for_shutdown(tmp_path: Path) -> None:
@@ -283,7 +283,7 @@ async def test_a_turn_whose_reply_still_owes_a_row_is_ready_for_shutdown(tmp_pat
     assert await bot._reply_runtime.store.replies.has_unresolved_rows(reply.reply_id)
     record = bot._turn_store.get_turn_record("$event")
     assert record is not None
-    assert await bot._response_recovery_ready(record)
+    assert await bot._turn_store.response_recovery_ready(record)
 
 
 async def test_stop_during_the_stream_cancels_the_reply_with_its_note(tmp_path: Path) -> None:

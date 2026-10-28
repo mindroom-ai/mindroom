@@ -14,7 +14,6 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from tests.journal_membership_helpers import admit_room_membership
-from tests.test_response_delivery_gateway import _response_recovery_bot
 from tests.test_turn_store import _store
 
 if TYPE_CHECKING:
@@ -51,7 +50,6 @@ async def test_departure_during_generation_allows_orderly_shutdown(
     turn = TurnRecord.create(sources)
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
-    bot = _response_recovery_bot(journal_store, turn_store)
     runner = ResponseRunner(deps=MagicMock())
     generating = asyncio.Event()
 
@@ -66,7 +64,7 @@ async def test_departure_during_generation_allows_orderly_shutdown(
     response = runner.track_inbox_response(
         generate(),
         name="generation_during_departure",
-        recovery_proof_ready=lambda: bot._response_recovery_ready(turn),
+        recovery_proof_ready=lambda: turn_store.response_recovery_ready(turn),
         source_event_ids=sources,
         room_id=ROOM,
     )
@@ -101,7 +99,6 @@ async def test_departure_proof_rejects_unexplained_or_inexact_sources(
     turn = TurnRecord.create(["$source"])
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
-    bot = _response_recovery_bot(journal_store, turn_store)
     await principal.settle("$source")
     if case == "other_room":
         await admit_room_membership(principal, "!other:localhost", "join")
@@ -119,6 +116,6 @@ async def test_departure_proof_rejects_unexplained_or_inexact_sources(
     elif case == "no_anchor":
         turn = replace(turn, anchor_event_id=None)
     try:
-        assert await bot._response_recovery_ready(turn) is False
+        assert await turn_store.response_recovery_ready(turn) is False
     finally:
         turn_store.release_pending_turn_claim(turn)

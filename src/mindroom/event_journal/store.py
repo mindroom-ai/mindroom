@@ -255,8 +255,8 @@ class PrincipalStore:
 
     async def response_recovery_state(
         self,
-        *,
         turn_record: TurnRecord,
+        *,
         agent_name: str,
         redaction_target: Callable[[JournalEvent], str | None],
     ) -> ResponseRecoveryState:

@@ -36,7 +36,6 @@ from tests.conftest import (
     finish_edit_regenerations,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
-    journal_edit_regenerator_deps,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
@@ -323,7 +322,8 @@ async def _paused_case(  # noqa: PLR0915
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=3),
-        **journal_edit_regenerator_deps(bot, principal),
+        generate_response=bot._run_regenerated_response,
+        store=principal,
     )
     await seed_finished_reply(
         principal,

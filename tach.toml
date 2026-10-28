@@ -2651,6 +2651,7 @@ path = "mindroom.edit_regenerator"
 depends_on = [
     "mindroom.coalescing.gate",
     "mindroom.conversation_resolver",
+    "mindroom.entity_resolution",
     "mindroom.handled_turns",
     "mindroom.hooks",
     "mindroom.matrix.client_visible_messages",
@@ -3013,7 +3014,13 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.hooks.ingress"
-depends_on = ["mindroom.hooks.types"]
+depends_on = [
+    "mindroom.constants",
+    "mindroom.hooks.context",
+    "mindroom.hooks.enrichment",
+    "mindroom.hooks.execution",
+    "mindroom.hooks.types",
+]
 
 [[modules]]
 path = "mindroom.hooks.registry"
@@ -4822,6 +4829,7 @@ depends_on = [
     "mindroom.event_journal.opening",
     "mindroom.handled_turns",
     "mindroom.hooks",
+    "mindroom.hooks.ingress",
     "mindroom.inbound_turn_normalizer",
     "mindroom.journal_dispatch",
     "mindroom.legacy_handled_turns",
@@ -6100,8 +6108,6 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.hooks",
-    "mindroom.inbound_turn_normalizer",
     "mindroom.managed_room_notice",
     "mindroom.matrix.identity",
     "mindroom.matrix.rooms",

@@ -116,7 +116,7 @@ from mindroom.turn_origin import (
     TurnIntent,
     classify_turn_origin,
 )
-from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.voice.readiness import VoiceReadiness
 
@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import PendingTurnView, PrincipalStore
+    from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
@@ -318,7 +319,6 @@ class TurnControllerDeps:
     visible_voice_echo: VisibleVoiceEchoLifecycle
     visible_responses: VisibleResponseReconciler
     retry_dispatch_sources: Callable[[str, tuple[str, ...]], None]
-    response_recovery_ready: Callable[[TurnRecord], Awaitable[bool]]
     settle_dispatch_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     dispatch_source_is_terminal: Callable[[str], Awaitable[bool]]
 

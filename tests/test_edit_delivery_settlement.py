@@ -22,7 +22,6 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from tests.conftest import (
-    journal_edit_regenerator_deps,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
@@ -123,7 +122,8 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
         regenerator.deps,
         turn_store=store,
         receipt_order=AsyncMock(return_value=1),
-        **journal_edit_regenerator_deps(bot, principal),
+        generate_response=bot._run_regenerated_response,
+        store=principal,
     )
     await seed_finished_reply(
         principal,

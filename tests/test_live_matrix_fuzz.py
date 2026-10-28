@@ -6063,6 +6063,7 @@ async def test_unconsumed_edit_physical_tombstone_settles_checkpoint(
             state_writer=Mock(),
             resolver=Mock(),
             tool_runtime=Mock(),
+            response_recovery_state=AsyncMock(),
         ),
     )
     try:

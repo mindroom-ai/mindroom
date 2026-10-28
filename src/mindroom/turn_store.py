@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal import RelationView
+    from mindroom.event_journal.models import ResponseRecoveryState
     from mindroom.event_journal.store import TurnRecordStore
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -69,6 +70,29 @@ class TurnStoreDeps:
     state_writer: ConversationStateWriter
     resolver: ConversationResolver
     tool_runtime: ToolRuntimeSupport
+    # One consistent read of everything that can still own a response after its
+    # task exits: the journal, the outbox, reply rows, and the stored turn records.
+    response_recovery_state: Callable[[TurnRecord], Awaitable[ResponseRecoveryState]]
+
+
+@dataclass(frozen=True)
+class _TurnMismatchCounts:
+    """How the stored turn records disagree with a turn's acknowledged final answer."""
+
+    missing_completed_turn_count: int
+    incomplete_completed_turn_count: int
+    source_identity_mismatch_count: int
+    anchor_mismatch_count: int
+    response_event_mismatch_count: int
+
+
+@dataclass(frozen=True)
+class _RecoveryGap:
+    """Why a response is neither complete nor still durably owned, with the counts its diagnostic logs."""
+
+    reason: str
+    pending_source_count: int | None = 0
+    turn_mismatches: _TurnMismatchCounts | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +112,11 @@ class TurnStore:
     _pending_claim_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _pending_claim_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _pending_turn_claims: list[TurnRecord] = field(default_factory=list, init=False, repr=False)
+    _recovery_diagnostic_classes: set[tuple[str, tuple[str, ...], str | None]] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Construct the private handled-turn ledger for this runtime entity."""
@@ -451,6 +480,18 @@ class TurnStore:
         """Return the ledger-backed canonical record for one source event."""
         return self._ledger.get_turn_record(source_event_id)
 
+    def delivered_source_ids(self, turn_id: str) -> tuple[str, ...]:
+        """Return every journal source one turn's answer discharges.
+
+        The turn is named by its anchor event, which is what the outbox keys
+        on, but a coalesced batch answers several sources at once and all of
+        them are handed over together. Without the ledger's own record of that
+        set, the anchor would settle and its siblings would replay into a turn
+        that has already been answered.
+        """
+        record = self.get_turn_record(turn_id)
+        return record.indexed_event_ids if record is not None else (turn_id,)
+
     def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the durable turn that owns one visible response event."""
         return self._ledger.turn_record_for_response_event_id(response_event_id)
@@ -559,6 +600,34 @@ class TurnStore:
                     return
                 claim_changed = self._pending_claim_changed
             await claim_changed.wait()
+
+    async def response_recovery_ready(self, turn_record: TurnRecord) -> bool:
+        """Prove that a terminal response is complete or still durably owned."""
+        if any(self.has_live_turn_claim(event_id) for event_id in turn_record.indexed_event_ids):
+            gap = _RecoveryGap("live_turn_claim", pending_source_count=None)
+        else:
+            gap = _recovery_gap(turn_record, await self.deps.response_recovery_state(turn_record))
+        if gap is None:
+            return True
+        self._log_recovery_gap(turn_record, gap)
+        return False
+
+    def _log_recovery_gap(self, turn_record: TurnRecord, gap: _RecoveryGap) -> None:
+        """Log each non-sensitive recovery boundary once per store lifetime."""
+        identity = (gap.reason, turn_record.source_event_ids, turn_record.anchor_event_id)
+        if identity in self._recovery_diagnostic_classes:
+            return
+        self._recovery_diagnostic_classes.add(identity)
+        logger.info(
+            "response_recovery_proof_not_ready",
+            agent=self.deps.agent_name,
+            reason=gap.reason,
+            source_count=len(turn_record.source_event_ids),
+            source_event_ids=turn_record.source_event_ids,
+            anchor_event_id=turn_record.anchor_event_id,
+            pending_source_count=gap.pending_source_count,
+            **(asdict(gap.turn_mismatches) if gap.turn_mismatches is not None else {}),
+        )
 
     def _revision_owners(self, event_id: str) -> Iterator[TurnRecord]:
         """Yield every turn that selected or consumed one physical revision."""
@@ -901,6 +970,53 @@ class TurnStore:
                 session_id=target.session_id,
                 history_scope=scope.key,
             )
+
+
+def _recovery_gap(turn_record: TurnRecord, state: ResponseRecoveryState) -> _RecoveryGap | None:
+    """Return why one recovery snapshot proves neither a complete response nor a durable owner, if it does not."""
+    pending_sources = state.pending_sources
+    if all(pending or redacted for pending, redacted in zip(pending_sources, state.redacted_sources, strict=True)) or (
+        turn_record.anchor_event_id is not None and state.sources_settled_by_departure
+    ):
+        return None
+    if any(pending_sources):
+        return _RecoveryGap("mixed_source_pending", pending_source_count=sum(pending_sources))
+    reply = state.reply
+    if reply is not None:
+        # The reply's records own an AI turn's outcome, and recovery sends any row it still owes.
+        return None if reply.terminal else _RecoveryGap("reply_unfinished")
+    return _ledger_turn_recovery_gap(turn_record, state)
+
+
+def _ledger_turn_recovery_gap(turn_record: TurnRecord, state: ResponseRecoveryState) -> _RecoveryGap | None:
+    """Return why a turn no reply answers is neither complete nor still owned by its outbox row, if it is not."""
+    if turn_record.anchor_event_id is None:
+        return _RecoveryGap("missing_turn_anchor")
+    final_delivery = state.final_delivery
+    if final_delivery is None:
+        return _RecoveryGap("missing_final_delivery")
+    if final_delivery.acknowledged_event_id is None:
+        return None
+    completed_response_event_ids = {
+        event_id
+        for event_id in (final_delivery.acknowledged_event_id, final_delivery.edits_event_id)
+        if event_id is not None
+    }
+    loaded = tuple(record for record in state.turn_records if record is not None)
+    mismatches = _TurnMismatchCounts(
+        missing_completed_turn_count=len(state.turn_records) - len(loaded),
+        incomplete_completed_turn_count=sum(not record.completed for record in loaded),
+        source_identity_mismatch_count=sum(
+            record.source_event_ids != turn_record.source_event_ids for record in loaded
+        ),
+        anchor_mismatch_count=sum(record.anchor_event_id != turn_record.anchor_event_id for record in loaded),
+        response_event_mismatch_count=sum(
+            record.response_event_id not in completed_response_event_ids for record in loaded
+        ),
+    )
+    if not any(asdict(mismatches).values()):
+        return None
+    return _RecoveryGap("terminal_turn_mismatch", turn_mismatches=mismatches)
 
 
 def _remove_runs_for_sources(

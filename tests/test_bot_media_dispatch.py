@@ -1244,7 +1244,7 @@ class TestAgentBot(AgentBotTestBase):
         bot._ingress_hook_runner.hook_context.hook_registry_state.registry = registry_stub
 
         with patch(
-            "mindroom.turn_policy.emit_collect",
+            "mindroom.hooks.ingress.emit_collect",
             new=AsyncMock(
                 return_value=[EnrichmentItem(key="extra", text="hook enrichment", cache_policy="volatile")],
             ),

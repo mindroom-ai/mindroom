@@ -30,10 +30,11 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
+    from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_runner import ResponseRequest
-    from mindroom.turn_policy import IngressHookRunner, PreparedDispatch
+    from mindroom.turn_policy import PreparedDispatch
 
 
 @dataclass(frozen=True)

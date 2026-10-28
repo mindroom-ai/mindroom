@@ -19,14 +19,14 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord
 from mindroom.history.types import HistoryScope
-from mindroom.hooks.ingress import HookIngressPolicy
+from mindroom.hooks.ingress import HookIngressPolicy, IngressHookRunner
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.turn_policy import IngressHookRunner
 from mindroom.turn_store import TurnStore
 from tests.conftest import make_visible_message, request_envelope
 from tests.identity_helpers import entity_ids
@@ -67,7 +67,9 @@ class _Harness:
     ingress_hook_runner: MagicMock
     generate_response: AsyncMock
     stop_reply: AsyncMock
-    later_human_message: AsyncMock
+    # The newest reply answering the edited turn's sources, from the reply records.
+    reply_for_sources: AsyncMock
+    later_message_exists: AsyncMock
     settle_sources: AsyncMock
     # The conversation lock the harness's regenerations take before they claim.
     response_lock: asyncio.Lock
@@ -231,6 +233,9 @@ def _harness(
 
     generate_response = AsyncMock(return_value=NEW_RESPONSE_EVENT_ID)
     reply_for_sources = AsyncMock(return_value=_reply(event_id=RESPONSE_EVENT_ID))
+    store = MagicMock()
+    store.replies.for_sources = reply_for_sources
+    store.later_message_exists = AsyncMock(return_value=False)
     response_lock = asyncio.Lock()
 
     regenerations: list[asyncio.Task[None]] = []
@@ -265,8 +270,7 @@ def _harness(
             stop_reply=AsyncMock(),
             receipt_order=AsyncMock(return_value=receipt_order),
             timestamp_formatter=lambda timestamp_ms: format_timestamp_ms(timestamp_ms, timezone=config.timezone),
-            reply_for_sources=reply_for_sources,
-            later_human_message=AsyncMock(return_value=False),
+            store=store,
         ),
     )
     return _Harness(
@@ -276,7 +280,8 @@ def _harness(
         ingress_hook_runner=ingress_hook_runner,
         generate_response=generate_response,
         stop_reply=regenerator.deps.stop_reply,  # type: ignore[arg-type]
-        later_human_message=regenerator.deps.later_human_message,  # type: ignore[arg-type]
+        reply_for_sources=reply_for_sources,
+        later_message_exists=store.later_message_exists,
         settle_sources=regenerator.deps.settle_sources,  # type: ignore[arg-type]
         response_lock=response_lock,
         regenerations=regenerations,
@@ -536,27 +541,37 @@ async def test_edit_regenerates_the_answer_its_reply_records_name(tmp_path: Path
     """After a regeneration answered in a new reply, the next edit regenerates that reply, not the turn's old answer."""
     record = _turn_record()
     harness = _harness(tmp_path, turn_record=record)
-    harness.regenerator.deps.reply_for_sources.return_value = _reply(event_id="$regenerated:example.org")
+    harness.reply_for_sources.return_value = _reply(event_id="$regenerated:example.org")
     event, event_info = _edit_event()
 
     await _handle_edit(harness, event, event_info)
 
-    harness.regenerator.deps.reply_for_sources.assert_awaited_once_with(record.source_event_ids)
+    harness.reply_for_sources.assert_awaited_once_with(record.source_event_ids)
     request = harness.generate_response.await_args.args[0]
     assert request.existing_event_id == "$regenerated:example.org"
     assert await request.prepare_source_turn(request.thread_history) is False
 
 
 @pytest.mark.asyncio
-async def test_an_edit_of_a_message_someone_answered_after_is_ignored(tmp_path: Path) -> None:
+@pytest.mark.parametrize("thread_mode", ["thread", "room"])
+async def test_an_edit_of_a_message_someone_answered_after_is_ignored(tmp_path: Path, thread_mode: str) -> None:
     """Later turns built on the old text, so editing an earlier message regenerates nothing."""
-    harness = _harness(tmp_path, turn_record=_turn_record())
-    harness.later_human_message.return_value = True
+    record = _turn_record()
+    harness = _harness(tmp_path, turn_record=record)
+    harness.config.agents[AGENT_NAME].thread_mode = thread_mode
+    harness.later_message_exists.return_value = True
     event, event_info = _edit_event()
 
     with capture_logs() as logs:
         assert await _handle_edit(harness, event, event_info) is None
 
+    harness.later_message_exists.assert_awaited_once_with(
+        room_id=ROOM_ID,
+        thread_id=THREAD_ID,
+        source_event_ids=record.source_event_ids,
+        excluded_senders=persisted_bot_user_ids(harness.runtime_paths),
+        whole_room=thread_mode == "room",
+    )
     _assert_no_regeneration(harness)
     harness.turn_store.register_edit_revision.assert_not_called()
     assert _not_regenerated_reasons(logs) == ["later_human_message"]
@@ -569,7 +584,7 @@ async def test_an_edit_of_a_reply_an_approval_holds_cancels_the_approval_and_reg
     """The edit stops the held reply, which cancels its approval; the regeneration takes its place."""
     harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
     held = replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.PAUSED), approval_id="approval-1")
-    harness.regenerator.deps.reply_for_sources.return_value = held  # type: ignore[attr-defined]
+    harness.reply_for_sources.return_value = held
     event, event_info = _edit_event(new_body="what is 4+4?")
 
     assert await _handle_edit(harness, event, event_info) is True
@@ -585,7 +600,7 @@ async def test_an_edit_of_a_reply_that_still_streams_stops_it_and_regenerates_in
     """The edit interrupts the running answer; the regeneration takes its place and owns the edit."""
     harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
     running = replace(_reply(event_id=RESPONSE_EVENT_ID, state=rl.ReplyState.ACTIVE), current_span_id="span-running")
-    harness.regenerator.deps.reply_for_sources.return_value = running  # type: ignore[attr-defined]
+    harness.reply_for_sources.return_value = running
     event, event_info = _edit_event(new_body="what is 4+4?")
 
     assert await _handle_edit(harness, event, event_info) is True
@@ -605,7 +620,7 @@ async def test_an_edit_before_the_replys_create_is_acknowledged_stops_it_and_reg
         current_span_id="span-running",
         possibly_shown="Thinking...",
     )
-    harness.regenerator.deps.reply_for_sources.return_value = creating  # type: ignore[attr-defined]
+    harness.reply_for_sources.return_value = creating
     event, event_info = _edit_event(new_body="what is 4+4?")
 
     assert await _handle_edit(harness, event, event_info) is True
@@ -626,7 +641,7 @@ async def test_an_edit_of_a_reply_that_recorded_nothing_to_show_is_ignored(tmp_p
     """
     harness = _harness(tmp_path, turn_record=_turn_record(), receipt_order=9)
     deciding = replace(_reply(event_id=None, state=rl.ReplyState.ACTIVE), current_span_id="span-running")
-    harness.regenerator.deps.reply_for_sources.return_value = deciding  # type: ignore[attr-defined]
+    harness.reply_for_sources.return_value = deciding
     event, event_info = _edit_event()
 
     with capture_logs() as logs:
@@ -690,7 +705,7 @@ async def test_an_edit_does_not_hold_the_rooms_lane_while_another_reply_holds_th
 async def test_edit_of_a_turn_whose_reply_is_gone_is_ignored(tmp_path: Path) -> None:
     """A reply whose answer is gone has nothing for an edit to regenerate."""
     harness = _harness(tmp_path, turn_record=_turn_record())
-    harness.regenerator.deps.reply_for_sources.return_value = _reply(
+    harness.reply_for_sources.return_value = _reply(
         event_id="$removed:example.org",
         state=rl.ReplyState.GONE,
     )
@@ -1092,7 +1107,7 @@ async def test_edit_without_previous_response_event_is_skipped(tmp_path: Path) -
     """A turn whose answer has no reply record, as one from before the upgrade, regenerates nothing."""
     record = _turn_record(response_event_id=None)
     harness = _harness(tmp_path, turn_record=record)
-    harness.regenerator.deps.reply_for_sources.return_value = None  # type: ignore[attr-defined]
+    harness.reply_for_sources.return_value = None
     event, event_info = _edit_event()
 
     with capture_logs() as logs:

@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -19,11 +20,13 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom import constants
+from mindroom import reply_lifecycle as rl
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from mindroom.event_journal.models import ResponseRecoveryState
 from mindroom.event_journal.store import TurnRecordStore
 from mindroom.handled_turns import (
     SourceEventMetadata,
@@ -41,6 +44,7 @@ from mindroom.history.types import HistoryScope, HistoryScopeState, ScopeSummary
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -60,7 +64,7 @@ from mindroom.turn_record import (
     RevisionSnapshotChangedError,
     canonicalize_turn_record,
 )
-from mindroom.turn_store import TurnStore, TurnStoreDeps
+from mindroom.turn_store import TurnStore, TurnStoreDeps, _recovery_gap, _RecoveryGap
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -75,6 +79,7 @@ from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
 from tests.session_storage.agno_layout import write_agno_database
+from tests.test_edit_regenerator import _reply
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -89,16 +94,22 @@ async def _store(journal_store: EventJournalStore, *, agent_name: str = "agent")
     Warming is not optional any more: the ledger's synchronous reads answer
     from a map that ``warm`` fills, and refuse until it has.
     """
+    principal = journal_store.principal("agent@alice")
     store = TurnStore(
         TurnStoreDeps(
             agent_name=agent_name,
             turn_records=journal_store.turn_records(agent_name),
-            redacted_event_ids=journal_store.principal("agent@alice").redacted_event_ids,
-            relations=journal_store.principal("agent@alice"),
+            redacted_event_ids=principal.redacted_event_ids,
+            relations=principal,
             legacy_responses_file=None,
             state_writer=MagicMock(),
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            response_recovery_state=partial(
+                principal.response_recovery_state,
+                agent_name=agent_name,
+                redaction_target=replayable_redaction_target,
+            ),
         ),
     )
     await store.warm()
@@ -146,6 +157,7 @@ def test_a_team_reply_records_the_history_scope_of_the_members_it_formed_with(tm
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            response_recovery_state=AsyncMock(),
         ),
     )
 
@@ -379,6 +391,7 @@ async def _store_with_storage(
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            response_recovery_state=AsyncMock(),
         ),
     )
     await store.warm()
@@ -500,6 +513,39 @@ async def test_redacted_event_ids_include_ledger_tombstones_the_journal_no_longe
     requested = ("$journal-only", "$other", "$user_msg")
     assert await store.redacted_event_ids(target.room_id, requested) == frozenset({"$journal-only", "$user_msg"})
     journal.assert_awaited_with(target.room_id, requested)
+
+
+@pytest.mark.asyncio
+async def test_an_answer_hands_over_every_source_its_turn_indexes(journal_store: EventJournalStore) -> None:
+    """A coalesced turn's answer discharges all of its sources; a turn with no record discharges only its anchor."""
+    store = await _store(journal_store)
+    turn = TurnRecord.create(["$first", "$second"], discovery_event_ids=["$relay"])
+    await store.record_pending_turn(turn)
+    assert turn.anchor_event_id is not None
+
+    assert store.delivered_source_ids(turn.anchor_event_id) == turn.indexed_event_ids
+    assert store.delivered_source_ids("$unrecorded") == ("$unrecorded",)
+
+
+@pytest.mark.parametrize(
+    ("state", "gap"),
+    [(rl.ReplyState.COMPLETED, None), (rl.ReplyState.ACTIVE, _RecoveryGap("reply_unfinished"))],
+)
+def test_a_reply_alone_decides_whether_the_turn_it_answers_is_recoverable(
+    state: rl.ReplyState,
+    gap: _RecoveryGap | None,
+) -> None:
+    """A finished reply proves its settled turn without an outbox row, and an unfinished one does not."""
+    snapshot = ResponseRecoveryState(
+        pending_sources=(False,),
+        final_delivery=None,
+        sources_settled_by_departure=False,
+        redacted_sources=(False,),
+        turn_records=(None,),
+        reply=_reply(event_id="$answer", state=state),
+    )
+
+    assert _recovery_gap(TurnRecord.create(["$source"]), snapshot) == gap
 
 
 @pytest.mark.asyncio
@@ -1309,6 +1355,7 @@ async def test_each_history_scope_that_read_a_redacted_source_drops_it_when_open
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            response_recovery_state=AsyncMock(),
         ),
     )
     await store.warm()
@@ -1380,6 +1427,7 @@ async def test_another_requesters_private_scope_drops_a_redacted_source_when_ope
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=tool_runtime,
+            response_recovery_state=AsyncMock(),
         ),
     )
     await store.warm()
@@ -1736,6 +1784,7 @@ async def test_active_ad_hoc_team_redaction_uses_pending_response_scope(
             state_writer=state_writer,
             resolver=MagicMock(),
             tool_runtime=MagicMock(),
+            response_recovery_state=AsyncMock(),
         ),
     )
     await store.warm()
@@ -2521,6 +2570,7 @@ async def test_router_turn_replay_uses_persisted_ledger_across_two_restarts(
                 ),
                 resolver=MagicMock(),
                 tool_runtime=MagicMock(),
+                response_recovery_state=AsyncMock(),
             ),
         )
         await store.warm()
