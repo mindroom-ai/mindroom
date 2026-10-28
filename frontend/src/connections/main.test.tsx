@@ -1,4 +1,11 @@
-import { act, cleanup, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const json = (value: unknown) => new Response(JSON.stringify(value));
@@ -81,3 +88,48 @@ it.each(["/connections", "/connections/", "/connections/egressx"])(
     ).toBeInTheDocument();
   },
 );
+
+it("switches tabs without signing in again, and back follows them", async () => {
+  await loadEntry("/connections");
+  await screen.findByRole("heading", { name: "Your MindRoom connections" });
+  const tab = (name: string) =>
+    within(
+      screen.getByRole("navigation", { name: "Connections pages" }),
+    ).getByRole("link", { name });
+  await screen.findByText("Signed in as Bob Builder");
+  const signIns = () =>
+    vi
+      .mocked(fetch)
+      .mock.calls.filter(
+        ([input]) => String(input) === "/api/connections/session",
+      ).length;
+  const signedIn = signIns();
+
+  fireEvent.click(tab("Agent Keys"));
+  expect(window.location.pathname).toBe("/connections/egress");
+  expect(screen.getByRole("heading", { name: "Agent Keys" })).toBeVisible();
+  // The header keeps the account it already showed instead of blinking out.
+  expect(screen.getByText("Signed in as Bob Builder")).toBeVisible();
+
+  await act(async () => {
+    window.history.back();
+    await new Promise((resolve) =>
+      window.addEventListener("popstate", resolve, { once: true }),
+    );
+  });
+  expect(window.location.pathname).toBe("/connections");
+  expect(
+    screen.getByRole("heading", { name: "Your MindRoom connections" }),
+  ).toBeVisible();
+  expect(signIns()).toBe(signedIn);
+});
+
+it("leaves a modified click on a tab to the browser", async () => {
+  await loadEntry("/connections");
+  await screen.findByRole("heading", { name: "Your MindRoom connections" });
+  const link = await screen.findByRole("link", { name: "Agent Keys" });
+  const click = createEvent.click(link, { ctrlKey: true });
+  fireEvent(link, click);
+  expect(click.defaultPrevented).toBe(false);
+  expect(window.location.pathname).toBe("/connections");
+});
