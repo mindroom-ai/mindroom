@@ -1683,8 +1683,8 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
 
 
 @pytest.mark.asyncio
-async def test_hook_dispatch_command_reply_preserves_original_envelope_metadata(tmp_path: Path) -> None:
-    """Router command replies should preserve hook-dispatch targeting metadata."""
+async def test_router_reply_to_hook_dispatch_text_preserves_original_envelope_metadata(tmp_path: Path) -> None:
+    """The router's reply to hook-dispatch text, which is conversation even when it looks like a command, keeps its targeting."""
     bot = _agent_bot(tmp_path, agent_name="router")
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
     event = nio.RoomMessageText.from_dict(

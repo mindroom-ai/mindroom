@@ -290,11 +290,8 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
 
 @pytest.mark.asyncio
-async def test_router_processes_own_sidecar_relay_commands_using_original_sender(tmp_path) -> None:  # noqa: ANN001
-    """A long relay the router sent as a sidecar keeps its relay kind, so its command runs as the relayed user.
-
-    Relay text runs as a command today; pending decision D1 makes it conversation.
-    """
+async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> None:  # noqa: ANN001
+    """A long relay the router sent as a sidecar keeps its relay kind, so its command-shaped text is not a command."""
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:localhost"
     agent_user.agent_name = ROUTER_AGENT_NAME
@@ -368,7 +365,7 @@ async def test_router_processes_own_sidecar_relay_commands_using_original_sender
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:localhost"
+    mock_schedule.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -8,9 +8,6 @@ from typing import TYPE_CHECKING
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_source import (
-    EXTERNAL_TRIGGER_SOURCE_KIND,
-    HOOK_DISPATCH_SOURCE_KIND,
-    HOOK_SOURCE_KIND,
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
@@ -21,17 +18,6 @@ from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 if TYPE_CHECKING:
     from mindroom.commands.parsing import Command
 
-# The source kinds whose text runs as a command; every other kind's text is conversation.
-# Hook, hook dispatch, external trigger, and relay text runs as a command today (pending decision D1).
-_COMMAND_SOURCE_KINDS: frozenset[str] = frozenset(
-    {
-        MESSAGE_SOURCE_KIND,
-        HOOK_SOURCE_KIND,
-        HOOK_DISPATCH_SOURCE_KIND,
-        EXTERNAL_TRIGGER_SOURCE_KIND,
-        TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-    },
-)
 _USER_RELAY_SOURCE_KINDS: frozenset[str] = frozenset({TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND})
 
 
@@ -117,10 +103,13 @@ def is_router_voice_echo(facts: IngressFacts, content: object) -> bool:
 def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -> Command | None:
     """Return the command one turn's text runs as, or None when the text is conversation.
 
-    ``command_text`` is ``dispatch_prompt_for_event`` of the event's logical content,
-    so a finished reply's tool markers never hide a command. A turn of several
-    sources carries no command.
+    Only a message a person typed, or one an agent wrote for a person, runs as a
+    command. Text an automation, a hook, a trigger, or a relay produced is
+    conversation: it can be written by an agent or a plugin yet would run with a
+    human's authority. ``command_text`` is ``dispatch_prompt_for_event`` of the
+    event's logical content, so a finished reply's tool markers never hide a
+    command. A turn of several sources carries no command.
     """
-    if source_count != 1 or facts.source_kind not in _COMMAND_SOURCE_KINDS:
+    if source_count != 1 or facts.source_kind != MESSAGE_SOURCE_KIND:
         return None
     return command_parser.parse(command_text)

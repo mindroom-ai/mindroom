@@ -6295,11 +6295,11 @@ async def test_a_persons_edit_reaches_the_regenerator_classified_as_an_edit(conf
 
 
 @pytest.mark.asyncio
-async def test_a_hook_command_runs_after_the_gate_in_receipt_order(
+async def test_hook_text_that_looks_like_a_command_is_conversation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hook's command is a FIFO barrier, so it reaches its executor through the gate, not ahead of earlier messages."""
+    """Hook text runs with a person's authority but a plugin or an agent wrote it, so `!help` there is never a command."""
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General")},
@@ -6330,8 +6330,8 @@ async def test_a_hook_command_runs_after_the_gate_in_receipt_order(
     await harness.deliver(room, event)
 
     assert [batch.handled_turn.source_event_ids for batch in harness.gate_batches] == [(event.event_id,)]
-    execute_if_owned.assert_awaited_once()
-    assert execute_if_owned.await_args.kwargs["command"].type.value == "help"
+    assert harness.gate_batches[0].command is None
+    execute_if_owned.assert_not_awaited()
 
 
 @pytest.mark.asyncio

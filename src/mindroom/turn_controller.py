@@ -56,7 +56,6 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
     ScheduledHistoryBudget,
     scheduled_history_limit_from_content,
-    source_kind_bypasses_coalescing,
 )
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.hooks import MessageEnvelope, hook_ingress_policy
@@ -700,11 +699,7 @@ class TurnController:
                     source_event_id=prepared_event.event_id,
                 )
                 return _IngressAdmissionOutcome.DEFERRED
-        # A FIFO barrier already dispatches alone and in receipt order, so its command runs after the gate.
-        if (
-            not source_kind_bypasses_coalescing(facts.source_kind)
-            and command_for(facts, dispatch_prompt_for_event(prepared_event)) is not None
-        ):
+        if command_for(facts, dispatch_prompt_for_event(prepared_event)) is not None:
             await self._dispatch_command_control_input(
                 room=room,
                 dispatch_event=prepared_event,

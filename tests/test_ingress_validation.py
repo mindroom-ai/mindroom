@@ -327,11 +327,11 @@ _CONVERSATION = "conversation"
         ("agent-written message", _COMMAND),
         ("sidecar text", _COMMAND),
         ("finished reply with tool markers", _COMMAND),
-        # D1: hook, hook dispatch, external trigger, and relay text runs as a command today.
-        ("hook D1", _COMMAND),
-        ("hook_dispatch D1", _COMMAND),
-        ("external_trigger D1", _COMMAND),
-        ("trusted_internal_relay D1", _COMMAND),
+        # A plugin or an agent can write this text, yet it would run with a person's authority.
+        ("hook", _CONVERSATION),
+        ("hook_dispatch", _CONVERSATION),
+        ("external_trigger", _CONVERSATION),
+        ("trusted_internal_relay", _CONVERSATION),
         ("scheduled", _CONVERSATION),
         ("silent_scheduled", _CONVERSATION),
         ("untrusted scheduled claim", _COMMAND),
@@ -352,10 +352,10 @@ def test_command_rule_per_source_kind(tmp_path: Path, case: str, expected: str) 
     source_count = 1
     command_text = "!help"
     automation_kinds = {
-        "hook D1": HOOK_SOURCE_KIND,
-        "hook_dispatch D1": HOOK_DISPATCH_SOURCE_KIND,
-        "external_trigger D1": EXTERNAL_TRIGGER_SOURCE_KIND,
-        "trusted_internal_relay D1": TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+        "hook": HOOK_SOURCE_KIND,
+        "hook_dispatch": HOOK_DISPATCH_SOURCE_KIND,
+        "external_trigger": EXTERNAL_TRIGGER_SOURCE_KIND,
+        "trusted_internal_relay": TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         "scheduled": SCHEDULED_SOURCE_KIND,
         "silent_scheduled": SILENT_SCHEDULE_SOURCE_KIND,
     }
