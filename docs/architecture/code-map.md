@@ -465,10 +465,11 @@ Matrix sync callback
 | `voice/visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `slack/` | Native Slack: the minimal Web API client, personal and project tools, events, and agent reply mirroring |
-| `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, and parsing of conversation, message, permalink, and user targets |
+| `slack/api.py` | Minimal async Slack Web API client over `httpx`, with Slack error and rate-limit mapping, parsing of conversation, message, permalink, and user targets, and message permalinks |
 | `slack/app.py` | The Slack app's workspace-wide credentials from the shared credential store, and the bot identity `auth.test` reports for them, cached per bot token |
 | `slack/oauth.py` | The built-in `slack` OAuth provider: each requester's own Slack user token requested as `user_scope`, accepted only from the workspace the bot token belongs to |
-| `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, read, and workspace downloads |
+| `slack/render.py` | Plain dictionaries for agents from Slack answers: messages with author names and permalinks, people, conversations, and the display-name rule |
+| `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, read, and workspace downloads, rendered by `slack/render.py` |
 
 ## Persistent State
 

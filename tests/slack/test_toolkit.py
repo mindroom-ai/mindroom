@@ -283,6 +283,96 @@ async def test_project_download_requires_allowlisted_share(
 
 
 @pytest.mark.asyncio
+async def test_project_download_from_a_member_channel_uses_the_bot_token(
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/plan.pdf"
+    file_info = {
+        "ok": True,
+        "file": {
+            "id": FILE_ID,
+            "name": "plan.pdf",
+            "size": 4,
+            "url_private_download": download_url,
+            "shares": {"public": {UNLISTED: [{"ts": ROOT_TS}], CHANNEL: [{"ts": ROOT_TS}]}},
+        },
+    }
+    fake = FakeSlack(
+        {
+            "files.info": file_info,
+            "conversations.info": _member(),
+            download_url: lambda _request: httpx.Response(200, content=b"plan"),
+        },
+    ).install(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    tools = _tools(paths, channels=[CHANNEL], tool_output_workspace_root=workspace)
+    result = json.loads(await tools.slack_download(FILE_ID))
+
+    saved = workspace / "slack-downloads" / f"{FILE_ID}-plan.pdf"
+    assert result["path"] == str(saved)
+    assert saved.read_bytes() == b"plan"
+    assert [str(request.url) for request in fake.requests] == [
+        "https://slack.com/api/files.info",
+        "https://slack.com/api/conversations.info",
+        download_url,
+    ]
+    assert _form(fake.calls("conversations.info")[0]) == {"channel": CHANNEL}
+    assert {_bearer(request) for request in fake.requests} == {BOT_TOKEN}
+
+
+@pytest.mark.asyncio
+async def test_download_stops_once_the_stream_passes_the_cap(
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    download_url = f"https://files.slack.com/files-pri/T0123ABCD-{FILE_ID}/big.bin"
+    # Slack reports a size within the cap, so only the streamed bytes can catch the oversized body.
+    file_info = {
+        "ok": True,
+        "file": {"id": FILE_ID, "name": "big.bin", "size": 4, "url_private_download": download_url},
+    }
+    FakeSlack(
+        {"files.info": file_info, download_url: lambda _request: httpx.Response(200, content=b"x" * 9)},
+    ).install(monkeypatch)
+    monkeypatch.setattr(slack_toolkit, "_MAX_DOWNLOAD_BYTES", 8)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
+
+    assert result["message"] == "The file is larger than 8 bytes"
+    assert list(workspace.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_download_link_off_slack_is_refused_without_the_token(
+    tmp_path: Path,
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    elsewhere = f"https://files.example.com/{FILE_ID}/x"
+    file_info = {"ok": True, "file": {"id": FILE_ID, "name": "x", "size": 1, "url_private_download": elsewhere}}
+    fake = FakeSlack(
+        {"files.info": file_info, elsewhere: lambda _request: httpx.Response(200, content=b"x")},
+    ).install(monkeypatch)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = json.loads(await _tools(paths, tool_output_workspace_root=workspace).slack_download(FILE_ID))
+
+    assert result["message"] == "Slack returned no download link for this file"
+    assert [request.url.host for request in fake.requests] == ["slack.com"]
+    assert list(workspace.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_read_thread_from_permalink(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
     _connect_alice(paths)
     replies = [
@@ -359,7 +449,8 @@ async def test_search_people_by_name_stops_after_five_pages(
 
     assert [_form(request).get("limit") for request in fake.requests] == ["200"] * 5
     assert [person["id"] for person in result["people"]] == [DANA["id"]]
-    assert (result["complete"], result["next_cursor"]) == (False, "5")
+    assert result["complete"] is False
+    assert "next_cursor" not in result
 
 
 @pytest.mark.asyncio
@@ -402,23 +493,24 @@ async def test_project_search_messages_refused(paths: RuntimePaths, monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_reports_retry_after(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("retry_after", "message"),
+    [("30", "Slack rate limit, retry after 30s"), ("soon", "Slack rate limit, retry later")],
+)
+async def test_rate_limit_reports_retry_after(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_after: str,
+    message: str,
+) -> None:
     _connect_alice(paths)
     FakeSlack(
-        {"search.messages": lambda _request: httpx.Response(429, headers={"Retry-After": "30"})},
+        {"search.messages": lambda _request: httpx.Response(429, headers={"Retry-After": retry_after})},
     ).install(monkeypatch)
 
     result = json.loads(await _tools(paths).slack_search("launch"))
 
-    assert result["message"] == "Slack rate limit, retry after 30s"
-
-
-def test_project_mode_with_room_tells_the_agent_replies_are_posted(paths: RuntimePaths) -> None:
-    assert _tools(paths).instructions is None
-    assert _tools(paths, channels=[CHANNEL]).instructions is None
-    assert "posted to that Slack thread automatically" in str(
-        _tools(paths, channels=[CHANNEL], room="launch").instructions,
-    )
+    assert result["message"] == message
 
 
 @pytest.mark.asyncio

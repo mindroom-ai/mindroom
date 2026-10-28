@@ -9732,6 +9732,10 @@ path = "mindroom.slack.oauth"
 depends_on = ["mindroom.slack.api", "mindroom.slack.app"]
 
 [[modules]]
+path = "mindroom.slack.render"
+depends_on = ["mindroom.slack.api"]
+
+[[modules]]
 path = "mindroom.custom_tools.slack"
 depends_on = [
     "mindroom.atomic_file",
@@ -9741,4 +9745,5 @@ depends_on = [
     "mindroom.slack.api",
     "mindroom.slack.app",
     "mindroom.slack.oauth",
+    "mindroom.slack.render",
 ]

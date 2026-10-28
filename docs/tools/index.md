@@ -126,7 +126,7 @@ agents:
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
-The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, `slack`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
+The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `reasoning`, and `zep` add to the agent's prompt are left out while a function they name is disabled or filtered out; instructions you set through a tool's `instructions` option are always included.
 
 ## Browse By Topic
 

@@ -121,6 +121,17 @@ def parse_slack_target(target: str) -> SlackTarget:
     raise ValueError(_INVALID_TARGET)
 
 
+def slack_permalink(workspace_url: str, channel_id: str, ts: str, *, thread_ts: str | None = None) -> str:
+    """Return the link to one message, as Slack builds it; a reply also names its thread, so the link opens there.
+
+    `workspace_url` is `auth.test`'s `url`, which ends in a slash.
+    """
+    link = f"{workspace_url}archives/{channel_id}/p{ts.replace('.', '')}"
+    if thread_ts is not None and thread_ts != ts:
+        link += f"?thread_ts={thread_ts}&cid={channel_id}"
+    return link
+
+
 def reply_root(target: SlackTarget) -> str | None:
     """Return the thread root a reply to this target posts under."""
     return target.thread_ts or target.ts

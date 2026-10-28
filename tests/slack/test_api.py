@@ -16,6 +16,7 @@ from mindroom.slack.api import (
     reply_root,
     slack_call,
     slack_http_client,
+    slack_permalink,
 )
 
 _MESSAGE_TS = "1712687433.668649"
@@ -82,6 +83,22 @@ def test_reply_root_prefers_the_thread_root() -> None:
     reply_link = f"https://example.slack.com/archives/C0123ABCD/p1712687433668649?thread_ts={_ROOT_TS}"
     assert reply_root(parse_slack_target(reply_link)) == _ROOT_TS
     assert reply_root(parse_slack_target("C0123ABCD")) is None
+
+
+@pytest.mark.parametrize("thread_ts", [None, _ROOT_TS])
+def test_permalink_round_trips_through_target_parsing(thread_ts: str | None) -> None:
+    """A link built for a message, or for a reply in a thread, parses back to that message and thread."""
+    link = slack_permalink("https://example.slack.com/", "C0123ABCD", _MESSAGE_TS, thread_ts=thread_ts)
+
+    assert link.startswith("https://example.slack.com/archives/C0123ABCD/p1712687433668649")
+    assert parse_slack_target(link) == SlackTarget("C0123ABCD", _MESSAGE_TS, thread_ts, None)
+
+
+def test_permalink_of_a_thread_root_names_no_thread() -> None:
+    """A thread's root links without a thread_ts, as Slack's own links do."""
+    link = slack_permalink("https://example.slack.com/", "C0123ABCD", _ROOT_TS, thread_ts=_ROOT_TS)
+
+    assert link == "https://example.slack.com/archives/C0123ABCD/p1712687000000100"
 
 
 @pytest.mark.asyncio
