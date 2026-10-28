@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Literal
 
 import pytest
 
-from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
 from mindroom.config.agent import AgentConfig
 from mindroom.event_journal import (
@@ -25,7 +24,7 @@ from mindroom.event_journal.approval_store import ApprovalStore
 from mindroom.script_runs.broker import ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
 from tests.approval_card_helpers import card_is_terminal, pending_card
-from tests.conftest import handle_card_response_for_test, test_runtime_paths
+from tests.conftest import approval_manager_for_test, handle_card_response_for_test, test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_script_run_manager import _context as _manager_context
 from tests.test_script_run_manager import _manager
@@ -33,6 +32,8 @@ from tests.test_script_tool_broker import _call_through_gateway, _RuntimeResolve
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.approval.manager import ApprovalManager
 
 # A background approval waiter rereads its durable decision once a second, so a
 # settlement can take a whole poll interval to reach it.
@@ -137,13 +138,13 @@ async def _approval_manager(
             raise RuntimeError(message)
         return f"$terminal:{delivery.delivery_id}" if unique_event_ids else "$terminal"
 
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
-        prepare_event=prepare_event,
-        send_delivery=send,
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send,
         cards=cards,
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@mindroom_router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     return manager, journal, initial_sent
 

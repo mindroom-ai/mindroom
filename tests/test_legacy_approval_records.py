@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, cast
 import psycopg
 import pytest
 
-from mindroom.approval.manager import ApprovalManager
 from mindroom.event_journal import (
     JOB_ENDED_REASON,
     ApprovalCardReservation,
@@ -31,11 +30,18 @@ from mindroom.event_journal import (
     scheduled_approvals,
 )
 from tests.approval_card_helpers import terminal_edit
-from tests.conftest import handle_card_response_for_test, postgres_journal_schema_url, test_runtime_paths
+from tests.conftest import (
+    approval_manager_for_test,
+    handle_card_response_for_test,
+    postgres_journal_schema_url,
+    test_runtime_paths,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import LiteralString
+
+    from mindroom.approval.manager import ApprovalManager
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "approval_records"
 _ROUTER = "router@@mindroom_router:example.org"
@@ -237,12 +243,12 @@ def _manager(tmp_path: Path, store: EventJournalStore, sent: list[MatrixDelivery
         sent.append(delivery)
         return f"${delivery.delivery_id}:{delivery.stage.value}"
 
-    return ApprovalManager(
+    return approval_manager_for_test(
         test_runtime_paths(tmp_path),
-        send_delivery=send,
+        send_approval_delivery=send,
         cards=store.principal(_ROUTER),
-        transport_sender=lambda: "@mindroom_router:example.org",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@mindroom_router:example.org",
+        transport_device_id=lambda: "DEVICE",
     )
 
 

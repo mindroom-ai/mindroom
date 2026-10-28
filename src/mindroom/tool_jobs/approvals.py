@@ -137,7 +137,7 @@ async def _decide(
     manager = approval_manager.get_approval_store()
     approver = resolve_tool_approval_approver(config, runtime_paths, owner.requester_id)
     if manager is None or approver is None or owner.room_id is None or owner.requester_id is None:
-        return False, "Tool approval runtime is not ready."
+        return False, approval_manager.RUNTIME_NOT_READY_REASON
     assert call.toolkit_name is not None
     decision = await manager.request_background_approval(
         origin=BackgroundScriptToolOrigin(
@@ -187,7 +187,7 @@ async def end_tool_call_approval(runtime: ToolJobRuntime, job: BackgroundJob) ->
 async def settle_job_approvals(runtime: ToolJobRuntime, job_id: str) -> None:
     """Deny every card a job still waits on, or leave the job to the coordinator's retries while that cannot happen."""
     manager = approval_manager.get_approval_store()
-    if manager is not None and manager.cards is not None and manager.send_delivery is not None:
+    if manager is not None and manager.cards is not None:
         try:
             await manager.settle_pending_background_approvals(_approval_run_id(job_id), reason=JOB_ENDED_REASON)
         except Exception:

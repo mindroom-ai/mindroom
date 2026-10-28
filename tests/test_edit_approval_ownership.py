@@ -374,12 +374,12 @@ async def _paused_case(  # noqa: PLR0915
 
     manager = initialize_approval_store_for_test(
         runner.deps.runtime_paths,
-        prepare_event=prepare_event,
-        send_delivery=send_delivery,
-        resolve_delivery=AsyncMock(return_value=None),
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=send_delivery,
+        resolve_approval_delivery=AsyncMock(return_value=None),
         cards=journal_store.principal("router@shared"),
-        transport_sender=lambda: "@router:localhost",
-        sending_device=lambda: "DEVICE",
+        transport_sender_id=lambda: "@router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
     model = AsyncMock(side_effect=ResponsePausedForApproval(pause))

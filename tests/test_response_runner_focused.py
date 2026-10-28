@@ -176,6 +176,7 @@ from tests.approval_continuation_helpers import (
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    FakeApprovalTransport,
     initialize_approval_store_for_test,
     install_model_providers,
     live_turn_tools_for_test,
@@ -2996,7 +2997,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3055,7 +3056,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     with patch(
         "mindroom.approval.response.approval_manager.get_approval_store",
@@ -3182,7 +3183,7 @@ async def test_first_pause_skips_the_card_inside_the_requesters_auto_approve_win
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
 
     with (
@@ -4066,7 +4067,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     approval_store = MagicMock(
         prepare_detached_approval=AsyncMock(return_value=object()),
         reserve_and_publish=AsyncMock(return_value=True),
-        router_missing=None,
+        transport=FakeApprovalTransport(),
     )
     retry_sources = Mock()
     runner._approvals._approval_responses.retry_sources = retry_sources

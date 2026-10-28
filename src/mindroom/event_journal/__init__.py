@@ -23,6 +23,7 @@ from .approval_calls import (
     approval_arguments_digest,
 )
 from .approval_cards import (
+    TIMEOUT_REASON,
     ApprovalCardReservation,
     ApprovalCardView,
     ApprovalDecisionMetadata,
@@ -101,6 +102,7 @@ __all__ = [
     "INTERRUPTED_FAILURE_REASON",
     "JOB_ENDED_REASON",
     "SCHEDULED_APPROVAL_WINDOW_NS",
+    "TIMEOUT_REASON",
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
     "AdmissionResult",

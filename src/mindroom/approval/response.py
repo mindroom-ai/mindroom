@@ -218,7 +218,7 @@ async def plan_approval_calls(
                 ContinuationDecision.DENIED,
                 "No approval recipient is configured; the tool was denied safely.",
             )
-        elif room_id is not None and manager is not None and manager.router_missing and manager.router_missing(room_id):
+        elif room_id is not None and manager is not None and manager.transport.router_missing(room_id):
             decision, reason = ContinuationDecision.DENIED, approval_manager.DEFAULT_ROUTER_MANAGED_ROOM_REASON
         decisions[tool.tool_call_id] = (decision, timeout_seconds, requires_approval, reason)
     now = datetime.now(UTC)

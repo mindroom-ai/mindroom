@@ -337,7 +337,7 @@ class _LiveScriptRuntimeResolver:
             return ToolApprovalDecision(approved=True)
         approvals = self.approval_provider()
         if approvals is None:
-            return ToolApprovalDecision(approved=False, reason="Tool approval runtime is not ready.")
+            return ToolApprovalDecision(approved=False, reason=approval_manager.RUNTIME_NOT_READY_REASON)
         decision = await approvals.request_background_approval(
             origin=origin,
             owner_kind="script",
@@ -359,7 +359,7 @@ class _LiveScriptRuntimeResolver:
         """Retire an exact card when broker ownership becomes indeterminate."""
         approvals = self.approval_provider()
         if approvals is None:
-            msg = "Tool approval runtime is not ready."
+            msg = approval_manager.RUNTIME_NOT_READY_REASON
             raise _ScriptRuntimeUnavailableError(msg)
         await approvals.settle_background_approval(origin, reason=reason)
 
@@ -367,7 +367,7 @@ class _LiveScriptRuntimeResolver:
         """Retire every pending approval whose broker run ownership ended."""
         approvals = self.approval_provider()
         if approvals is None:
-            msg = "Tool approval runtime is not ready."
+            msg = approval_manager.RUNTIME_NOT_READY_REASON
             raise _ScriptRuntimeUnavailableError(msg)
         await approvals.settle_pending_background_approvals(run_id, reason=reason)
 

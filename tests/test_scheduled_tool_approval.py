@@ -19,7 +19,6 @@ from agno.tools import Toolkit
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
 from mindroom.approval.inbound import parse_approval_response_event
-from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -78,6 +77,7 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
+    approval_manager_for_test,
     handle_card_response_for_test,
     install_model_providers,
     make_matrix_client_mock,
@@ -98,7 +98,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.approval.manager import ApprovalActionResult
+    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
@@ -123,12 +123,12 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
         sent.append(delivery)
         return "$" + delivery.delivery_id + ("-edit" if delivery.stage is DeliveryStage.FINAL else "")
 
-    return ApprovalManager(
+    return approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=journal.principal("router@shared"),
-        prepare_event=prepare,
-        send_delivery=send,
-        transport_sender=lambda: "@router:test",
+        prepare_approval_event=prepare,
+        send_approval_delivery=send,
+        transport_sender_id=lambda: "@router:test",
     )
 
 

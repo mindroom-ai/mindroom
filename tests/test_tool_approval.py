@@ -71,6 +71,7 @@ from mindroom.tools import config_manager as _config_manager  # noqa: F401 - reg
 from tests.approval_card_helpers import card_is_terminal, card_view
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
+    approval_manager_for_test,
     bind_runtime_paths,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
@@ -110,7 +111,7 @@ async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tm
     """A terminal tombstone remains authoritative without consulting transport."""
     cards = MagicMock()
     cards.approvals.approval_card = AsyncMock(return_value="terminal")
-    initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, send_approval_delivery=AsyncMock())
     before_consume = AsyncMock()
 
     result = await handle_matrix_approval_action(
@@ -134,7 +135,11 @@ async def test_decided_card_action_is_consumed_before_transport_or_approver_vali
     """A duplicate click cannot escape while its deterministic terminal edit is still owed."""
     cards = MagicMock()
     cards.approvals.approval_card = AsyncMock(return_value=card_view(decided=True))
-    manager = initialize_approval_store_for_test(test_runtime_paths(tmp_path), cards=cards, send_delivery=AsyncMock())
+    manager = initialize_approval_store_for_test(
+        test_runtime_paths(tmp_path),
+        cards=cards,
+        send_approval_delivery=AsyncMock(),
+    )
     before_consume = AsyncMock()
 
     try:
@@ -232,7 +237,7 @@ _TURN_OWNER: contextvars.ContextVar[object | None] = contextvars.ContextVar("tes
 @pytest.mark.asyncio
 async def test_deadline_sweep_started_by_a_turn_does_not_inherit_the_turn_context(tmp_path: Path) -> None:
     """A turn can request an approval before startup recovery starts the sweep, which never ends."""
-    manager = ApprovalManager(test_runtime_paths(tmp_path))
+    manager = approval_manager_for_test(test_runtime_paths(tmp_path))
     token = _TURN_OWNER.set(object())
     try:
         manager._ensure_deadline_sweep()
@@ -271,13 +276,13 @@ async def test_action_binds_its_exact_visible_card_after_changed_device_recovery
         return_value=DeliveryAcknowledgement(settled_event_id="$approval"),
     )
     resolve_action = AsyncMock(return_value="approval-card-1")
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
-        send_delivery=AsyncMock(),
-        resolve_delivery=AsyncMock(return_value=None),
-        resolve_action_delivery=resolve_action,
+        send_approval_delivery=AsyncMock(),
+        resolve_approval_delivery=AsyncMock(return_value=None),
+        resolve_approval_action_delivery=resolve_action,
         cards=cards,
-        sending_device=lambda: "NEW-DEVICE",
+        transport_device_id=lambda: "NEW-DEVICE",
     )
     before_consume = AsyncMock()
 
@@ -463,10 +468,10 @@ async def test_legacy_action_without_router_transport_is_ignored(tmp_path: Path)
     cards.approvals.resolve_approval_call = AsyncMock()
     cards.acknowledge_matrix_delivery = AsyncMock()
     transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        resolve_action_delivery=transport.resolve_approval_action_delivery,
+        resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
     )
     before_consume = AsyncMock()
 
@@ -514,10 +519,10 @@ async def test_legacy_action_retries_while_router_transport_is_starting(tmp_path
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,
     )
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        resolve_action_delivery=transport.resolve_approval_action_delivery,
+        resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
     )
     before_consume = AsyncMock()
 
@@ -567,10 +572,10 @@ async def test_legacy_action_for_unreadable_room_is_ignored(tmp_path: Path, erro
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,
     )
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        resolve_action_delivery=transport.resolve_approval_action_delivery,
+        resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
     )
     before_consume = AsyncMock()
 
@@ -627,10 +632,10 @@ async def test_legacy_action_retries_a_transient_transport_failure(tmp_path: Pat
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,
     )
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        resolve_action_delivery=transport.resolve_approval_action_delivery,
+        resolve_approval_action_delivery=transport.resolve_approval_action_delivery,
     )
     before_consume = AsyncMock()
 
@@ -747,13 +752,13 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
 
     cards = MagicMock(wraps=router)
     cards.principal_id = router.principal_id
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
-        send_delivery=send,
+        send_approval_delivery=send,
         cards=cards,
-        resolve_action_delivery=AsyncMock(return_value=card_delivery_id),
-        transport_sender=lambda: "@mindroom_router:localhost",
-        sending_device=lambda: "DEVICE",
+        resolve_approval_action_delivery=AsyncMock(return_value=card_delivery_id),
+        transport_sender_id=lambda: "@mindroom_router:localhost",
+        transport_device_id=lambda: "DEVICE",
     )
     authorize_responder = MagicMock(return_value=True)
     try:
@@ -813,11 +818,11 @@ async def test_startup_recovery_settles_only_due_cards(tmp_path: Path) -> None:
             card_view(delivery_id="recoverable-card", created_at_ns=2, decided=True),
         ),
     )
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
-        send_delivery=AsyncMock(),
+        send_approval_delivery=AsyncMock(),
         cards=cards,
-        sending_device=lambda: "DEVICE",
+        transport_device_id=lambda: "DEVICE",
     )
 
     try:
@@ -839,11 +844,11 @@ async def test_startup_recovery_logs_a_deferred_terminal_flush(tmp_path: Path) -
     card_event_id = "$approval"
     room_id = "!room:localhost"
     stored = card_view(card_event_id=card_event_id, room_id=room_id, decided=True)
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=MagicMock(),
-        send_delivery=AsyncMock(),
-        transport_sender=lambda: "@mindroom_router:localhost",
+        send_approval_delivery=AsyncMock(),
+        transport_sender_id=lambda: "@mindroom_router:localhost",
     )
     worker = MagicMock(flush=AsyncMock(side_effect=RuntimeError("homeserver unavailable")))
 
@@ -881,10 +886,10 @@ async def test_startup_recovery_drops_a_transport_failure_settled_by_the_same_pa
             failed_deliveries=frozenset({(delivery_id, DeliveryStage.FINAL)}),
         ),
     )
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        send_delivery=AsyncMock(),
+        send_approval_delivery=AsyncMock(),
     )
 
     try:
@@ -914,10 +919,10 @@ async def test_live_resolution_logs_room_context_when_terminal_flush_is_deferred
             card_event_id="$approval",
         ),
     )
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        send_delivery=AsyncMock(),
+        send_approval_delivery=AsyncMock(),
     )
     worker = MagicMock(flush=AsyncMock(side_effect=RuntimeError("homeserver unavailable")))
 
@@ -956,10 +961,10 @@ async def test_deadline_sweep_expires_an_unacknowledged_card_and_wakes_its_conti
     cards = MagicMock()
     cards.approvals.resolve_approval_call = AsyncMock(return_value=recorded)
     wake = AsyncMock()
-    manager = ApprovalManager(
+    manager = approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=cards,
-        continuation_ready=wake,
+        wake_continuation_sources=wake,
     )
     stored = card_view(card_event_id=None)
 
@@ -2207,9 +2212,10 @@ async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_pa
     await recovery.mark_startup_runtime_support_ready()
     assert not recovery._startup_cleanup_done
     assert recovery._startup_cleanup_retry is None
-    manager = ApprovalManager(test_runtime_paths(tmp_path), recovery=recovery)
+    manager = initialize_approval_store_for_test(test_runtime_paths(tmp_path), recovery=recovery)
     try:
-        manager._configure_transport(send_delivery=AsyncMock())
+        # A reload rebinds the transport and keeps the recovery it does not replace.
+        assert initialize_approval_store_for_test(test_runtime_paths(tmp_path)) is manager
         assert manager.recovery is recovery
         assert recovery.manager is manager
         with patch.object(
