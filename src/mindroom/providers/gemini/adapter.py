@@ -174,8 +174,8 @@ class GeminiProvider:
         config = {key: value for key, value in config.items() if value is not None}
         if self.capabilities.provider_default_sampling:
             config = {key: value for key, value in config.items() if key not in _SAMPLING_CONTROL_NAMES}
-        # The request pipeline alone retries a failed request, so one attempt overrides any SDK retries that
-        # ``http_options.retry_options`` authors on the client or in the generation config.
+        # The request pipeline alone retries a failed request, so one attempt also overrides SDK retries that the
+        # generation config's ``http_options`` authors.
         config["http_options"] = {**(config.get("http_options") or {}), "retry_options": {"attempts": 1}}
         if disables_tools(request.tool_choice):
             return self._decision_config(config)
@@ -205,7 +205,11 @@ class GeminiProvider:
         params["vertexai"] = settings.vertexai
         if settings.timeout is not None:
             params["http_options"] = {"timeout": int(settings.timeout * 1000)}
-        return {**params, **(settings.client_params or {})}
+        params = {**params, **(settings.client_params or {})}
+        # The request pipeline alone retries, so one attempt overrides any SDK retries ``client_params`` authors, for
+        # the Files API calls of an attachment too large to inline as for generation.
+        params["http_options"] = {**(params.get("http_options") or {}), "retry_options": {"attempts": 1}}
+        return params
 
 
 def _provider_error(error: Exception, *, provider: str) -> ProviderError:

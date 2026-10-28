@@ -206,6 +206,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "project": "env-project",
         "location": "europe-west4",
         "credentials": credentials,
+        "http_options": {"retry_options": {"attempts": 1}},
     }
     assert loaded == [str((tmp_path / "adc.json").resolve())]
     authored = Credentials(token="authored-token")  # noqa: S106 - synthetic SDK credential
@@ -218,6 +219,7 @@ def test_gemini_reads_the_vertex_project_location_and_credentials_from_the_runti
         "project": "test-project",
         "location": "us-central1",
         "credentials": authored,
+        "http_options": {"retry_options": {"attempts": 1}},
     }
     assert len(loaded) == 1
 
@@ -387,7 +389,11 @@ def test_gemini_timeout_reaches_the_sdk_client_in_milliseconds(tmp_path: Path) -
     """The ``timeout`` extra kwarg is in seconds, as Agno's field was, and the SDK client takes milliseconds."""
     adapter = gemini_adapter.build_provider(ModelConfig(**_config(GEMINI, timeout=12.5)), runtime_paths_for(tmp_path))
 
-    assert adapter._client_params() == {"api_key": "test-key", "vertexai": False, "http_options": {"timeout": 12500}}
+    assert adapter._client_params() == {
+        "api_key": "test-key",
+        "vertexai": False,
+        "http_options": {"timeout": 12500, "retry_options": {"attempts": 1}},
+    }
 
 
 @pytest.mark.asyncio
@@ -1348,6 +1354,38 @@ async def test_gemini_upload_transport_failure_is_retryable(
     assert raised.value.retryable
     assert raised.value.__cause__ is failure
     assert server.model_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_files_api_calls_send_once_whatever_retries_the_config_authors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attachment too large to inline makes Files API calls, which the pipeline alone retries, as generation."""
+    # These files are small, so a tiny inline limit sends them through the Files API.
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 4)
+    audio_path = tmp_path / "voice.ogg"
+    audio_path.write_bytes(b"OggS-voice")
+    message = Message(role="user", content="Listen", audio=[Audio(filepath=str(audio_path), mime_type="audio/ogg")])
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(503, json={"error": {"code": 503, "message": "Overloaded", "status": "UNAVAILABLE"}})
+
+    http_options = {
+        "httpx_async_client": httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        "retry_options": {"attempts": 3, "initial_delay": 0.01, "max_delay": 0.01},
+    }
+    config = ModelConfig(**_config(GEMINI, client_params={"http_options": http_options}))
+    adapter = gemini_adapter.build_provider(config, runtime_paths_for(tmp_path))
+
+    with pytest.raises(ProviderUnavailable):
+        await anext(adapter.stream(_request(message)))
+
+    assert [(request.method, request.url.path) for request in sent] == [
+        ("GET", f"/v1beta/{_upload_name('audio/ogg', b'OggS-voice')}"),
+    ]
 
 
 @pytest.mark.asyncio
