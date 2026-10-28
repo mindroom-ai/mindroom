@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="slack",
     display_name="Slack",
-    description="Search, read, and download Slack messages and files as the connected user or in a project's channels",
+    description="Search, read, download, post, and react in Slack as the connected user or in a project's channels",
     category=ToolCategory.COMMUNICATION,
     # Downloads always land in the workspace, like every MindRoom-owned output; no function takes a local path.
     file_access=ToolFileAccess.NONE,
@@ -77,7 +77,7 @@ if TYPE_CHECKING:
         "Store the app's client ID and secret in the slack_oauth_client credential service, "
         "and its bot token and signing secret in slack_app."
     ),
-    function_names=("slack_search", "slack_read", "slack_download"),
+    function_names=("slack_search", "slack_read", "slack_download", "slack_post", "slack_react"),
 )
 def slack_tools() -> type[SlackTools]:
     """Return Slack tools that act as the requester or as the MindRoom Slack app in a project's channels."""

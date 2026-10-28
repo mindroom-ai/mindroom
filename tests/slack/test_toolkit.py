@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs
 
 import httpx
@@ -20,8 +21,11 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import slack as slack_toolkit
 from mindroom.custom_tools.slack import SlackTools
 from mindroom.mcp_gateway import tools as gateway
+from mindroom.message_target import MessageTarget
 from mindroom.slack import app as slack_app
 from mindroom.slack.oauth import slack_oauth_provider
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -145,6 +149,20 @@ def _tools(paths: RuntimePaths, **overrides: Any) -> SlackTools:  # noqa: ANN401
 
 def _member(channel_id: str = CHANNEL, **flags: bool) -> dict[str, Any]:
     return {"ok": True, "channel": {"id": channel_id, "name": "launch-eng", "is_member": True, **flags}}
+
+
+def _turn_context(paths: RuntimePaths, hook_source: str | None) -> ToolRuntimeContext:
+    return ToolRuntimeContext(
+        agent_name="assistant",
+        target=MessageTarget.resolve("!room:example.org", None, "$event", room_mode=True),
+        requester_id=ALICE,
+        client=AsyncMock(),
+        config=Config.model_validate({"models": {"default": {"provider": "ollama", "id": "test-model"}}}),
+        runtime_paths=paths,
+        conversation_reader=MagicMock(),
+        relations=MagicMock(),
+        hook_source=hook_source,
+    )
 
 
 @pytest.mark.asyncio
@@ -549,7 +567,13 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
     schema = await gateway.get_tool(context, toolkit="slack", function="slack_read")
 
     assert "error" not in result
-    assert [item["function"] for item in result["results"]] == ["slack_search", "slack_read", "slack_download"]
+    assert [item["function"] for item in result["results"]] == [
+        "slack_search",
+        "slack_read",
+        "slack_download",
+        "slack_post",
+        "slack_react",
+    ]
     assert "error" not in schema
     assert set(schema["inputSchema"]["properties"]) >= {"target", "limit", "before", "cursor"}
 
@@ -557,3 +581,245 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
 def test_slack_tools_require_a_credentials_manager(paths: RuntimePaths) -> None:
     with pytest.raises(RuntimeError, match="credentials_manager"):
         SlackTools(runtime_paths=paths, credentials_manager=None)
+
+
+def _write_names(tools: SlackTools) -> set[str]:
+    return set(tools.get_async_functions()) & {"slack_post", "slack_react"}
+
+
+def test_write_false_hides_write_functions(paths: RuntimePaths) -> None:
+    assert _write_names(_tools(paths)) == {"slack_post", "slack_react"}
+    assert _write_names(_tools(paths, write=False)) == set()
+    assert set(_tools(paths, write=False).get_async_functions()) == {"slack_search", "slack_read", "slack_download"}
+
+
+def test_instructions_name_the_mirrored_reply_only_for_a_project_agent_offered_slack_post(paths: RuntimePaths) -> None:
+    offered = ["slack_search", "slack_read", "slack_post", "slack_react"]
+    project = _tools(paths, channels=[CHANNEL], room="lobby")
+
+    assert "do not call slack_post" in project.instructions_for(offered)
+    assert (
+        "do not call slack_post"
+        in with_offered_instructions(
+            project,
+            adapt_toolkit(project),
+            authored_instructions=False,
+        ).instructions
+    )
+    assert project.instructions_for([name for name in offered if name != "slack_post"]) == ""
+    assert _tools(paths, channels=[CHANNEL]).instructions_for(offered) == ""
+    assert _tools(paths, room="lobby").instructions_for(offered) == ""
+
+
+@pytest.mark.asyncio
+async def test_post_reply_from_permalink_uses_thread_root(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack({"chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": REPLY_TS}}).install(monkeypatch)
+    permalink = f"{WORKSPACE_URL}archives/{CHANNEL}/p1714000100000200?thread_ts={ROOT_TS}&cid={CHANNEL}"
+
+    result = json.loads(await _tools(paths).slack_post(permalink, "I will review it tomorrow"))
+
+    assert result == {"status": "ok", "tool": "slack", "channel_id": CHANNEL, "ts": REPLY_TS, "thread_ts": ROOT_TS}
+    assert fake.methods() == ["chat.postMessage"]
+    assert _form(fake.requests[0]) == {"channel": CHANNEL, "text": "I will review it tomorrow", "thread_ts": ROOT_TS}
+    assert _bearer(fake.requests[0]) == USER_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_post_to_a_conversation_starts_a_top_level_message(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack({"chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS}}).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_post(CHANNEL, "hello"))
+
+    assert result["thread_ts"] is None
+    assert result["ts"] == ROOT_TS
+    assert _form(fake.requests[0]) == {"channel": CHANNEL, "text": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_post_to_user_opens_dm_personal_only(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    _connect_alice(paths)
+    dm = "D0123ABCD"
+    fake = FakeSlack(
+        {
+            "conversations.open": {"ok": True, "channel": {"id": dm}},
+            "chat.postMessage": {"ok": True, "channel": dm, "ts": ROOT_TS},
+        },
+    ).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_post(DANA["id"], "ping"))
+
+    assert result["channel_id"] == dm
+    assert fake.methods() == ["conversations.open", "chat.postMessage"]
+    assert _form(fake.requests[0]) == {"users": DANA["id"]}
+    assert _form(fake.requests[1]) == {"channel": dm, "text": "ping"}
+    assert {_bearer(request) for request in fake.requests} == {USER_TOKEN}
+
+    refusing = FakeSlack().install(monkeypatch)
+    refused = json.loads(await _tools(paths, channels=[CHANNEL]).slack_post(DANA["id"], "ping"))
+
+    assert refused["message"] == "Project agents post only in their channels"
+    assert refusing.requests == []
+
+
+@pytest.mark.asyncio
+async def test_project_post_uses_the_bot_token_in_a_member_channel(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeSlack(
+        {"conversations.info": _member(), "chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": REPLY_TS}},
+    ).install(monkeypatch)
+
+    result = json.loads(await _tools(paths, channels=[CHANNEL]).slack_post(f"{CHANNEL}:{ROOT_TS}", "on it"))
+
+    assert result["thread_ts"] == ROOT_TS
+    assert fake.methods() == ["conversations.info", "chat.postMessage"]
+    assert _form(fake.requests[1]) == {"channel": CHANNEL, "text": "on it", "thread_ts": ROOT_TS}
+    assert {_bearer(request) for request in fake.requests} == {BOT_TOKEN}
+
+
+@pytest.mark.asyncio
+async def test_project_post_outside_allowlist_refused(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeSlack({"conversations.info": _member(UNLISTED)}).install(monkeypatch)
+    tools = _tools(paths, channels=[CHANNEL])
+
+    post = json.loads(await tools.slack_post(UNLISTED, "hello"))
+    react = json.loads(await tools.slack_react(f"{UNLISTED}:{ROOT_TS}", "eyes"))
+
+    assert post["message"] == react["message"] == "Not one of this agent's Slack channels"
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_write_error_is_returned_with_the_slack_code_and_never_retried(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack({"chat.postMessage": {"ok": False, "error": "is_archived"}}).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_post(CHANNEL, "hello"))
+
+    assert result["message"] == "Slack refused the request: is_archived"
+    assert fake.methods() == ["chat.postMessage"]
+
+
+@pytest.mark.asyncio
+async def test_react_adds_the_named_reaction_to_the_message(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack({"reactions.add": {"ok": True}}).install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_react(f"{CHANNEL}:{ROOT_TS}", ":white_check_mark:"))
+
+    assert result == {
+        "status": "ok",
+        "tool": "slack",
+        "channel_id": CHANNEL,
+        "ts": ROOT_TS,
+        "emoji": "white_check_mark",
+    }
+    assert _form(fake.requests[0]) == {"channel": CHANNEL, "timestamp": ROOT_TS, "name": "white_check_mark"}
+    assert _bearer(fake.requests[0]) == USER_TOKEN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [CHANNEL, DANA["id"]])
+async def test_react_requires_message_target(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack().install(monkeypatch)
+
+    result = json.loads(await _tools(paths).slack_react(target, "eyes"))
+
+    assert result["message"] == "Use <conversation>:<ts> or a message link to react to a message"
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_permalink_to_reply_posts_under_root_reacts_on_message(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(
+        {
+            "chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": "1714000200.000300"},
+            "reactions.add": {"ok": True},
+        },
+    ).install(monkeypatch)
+    permalink = f"{WORKSPACE_URL}archives/{CHANNEL}/p1714000100000200?thread_ts={ROOT_TS}&cid={CHANNEL}"
+    tools = _tools(paths)
+
+    await tools.slack_post(permalink, "thanks")
+    await tools.slack_react(permalink, "eyes")
+
+    assert _form(fake.calls("chat.postMessage")[0])["thread_ts"] == ROOT_TS
+    assert _form(fake.calls("reactions.add")[0]) == {"channel": CHANNEL, "timestamp": REPLY_TS, "name": "eyes"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["not a target", "https://example.com/archives/C0123ABCD/p1714000000000100"])
+async def test_write_target_must_be_a_slack_target(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack().install(monkeypatch)
+    tools = _tools(paths)
+
+    for result in (await tools.slack_post(target, "hello"), await tools.slack_react(target, "eyes")):
+        assert (
+            json.loads(result)["message"]
+            == "Use a Slack conversation ID, <conversation>:<ts>, a message link, or a user ID"
+        )
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hook_source", ["slack-watch/w-1", "slack-watch/"])
+async def test_writes_refused_during_watch_turn(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    hook_source: str,
+) -> None:
+    _connect_alice(paths)
+    fake = FakeSlack(
+        {"chat.postMessage": {"ok": True, "channel": CHANNEL, "ts": ROOT_TS}, "reactions.add": {"ok": True}},
+    ).install(monkeypatch)
+    tools = _tools(paths)
+
+    with tool_runtime_context(_turn_context(paths, hook_source)):
+        post = json.loads(await tools.slack_post(CHANNEL, "hello"))
+        react = json.loads(await tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"))
+
+    assert post["message"] == react["message"] == "Ask me in a new message to post to Slack"
+    assert fake.requests == []
+
+    for context in (None, _turn_context(paths, None), _turn_context(paths, "plugin:message_received")):
+        with tool_runtime_context(context):
+            assert json.loads(await tools.slack_post(CHANNEL, "hello"))["status"] == "ok"
+            assert json.loads(await tools.slack_react(f"{CHANNEL}:{ROOT_TS}", "eyes"))["status"] == "ok"
+    assert fake.methods() == ["chat.postMessage", "reactions.add"] * 3
+
+
+@pytest.mark.asyncio
+async def test_watch_turn_refusal_comes_before_credentials_are_read(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeSlack().install(monkeypatch)
+
+    with tool_runtime_context(_turn_context(paths, "slack-watch/w-1")):
+        result = json.loads(await _tools(paths).slack_post(CHANNEL, "hello"))
+
+    assert result["message"] == "Ask me in a new message to post to Slack"
+    assert "oauth_connection_required" not in result
+    assert fake.requests == []

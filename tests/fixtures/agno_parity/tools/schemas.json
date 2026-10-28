@@ -25678,6 +25678,78 @@
         "external_execution": false,
         "approval_type": null,
         "stop_after_tool_call": false
+      },
+      {
+        "name": "slack_post",
+        "description": "Post a message to Slack, or reply in a thread.\nA personal connection posts as the connected person; a project agent posts as the MindRoom app, in its own\nchannels only. A conversation ID starts a new message there. A message, as `<conversation>:<ts>` or a\nmessage link, posts a reply in that message's thread. A user ID such as U0123ABCD opens a direct message\nwith that person (personal connections only). The message is sent once and never retried; check slack_read\nbefore posting again after an error.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "target",
+            "text"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "slack_react",
+        "description": "Add an emoji reaction to one Slack message.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "emoji": {
+              "type": "string"
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+            }
+          },
+          "required": [
+            "target",
+            "emoji"
+          ]
+        },
+        "strict": false,
+        "requires_confirmation": false,
+        "external_execution": false,
+        "approval_type": null,
+        "stop_after_tool_call": false
       }
     ]
   },

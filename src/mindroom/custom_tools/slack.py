@@ -42,9 +42,10 @@ from mindroom.slack.render import (
     render_person,
     slack_display_name,
 )
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -78,6 +79,15 @@ _NOT_PROJECT_CHANNEL = "Not one of this agent's Slack channels"
 _FILE_NOT_IN_PROJECT = "This file is not in one of this agent's Slack channels"
 _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connection"
 _UNREACHABLE = "Slack could not be reached; try again"
+_PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
+_NOT_A_MESSAGE = "Use <conversation>:<ts> or a message link to react to a message"
+# A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
+_WATCH_SOURCE_PREFIX = "slack-watch/"
+_WATCH_TURN_REFUSAL = "Ask me in a new message to post to Slack"
+_REPLY_MIRRORED = (
+    "Your final reply in a thread that started from a Slack message is posted to that Slack thread automatically, "
+    "so do not call slack_post to answer it."
+)
 
 # Tests replace this to answer Slack through a mock transport.
 _client_factory: Callable[[], httpx.AsyncClient] = slack_http_client
@@ -155,6 +165,20 @@ def _conversation_target(target: str) -> tuple[str, SlackTarget]:
         msg = "Use a Slack conversation ID, <conversation>:<ts>, or a message link"
         raise _SlackRefusalError(msg)
     return parsed.channel_id, parsed
+
+
+def _write_target(target: str) -> SlackTarget:
+    try:
+        return parse_slack_target(target)
+    except ValueError as exc:
+        raise _SlackRefusalError(str(exc)) from None
+
+
+def _refuse_in_watch_turn() -> None:
+    """Refuse a Slack write when a Slack watch started this turn; a call outside any turn, such as MCP's, passes."""
+    context = get_tool_runtime_context()
+    if context is not None and (context.hook_source or "").startswith(_WATCH_SOURCE_PREFIX):
+        raise _SlackRefusalError(_WATCH_TURN_REFUSAL)
 
 
 def _name_matches(query: str, *names: object) -> bool:
@@ -290,17 +314,23 @@ class SlackTools(Toolkit):
         self._config = runtime_config
         self._workspace_root = tool_output_workspace_root
         self.project_channels = frozenset(channels) if channels else None
+        # A project agent answers a Slack-started thread in its room, and MindRoom mirrors that reply to Slack itself.
+        self._reply_mirrored = self.project_channels is not None and bool(room)
         functions: dict[str, Callable[..., Awaitable[str]]] = {
             "slack_search": self.slack_search,
             "slack_read": self.slack_read,
             "slack_download": self.slack_download,
+            "slack_post": self.slack_post,
+            "slack_react": self.slack_react,
         }
-        # Slack event routing reads `room` from the config; the toolkit itself has no use for it.
-        del room
         super().__init__(
             name=_TOOL_NAME,
             tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
         )
+
+    def instructions_for(self, function_names: Collection[str]) -> str:
+        """Tell an agent offered `slack_post` not to answer a Slack-started thread with it, as MindRoom mirrors the reply."""
+        return _REPLY_MIRRORED if self._reply_mirrored and "slack_post" in function_names else ""
 
     def _credential_context(self) -> OAuthCredentialContext:
         return active_oauth_credential_context(
@@ -335,10 +365,20 @@ class SlackTools(Toolkit):
         token = app.bot_token if self.project_channels is not None else await self._requester_token()
         return _Session(client, token, app)
 
-    async def _run(self, operation: Callable[[_Session], Awaitable[Mapping[str, object]]]) -> str:
-        """Run one operation and render its result, connect prompt, or error as the tool's JSON payload."""
+    async def _run(
+        self,
+        operation: Callable[[_Session], Awaitable[Mapping[str, object]]],
+        *,
+        writes: bool = False,
+    ) -> str:
+        """Run one operation and render its result, connect prompt, or error as the tool's JSON payload.
+
+        A write is refused first in a turn a Slack watch started, before any credential or Slack call.
+        """
         personal = self.project_channels is None
         try:
+            if writes:
+                _refuse_in_watch_turn()
             async with _client_factory() as client:
                 fields = await operation(await self._session(client))
         except _SlackRefusalError as exc:
@@ -575,3 +615,57 @@ class SlackTools(Toolkit):
             }
 
         return await self._run(operation)
+
+    async def slack_post(self, target: str, text: str) -> str:
+        """Post a message to Slack, or reply in a thread.
+
+        A personal connection posts as the connected person; a project agent posts as the MindRoom app, in its own
+        channels only. A conversation ID starts a new message there. A message, as `<conversation>:<ts>` or a
+        message link, posts a reply in that message's thread. A user ID such as U0123ABCD opens a direct message
+        with that person (personal connections only). The message is sent once and never retried; check slack_read
+        before posting again after an error.
+
+        Args:
+            target: A conversation ID such as C0123ABCD, `<conversation>:<ts>`, a Slack message link, or a user ID.
+            text: The message, in Slack's formatting.
+
+        """
+
+        async def operation(session: _Session) -> Mapping[str, object]:
+            parsed = _write_target(target)
+            if parsed.channel_id is None:
+                if self.project_channels is not None:
+                    raise _SlackRefusalError(_PROJECT_POSTS_IN_CHANNELS)
+                opened = await session.call("conversations.open", users=parsed.user_id)
+                channel_id = json_object(opened, "channel").get("id")
+                if not isinstance(channel_id, str):
+                    msg = "Slack did not open the direct message"
+                    raise _SlackRefusalError(msg)
+            else:
+                channel_id = parsed.channel_id
+                await self._require_project_channel(session, channel_id)
+            root = reply_root(parsed)
+            posted = await session.call("chat.postMessage", channel=channel_id, text=text, thread_ts=root)
+            return {"channel_id": channel_id, "ts": posted.get("ts"), "thread_ts": root}
+
+        return await self._run(operation, writes=True)
+
+    async def slack_react(self, target: str, emoji: str) -> str:
+        """Add an emoji reaction to one Slack message.
+
+        Args:
+            target: The message, as `<conversation>:<ts>` or a Slack message link.
+            emoji: The emoji's name, such as eyes or white_check_mark, with or without colons.
+
+        """
+
+        async def operation(session: _Session) -> Mapping[str, object]:
+            parsed = _write_target(target)
+            if parsed.channel_id is None or parsed.ts is None:
+                raise _SlackRefusalError(_NOT_A_MESSAGE)
+            await self._require_project_channel(session, parsed.channel_id)
+            name = emoji.strip(":")
+            await session.call("reactions.add", channel=parsed.channel_id, timestamp=parsed.ts, name=name)
+            return {"channel_id": parsed.channel_id, "ts": parsed.ts, "emoji": name}
+
+        return await self._run(operation, writes=True)

@@ -9746,4 +9746,5 @@ depends_on = [
     "mindroom.slack.app",
     "mindroom.slack.oauth",
     "mindroom.slack.render",
+    "mindroom.tool_system.runtime_context",
 ]
