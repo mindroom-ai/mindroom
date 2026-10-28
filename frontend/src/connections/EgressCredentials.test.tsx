@@ -2801,6 +2801,37 @@ describe("adding another account", () => {
     expect(screen.queryByRole("form", { name: "Add service" })).toBeNull();
   });
 
+  it("signs in after Save and sign in even when the page could not load the presets", async () => {
+    // The page's own presets request fails; the editor's, made when it opens, succeeds.
+    const answer = vi.mocked(fetch).getMockImplementation()!;
+    let presetRequests = 0;
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      if (String(input) !== PRESETS) return answer(input, options);
+      presetRequests += 1;
+      return presetRequests === 1
+        ? json({ detail: "Unavailable" }, 503)
+        : json(egressPresets);
+    });
+    await renderPage();
+    await waitFor(() => expect(presetRequests).toBe(1));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Add service for Personal Mind",
+      }),
+    );
+    const form = await screen.findByRole("form", { name: "Add service" });
+    await presetsReady();
+    fireEvent.change(within(form).getByLabelText("Preset"), {
+      target: { value: "google_gmail" },
+    });
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Save and sign in" }),
+    );
+    expect(await screen.findByRole("dialog")).toHaveAccessibleName(
+      "Sign in to another Gmail account?",
+    );
+  });
+
   it("the dialog opens once", async () => {
     await renderPage();
     fireEvent.click(await link());

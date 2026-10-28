@@ -16,13 +16,7 @@ import { breakAfterUnderscores } from "./breakAfterUnderscores";
 import { ConnectionsHeader } from "./ConnectionsHeader";
 import { InactiveServices } from "./EgressInactiveServices";
 import { DiscardEditsNotice, EgressServiceEditor } from "./EgressServiceEditor";
-import {
-  firstFreeName,
-  formFromService,
-  presetOf,
-  serviceLogin,
-  signsInAfterSave,
-} from "./egressServiceForm";
+import { firstFreeName } from "./egressServiceForm";
 import { configPlaceholderOwners } from "./egressServiceNotes";
 import {
   keysSetText,
@@ -381,24 +375,9 @@ function AgentSection({
 
   // The editor stays open after the service is written: it saves the key next
   // and closes through `onClose`, so a key that fails can be reported there.
-  // A service that gets an account of its own signs in to it next, from its row.
   const save = async (name: string, service: AuthoredEgressService) => {
-    if (!(await write(servicePath(agent.agent_name, name), "PUT", service)))
-      return;
-    onChanged();
-    const saved = formFromService(name, service);
-    const presets = catalog?.presets ?? null;
-    if (
-      signsInAfterSave(
-        saved,
-        editor?.kind === "edit" ? editor.service : null,
-        presets,
-      )
-    )
-      setSignInNext({
-        name,
-        provider: serviceLogin(saved, presetOf(presets, saved.preset)),
-      });
+    if (await write(servicePath(agent.agent_name, name), "PUT", service))
+      onChanged();
   };
 
   const saveKey = async (secret: string, name: string) => {
@@ -560,6 +539,8 @@ function AgentSection({
             loadPresets={loadPresets}
             onDirtyChange={setEditorDirty}
             onSave={save}
+            // A service that gets an account of its own signs in to it next, from its row.
+            onSignIn={(name, provider) => setSignInNext({ name, provider })}
             saveKey={saveKey}
             onDelete={
               editor.kind === "edit" ? () => remove(editor.name) : undefined

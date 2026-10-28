@@ -139,6 +139,12 @@ export interface EgressServiceEditorProps {
    */
   onSave: (name: string, service: AuthoredEgressService) => Promise<void>;
   /**
+   * Called after a save that gives the service an account of its own it has
+   * not signed in to, with that account's login as the form resolved it, so
+   * the page can ask to sign in next. Leave it out where nothing signs in.
+   */
+  onSignIn?: (name: string, provider: string) => void;
+  /**
    * Save the API key typed in the form for the service of that name, called
    * after `onSave` succeeds and only when a key was typed. Without it the form
    * has no key field. When it rejects, the service stays saved and the form
@@ -174,6 +180,7 @@ export function EgressServiceEditor({
   saveWarning = null,
   onDirtyChange,
   onSave,
+  onSignIn,
   saveKey,
   onDelete,
   onClose,
@@ -430,10 +437,18 @@ export function EgressServiceEditor({
   // The services that already send a credential where this form would, for
   // this agent. A request picks a service with its own account by its header,
   // so it is warned about none of them, but one that names no service follows
-  // the usual order, which may pick it too.
+  // the usual order, which may pick it over another of the user's services;
+  // the administrator's win every tie.
   const overlaps = limiting
     ? []
-    : overlapWarnings(form, preset, agentServices, name);
+    : overlapWarnings(
+        form,
+        preset,
+        form.separateAccount
+          ? agentServices.filter((other) => other.source !== "config")
+          : agentServices,
+        name,
+      );
   // Another service of the user's with rules on the hosts a limit, or the
   // repositories applied to this service, cover.
   const overlapHosts = !limiting
@@ -512,6 +527,9 @@ export function EgressServiceEditor({
       // The service goes first, and the key only after it is written.
       if (signature !== savedSignature) {
         await onSave(current.name, authored);
+        const login = serviceLogin(current, presetOf(presets, current.preset));
+        if (login && signsInAfterSave(current, initial, presets))
+          onSignIn?.(current.name, login);
         setSavedSignature(signature);
       }
     } catch (cause) {

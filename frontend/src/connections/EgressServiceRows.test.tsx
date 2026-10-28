@@ -956,14 +956,16 @@ describe("connected accounts", () => {
       },
     );
 
-    it("says a service's own account is not used yet, never that the tools use it", () => {
+    it("says a service's own account is not used by agents yet, as the tools' account row does", () => {
       renderRows([{ ...toolsOnly, separate_account: true }]);
       expect(
-        within(row("GitHub")).getByText(
-          "Connected, not used for Agent Keys yet",
-        ),
+        within(row("GitHub")).getByText("Not used by agents yet"),
       ).toBeVisible();
-      expect(screen.queryByText("Not used by agents yet")).toBeNull();
+      expect(
+        within(row("GitHub")).getByRole("button", {
+          name: "Let agents use GitHub",
+        }),
+      ).toBeVisible();
     });
 
     it("names the header agents choose a service's own account with", () => {
@@ -2416,6 +2418,15 @@ describe("what a row says about how the key is sent", () => {
       "Requests are refused until a key is set.",
     ],
     [
+      "a connected account the sandbox refuses",
+      {
+        ...toolsOnly,
+        unavailable_reason: "shared_sandbox",
+        can_connect: false,
+      },
+      "Requests are refused until a key is set.",
+    ],
+    [
       "a personal account connected before a service account",
       {
         ...toolsOnly,
@@ -2452,7 +2463,7 @@ describe("what a row says about how the key is sent", () => {
     [
       "its own account, connected but not used yet",
       toolsOnly,
-      "Requests are refused until this account is used for Agent Keys.",
+      "Agents' requests are refused until you let them use this account.",
     ],
     [
       "its own account that cannot be connected here",

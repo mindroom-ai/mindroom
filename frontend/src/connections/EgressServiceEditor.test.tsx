@@ -642,7 +642,7 @@ describe("the editor form", () => {
     ).toHaveLength(1);
   });
 
-  it("says once that requests naming no service may use its own account, and only where it overlaps", async () => {
+  it("says once that requests naming no service may use its own account, only beside another service of the user's", async () => {
     const gmail = credentialService({
       name: "google_gmail",
       display_name: "Gmail",
@@ -655,28 +655,41 @@ describe("the editor form", () => {
         },
       ],
     });
+    const mine = {
+      ...gmail,
+      name: "mine",
+      display_name: "Mine",
+      source: "user" as const,
+    };
     const line = "Requests that name no service may use this account too.";
+    const own = { preset: "google_gmail", oauth_separate_account: true };
     await renderEditor({
-      service: { preset: "google_gmail", oauth_separate_account: true },
+      service: own,
       name: "google_gmail-2",
-      agentServices: [
-        gmail,
-        { ...gmail, name: "other", display_name: "Other" },
-      ],
+      agentServices: [gmail, mine, { ...mine, name: "other" }],
     });
     expect(screen.queryByText(/already handles/)).toBeNull();
     expect(screen.getAllByText(line)).toHaveLength(1);
     expect(screen.getByText(line)).toHaveAttribute("role", "status");
+    expect(screen.getByText(line)).toHaveClass("text-muted-foreground");
+    cleanup();
+    // The administrator's services win every tie, so they take those requests.
+    await renderEditor({
+      service: own,
+      name: "google_gmail-2",
+      agentServices: [gmail],
+    });
+    expect(screen.queryByText(line)).toBeNull();
     cleanup();
     await renderEditor({
-      service: { preset: "google_gmail", oauth_separate_account: true },
+      service: own,
       name: "google_gmail-2",
       agentServices: [
         {
-          ...gmail,
+          ...mine,
           rules: [
             {
-              ...gmail.rules[0],
+              ...mine.rules[0],
               host: "www.googleapis.com",
               path_prefix: "/drive/",
             },
@@ -3523,15 +3536,30 @@ describe("the Account choice", () => {
       screen.getByRole("button", { name: "Save and sign in" }),
     ).toBeVisible();
     // Its own account is picked by its header, so no service is warned
-    // about; requests without one may still reach it.
+    // about, and the administrator's Gmail wins every request without one.
     expect(screen.queryByText(/already handles/)).toBeNull();
-    expect(
-      screen.getByText(
-        "Requests that name no service may use this account too.",
-      ),
-    ).toHaveClass("text-muted-foreground");
+    expect(screen.queryByText(/Requests that name no service/)).toBeNull();
     openMoreOptions();
     expect(screen.queryByText(/instead of an API key/)).toBeNull();
+  });
+
+  it("names the row that uses the tools' account only when that account is connected", async () => {
+    await renderEditor({
+      ...withGmail,
+      agentServices: [
+        {
+          ...gmail,
+          configured: false,
+          active_source: null,
+          oauth: { ...gmail.oauth!, connected: false, account_label: null },
+        },
+      ],
+    });
+    type("Preset", "google_gmail");
+    // The default still follows the row, but with no account there is nothing to say it uses.
+    expect(another()).toBeChecked();
+    expect(toolsAccount()).toHaveAccessibleName("The account your tools use");
+    expect(screen.queryByText(/already uses this account/)).toBeNull();
   });
 
   it("says <name> in the header while the name is empty", async () => {

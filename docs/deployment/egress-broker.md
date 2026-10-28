@@ -434,8 +434,8 @@ When a config service sets the same variable, the config value wins, and the edi
 A user service that signs in with a connected account on a `user` or `user_agent` agent can set `oauth_separate_account: true` (in the editor, **Account**: **Another <provider> account**), for example to use a second Google account for a shared mailbox or another calendar from the agent's commands.
 A GitHub or Atlassian login cannot, because those accounts belong to each user rather than to one agent.
 A row on the tools' account with a connected account offers **Add another <provider> account** under its status, which adds such a service with the row's preset and the next free name (`google_gmail-2`) at once.
-After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in; cancelled, the row keeps its **Connect** button.
-That service's row then connects, allows, and disconnects an account of its own, which shows as "Connected, not used for Agent Keys yet" until it is allowed, and the agent's tools and every other service keep the account they use.
+After that link, or **Save and sign in** in the editor, the new row asks what agents may do with the account and then opens the provider's sign-in, where Google always shows its account picker; cancelled, the row keeps its **Connect** button.
+That service's row then connects, allows, and disconnects an account of its own, which shows as "Not used by agents yet" until it is allowed, and the agent's tools and every other service keep the account they use.
 It uses only that account, so it takes no key and its row offers none: until the account is connected the service has none, and it never uses the tools' account instead.
 Deleting the service, switching it back to the tools' account, or changing its account login also removes its own account and its opt-in.
 

@@ -65,7 +65,9 @@ export function EgressAccountChoice({
       {choice(
         false,
         `The account your tools use${toolsAddress ? ` (${toolsAddress})` : ""}`,
-        usedBy && `The ${usedBy} row already uses this account.`,
+        usedBy &&
+          toolsAddress &&
+          `The ${usedBy} row already uses this account.`,
       )}
       {choice(
         true,
