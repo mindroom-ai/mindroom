@@ -50,15 +50,16 @@ logger = get_logger(__name__)
 
 # AGNO_COMPAT: AgentQLTools does not pass its resolved key to SDK queries.
 # Reason: Agno 3.0.9 stores api_key but AgentQL 1.18.1 resolves auth from shared
-# SDK, environment, or CLI-file state. Its Page has no per-call credential hook.
+# SDK, environment, or CLI-file state. Its Page has no per-call credential hook,
+# and the SDK also reads its host from the live process environment on every request.
 # Keep the private page dispatch and HTTP boundary local to one toolkit key;
 # retain SDK query parsing, readiness, parameters, and typed transport failures.
 # Deliberately reject redirects and preserve parsing errors from malformed
 # successful responses instead of inheriting the SDK's generic server error.
 # Upstream issue: Tracking gap; a resolved-key handoff and a per-request or
-# per-page SDK authentication extension point are needed. No issue identified.
-# Upstream PR: None identified for this credential handoff.
-# Remove when: Agno forwards its resolved key through an isolated AgentQL SDK
+# per-page SDK authentication and host extension point are needed. No issue identified.
+# Upstream PR: None identified for this credential and host handoff.
+# Remove when: Agno forwards its resolved key and host through an isolated AgentQL SDK
 # request API; retain scoped-key precedence, redirect rejection, parse diagnostics,
 # concurrent-call isolation, and the host read from the runtime environment and `.env`.
 # Coverage: tests/test_agentql_tools.py::test_agentql_resolved_key_reaches_request_without_shared_auth_mutation;
@@ -208,7 +209,8 @@ def _destination_relay(egress: BrowserEgress) -> Iterator[str]:
 class MindRoomAgentQLTools(AgnoAgentQLTools):
     """Preserve Agno registration with scoped requests and complete custom results."""
 
-    # Mirror the authored upstream options beside the managed runtime paths the browser egress needs.
+    # Mirror the authored upstream options beside the managed runtime paths, which supply the key fallback,
+    # the AgentQL host, and the browser egress.
     def __init__(
         self,
         runtime_paths: RuntimePaths,
