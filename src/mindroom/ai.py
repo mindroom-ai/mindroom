@@ -795,15 +795,7 @@ async def _prepare_agent_and_prompt(
         ):
             try:
                 prompt_parts, runtime_model, build = await prepare_prompt_branches(
-                    prepare_memory=partial(
-                        _prepare_turn_memory,
-                        ctx,
-                        prompt,
-                        config,
-                        runtime_paths,
-                        execution_identity,
-                        memory_conversation,
-                    ),
+                    prepare_memory=partial(_prepare_turn_memory, ctx, config, runtime_paths, memory_conversation),
                     build_agent=_resolve_model_and_build_agent,
                     agent_name=agent_name,
                     pipeline_timing=pipeline_timing,

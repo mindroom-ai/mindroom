@@ -36,7 +36,6 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
-    ResumedAttempt,
     TurnResume,
     TurnSinks,
     collect_streamed_response_content,
@@ -263,7 +262,7 @@ async def _continue_persisted_agent(
         _continuation_turn_context(continuation, model_name=model_name, metadata=response.metadata),
         presentation,
         prompt=continuation.request_body,
-        resumed_attempt=ResumedAttempt(attempt, continuation_count=continuation.continuation_count),
+        resume=TurnResume(attempt, continuation_count=continuation.continuation_count),
         config=config,
         runtime_paths=runtime_paths,
         knowledge=knowledge,
@@ -308,19 +307,18 @@ async def _stream_continuation_turn(
     tool_trace_collector: list[ToolTraceEntry],
     tool_dispatch: ToolDispatchContext,
     progress: ProgressPublisher | None,
-    resumed_attempt: ResumedAttempt | None = None,
+    resume: TurnResume,
     reusable_build: AgentBuild | None = None,
-    initial_continuation_count: int = 0,
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
 
     The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
-    follow-up, the turn with no ``resumed_attempt``, reads the approval receipt in its first attempt's run; a resumed
-    run already read it.
+    follow-up, the turn whose ``resume`` restores no attempt, reads the approval receipt in its first attempt's run; a
+    resumed run already read it.
     """
-    if resumed_attempt is None:
+    if resume.attempt is None:
         run_id = str(uuid4())
         ctx = replace(ctx, run_id=run_id)
         add_approval_receipt_reader(run_id)
@@ -344,7 +342,7 @@ async def _stream_continuation_turn(
         runtime_paths,
         config,
         sinks=TurnSinks(run_metadata_collector=run_metadata, on_completed=completed.append),
-        resume=TurnResume(attempt=resumed_attempt, initial_continuation_count=initial_continuation_count),
+        resume=resume,
     )
     try:
         response_text, tool_trace = await collect_streamed_response_content(
@@ -517,7 +515,7 @@ class AgentApprovalExecution:
                                 recovered.presentation,
                                 prompt=recovered.prompt,
                                 reusable_build=recovered.reusable_build,
-                                initial_continuation_count=recovered.initial_continuation_count,
+                                resume=TurnResume(continuation_count=recovered.initial_continuation_count),
                                 delegation_depth=recovered.delegation_depth,
                                 media=recovered.media,
                                 config=config,

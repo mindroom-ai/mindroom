@@ -1762,7 +1762,7 @@ async def test_generate_team_response_helper_uses_persisted_team_scope_for_sessi
 
     async def fails(_run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
         # The turn driver stores the failed turn's record, which creates the team's session.
-        yield AttemptResolved(HandledAttempt("Team hello"))
+        yield AttemptResolved(HandledAttempt("Team hello", error=RuntimeError("Team hello")))
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
@@ -2023,7 +2023,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     async def fails_after_partial_text(run: TurnRunState) -> AsyncIterator[str | AttemptResolved]:
         run.attempt = _Shown("Team partial")
         yield "Team partial"
-        yield AttemptResolved(HandledAttempt("Team run failed"))
+        yield AttemptResolved(HandledAttempt("Team run failed", error=RuntimeError("Team run failed")))
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),

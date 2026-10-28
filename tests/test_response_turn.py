@@ -855,7 +855,7 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
         _run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        yield AttemptResolved(HandledAttempt("friendly error"))
+        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
 
     chunks = asyncio.run(
         _collect(
@@ -901,7 +901,7 @@ def test_handled_attempt_persists_its_interrupted_record(
                 attempt_run_id="run-live",
             ),
         )
-        yield AttemptResolved(HandledAttempt("friendly error"))
+        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
 
     chunks = asyncio.run(
         _collect(
@@ -997,7 +997,7 @@ def test_external_cancel_skips_persist_after_handled_attempt_persisted(
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.run_metadata = {"room_id": "!room"}
-        yield AttemptResolved(HandledAttempt("friendly error"))
+        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
 
     async def _cancel_while_finalizing(_scope: ScopeSessionContext | None) -> None:
         raise asyncio.CancelledError
@@ -1313,7 +1313,7 @@ def test_discarded_empty_run_metadata_stays_out_of_collector() -> None:
                 ),
             )
             return
-        yield AttemptResolved(HandledAttempt("friendly error"))
+        yield AttemptResolved(HandledAttempt("friendly error", error=RuntimeError("friendly error")))
 
     chunks = asyncio.run(
         _collect(
@@ -1411,7 +1411,9 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
         _run: TurnRunState,
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        yield AttemptResolved(HandledAttempt("friendly error", metadata_content=error_metadata))
+        yield AttemptResolved(
+            HandledAttempt("friendly error", error=RuntimeError("friendly error"), metadata_content=error_metadata),
+        )
 
     chunks = asyncio.run(
         _collect(
@@ -1700,9 +1702,7 @@ def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_a
                 _streaming_adapter(log, attempt),
                 TurnSinks(on_completed=completed.append),
                 continuation=_continuation(),
-                resume=TurnResume(
-                    attempt=response_turn_module.ResumedAttempt(restored, continuation_count=saved_count),
-                ),
+                resume=TurnResume(attempt=restored, continuation_count=saved_count),
             ),
         ),
     )
@@ -1738,10 +1738,8 @@ def test_resumed_continuation_preserves_count_on_next_pause() -> None:
                     TurnSinks(on_completed=completed.append),
                     continuation=_continuation(),
                     resume=TurnResume(
-                        attempt=response_turn_module.ResumedAttempt(
-                            CompletedAttempt(tool_executions=(_model_switch_execution("next-turn"),)),
-                            continuation_count=2,
-                        ),
+                        attempt=CompletedAttempt(tool_executions=(_model_switch_execution("next-turn"),)),
+                        continuation_count=2,
                     ),
                 ),
             ),
@@ -1785,7 +1783,7 @@ def test_fresh_continuation_saves_count_before_first_approval() -> None:
 
 @pytest.mark.parametrize(
     "resolution",
-    [HandledAttempt("failed"), SkippedAttempt(reason="quiet")],
+    [HandledAttempt("failed", error=RuntimeError("failed")), SkippedAttempt(reason="quiet")],
 )
 def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
     """Handled errors and quiet turns cannot report typed success."""
@@ -2036,7 +2034,7 @@ def test_streaming_aclose_runs_cleanup_and_records_the_stopped_turn(
 
 def test_stream_resolution_union_covers_handled() -> None:
     """The streaming resolution union accepts the handled sentinel."""
-    resolution: StreamAttemptResolution = HandledAttempt("failed")
+    resolution: StreamAttemptResolution = HandledAttempt("failed", error=RuntimeError("failed"))
     assert isinstance(resolution, HandledAttempt)
 
 

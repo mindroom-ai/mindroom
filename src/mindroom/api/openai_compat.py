@@ -771,34 +771,21 @@ async def _chat_completions(  # noqa: C901, PLR0912
                 knowledge = knowledge_resolution.knowledge
                 unavailable_bases = dict(knowledge_resolution.unavailable)
             prompt = prepend_knowledge_availability_notice(prompt, unavailable_bases)
-            model_name = budget(config.resolve_runtime_model(entity_name=agent_name).model_name)
+            turn = _openai_turn_context(
+                agent_name,
+                session_id=session_id,
+                model_name=budget(config.resolve_runtime_model(entity_name=agent_name).model_name),
+                execution_identity=execution_identity,
+                prompt=prompt,
+                thread_history=thread_history,
+                knowledge=knowledge,
+                refresh_scheduler=knowledge_refresh_scheduler,
+            )
             if req.stream:
-                response = await _stream_completion(
-                    agent_name,
-                    prompt,
-                    session_id,
-                    config,
-                    runtime_paths,
-                    thread_history,
-                    knowledge,
-                    model_name=model_name,
-                    execution_identity=execution_identity,
-                    refresh_scheduler=knowledge_refresh_scheduler,
-                )
+                response = await _stream_completion(turn, config, runtime_paths, execution_identity=execution_identity)
             else:
                 with tool_execution_identity(execution_identity):
-                    response = await _non_stream_completion(
-                        agent_name,
-                        prompt,
-                        session_id,
-                        config,
-                        runtime_paths,
-                        thread_history,
-                        knowledge,
-                        model_name=model_name,
-                        execution_identity=execution_identity,
-                        refresh_scheduler=knowledge_refresh_scheduler,
-                    )
+                    response = await _non_stream_completion(turn, config, runtime_paths)
     except BaseException:
         _release_openai_completion_lock(completion_lock)
         raise
@@ -812,36 +799,17 @@ async def _chat_completions(  # noqa: C901, PLR0912
 
 
 async def _non_stream_completion(
-    agent_name: str,
-    prompt: str,
-    session_id: str,
+    turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None,
-    *,
-    model_name: str,
-    execution_identity: ToolExecutionIdentity,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> JSONResponse:
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
+    agent_name, session_id = turn.entity_label, turn.session_id
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
     failures: list[Exception] = []
     response_text = await ai_response(
-        replace(
-            _openai_turn_context(
-                agent_name,
-                session_id=session_id,
-                model_name=model_name,
-                execution_identity=execution_identity,
-                prompt=prompt,
-                thread_history=thread_history,
-                knowledge=knowledge,
-                refresh_scheduler=refresh_scheduler,
-            ),
-            show_tool_calls=False,
-        ),
+        replace(turn, show_tool_calls=False),
         runtime_paths,
         config,
         sinks=TurnSinks(
@@ -884,37 +852,19 @@ async def _non_stream_completion(
 
 
 async def _stream_completion(
-    agent_name: str,
-    prompt: str,
-    session_id: str,
+    turn: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    knowledge: AgentKnowledge | None,
     *,
-    model_name: str,
     execution_identity: ToolExecutionIdentity,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> StreamingResponse | JSONResponse:
     """Handle streaming chat completion via SSE."""
+    agent_name, session_id = turn.entity_label, turn.session_id
     stream = cast(
         "AsyncGenerator[AIStreamChunk, None]",
         stream_with_tool_execution_identity(
             execution_identity,
-            stream_factory=lambda: stream_agent_response(
-                _openai_turn_context(
-                    agent_name,
-                    session_id=session_id,
-                    model_name=model_name,
-                    execution_identity=execution_identity,
-                    prompt=prompt,
-                    thread_history=thread_history,
-                    knowledge=knowledge,
-                    refresh_scheduler=refresh_scheduler,
-                ),
-                runtime_paths,
-                config,
-            ),
+            stream_factory=lambda: stream_agent_response(turn, runtime_paths, config),
         ),
     )
 

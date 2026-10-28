@@ -215,7 +215,7 @@ async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored
         _continuation: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.attempt = _Partial()
-        yield AttemptResolved(HandledAttempt("the model failed"))
+        yield AttemptResolved(HandledAttempt("the model failed", error=RuntimeError("the model failed")))
 
     stream = stream_response_turn(
         _ctx(),

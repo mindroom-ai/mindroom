@@ -92,7 +92,6 @@ __all__ = [
     "PausedAttempt",
     "ResponsePausedForApproval",
     "ResponseTurnContext",
-    "ResumedAttempt",
     "SkippedAttempt",
     "StreamAttemptResolution",
     "TurnAdapter",
@@ -418,10 +417,10 @@ class TurnSinks:
 
 @dataclass(frozen=True)
 class TurnResume:
-    """Where a resumed turn starts: the restored attempt to settle first, or the same-turn attempts already spent."""
+    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent."""
 
-    attempt: ResumedAttempt | None = None
-    initial_continuation_count: int = 0
+    attempt: CompletedAttempt | None = None
+    continuation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -499,14 +498,6 @@ class CompletedAttempt:
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
     status: RunStatus = RunStatus.completed
-
-
-@dataclass(frozen=True)
-class ResumedAttempt:
-    """A restored completed attempt and the logical turn budget already spent."""
-
-    attempt: CompletedAttempt
-    continuation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -734,9 +725,9 @@ class HandledAttempt:
     """One attempt that failed: the reply text that says so, which the driver emits once it recorded the failure."""
 
     text: str
-    metadata_content: dict[str, Any] | None = None
     # The failure the text reports, which ``TurnSinks.on_failed`` receives.
-    error: Exception | None = None
+    error: Exception
+    metadata_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1196,16 +1187,13 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     resumed_attempt = resume.attempt
     try:
         scope_context = await _load_scope_session(ctx, adapter, run)
-        initial_count = (
-            resumed_attempt.continuation_count if resumed_attempt is not None else resume.initial_continuation_count
-        )
-        for continuation_count in range(initial_count, TURN_CONTINUATION_LIMIT + 1):
+        for continuation_count in range(resume.continuation_count, TURN_CONTINUATION_LIMIT + 1):
             cli_lifetime.continuation_count = continuation_count
             resolution: StreamAttemptResolution | None = None
             keep_going = False
             try:
                 if resumed_attempt is not None:
-                    resolution = resumed_attempt.attempt
+                    resolution = resumed_attempt
                     resumed_attempt = None
                 else:
                     attempt_stream = context_bound_async_stream(
@@ -1231,7 +1219,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 if isinstance(resolution, HandledAttempt):
                     _publish_run_metadata(sinks, resolution.metadata_content)
                     await _record_interrupted(ctx, adapter, sinks, run, RunStatus.error)
-                    if resolution.error is not None and sinks.on_failed is not None:
+                    if sinks.on_failed is not None:
                         sinks.on_failed(resolution.error)
                     yield resolution.text
                     return

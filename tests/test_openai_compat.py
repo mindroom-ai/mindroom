@@ -2062,26 +2062,27 @@ class TestStreamingCompletion:
             patch("mindroom.providers.registry._build_adapter", return_value=model),
             patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
         ):
+            execution_identity = build_tool_execution_identity(
+                channel="openai_compat",
+                agent_name="general",
+                session_id="session-123",
+                runtime_paths=runtime_paths,
+                requester_id=None,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+            )
             response = await openai_compat._stream_completion(
-                "general",
-                "Hello",
-                "session-123",
+                openai_compat._openai_turn_context(
+                    "general",
+                    session_id="session-123",
+                    model_name="default",
+                    execution_identity=execution_identity,
+                    prompt="Hello",
+                ),
                 test_config,
                 runtime_paths,
-                None,
-                model_name="default",
-                knowledge=None,
-                execution_identity=build_tool_execution_identity(
-                    channel="openai_compat",
-                    agent_name="general",
-                    session_id="session-123",
-                    runtime_paths=runtime_paths,
-                    requester_id=None,
-                    room_id=None,
-                    thread_id=None,
-                    resolved_thread_id=None,
-                ),
-                refresh_scheduler=None,
+                execution_identity=execution_identity,
             )
 
         assert isinstance(response, openai_compat.OpenAIStreamingResponse)
@@ -2131,16 +2132,16 @@ class TestStreamingCompletion:
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = await openai_compat._stream_completion(
-                "general",
-                "Hello",
-                "session-123",
+                openai_compat._openai_turn_context(
+                    "general",
+                    session_id="session-123",
+                    model_name="default",
+                    execution_identity=execution_identity,
+                    prompt="Hello",
+                ),
                 test_config,
                 runtime_paths,
-                None,
-                None,
-                model_name="default",
                 execution_identity=execution_identity,
-                refresh_scheduler=None,
             )
 
         assert isinstance(response, StreamingResponse)

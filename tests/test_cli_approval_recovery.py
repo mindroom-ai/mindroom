@@ -52,6 +52,7 @@ from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAnswer,
     ResponsePausedForApproval,
+    TurnResume,
     apply_exact_approval_decisions,
 )
 from mindroom.run_storage import RunStorage
@@ -1084,7 +1085,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             recovered.presentation,
             prompt=recovered.prompt,
             reusable_build=recovered.reusable_build,
-            initial_continuation_count=recovered.initial_continuation_count,
+            resume=TurnResume(continuation_count=recovered.initial_continuation_count),
             delegation_depth=recovered.delegation_depth,
             media=MediaInputs(images=recovered.media.images),
             config=runtime.config,
