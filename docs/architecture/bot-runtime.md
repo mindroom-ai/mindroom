@@ -158,6 +158,6 @@ Clients consume approval events under these rules, which this repository's code 
 ## Simplifications Still Planned
 
 - `TurnController` is the only normal-turn owner but is still too large: interactive-selection execution and response-action assembly should move out of it.
-- `ResponseRunner` still holds the approval pause, resume, and recovery beside the one locked turn it runs for agents and teams; the approval methods should move to `approval/`, leaving the runner the locked turn and its delivery.
+- `ResponseRunner` still builds `InboxResponses`, which `bot.py`, `turn_controller.py`, and `text_ingress_dispatch.py` reach through it; building the inbox in `bot.py` would leave the runner only the locked turn and its delivery.
 - `IngressHookRunner` is a thin hook adapter with a vague name; it may stay a helper but must not grow into another top-level orchestration object.
 - Only after those steps, revisit `MessageTarget`, which combines conversation identity and delivery placement, and split them only if the runtime still needs it.

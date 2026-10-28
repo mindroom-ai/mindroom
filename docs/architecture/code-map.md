@@ -90,7 +90,7 @@ Matrix sync callback
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
 | `turn_store.py` | Unified durable turn access (wraps the handled-turn ledger) |
 | `handled_turns.py` | Disk-backed handled-turn ledger preventing duplicate responses |
-| `response_runner.py` | Response lifecycle execution: the one locked turn agents and teams share, streamed or collected delivery, how a reply's span ends, cancellation, and approval pause, resume, and recovery |
+| `response_runner.py` | Response lifecycle execution: the one locked turn agents and teams share, streamed or collected delivery, how a reply's span ends, and cancellation; it delegates a reply's approval lifecycle to `approval/continuation_runner.py` |
 | `reply_turn/inbox.py` | `InboxResponses`: owns detached inbox response tasks until they finish, and proves their journal recovery when a shutdown drain cancels them |
 | `reply_turn/enrichment.py` | Request enrichment for one reply turn: Matrix targeting context, silent-schedule guidance, timestamped model context, and the account of an interrupted attempt |
 | `response_turn.py` | The streaming response-turn driver behind agent and team turns and the collector blocking callers read it with (attempt loop, model-switch continuation, empty-run retry, the turn record and its interrupted row), `ResponseTurnContext` with a turn's inputs, and the run metadata and request-log context a turn binds around its model requests and stream pulls |
