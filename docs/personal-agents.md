@@ -180,7 +180,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 - Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings.
 - Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
-  It starts with no rooms and no delegation, takes its automations from `defaults`, has no `self_config`, and cannot create agents of its own.
+  It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
 
 The new agent joins no room by itself.
 The owner invites its Matrix ID to a room to talk to it, and the agent accepts because the invitation comes from an owner.

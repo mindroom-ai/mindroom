@@ -253,10 +253,10 @@ def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
             changes=[{"op": "remove", "path": "/agents/creator_research"}],
         )
 
-    assert update_result == (
-        "Error: Agent 'creator_research' was created by another agent and lives in the personal agent roster; "
-        "its owners change it with update_agent."
+    assert (
+        "agents.creator_research was created by another agent; its owners change it with update_agent" in update_result
     )
+    assert "Successfully" not in update_result
     assert remove_result.startswith("Error:")
     assert paths.config_path.read_text(encoding="utf-8") == original
 
