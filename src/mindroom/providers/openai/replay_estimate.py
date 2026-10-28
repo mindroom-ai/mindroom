@@ -43,12 +43,17 @@ def estimate_responses_replay_tokens(
     model_id: str,
     cache_system_prompt: bool,
     explicit_breakpoint: bool,
+    provider: str,
 ) -> int:
-    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``."""
+    """Count the ``input`` an explicitly replayed Responses request sends for ``messages``.
+
+    An attachment file that cannot be read raises ``InvalidRequest`` naming ``provider``, as the request would.
+    """
     replayed = responses_input(
         responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=cache_system_prompt,
         explicit_breakpoint=explicit_breakpoint,
+        provider=provider,
     )
     formatted = [_without_reasoning_ciphertext(item) for item in replayed]
     reasoning_tokens = _earlier_reasoning_tokens(messages, replayed)

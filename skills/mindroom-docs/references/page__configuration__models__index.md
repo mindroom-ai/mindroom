@@ -148,7 +148,7 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
@@ -499,10 +499,11 @@ A model with any other key, including a misspelled key or a retired Agno model s
 | `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
 | `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
-| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `timeout` |
+| `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `think`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
+An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 

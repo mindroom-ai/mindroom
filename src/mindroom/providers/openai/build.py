@@ -445,6 +445,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     capabilities = Capabilities(
         structured_output=structured_output,
         omitted_media=route.omitted_media,
+        url_media=frozenset({"image"}),
         provider_default_sampling=_provider_default_sampling(model_id),
     )
     return ChatAdapter(
@@ -524,6 +525,7 @@ def _build_responses(
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
+        url_media=frozenset({"file", "image"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
         provider_default_sampling=_provider_default_sampling(model_id),

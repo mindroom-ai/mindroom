@@ -116,7 +116,7 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
 
 @pytest.mark.asyncio
 async def test_images_are_typed_by_their_bytes_when_claude_does_not_name_their_type(tmp_path: Path) -> None:
-    """The bytes decide an image's type, even against its file name; an image gone or of another type is logged."""
+    """The bytes decide an image's type, even against its file name; an image of another type is logged."""
     # An upload announced as image/jpg is retained without a usable suffix; a tool saved a PNG under a .jpg name.
     upload = tmp_path / "sha256_upload.bin"
     upload.write_bytes(_JPEG)
@@ -131,10 +131,8 @@ async def test_images_are_typed_by_their_bytes_when_claude_does_not_name_their_t
             Image(id="att_upload", filepath=str(upload), mime_type="image/jpg"),
             Image(id="tool_chart", filepath=str(chart)),
             Image(id="tool_webp", content=_WEBP),
-            Image(id="att_gone", filepath=str(tmp_path / "sha256_gone.png"), mime_type="image/png"),
             Image(id="att_heic", filepath=str(heic), mime_type="image/heic"),
         ],
-        files=[File(id="att_report", filepath=str(tmp_path / "sha256_gone.pdf"), mime_type="application/pdf")],
     )
     wire = Wire(sse_reply([{"type": "text", "text": "Three images."}]))
 
@@ -151,11 +149,7 @@ async def test_images_are_typed_by_their_bytes_when_claude_does_not_name_their_t
             for media_type, data in (("image/jpeg", _JPEG), ("image/png", _PNG), ("image/webp", _WEBP))
         ),
     ]
-    assert [log["event"] for log in logs if log["log_level"] == "warning"] == [
-        "claude_image_file_missing",
-        "claude_image_type_unknown",
-        "claude_document_file_missing",
-    ]
+    assert [log["event"] for log in logs if log["log_level"] == "warning"] == ["claude_image_type_unknown"]
 
 
 @pytest.mark.asyncio

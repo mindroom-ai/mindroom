@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
 def _openai_audio_format(result: ToolValue) -> str:
     """Return the format the OpenAI chat wire sends for the first audio of a tool value."""
-    part = chat_audio_part(result.audios[0])
+    part = chat_audio_part(result.audios[0], provider="OpenAI Chat")
     assert part is not None
     return part["input_audio"]["format"]
 
@@ -144,7 +144,7 @@ def test_document_name_and_type_survive_inlining(
     assert document.url is None
     assert document.filename == ("chosen.csv" if explicit else "report one.txt")
     assert document.mime_type == ("text/csv" if explicit else "text/plain")
-    payload = chat_file_part(decoded.files[0])
+    payload = chat_file_part(decoded.files[0], provider="OpenAI Chat")
     assert payload is not None
     assert payload["file"]["filename"] == document.filename
     assert payload["file"]["file_data"].startswith(f"data:{document.mime_type};base64,")
@@ -235,6 +235,26 @@ def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> Non
     assert decoded.files
     assert decoded.files[0].mime_type is None
     assert decoded.files[0].filename == "download"
+
+
+def test_a_declared_type_files_cannot_take_leaves_the_file_name_to_type_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A header naming a type outside the File types the transport accepts gives way to the URL's name."""
+
+    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b"notes"),
+            headers={"Content-Type": "image/png"},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    result = ToolResult(content="Document", files=[File(url="https://8.8.8.8/export/notes.txt")])
+    decoded = decode_media_result(serialize_worker_tool_result(result))
+
+    assert isinstance(decoded, ToolValue)
+    assert decoded.files
+    assert (decoded.files[0].filename, decoded.files[0].mime_type) == ("notes.txt", "text/plain")
 
 
 def test_worker_file_result_rejects_nonregular_file(tmp_path: Path) -> None:
@@ -564,6 +584,6 @@ def test_a_file_returned_as_bytes_beside_its_path_keeps_the_paths_name_and_type(
     ]
     decoded = decode_media_result(json.loads(wire))
     assert isinstance(decoded, ToolValue)
-    part = responses_file_part(decoded.files[0])
+    part = responses_file_part(decoded.files[0], provider="OpenAI Responses")
     assert part is not None
     assert (part["filename"], part["file_data"].split(";", 1)[0]) == ("report.pdf", "data:application/pdf")

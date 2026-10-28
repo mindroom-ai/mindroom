@@ -64,7 +64,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.embeddings.ollama_embedder"
-depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors"]
+depends_on = ["mindroom.embeddings.errors", "mindroom.providers.ollama.errors", "mindroom.providers.ollama.settings"]
 visibility = ["mindroom.embeddings.factory"]
 
 [[modules]]
@@ -2838,6 +2838,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.claude_wire_blocks",
+    "mindroom.providers.media_files",
 ]
 visibility = ["mindroom.providers.anthropic.messages"]
 
@@ -3708,7 +3709,7 @@ depends_on = [
     "mindroom.timing",
     "mindroom.tool_system.dependencies",
 ]
-visibility = ["mindroom.memory._backend"]
+visibility = ["mindroom.cli.doctor", "mindroom.memory._backend"]
 
 [[modules]]
 path = "mindroom.memory._mem0_usage"
@@ -4970,6 +4971,7 @@ depends_on = [
     "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
     "mindroom.embeddings.errors",
+    "mindroom.embeddings.factory",
     "mindroom.embeddings.sentence_transformers_embedder",
     "mindroom.llm",
     "mindroom.matrix.client_session",
@@ -4981,10 +4983,15 @@ depends_on = [
     "mindroom.providers.key_checks",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
+    "mindroom.providers.ollama.settings",
     "mindroom.runtime_env_policy",
     "mindroom.startup_errors",
     # Deferred import in the Vertex AI Claude connection check, so the anthropic SDK loads only when used.
     "mindroom.providers.anthropic.messages",
+    # Deferred imports in the Ollama server checks, so the Ollama SDK, memory setup, and model registry load only when used.
+    "mindroom.memory.config",
+    "mindroom.providers.ollama.adapter",
+    "mindroom.providers.registry",
 ]
 
 [[modules]]
@@ -6150,6 +6157,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.media_files",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
     "mindroom.providers.prompt_cache_key",
@@ -6164,10 +6172,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.providers.pipeline"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.constants",
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.model_usage",
+    "mindroom.providers.model_http_client",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
 ]
@@ -8152,22 +8162,21 @@ path = "mindroom.providers.errors"
 depends_on = ["mindroom.llm", "mindroom.failure_text"]
 
 [[modules]]
-path = "mindroom.providers.remote_media"
-depends_on = ["mindroom.bounded_bytes", "mindroom.llm", "mindroom.logging_config"]
+path = "mindroom.providers.media_files"
+depends_on = ["mindroom.llm", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.providers.gemini"
 depends_on = [
     "mindroom.constants",
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
-    "mindroom.providers.remote_media",
+    "mindroom.providers.media_files",
     "mindroom.providers.tool_policy",
 ]
 
@@ -8180,13 +8189,12 @@ path = "mindroom.providers.ollama.adapter"
 depends_on = [
     "mindroom.credentials.sync",
     "mindroom.llm",
-    "mindroom.logging_config",
     "mindroom.model_defaults",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.media_files",
     "mindroom.providers.ollama.errors",
     "mindroom.providers.ollama.settings",
-    "mindroom.providers.remote_media",
     "mindroom.providers.tool_policy",
 ]
 
