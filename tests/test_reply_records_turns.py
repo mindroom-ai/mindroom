@@ -17,7 +17,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.participation import ParticipationConfig
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import SKIP_MENTIONS_KEY, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, EventKind, InboundEvent
@@ -588,6 +588,51 @@ async def test_regeneration_replaces_the_answer_of_the_same_reply(tmp_path: Path
     assert spans[-1].delivery_id == "$edit"
     # The regeneration edits the answer itself; no placeholder is sent over it.
     assert _sent_bodies(bot) == ["Thinking...", "First answer.", "Second answer."]
+
+
+async def test_a_team_regeneration_streams_into_the_answer_it_replaces(tmp_path: Path) -> None:
+    """An edit regenerates a team's answered reply as a stream when streaming applies, as it does an agent's."""
+    bot = await _streaming_bot(tmp_path)
+    bot.orchestrator = MagicMock(config=bot.config)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    with patch_response_runner_module(
+        team_response_stream=_model_stream(AsyncMock(return_value="First answer.")),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        await runner.generate_team_response_helper(
+            _plain_request(_target()),
+            member_names=[bot.agent_name],
+            team_mode="coordinate",
+        )
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        for chunk in ("Second", "Second answer."):
+            yield chunk
+            await asyncio.sleep(0.01)
+
+    sends = len(_sent_bodies(bot))
+    with patch_response_runner_module(
+        team_response_stream=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        assert (
+            await runner.generate_team_response_helper(
+                _regeneration(answer_event_id="$sent1"),
+                member_names=[bot.agent_name],
+                team_mode="coordinate",
+            )
+            == "$sent1"
+        )
+
+    statuses = [
+        call.kwargs["content"].get("m.new_content", call.kwargs["content"]).get(STREAM_STATUS_KEY)
+        for call in bot.client.room_send.await_args_list[sends:]
+    ]
+    assert "streaming" in statuses
+    assert statuses[-1] == "completed"
+    assert _sent_bodies(bot)[-1] == "Second answer."
 
 
 async def _admit_edit(bot: AgentBot) -> None:
