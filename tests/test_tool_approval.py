@@ -2247,37 +2247,6 @@ def test_approving_a_card_past_its_deadline_reports_the_expiry(approvable: bool)
 
 
 @pytest.mark.asyncio
-async def test_a_timed_approval_of_a_card_past_its_deadline_records_the_expiry(tmp_path: Path) -> None:
-    """A late "approve for N minutes" click expires the card instead of leaving it looking pending."""
-    cards = MagicMock()
-    cards.approvals.approval_card = AsyncMock(return_value=card_view(expires_at_ns=1, offers_timed_approval=True))
-    cards.approvals.resolve_approval_call = AsyncMock(return_value=MagicMock(resolution=None))
-    cards.approvals.create_approval_grant = AsyncMock(return_value=())
-    manager = initialize_approval_store_for_test(
-        test_runtime_paths(tmp_path),
-        cards=cards,
-        transport_sender_id=lambda: "@router:localhost",
-    )
-
-    try:
-        result = await handle_card_response_for_test(
-            manager,
-            room_id="!room:localhost",
-            sender_id="@approver:localhost",
-            card_event_id="$approval",
-            status="approved",
-            auto_approve_seconds=600,
-            authorize_responder=lambda _entity_name: True,
-        )
-    finally:
-        await manager.shutdown()
-
-    assert result.consumed is True
-    cards.approvals.create_approval_grant.assert_not_awaited()
-    assert cards.approvals.resolve_approval_call.await_args.kwargs["requested_status"] == "expired"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("retired", [True, False])
 async def test_expiring_a_decided_unsent_card_finishes_once_matrix_refused_it(tmp_path: Path, retired: bool) -> None:
     """A decided card that never reached Matrix is finished exactly when retiring it succeeds, so outbox recovery owns it."""

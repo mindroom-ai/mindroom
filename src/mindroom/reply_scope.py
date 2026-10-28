@@ -275,8 +275,8 @@ class ReplyRuntime:
     retry_sources: Callable[[str, tuple[str, ...]], None]
     # Tells the turn ledger about a turn a reply's settlement already recorded answered.
     complete_turn: Callable[[TurnRecord], Awaitable[object]]
-    # Settles what the reply of an ended approval owes.
-    approval_ended: Callable[[ApprovalEnded], None]
+    # Settles what the reply of an ended approval owes, given the reply's id.
+    approval_ended: Callable[[str], None]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -304,7 +304,7 @@ class ReplyRuntime:
             for effect in effects:
                 if isinstance(effect, ApprovalEnded):
                     self.claim_may_proceed(effect.reply_id)
-                    self.approval_ended(effect)
+                    self.approval_ended(effect.reply_id)
             for effect in effects:
                 if isinstance(effect, rl.CancelSpan):
                     self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)

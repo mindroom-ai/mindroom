@@ -994,7 +994,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
     """A failed read while waking the fenced approval cannot leave the stopped span running or the hold in place."""
     principal = journal_store.principal("agent@alice")
     cancelled: list[tuple[str, str | None]] = []
-    ended: list[ApprovalEnded] = []
+    ended: list[str] = []
 
     class _Spans(SpanRegistry):
         def cancel(self, span_id: str, *, cancel_source: TaskCancelSource | None) -> bool:
@@ -1019,10 +1019,10 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         pytest.raises(RuntimeError, match="journal unavailable"),
     ):
         await runtime.run_effects(
-            (WakeApproval("approval-1"), ApprovalEnded("approval-2", "reply-2"), rl.CancelSpan("span-1", by_stop=True)),
+            (WakeApproval("approval-1"), ApprovalEnded("reply-2"), rl.CancelSpan("span-1", by_stop=True)),
         )
     assert cancelled == [("span-1", "user_stop")]
-    assert [end.approval_id for end in ended] == ["approval-2"]
+    assert ended == ["reply-2"]
 
 
 @pytest.mark.parametrize("ended_by", ["departure", "deletion"])
@@ -1279,7 +1279,7 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
 
     # Its effects are returned like a finish's, for whatever runs them.
     assert effects is not None
-    assert ApprovalEnded("approval-1", paused.reply_id) in effects
+    assert ApprovalEnded(paused.reply_id) in effects
     ended = await alice.replies.load(paused.reply_id)
     assert ended is not None
     assert ended.state is ReplyState.FAILED
@@ -1391,9 +1391,12 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
     await journal_tests.TestApprovalContinuations.admit_sources(alice)
     paused = await paused_for_approval(alice, journal_tests.TestApprovalContinuations.continuation(state="waiting"))
     assert paused is not None
+    assert paused.span_id is not None
+    paused_span = await alice.replies.span(paused.span_id)
+    assert paused_span is not None
     await _delete(alice, "$source-1")
     await _delete(alice, "$source-2")
-    ended: list[ApprovalEnded] = []
+    ended: list[str] = []
     runtime = reply_scope.ReplyRuntime(
         store=alice,
         entity_name="agent",
@@ -1417,7 +1420,7 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         with pytest.raises(asyncio.CancelledError):
             await finishing
     assert await alice.approvals.approval_continuation("approval-1") is None
-    assert [end.approval_id for end in ended] == ["approval-1"]
+    assert ended == [paused_span.reply_id]
 
 
 async def test_retention_keeps_a_reply_a_continuation_still_names(journal_store: EventJournalStore) -> None:

@@ -594,24 +594,20 @@ def _retire(transaction: Transaction, principal_id: str, delivery_id: str) -> No
 def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> bool:
     """Retire a decided request card Matrix is done with; return whether it is retired.
 
-    Matrix is done with it once its terminal edit is acknowledged or refused for good, or once its card itself was
-    refused for good, so no edit can ever reach it; a card whose delivery Matrix refuses must not keep the paused
-    reply it shows from settling.
+    Matrix is done with it once its terminal edit is acknowledged or refused for good; a card Matrix refused to post
+    refuses its terminal edit too. A card whose delivery Matrix refuses must not keep the paused reply it shows from
+    settling.
     """
     row = transaction.fetchone(
         """
         SELECT cards.retired, final.acknowledged_event_id AS final_event_id,
-               final.permanent_failure_reason AS final_refused, initial.permanent_failure_reason AS initial_refused,
+               final.permanent_failure_reason AS final_refused,
                calls.owner_id IS NOT NULL AND calls.decision IS NULL AS undecided
         FROM approval_cards AS cards
         LEFT JOIN approval_calls AS calls
           ON calls.owner_id = cards.owner_id
          AND calls.generation = cards.generation
          AND calls.tool_call_id = cards.tool_call_id
-        LEFT JOIN matrix_delivery_outbox AS initial
-          ON initial.principal_id = cards.principal_id
-         AND initial.delivery_id = cards.delivery_id
-         AND initial.stage = 'initial'
         LEFT JOIN matrix_delivery_outbox AS final
           ON final.principal_id = cards.principal_id
          AND final.delivery_id = cards.delivery_id
@@ -624,9 +620,7 @@ def retire(transaction: Transaction, principal_id: str, *, delivery_id: str) -> 
         return False
     if bool(row["retired"]):
         return True
-    if bool(row["undecided"]) or (
-        row["final_event_id"] is None and row["final_refused"] is None and row["initial_refused"] is None
-    ):
+    if bool(row["undecided"]) or (row["final_event_id"] is None and row["final_refused"] is None):
         return False
     _retire(transaction, principal_id, delivery_id)
     return True
@@ -637,13 +631,13 @@ def retire_receipts(transaction: Transaction, principal_id: str) -> None:
     rows = transaction.fetchall(
         """
         SELECT cards.delivery_id FROM approval_cards AS cards
-        LEFT JOIN matrix_delivery_outbox AS initial
+        JOIN matrix_delivery_outbox AS initial
           ON initial.principal_id = cards.principal_id
          AND initial.delivery_id = cards.delivery_id
          AND initial.stage = 'initial'
         WHERE cards.principal_id = ? AND cards.kind <> 'request' AND cards.retired = 0
           AND (
-              initial.delivery_id IS NULL OR initial.acknowledged_event_id IS NOT NULL
+              initial.acknowledged_event_id IS NOT NULL
               OR initial.permanent_failure_reason IS NOT NULL OR initial.retired = 1
           )
         """,
@@ -660,7 +654,7 @@ _CURRENT_MEMBERSHIP = """(
 
 
 def card_event_of(alias: str) -> str:
-    """Return the SQL that reads the first Matrix event showing the card ``alias``'s principal and delivery name."""
+    """Return the SQL that reads the smallest id of the Matrix events showing the card ``alias`` names."""
     return f"""(
         SELECT MIN(events.card_event_id) FROM approval_card_events AS events
         WHERE events.principal_id = {alias}.principal_id AND events.delivery_id = {alias}.delivery_id
@@ -873,7 +867,7 @@ def deny_for_departed_card_owner(
         """
         UPDATE approval_continuations
         SET state = 'failing', failure_kind = 'error', failure_detail = ?, runtime_generation = NULL
-        WHERE state IN ('waiting', 'ready')
+        WHERE state = 'waiting'
           AND EXISTS (
               SELECT 1 FROM approval_cards AS cards
               JOIN approval_calls AS calls

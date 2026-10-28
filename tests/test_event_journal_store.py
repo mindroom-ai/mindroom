@@ -6779,7 +6779,27 @@ class TestApprovalContinuations:
         tool_call_id: str = "call-1",
         continuation_principal_id: str = "agent@alice",
     ) -> None:
-        """Persist one current-format card for the first continuation generation."""
+        """Persist one current-format card for the first continuation generation, posted as ``$approval``."""
+        await TestApprovalContinuations.reserve_card(
+            store,
+            tool_call_id=tool_call_id,
+            continuation_principal_id=continuation_principal_id,
+        )
+        await store.acknowledge_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            event_id="$approval",
+            delivered_projections=(),
+        )
+
+    @staticmethod
+    async def reserve_card(
+        store: PrincipalStore,
+        *,
+        tool_call_id: str = "call-1",
+        continuation_principal_id: str = "agent@alice",
+    ) -> None:
+        """Reserve one current-format card for the first continuation generation, and claim its post."""
         reserved = await store.approvals.reserve_reply_cards(
             continuation_principal_id=continuation_principal_id,
             continuation_id="approval-1",
@@ -6814,12 +6834,6 @@ class TestApprovalContinuations:
             delivery_id="approval-card-1",
             stage=DeliveryStage.INITIAL,
             device_id=DEVICE,
-        )
-        await store.acknowledge_matrix_delivery(
-            delivery_id="approval-card-1",
-            stage=DeliveryStage.INITIAL,
-            event_id="$approval",
-            delivered_projections=(),
         )
 
     async def test_background_call_uses_shared_card_dispatch_and_retirement(
@@ -8258,7 +8272,7 @@ class TestApprovalContinuations:
         # A claim that waited for the approval to end, such as an edit's regeneration, retries.
         span = await alice.replies.span(paused.span_id)
         assert span is not None
-        assert ApprovalEnded("approval-1", span.reply_id) in effects
+        assert ApprovalEnded(span.reply_id) in effects
         assert await alice.approvals.approval_continuation_for_source("$source-1") is None
         assert not await alice.is_pending("$source-1")
         assert not await alice.is_pending("$source-2")
@@ -8293,7 +8307,7 @@ class TestApprovalContinuations:
         assert effects is not None
         span = await alice.replies.span(paused.span_id)
         assert span is not None
-        assert ApprovalEnded("approval-1", span.reply_id) in effects
+        assert ApprovalEnded(span.reply_id) in effects
 
         assert await alice.approvals.approval_continuation("approval-1") is None
         assert await alice.approvals.approval_continuation_for_source("$source-1") is None
@@ -8843,6 +8857,84 @@ class TestApprovalContinuations:
         resolution = await terminal_edit(router, stored.delivery_id)
         assert resolution["status"] == "expired"
         assert resolution["resolution_reason"] == "Requesting agent left the room."
+
+    async def test_a_decided_card_retires_once_matrix_refused_its_terminal_edit(self, alice: PrincipalStore) -> None:
+        """No edit can ever reach a card whose terminal edit Matrix refused for good, so the card retires."""
+        await self.admit_sources(alice)
+        await paused_for_approval(alice, replace(self.continuation(state="waiting"), runtime_generation="runtime-a"))
+        await self.remember_card(alice)
+        await resolve_card_event(
+            alice.approvals,
+            room_id=ROOM,
+            card_event_id="$approval",
+            requested_status="denied",
+            reason="Unsafe.",
+            metadata=ApprovalDecisionMetadata(),
+        )
+        assert await alice.claim_matrix_delivery(delivery_id="approval-card-1", stage=DeliveryStage.FINAL)
+        assert await alice.approvals.retire_approval_card(delivery_id="approval-card-1") is False
+
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        assert await alice.approvals.retire_approval_card(delivery_id="approval-card-1") is True
+        assert await card_is_terminal(alice.approvals, room_id=ROOM, card_event_id="$approval") is True
+
+    async def test_a_decided_card_retires_once_matrix_refused_the_card(self, alice: PrincipalStore) -> None:
+        """A decided card Matrix refused to post can never be edited, so it retires instead of holding its reply."""
+        await self.admit_sources(alice)
+        await paused_for_approval(alice, replace(self.continuation(state="waiting"), runtime_generation="runtime-a"))
+        await self.reserve_card(alice)
+        await alice.approvals.resolve_approval_call(
+            CallKey("approval-1", 0, "call-1"),
+            requested_status="denied",
+            reason="Unsafe.",
+            metadata=ApprovalDecisionMetadata(),
+        )
+        assert await alice.approvals.retire_approval_card(delivery_id="approval-card-1") is False
+
+        await alice.record_permanent_matrix_delivery_failure(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.INITIAL,
+            reason="matrix event exceeds the hard size limit",
+        )
+
+        assert await alice.approvals.retire_approval_card(delivery_id="approval-card-1") is True
+        assert await alice.approvals.pending_approval_cards(room_id=ROOM) == ()
+
+    async def test_a_departed_responders_call_lives_until_its_card_retires(
+        self,
+        journal_store: EventJournalStore,
+        alice: PrincipalStore,
+    ) -> None:
+        """The router's card keeps the decision a departure gave its call until the card retires, then the call goes."""
+        router = journal_store.principal("router@shared")
+        await self.admit_sources(alice)
+        await paused_for_approval(alice, replace(self.continuation(state="waiting"), runtime_generation="runtime-a"))
+        await self.remember_card(router)
+        await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.REPORTED)
+
+        async def calls() -> list[tuple[object, object]]:
+            rows = await router._backend.read(
+                lambda transaction: transaction.fetchall("SELECT owner_id, decision FROM approval_calls"),
+            )
+            return [(row["owner_id"], row["decision"]) for row in rows]
+
+        assert await alice.approvals.approval_continuation("approval-1") is None
+        assert await calls() == [("approval-1", "expired")]
+        assert await router.claim_matrix_delivery(delivery_id="approval-card-1", stage=DeliveryStage.FINAL)
+        await router.acknowledge_matrix_delivery(
+            delivery_id="approval-card-1",
+            stage=DeliveryStage.FINAL,
+            event_id="$terminal-edit",
+            delivered_projections=(),
+        )
+
+        assert await router.approvals.retire_approval_card(delivery_id="approval-card-1") is True
+        assert await calls() == []
 
     async def test_room_departure_retires_router_card_after_terminal_ack_crash(
         self,

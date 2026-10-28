@@ -61,7 +61,6 @@ class ApprovalEnded:
     conversation it held learns of its end from the approval signals.
     """
 
-    approval_id: str
     reply_id: str
 
 

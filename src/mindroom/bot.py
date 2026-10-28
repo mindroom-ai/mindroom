@@ -659,7 +659,7 @@ class AgentBot:
             # Resolved late: the dispatcher is built after the reply runtime.
             retry_sources=lambda room_id, event_ids: self._journal_dispatcher.retry_turn_sources(room_id, event_ids),
             complete_turn=lambda record: self._turn_store.publish_completed_turn(record),
-            approval_ended=lambda ended: self._settle_reply_debt_later(ended.reply_id),
+            approval_ended=self._settle_reply_debt_later,
         )
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(

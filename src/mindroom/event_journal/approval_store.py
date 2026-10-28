@@ -301,7 +301,7 @@ class ApprovalStore:
         )
 
     async def retire_approval_card(self, *, delivery_id: str) -> bool:
-        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit or the card."""
+        """Retire a decided request card once Matrix acknowledged or refused for good its terminal edit."""
         return await self._backend.write(
             lambda transaction: approval_cards.retire(transaction, self._principal_id, delivery_id=delivery_id),
         )
@@ -673,7 +673,7 @@ def _end_approval(
     approval_continuations.delete(transaction, principal_id, approval_id=approval_id)
     effects = () if applied is None else applied.post_commit
     # A claim that waited for the approval to end, such as an edit's regeneration, retries now.
-    return effects if paused is None else (*effects, replies.ApprovalEnded(approval_id, paused.reply_id))
+    return effects if paused is None else (*effects, replies.ApprovalEnded(paused.reply_id))
 
 
 class _InPlaceResumeRefusedError(Exception):

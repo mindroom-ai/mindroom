@@ -755,6 +755,7 @@ class ApprovalManager:
         # A timed approval that normalizes to an expiry or a denial is recorded as that decision, like any other click.
         if auto_approve_seconds is not None and resolved_status == "approved":
             return await self._approve_with_grant(
+                cards,
                 card,
                 card_event_id=card_event_id,
                 sender_id=sender_id,
@@ -781,6 +782,7 @@ class ApprovalManager:
 
     async def _approve_with_grant(
         self,
+        cards: ApprovalDeliveryView,
         card: ApprovalCardView,
         *,
         card_event_id: str,
@@ -790,9 +792,7 @@ class ApprovalManager:
         current_binding: str | None,
     ) -> ApprovalActionResult:
         """Commit the grant batch and wake every newly executable continuation."""
-        if self.cards is None:
-            return ApprovalActionResult(consumed=True, card_event_id=card_event_id)
-        decisions = await self.cards.approvals.create_approval_grant(
+        decisions = await cards.approvals.create_approval_grant(
             room_id=card.room_id,
             card_event_id=card_event_id,
             sender_id=sender_id,
@@ -1104,8 +1104,8 @@ class ApprovalManager:
     async def _run_deadline_sweep(self) -> None:
         # While the sweep runs, a decision written outside the manager, such as a job's end or a departure, reaches
         # Matrix as it commits instead of at the next sweep; one the manager writes itself is sent once all the same.
-        cards = self.cards
-        stop_following = None if cards is None else cards.approvals.signals.follow_decided_cards(self._card_decided)
+        assert self.cards is not None, "only a manager with a card store sweeps deadlines"
+        stop_following = self.cards.approvals.signals.follow_decided_cards(self._card_decided)
         try:
             while True:
                 self._deadline_wakeup.clear()
@@ -1116,8 +1116,7 @@ class ApprovalManager:
                 except Exception:
                     logger.warning("approval_deadline_sweep_failed", exc_info=True)
         finally:
-            if stop_following is not None:
-                stop_following()
+            stop_following()
 
     def _card_decided(self, card: DecidedCard) -> None:
         """Send the terminal edit of a card whose call was just decided."""

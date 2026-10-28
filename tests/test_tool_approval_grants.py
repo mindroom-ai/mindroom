@@ -1595,6 +1595,32 @@ async def test_ineligible_timed_request_leaves_call_pending(
 
 
 @pytest.mark.asyncio
+async def test_a_timed_approval_past_the_deadline_records_the_expiry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late "approve for N minutes" click expires the call and its card at once and grants nothing."""
+    monkeypatch.setattr("time.time_ns", lambda: 2_000_000_000_000_000_000)
+    journal = EventJournalStore.open_sqlite(tmp_path / "grants.db")
+    manager = _manager(journal, tmp_path)
+    try:
+        card = await _card(journal, manager, "late", expires_at_ns=2_000_000_060_000_000_000)
+        monkeypatch.setattr("time.time_ns", lambda: 2_000_000_060_000_000_000)
+
+        assert (await _approve(manager, card)).consumed
+
+        continuation = await journal.principal("agent@code").approvals.approval_continuation("late")
+        assert continuation is not None
+        assert continuation.calls[0].decision.value == "expired"
+        router = journal.principal("router@shared").approvals
+        assert await router.approval_grant_for_card(room_id="!room:test", card_event_id=card) is None
+        assert await card_is_terminal(router, room_id="!room:test", card_event_id=card)
+    finally:
+        await manager.shutdown()
+        await journal.close()
+
+
+@pytest.mark.asyncio
 async def test_timed_action_delivers_its_scope_without_startup_recovery(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,

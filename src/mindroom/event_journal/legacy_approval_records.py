@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -12,7 +11,6 @@ from mindroom.logging_config import get_logger
 from . import approval_calls, approval_cards, scheduled_approvals
 from .approval_calls import JOB_ENDED_REASON, CallKey
 from .identity import encode_thread_id
-from .models import DURABLE_DELIVERY_ID_KEY
 from .schema import APPROVAL_TABLES, create_statement
 
 if TYPE_CHECKING:
@@ -27,7 +25,7 @@ logger = get_logger(__name__)
 # run; approval_grant_cards copied a card's grant scope and the grant that applied to it; approval_grants copied the
 # scope again with the originating card's event; scheduled_call_approvals held its card's event, decider, and approved
 # scope; approval_action_tombstones held the events of retired cards and receipt aliases. Selected when any of those
-# tables exists, or approval_cards still has its continuation_id column.
+# tables exists.
 # Last legacy release: v2026.10.647; replacement: the next release keeps one approval_calls row per call, one
 # approval_cards row per card or receipt, approval_card_events, approval_card_scopes, and trimmed approval_grants and
 # scheduled_call_approvals.
@@ -60,9 +58,7 @@ _TOMBSTONE_DELIVERY_PREFIX = "legacy-tombstone:"
 def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspector) -> None:
     """Convert an earlier release's approval tables to one row per call and card, inside the schema transaction."""
     tables = inspector.tables()
-    if not any(table in tables for table in _DROPPED_TABLES) and "continuation_id" not in inspector.columns(
-        "approval_cards",
-    ):
+    if not any(table in tables for table in _DROPPED_TABLES):
         return
     legacy = _Legacy.load(transaction, tables)
     for table in (*_DROPPED_TABLES, *_REPLACED_TABLES):
@@ -81,16 +77,6 @@ def upgrade_approval_records(transaction: Transaction, inspector: SchemaInspecto
         cards=len(converted.cards),
         denied_job_calls=len(converted.pending_jobs),
     )
-
-
-def _payload(value: object) -> dict[str, Any]:
-    if value is None:
-        return {}
-    decoded = json.loads(str(value))
-    if not isinstance(decoded, dict):
-        return {}
-    decoded.pop(DURABLE_DELIVERY_ID_KEY, None)
-    return decoded
 
 
 def _ns(value: object) -> int | None:
@@ -128,6 +114,19 @@ class _Legacy:
     bindings: tuple[Row, ...]
     tombstones: tuple[Row, ...]
     deliveries: dict[tuple[str, str], _Delivery]
+    # The old rows by the call or delivery they name.
+    card_for_call: dict[CallKey, Row] = field(init=False)
+    grant_card_for_call: dict[CallKey, Row] = field(init=False)
+    binding_for_delivery: dict[tuple[str, str], Row] = field(init=False)
+    grant_for_delivery: dict[tuple[str, str], Row] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.card_for_call = {_old_call(row): row for row in self.cards}
+        self.grant_card_for_call = {_old_call(row): row for row in self.grant_cards if row["grant_id"] is not None}
+        self.binding_for_delivery = {(str(row["principal_id"]), str(row["delivery_id"])): row for row in self.bindings}
+        self.grant_for_delivery = {
+            (str(row["principal_id"]), str(row["original_delivery_id"])): row for row in self.grants
+        }
 
     @classmethod
     def load(cls, transaction: Transaction, tables: frozenset[str]) -> _Legacy:
@@ -155,11 +154,17 @@ class _Legacy:
                     delivery,
                     room_id=str(row["room_id"]),
                     thread_id=str(row["thread_id"]),
-                    initial=_payload(row["payload_json"]),
+                    initial=approval_cards.decode_object_payload(row["payload_json"], description="approval card"),
                     initial_event_id=cast("str | None", row["acknowledged_event_id"]),
                 )
             else:
-                delivery = replace(delivery, final=_payload(row["payload_json"]))
+                delivery = replace(
+                    delivery,
+                    final=approval_cards.decode_object_payload(
+                        row["payload_json"],
+                        description="approval terminal edit",
+                    ),
+                )
             deliveries[key] = delivery
         return cls(
             reply_calls=rows("approval_continuation_calls"),
@@ -209,23 +214,25 @@ class _Converted:
     # Rebuilt calls whose card never got a terminal edit, which the conversion queues as the timeout would have.
     _final_edits: list[CallKey] = field(default_factory=list)
 
-    def build(self, legacy: _Legacy) -> None:  # noqa: C901, PLR0912, PLR0915 - one pass per legacy table
-        bindings_by_delivery = {(str(row["principal_id"]), str(row["delivery_id"])): row for row in legacy.bindings}
-        grants_by_delivery = {
-            (str(row["principal_id"]), str(row["original_delivery_id"])): row for row in legacy.grants
-        }
-        card_rows = {(str(row["principal_id"]), str(row["delivery_id"])): row for row in legacy.cards}
-        card_for_call = {_old_call(row): row for row in legacy.cards}
-        grant_card_for_call = {_old_call(row): row for row in legacy.grant_cards if row["grant_id"] is not None}
+    def build(self, legacy: _Legacy) -> None:
+        # In this order: a later table's rows skip the cards and calls an earlier one converted.
+        self._reply_calls(legacy)
+        self._detached_calls(legacy)
+        self._request_cards(legacy)
+        self._grant_cards(legacy)
+        self._grants(legacy)
+        self._bindings(legacy)
+        self._tombstones(legacy)
 
-        # Paused-reply calls; approver from the request card, decider from its terminal edit.
+    def _reply_calls(self, legacy: _Legacy) -> None:
+        """Paused-reply calls; approver from the request card, decider from its terminal edit."""
         for row in legacy.reply_calls:
             call = CallKey(str(row["approval_id"]), int(row["generation"]), str(row["tool_call_id"]))
-            card = card_for_call.get(call)
+            card = legacy.card_for_call.get(call)
             delivery = (
                 _Delivery() if card is None else legacy.delivery(str(card["principal_id"]), str(card["delivery_id"]))
             )
-            grant_card = grant_card_for_call.get(call)
+            grant_card = legacy.grant_card_for_call.get(call)
             self.calls[call] = {
                 "principal_id": str(row["principal_id"]),
                 "owner_kind": "reply",
@@ -245,12 +252,13 @@ class _Converted:
                 "grant_id": None if grant_card is None else grant_card["grant_id"],
             }
 
-        # Detached calls: scheduled when a binding names the card, a job's under tool-job:, otherwise a script's.
+    def _detached_calls(self, legacy: _Legacy) -> None:
+        """Detached calls: scheduled when a binding names the card, a job's under tool-job:, otherwise a script's."""
         for row in legacy.detached_calls:
             principal_id = str(row["principal_id"])
             delivery_id = str(row["delivery_id"])
             call = CallKey.detached(str(row["run_id"]), str(row["call_id"]))
-            binding = bindings_by_delivery.get((principal_id, delivery_id))
+            binding = legacy.binding_for_delivery.get((principal_id, delivery_id))
             delivery = legacy.delivery(principal_id, delivery_id)
             initial = delivery.initial or {}
             final = delivery.final or {}
@@ -261,7 +269,7 @@ class _Converted:
                 if call.owner_id.startswith(approval_calls.JOB_RUN_PREFIX)
                 else "script"
             )
-            grant_card = grant_card_for_call.get(call)
+            grant_card = legacy.grant_card_for_call.get(call)
             resolved_by = _text(final.get("resolved_by"))
             resolved_at_ns = _ns(final.get("resolved_at"))
             approved_scope = None
@@ -291,8 +299,11 @@ class _Converted:
             if owner_kind == "job" and row["decision"] is None:
                 self.pending_jobs.append(call)
 
-        # Request cards still holding delivery debt.
-        for (principal_id, delivery_id), row in card_rows.items():
+    def _request_cards(self, legacy: _Legacy) -> None:
+        """Request cards still holding delivery debt."""
+        for row in legacy.cards:
+            principal_id = str(row["principal_id"])
+            delivery_id = str(row["delivery_id"])
             delivery = legacy.delivery(principal_id, delivery_id)
             if delivery.initial is None:
                 continue
@@ -312,13 +323,14 @@ class _Converted:
                 # A responder departure deleted the paused reply and kept this card's terminal-edit debt.
                 self._rebuilt_call(principal_id, call, delivery, grant_id=None)
 
-        # Timed-grant cards: receipts, retired cards a grant names, and the consent a live card offers.
+    def _grant_cards(self, legacy: _Legacy) -> None:
+        """Timed-grant cards: receipts, retired cards a grant names, and the consent a live card offers."""
         for row in legacy.grant_cards:
             principal_id = str(row["principal_id"])
             delivery_id = str(row["delivery_id"])
             call = _old_call(row)
             live_request = (principal_id, delivery_id) in self.cards
-            originating = (principal_id, delivery_id) in grants_by_delivery
+            originating = (principal_id, delivery_id) in legacy.grant_for_delivery
             if live_request or originating:
                 self.scopes[principal_id, delivery_id] = _scope(row)
             if live_request or row["grant_id"] is None:
@@ -339,7 +351,7 @@ class _Converted:
                 if call not in self.calls:
                     self._rebuilt_call(principal_id, call, delivery, grant_id=str(row["grant_id"]))
                 continue
-            grant = grants_by_delivery.get((principal_id, delivery_id))
+            grant = legacy.grant_for_delivery.get((principal_id, delivery_id))
             self._card(
                 principal_id,
                 delivery_id,
@@ -352,7 +364,8 @@ class _Converted:
                 event_id=None if grant is None else str(grant["card_event_id"]),
             )
 
-        # Grants point at their originating card, whose consent and event the grant row also kept.
+    def _grants(self, legacy: _Legacy) -> None:
+        """Grants point at their originating card, whose consent and event the grant row also kept."""
         for row in legacy.grants:
             principal_id = str(row["principal_id"])
             delivery_id = str(row["original_delivery_id"])
@@ -382,7 +395,8 @@ class _Converted:
                 },
             )
 
-        # Scheduled bindings, their request cards, and their receipts.
+    def _bindings(self, legacy: _Legacy) -> None:
+        """Scheduled bindings, their request cards, and their receipts."""
         for row in legacy.bindings:
             principal_id = str(row["principal_id"])
             task_id = str(row["task_id"])
@@ -440,8 +454,11 @@ class _Converted:
                 },
             )
 
-        # Retired cards and receipt aliases no converted card shows; tombstones never stored their delivery or thread,
-        # and a retired card's call is never read.
+    def _tombstones(self, legacy: _Legacy) -> None:
+        """Retired cards and receipt aliases no converted card shows.
+
+        Tombstones never stored their delivery or thread, and a retired card's call is never read.
+        """
         for row in legacy.tombstones:
             principal_id = str(row["principal_id"])
             event_id = str(row["card_event_id"])
