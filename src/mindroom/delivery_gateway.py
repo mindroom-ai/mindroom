@@ -127,7 +127,6 @@ from mindroom.streaming import (
     ProgressPermission,
     ProgressState,
     StreamingResponse,
-    build_cancelled_response_update,
     cancel_failure_reason,
     current_task_is_process_shutdown,
     interactive_response_for_visible_body,
@@ -153,12 +152,31 @@ if TYPE_CHECKING:
     )
     from mindroom.hooks import MessageEnvelope
     from mindroom.response_sources import ResponseSources
-    from mindroom.streaming import CancelSource, ProgressPublisher, StreamInputChunk
+    from mindroom.streaming import (
+        CancelSource,
+        ProgressDelivered,
+        ProgressPublisher,
+        ProgressWriteAhead,
+        StreamInputChunk,
+        TerminalEdit,
+        TerminalSend,
+    )
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 
 _BEFORE_RESPONSE_HOOK_FAILURE_TEXT = "Response failed. Please retry."
 _SEGMENT_PAYLOADS_RESULT_KEY = "io.mindroom.matrix_segment_payloads"
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplyStreamHooks:
+    """The callbacks that make a span's stream write its reply through the reply's records."""
+
+    initial_send: TerminalSend
+    terminal_send: TerminalSend
+    terminal_edit: TerminalEdit
+    progress_write_ahead: ProgressWriteAhead
+    progress_delivered: ProgressDelivered
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,7 +709,10 @@ class DeliveryGateway:
         cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
     ) -> FinalDeliveryOutcome:
         """Report a cancellation of a visible reply, whose span's exit writes the note through its records."""
-        _cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=cancel_source)
+        # A generic interruption reuses the error wire status, so older clients do not read it as a Stop.
+        stream_status = (
+            constants.STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else constants.STREAM_STATUS_ERROR
+        )
         return FinalDeliveryOutcome(
             terminal_status="cancelled",
             event_id=event_id,
@@ -2124,7 +2145,11 @@ class DeliveryGateway:
             placeholder_ready=request.placeholder_ready,
             # What a stopped attempt at the reply showed; the stream continues below it.
             resumed=handle.resumed,
-            **reply_hooks,
+            initial_send=reply_hooks.initial_send,
+            terminal_send=reply_hooks.terminal_send,
+            terminal_edit=reply_hooks.terminal_edit,
+            progress_write_ahead=reply_hooks.progress_write_ahead,
+            progress_delivered=reply_hooks.progress_delivered,
         )
 
     def _reply_stream_hooks(  # noqa: C901
@@ -2133,7 +2158,7 @@ class DeliveryGateway:
         target: MessageTarget,
         *,
         published: dict[str, Presentation] | None = None,
-    ) -> dict[str, Any]:
+    ) -> _ReplyStreamHooks:
         """Return the streamer callbacks that make a span's stream a durable reply.
 
         The first visible create and every terminal update become the reply's
@@ -2255,13 +2280,13 @@ class DeliveryGateway:
                 placeholder_only=progress.placeholder_only,
             )
 
-        return {
-            "initial_send": initial_send,
-            "terminal_send": terminal_send,
-            "terminal_edit": terminal_edit,
-            "progress_write_ahead": progress_write_ahead,
-            "progress_delivered": progress_delivered,
-        }
+        return _ReplyStreamHooks(
+            initial_send=initial_send,
+            terminal_send=terminal_send,
+            terminal_edit=terminal_edit,
+            progress_write_ahead=progress_write_ahead,
+            progress_delivered=progress_delivered,
+        )
 
     def stream_progress(
         self,
@@ -2297,8 +2322,8 @@ class DeliveryGateway:
                 target.room_id,
             ),
             # The reply's records hear of each progress edit before it is sent.
-            progress_write_ahead=hooks["progress_write_ahead"],
-            progress_delivered=hooks["progress_delivered"],
+            progress_write_ahead=hooks.progress_write_ahead,
+            progress_delivered=hooks.progress_delivered,
         )
         if all(segment.span_id == handle.span_id for segment in handle.base.segments):
             return progress

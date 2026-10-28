@@ -403,8 +403,6 @@ class TurnSinks:
     on_completed: Callable[[CompletedAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
-    # Receives a collected turn's structured tool trace.
-    tool_trace: list[ToolTraceEntry] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
     # to delegation recovery, and a voice call stores what it spoke.
     persist_interrupted: bool = True

@@ -10,20 +10,21 @@ from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
-from mindroom.ai import ai_response
+from mindroom.ai import stream_agent_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.delegation.background import delegation_child
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.response_turn import TurnSinks
+from mindroom.response_turn import TurnSinks, collect_streamed_response_content
 from mindroom.tool_jobs.conversation import ConversationKey, current_conversation
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
@@ -106,7 +107,7 @@ async def _run_silent_turn(
     record_turn: bool = True,
     hold_probe: bool = False,
 ) -> _SilentTurn:
-    """Run one silent scheduled agent turn through `ai_response`.
+    """Run one silent scheduled agent turn through the turn driver, collected as ``ai_response`` collects it.
 
     ``hold_probe`` keeps the probe tool running until the runtime shuts down, so a released call returns its handle.
     """
@@ -136,15 +137,12 @@ async def _run_silent_turn(
         prompt="Silent check",
         execution_identity=owner,
     )
-    trace: list[ToolTraceEntry] = []
     recorder = TurnRecorder(user_message="Silent check") if record_turn else None
     try:
         with tool_runtime_context(context), _registered_probe(hold=hold_probe):
-            answer_text = await ai_response(
-                ctx,
-                paths,
-                config,
-                sinks=TurnSinks(turn_recorder=recorder, tool_trace=trace),
+            answer_text, trace = await collect_streamed_response_content(
+                stream_agent_response(ctx, paths, config, sinks=TurnSinks(turn_recorder=recorder)),
+                presentation=CollectedStreamPresentation(show_tool_calls=ctx.show_tool_calls, track_hidden_tools=True),
             )
         return _SilentTurn(answer_text, trace, recorder, pending_outcomes(runtime))
     finally:

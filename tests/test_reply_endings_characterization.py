@@ -778,8 +778,8 @@ async def test_a_model_failure(
 
     # A collected reply keeps the partial text the stream would have shown.
     partial = "Partial answer" if text_first else ""
-    # CHARACTERIZATION: current behavior; the error is glued to the partial text, without a separator.
-    shown = f"{partial}{_MODEL_ERROR}"
+    # The error starts a paragraph of its own below the partial text.
+    shown = f"{partial}\n\n{_MODEL_ERROR}" if partial else _MODEL_ERROR
     reply = await turn.reply()
     # CHARACTERIZATION: current behavior; a failed model run ends the reply completed, its error inside the answer.
     assert reply.state is rl.ReplyState.COMPLETED

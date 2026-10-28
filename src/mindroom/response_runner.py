@@ -2110,7 +2110,7 @@ class ResponseRunner:
             )
             request.pipeline_timing.mark("response_complete")
 
-    async def _settle_blocking_cancellation(
+    async def _settle_collected_cancellation(
         self,
         exc: asyncio.CancelledError,
         *,
@@ -2119,7 +2119,7 @@ class ResponseRunner:
         user_stop_message: str,
         interrupted_message: str,
     ) -> FinalDeliveryOutcome:
-        """Settle one blocking-mode cancellation through the visible note or a no-event outcome."""
+        """Settle the cancellation of a collected reply through the visible note or a no-event outcome."""
         cancel_source = classify_cancel_source(exc)
         log_cancelled_response(
             self.deps.logger,
@@ -4337,7 +4337,7 @@ class ResponseRunner:
         except asyncio.CancelledError as exc:
             if current_task_is_process_shutdown():
                 raise
-            return await self._settle_blocking_cancellation(
+            return await self._settle_collected_cancellation(
                 exc,
                 message_id=_existing_event_id(request),
                 restart_message=f"{label} response interrupted by sync restart",

@@ -19,7 +19,6 @@ from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
-    TurnSinks,
     collect_streamed_response_content,
 )
 from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk, ToolTraceEntry
@@ -254,16 +253,13 @@ async def test_ai_response_collects_the_stream_without_tool_markers_when_tool_ca
 
     monkeypatch.setattr("mindroom.ai.stream_agent_response", fake_stream_agent_response)
 
-    trace: list[ToolTraceEntry] = []
     body = await ai_response(
         replace(make_turn_context("general", session_id="session"), prompt="Read", show_tool_calls=False),
         test_runtime_paths(tmp_path),
         Config(),
-        sinks=TurnSinks(tool_trace=trace),
     )
 
     assert body == "Before.\n\n After."
-    assert [(entry.type, entry.tool_name) for entry in trace] == [("tool_call_completed", "read_file")]
     assert seen_show_tool_calls == [False]
 
 

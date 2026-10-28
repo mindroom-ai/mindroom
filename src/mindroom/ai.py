@@ -98,6 +98,7 @@ from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
+    append_stream_text,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -1099,18 +1100,12 @@ async def ai_response(
     *,
     sinks: TurnSinks | None = None,
 ) -> str:
-    """Generate one agent response and return its text, collected from the turn's stream.
-
-    ``sinks.tool_trace``, when given, receives the run's structured tool-trace entries.
-    """
-    sinks = sinks or TurnSinks()
-    body, tool_trace = await collect_streamed_response_content(
+    """Generate one agent response and return its text, collected from the turn's stream."""
+    body, _tool_trace = await collect_streamed_response_content(
         stream_agent_response(ctx, runtime_paths, config, sinks=sinks),
         # Hidden tool calls still separate the text around them, as a streamed reply shows it.
         presentation=CollectedStreamPresentation(show_tool_calls=ctx.show_tool_calls, track_hidden_tools=True),
     )
-    if sinks.tool_trace is not None:
-        sinks.tool_trace.extend(tool_trace)
     return body
 
 
@@ -1318,9 +1313,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ):
                 yield AttemptResolved(skipped)
             else:
+                error_text = get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
                 yield AttemptResolved(
                     HandledAttempt(
-                        get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths),
+                        # Below the text this attempt already streamed, the error starts a paragraph of its own.
+                        append_stream_text(state.assistant_text, error_text, separate=True)[
+                            len(state.assistant_text) :
+                        ],
                         metadata_content=_attempt_run_metadata(
                             run_metadata_collector,
                             run_context,

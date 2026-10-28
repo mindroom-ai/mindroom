@@ -135,7 +135,6 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelProvider
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -1801,21 +1800,17 @@ class TestUserIdPassthrough:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A collected reply that hides its tool calls names none of them in its text; its trace keeps them."""
+        """A collected reply that hides its tool calls names none of them in its text."""
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
-        tool_trace: list[ToolTraceEntry] = []
-
         response = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
             show_tool_calls=False,
-            sinks=TurnSinks(tool_trace=tool_trace),
         )
 
         assert response == "Done."
-        assert [(entry.type, entry.tool_name) for entry in tool_trace] == [("tool_call_completed", "read_file")]
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
@@ -1824,21 +1819,17 @@ class TestUserIdPassthrough:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A collected reply writes each tool the run called into its text, where it streamed, and its tool trace."""
+        """A collected reply writes each tool the run called into its text, where it streamed."""
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, calls(tool_call("read_file", "call-1", path="README.md")), answer("Done."))
-        tool_trace: list[ToolTraceEntry] = []
-
         response = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
             show_tool_calls=True,
-            sinks=TurnSinks(tool_trace=tool_trace),
         )
 
         assert response.strip() == "🔧 `read_file` [1]\n\nDone."
-        assert [entry.tool_name for entry in tool_trace] == ["read_file"]
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")

@@ -13,9 +13,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NoReturn
 
 from mindroom import interactive
 from mindroom.constants import (
-    STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
-    STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
@@ -92,7 +90,6 @@ __all__ = [
     "TerminalEdit",
     "TerminalSend",
     "UnfinishedStreamedReply",
-    "build_cancelled_response_update",
     "build_restart_interrupted_body",
     "cancel_failure_reason",
     "cancel_source_from_failure_reason",
@@ -139,7 +136,6 @@ INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted]**"
 _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
-_TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 
 StreamInputChunk = str | StructuredStreamChunk | TextDelta | RunFinished | ToolStarted | ToolCompleted
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
@@ -308,25 +304,6 @@ def _tool_traces_match(
 ) -> bool:
     """Compare trace presentation and continuation identity together."""
     return tuple(map(_tool_trace_identity, left)) == tuple(map(_tool_trace_identity, right))
-
-
-def build_cancelled_response_update(
-    text: str,
-    *,
-    cancel_source: Literal["user_stop", "sync_restart", "interrupted"],
-) -> tuple[str, _TerminalStreamStatus]:
-    """Return the final visible body and stream status for one cancellation source."""
-    if cancel_source == "sync_restart":
-        return build_restart_interrupted_body(text), STREAM_STATUS_ERROR
-
-    note = CANCELLED_RESPONSE_NOTE if cancel_source == "user_stop" else _INTERRUPTED_RESPONSE_NOTE
-    # Generic interruptions keep their distinct visible note, but reuse an
-    # existing terminal wire status so older clients do not misclassify them.
-    stream_status = STREAM_STATUS_CANCELLED if cancel_source == "user_stop" else STREAM_STATUS_ERROR
-    stripped_text = text.rstrip()
-    if not stripped_text or stripped_text == _PROGRESS_PLACEHOLDER:
-        return note, stream_status
-    return f"{stripped_text}\n\n{note}", stream_status
 
 
 def interactive_response_for_visible_body(
