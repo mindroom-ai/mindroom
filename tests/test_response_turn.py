@@ -842,7 +842,7 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
         ),
     )
 
-    assert chunks == ["notice:friendly error"]
+    assert chunks == ["friendly error"]
     assert recorder.interrupted_calls[-1]["run_metadata"] == {
         "matrix_source_event_ids": ["$source"],
         "matrix_seen_event_ids": ["$reply", "$source"],
@@ -888,7 +888,7 @@ def test_handled_attempt_persists_its_interrupted_record(
         ),
     )
 
-    assert chunks == ["notice:friendly error"]
+    assert chunks == ["friendly error"]
     [(run_id, snapshot)] = persisted
     assert run_id == "run-live"
     assert snapshot.partial_text == "partial"
@@ -1267,7 +1267,7 @@ def test_discarded_empty_run_metadata_stays_out_of_collector() -> None:
     )
 
     assert attempts == 2
-    assert chunks == ["notice:friendly error"]
+    assert chunks == ["friendly error"]
     assert collector == {}
 
 
@@ -1364,7 +1364,7 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
         ),
     )
 
-    assert chunks == ["notice:friendly error"]
+    assert chunks == ["friendly error"]
     assert collector == error_metadata
     assert recorder.completed_calls == []
     assert len(recorder.interrupted_calls) == 1
@@ -1776,8 +1776,8 @@ def test_streaming_finalize_runs_when_attempt_raises() -> None:
     assert log.finalized == 1
 
 
-def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
-    """Unexpected streaming exceptions become one shaped terminal notice chunk."""
+def test_streaming_unexpected_error_yields_its_shaped_error_text() -> None:
+    """An unexpected exception becomes the adapter's shaped error text, a bare string as every failed turn's reply is."""
     log = _AdapterLog()
 
     async def _attempt(
@@ -1799,7 +1799,7 @@ def test_streaming_unexpected_error_yields_shaped_notice_chunk() -> None:
         ),
     )
 
-    assert chunks == ["chunk", "notice:shaped: boom"]
+    assert chunks == ["chunk", "shaped: boom"]
 
 
 def test_streaming_completed_response_text_is_emitted_after_settle() -> None:
