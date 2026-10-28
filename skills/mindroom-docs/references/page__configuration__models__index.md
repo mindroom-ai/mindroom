@@ -586,9 +586,9 @@ Each decision logs `Cold cache model selected` with a `reason`: `no_earlier_repl
 MindRoom retries a model request that fails with a rate limit, an overload, a server error (any 5xx status, a CDN's origin timeout included), a request timeout, a conflict (409), or a dropped connection up to four times, as long as nothing was streamed yet and no provider-hosted tool had started.
 Before each retry it waits as long as the provider's `Retry-After` or Azure's `retry-after-ms` header asks, when that is at most a minute, and otherwise a delay that doubles with each retry.
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
-A request refused because the account has no credit left or reached a spend or usage limit is not retried, and the turn ends with the provider's own message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
-A request larger than the account's tokens-per-minute limit is not retried, since only a smaller request can pass; it ends the turn with "⚠️ The conversation no longer fits the model's context window. Start a new thread or compact the conversation, then try again."
+A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ The conversation no longer fits the model's context window. Start a new thread or compact the conversation, then try again."
+A request that OpenAI or Gemini refuses because the account has no credit left or reached a spend or usage limit is not retried either, and the turn ends with the provider's own message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
 
 ## Stalled Streams
 

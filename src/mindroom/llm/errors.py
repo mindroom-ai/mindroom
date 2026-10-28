@@ -62,7 +62,10 @@ class AuthenticationFailed(ProviderError):  # noqa: N818
 
 
 class ContextWindowExceeded(ProviderError):  # noqa: N818
-    """The request does not fit the model's context window; compaction, not retrying, resolves it."""
+    """The request does not fit the model's context window, or alone exceeds the account's tokens-per-minute limit.
+
+    A smaller request, not a retry, resolves it.
+    """
 
 
 class InvalidRequest(ProviderError):  # noqa: N818
