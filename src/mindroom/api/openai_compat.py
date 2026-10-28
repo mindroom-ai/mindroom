@@ -937,15 +937,15 @@ async def _stream_completion(
                 if isinstance(event, RunFinished):
                     content = event.record.content
                     completed_body = content if content is not None else completed_body
-                elif (failure_text := extract_agent_stream_failure(event)) is not None:
+                elif (failure := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
                         "Stream emitted terminal failure",
                         model=agent_name,
                         session_id=session_id,
-                        error=failure_text,
+                        error=failure,
                     )
-                    yield sse_chunk(state, {"content": failure_text})
+                    yield sse_chunk(state, {"content": failure})
                     break
                 elif text := extract_stream_text(event, state.tool_state):
                     if isinstance(event, TextDelta | str):
