@@ -436,10 +436,13 @@ async def _collect_response_body_with_trace(
     show_tool_calls: bool,
     tool_trace_collector: list[ToolTraceEntry] | None,
 ) -> str:
-    """Collect a stream to one body, bridging the trace to an optional collector."""
+    """Collect a stream to one body, bridging the trace to an optional collector.
+
+    The text after a hidden tool call starts a new paragraph, as a streamed reply shows it and the run stores it.
+    """
     body, tool_trace = await collect_streamed_response_content(
         response_stream,
-        presentation=CollectedStreamPresentation(show_tool_calls=show_tool_calls),
+        presentation=CollectedStreamPresentation(show_tool_calls=show_tool_calls, track_hidden_tools=True),
     )
     if tool_trace_collector is not None:
         tool_trace_collector.extend(tool_trace)
