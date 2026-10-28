@@ -369,7 +369,7 @@ async def test_removal_settles_every_task_within_one_bound_however_many_the_agen
 
 @pytest.mark.asyncio
 async def test_removal_stops_waiting_for_a_stalled_homeserver_and_leaves_the_task_pending(tmp_path: Path) -> None:
-    """A removal that cannot settle its tasks in time lets the reload go on; the next restore fails them."""
+    """A removal that cannot settle its tasks in time lets the reload go on and leaves the task pending."""
     config, runtime_paths, _ids = _config_and_ids(tmp_path)
     removed_bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
     runtime = _runtime(runtime_paths, config, _Bots(general=removed_bot))

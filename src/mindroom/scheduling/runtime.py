@@ -158,14 +158,7 @@ class ScheduledTaskRuntime:
                         owner_id=owner_id,
                     )
                     continue
-                try:
-                    await self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id)
-                except Exception:
-                    logger.exception(
-                        "scheduled_task_owner_removal_failure_failed",
-                        task_id=task.task_id,
-                        owner=owner_id,
-                    )
+                await self._fail_owner_removed_task(bot, room_id, task.task_id, owner_id)
                 continue
             if owner == bot.agent_name and await self._restore_task(bot, client, task, config):
                 restored += 1
@@ -229,10 +222,7 @@ class ScheduledTaskRuntime:
             if bot is None or bot.client is None:
                 logger.warning("scheduled_task_of_removed_owner_left_pending", task_id=task_id, owner=runner.owner)
             else:
-                try:
-                    await self._fail_owner_removed_task(bot, runner.room_id, task_id, runner.owner)
-                except Exception:
-                    logger.exception("scheduled_task_owner_removal_failure_failed", task_id=task_id, owner=runner.owner)
+                await self._fail_owner_removed_task(bot, runner.room_id, task_id, runner.owner)
             settled.add(task_id)
 
         try:
@@ -246,7 +236,13 @@ class ScheduledTaskRuntime:
             )
 
     async def _fail_owner_removed_task(self, bot: _Bot, room_id: str, task_id: str, owner: str) -> None:
-        """Mark one pending task failed because its owner was removed, and say so where it posts."""
+        """Mark one pending task failed because its owner was removed, and say so where it posts; log any failure."""
+        try:
+            await self._fail_and_announce_owner_removed_task(bot, room_id, task_id, owner)
+        except Exception:
+            logger.exception("scheduled_task_owner_removal_failure_failed", task_id=task_id, owner=owner)
+
+    async def _fail_and_announce_owner_removed_task(self, bot: _Bot, room_id: str, task_id: str, owner: str) -> None:
         client = bot.client
         assert client is not None
         async with schedule_edit_lock(client, room_id, task_id):
