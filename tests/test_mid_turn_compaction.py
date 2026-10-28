@@ -544,7 +544,8 @@ def test_request_sizing_counts_deferred_tool_definitions_once_tool_search_loads_
                     "execution": "server",
                     "status": "completed",
                     "tools": [
-                        {"type": "function", "name": "big_tool", "description": "d" * 80_000, "parameters": {}},
+                        # About 20,000 tokens; words, because tiktoken takes seconds on one 80,000-letter word.
+                        {"type": "function", "name": "big_tool", "description": "word " * 20_000, "parameters": {}},
                     ],
                 },
             ],
