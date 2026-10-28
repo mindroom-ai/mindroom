@@ -33,8 +33,7 @@ if TYPE_CHECKING:
 _POOL_SIZE = 4
 # The journal lock's session. A runtime that vanishes without closing it (a
 # lost node, a partition) holds the lock until the server notices: within about
-# a minute with these, instead of the default two hours. A holder cut off from
-# the server fails its probe within a minute too, and shuts down.
+# a minute with these, instead of the default two hours.
 _HOLD_SERVER_KEEPALIVES: tuple[LiteralString, ...] = (
     "SET tcp_keepalives_idle = 30",
     "SET tcp_keepalives_interval = 10",

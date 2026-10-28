@@ -566,7 +566,7 @@ async def test_a_runtime_that_loses_its_journal_stops() -> None:
     shutdown_requested = asyncio.Event()
     journal_lost = asyncio.Event()
 
-    with patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0):
+    with patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0):
         await asyncio.wait_for(_watch_event_journal(orchestrator, shutdown_requested, journal_lost), timeout=5)
 
     assert shutdown_requested.is_set()
@@ -697,7 +697,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.reset_primary_worker_manager"),
             patch("mindroom.orchestrator._MultiAgentOrchestrator", return_value=mock_orchestrator),
             patch("mindroom.orchestrator._run_auxiliary_task_forever", new=_blocked_auxiliary_task),
-            patch("mindroom.orchestrator._EVENT_JOURNAL_HOLD_CHECK_SECONDS", 0),
+            patch("mindroom.orchestrator._EVENT_JOURNAL_CHECK_SECONDS", 0),
             pytest.raises(EventJournalLostError),
         ):
             await asyncio.wait_for(

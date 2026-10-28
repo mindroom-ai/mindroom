@@ -10590,25 +10590,27 @@ async def test_every_postgres_journal_connection_detects_a_silent_drop(postgres_
         await store.close()
 
 
-def _lose_the_writer(backend: PostgresBackend, principal: PrincipalStore) -> tuple[list[object], Awaitable[object]]:
-    return [backend._writer], admit(principal, "$after")
+def _lose_the_writer(backend: PostgresBackend, principal: PrincipalStore) -> tuple[list[int], Awaitable[object]]:
+    return [backend._writer.info.backend_pid], admit(principal, "$after")
 
 
-def _lose_the_readers(backend: PostgresBackend, principal: PrincipalStore) -> tuple[list[object], Awaitable[object]]:
-    return list(backend._pool), principal.is_pending("$before")
+def _lose_the_readers(backend: PostgresBackend, principal: PrincipalStore) -> tuple[list[int], Awaitable[object]]:
+    return [connection.info.backend_pid for connection in backend._pool], principal.is_pending("$before")
 
 
 def _lose_the_recovery_reader(
     backend: PostgresBackend,
     _principal: PrincipalStore,
-) -> tuple[list[object], Awaitable[object]]:
-    return [backend._recovery_reader], backend.recovery_read(lambda transaction: transaction.fetchone("SELECT 1"))
+) -> tuple[list[int], Awaitable[object]]:
+    return [backend._recovery_reader.info.backend_pid], backend.recovery_read(
+        lambda transaction: transaction.fetchone("SELECT 1"),
+    )
 
 
 @pytest.mark.parametrize("lose", [_lose_the_writer, _lose_the_readers, _lose_the_recovery_reader])
 async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_usable(
     postgres_journal_url: str,
-    lose: Callable[[PostgresBackend, PrincipalStore], tuple[list[object], Awaitable[object]]],
+    lose: Callable[[PostgresBackend, PrincipalStore], tuple[list[int], Awaitable[object]]],
 ) -> None:
     """Journal connections never reconnect, so losing one stops the runtime as losing the lock's session does."""
     import psycopg  # noqa: PLC0415 - psycopg ships in the optional postgres extra
@@ -10623,11 +10625,10 @@ async def test_a_postgres_journal_that_lost_a_connection_is_no_longer_usable(
         assert await admit(principal, "$before") is AdmissionResult.ADMITTED
         backend = store.backend
         assert isinstance(backend, PostgresBackend)
-        terminated, use = lose(backend, principal)
+        backend_pids, use = lose(backend, principal)
         with psycopg.connect(database_url, autocommit=True) as admin:
-            for connection in terminated:
-                assert isinstance(connection, psycopg.Connection)
-                admin.execute("SELECT pg_terminate_backend(%s)", (connection.info.backend_pid,))
+            for backend_pid in backend_pids:
+                admin.execute("SELECT pg_terminate_backend(%s)", (backend_pid,))
 
         with pytest.raises(psycopg.OperationalError):
             await use

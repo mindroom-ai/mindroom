@@ -213,7 +213,7 @@ _AUXILIARY_TASK_RESTART_INITIAL_DELAY_SECONDS = 1.0
 _AUXILIARY_TASK_RESTART_MAX_DELAY_SECONDS = 30.0
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _DEFERRED_RESPONSE_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
-_EVENT_JOURNAL_HOLD_CHECK_SECONDS = 30.0
+_EVENT_JOURNAL_CHECK_SECONDS = 30.0
 
 
 async def _gather_periodic_shutdown_phase(
@@ -3121,7 +3121,7 @@ async def _watch_event_journal(
     Another runtime could take over a journal whose lock lapsed, and a lost connection never reconnects.
     """
     while not shutdown_requested.is_set():
-        await asyncio.sleep(_EVENT_JOURNAL_HOLD_CHECK_SECONDS)
+        await asyncio.sleep(_EVENT_JOURNAL_CHECK_SECONDS)
         if not await orchestrator.event_journal_still_usable():
             logger.error("event_journal_lost")
             journal_lost.set()
