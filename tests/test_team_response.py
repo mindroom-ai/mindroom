@@ -1135,28 +1135,23 @@ async def test_a_stop_during_a_member_s_call_records_the_call_as_still_running(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stream", "recorded"),
-    [
-        # A blocking turn records the stopped run's records, which hold no text of a request still running.
-        pytest.param(False, "(turn stopped before completion)", id="blocking"),
-        pytest.param(True, "**Team Consensus**:\n\nHalf done\n\n(turn stopped before completion)", id="streamed"),
-    ],
-)
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streamed"])
 async def test_a_stop_before_any_call_records_the_streamed_text_so_far(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     stream: bool,
-    recorded: str,
 ) -> None:
+    """A stopped turn records the text its run streamed, even of a request still running, on either path."""
     ready = asyncio.Event()
     team = _team(tmp_path, monkeypatch, leader=[[TextDelta("Half done"), _waits(ready)]])
 
     await _stopped(team, ready, stream=stream)
 
     snapshot = team.recorder.interrupted_snapshot()
-    assert _render_interrupted_replay_content(snapshot) == recorded
+    assert _render_interrupted_replay_content(snapshot) == (
+        "**Team Consensus**:\n\nHalf done\n\n(turn stopped before completion)"
+    )
 
 
 @pytest.mark.asyncio

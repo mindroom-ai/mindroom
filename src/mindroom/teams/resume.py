@@ -366,7 +366,6 @@ async def continue_paused_team_run(
             run_id=run_id,
             members=members,
             presentation=presentation,
-            stream=True,
             team_name=entity_name,
             runtime_model_name=model_name,
             prepared_history=None,

@@ -1,12 +1,10 @@
-"""Team turns: prepare a turn, run its leader, and render the reply through the turn drivers.
+"""Team turns: prepare a turn, run its leader, and render the reply through the turn driver.
 
-``team_response`` and ``team_response_stream`` are the team envelopes the response runner drives through the shared
-turn drivers; both consume one ``run_team`` event stream into a ``TeamStreamPresentation``. A blocking reply, its
-pause, and the text a stopped or failed blocking turn records render from the finished run's records: each member
-run's text in the order the runs ended, then the consensus; the reply delivers no tool trace.
-A streamed reply shows its trace through its chunks, keeps the configured member order, and adds each failed member
-run's reason when the team run ends, as a resumed reply does. ``run_prepared_team`` runs an OpenAI-compatible API
-team turn under the same leader hooks and storage.
+``team_response_stream`` is the team envelope the response runner drives through the shared turn driver; it consumes
+one ``run_team`` event stream into a ``TeamStreamPresentation``, the document its chunks show, in the configured member
+order, with each failed member run's reason once the team run ends, as a resumed reply shows it. ``team_response``
+collects that stream into the text a blocking reply delivers. ``run_prepared_team`` runs an OpenAI-compatible API team
+turn under the same leader hooks and storage.
 """
 
 from __future__ import annotations
@@ -46,10 +44,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.response_turn import (
     AttemptResolved,
-    BlockingAttemptResolution,
-    BlockingTurnAdapter,
     CompletedAttempt,
-    ExcludedAttempt,
     HandledAttempt,
     PausedAttempt,
     ResponseTurnContext,
@@ -60,7 +55,6 @@ from mindroom.response_turn import (
     build_matrix_run_metadata,
     pause_without_approval_error,
     paused_attempt_from_response,
-    run_blocking_response_turn,
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
@@ -82,7 +76,6 @@ from mindroom.teams.presentation import (
     TeamStreamPresentation,
     finished_run_text,
     format_team_header,
-    format_team_response,
 )
 from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
 from mindroom.teams.runtime import leader_tool_specs
@@ -110,6 +103,7 @@ if TYPE_CHECKING:
     from mindroom.teams.runtime import TeamRunEvent
     from mindroom.teams.spec import TeamMode
     from mindroom.timing import DispatchPipelineTiming
+    from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -466,8 +460,6 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
-        *,
-        stream: bool,
     ) -> tuple[TeamAttempt, AsyncIterator[TeamRunEvent]]:
         """Build the attempt's team and prepared input, and return its state with the run's event stream."""
         members = await self.members_for_attempt(continuation_state)
@@ -523,7 +515,6 @@ class _TeamTurn:
             run_id=continuation_state.active_run_id or str(uuid4()),
             members=members,
             presentation=presentation,
-            stream=stream,
             team_name=self.entity_name,
             runtime_model_name=prepared.runtime_model_name,
             prepared_history=prepared.prepared_history,
@@ -581,48 +572,13 @@ class _TeamTurn:
         )
         return attempt, stream_with_llm_request_log_context(events, request_context=request_context)
 
-    async def run_blocking_attempt(
-        self,
-        run: TurnRunState,
-        continuation_state: TurnContinuationRunState,
-    ) -> BlockingAttemptResolution:
-        """Run one prepared team attempt and collect its events into the reply."""
-        attempt, events = await self.start_attempt(run, continuation_state, stream=False)
-        try:
-            async with closing_async_stream(events):
-                async for event in events:
-                    if attempt.apply(event):
-                        self.sync_live_turn_recorder(run, attempt)
-        except Exception as error:
-            logger.exception("team_response_failed", agents=attempt.members.display_names)
-            snapshot = attempt.partial_snapshot()
-            return ExcludedAttempt(
-                response_text=self.error_text(error),
-                partial_text=snapshot.assistant_text,
-                completed_tools=snapshot.completed_tools,
-                interrupted_tools=snapshot.interrupted_tools,
-                run_id=attempt.run_id,
-                metadata_content=self.run_metadata_content(attempt, RunStatus.error),
-            )
-        finally:
-            # The run stores its record before its events end, however they end, so a stop from here until the turn
-            # settles records the run's records.
-            self.sync_live_turn_recorder(run, attempt)
-        record = attempt.terminal_record()
-        if record.status is RunStatus.paused:
-            # The pause shows the document the run's events built, as a streamed pause does, with each failed member
-            # run's reason, which its deltas never show.
-            attempt.show_failure_reasons(record)
-            return self.resolve_paused(attempt, record)
-        return await self.resolve_completed(run, attempt, record, blocking=True, mark_seen=True)
-
-    async def run_streaming_attempt(
+    async def run_attempt(
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
-        attempt, events = await self.start_attempt(run, continuation_state, stream=True)
+        attempt, events = await self.start_attempt(run, continuation_state)
         shown: str | None = None
         try:
             async with closing_async_stream(events):
@@ -635,16 +591,19 @@ class _TeamTurn:
                         shown = chunk.content
                         yield chunk
         except Exception as error:
-            logger.exception("team_streaming_failed", agents=attempt.members.display_names)
-            self.sync_live_turn_recorder(run, attempt)
+            logger.exception("team_response_failed", agents=attempt.members.display_names)
             yield self.error_text(error)
-            yield AttemptResolved(HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error)))
+            yield AttemptResolved(
+                HandledAttempt(metadata_content=self.run_metadata_content(attempt, RunStatus.error), error=error),
+            )
             return
+        finally:
+            # A failed run's deltas never show why it failed. However the team run ended, finished, failed, or stopped,
+            # it stored its record before its events ended, and the document adds each failed run's reason from it, so
+            # the reply and what the turn records show the reason.
+            if (stored := attempt.records.record) is not None:
+                attempt.show_failure_reasons(stored)
         record = attempt.terminal_record()
-        # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
-        shown_reasons = attempt.show_failure_reasons(record)
-        if shown_reasons:
-            self.sync_live_turn_recorder(run, attempt)
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
             if paused.response_text:
@@ -660,11 +619,7 @@ class _TeamTurn:
         if (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
-        # An attempt that streamed nothing writes no seen ids: when every attempt comes back empty, no stored run
-        # carries the trigger either, so the next turn still reads it.
-        yield AttemptResolved(
-            await self.resolve_completed(run, attempt, record, blocking=False, mark_seen=shown is not None),
-        )
+        yield AttemptResolved(await self.resolve_completed(run, attempt, record, shown=shown is not None))
 
     def run_metadata_content(self, attempt: TeamAttempt, status: RunStatus) -> dict[str, Any] | None:
         """Return the attempt's run metadata when the caller collects metadata and the run stored its record."""
@@ -698,8 +653,8 @@ class _TeamTurn:
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
-        A blocking pause and a streamed one freeze the same document, so neither shows the paused notices its runs
-        hold as their content (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
+        The pause freezes that document, so it shows none of the paused notices its runs hold as their content
+        (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
         """
         paused = paused_attempt_from_response(
             record,
@@ -719,43 +674,37 @@ class _TeamTurn:
         attempt: TeamAttempt,
         record: TeamRunRecord,
         *,
-        blocking: bool,
-        mark_seen: bool,
+        shown: bool,
     ) -> CompletedAttempt:
-        """Return the completed attempt: its rendered body, what replays, and the turn's metadata.
+        """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
-        ``mark_seen`` records the Matrix events the turn consumed as seen on the stored session row.
+        ``shown`` says whether the attempt's chunks showed a document. One that showed nothing ends with the
+        no-response line; a quiet scheduled reply in which only the leader answered, with the bare no-report token,
+        which its delivery suppresses. An attempt that produced anything records the Matrix events the turn consumed
+        as seen on the stored session row; an empty one, whose run is discarded, leaves them unseen, so the next turn
+        still reads them.
         """
-        if mark_seen and self.ctx.reply_to_event_id:
+        tool_executions = team_tool_executions(record)
+        # The text a reply records: its document without the header and tool markers. The no-response line is
+        # display chrome, not replayable assistant text.
+        body_text = attempt.presentation.text_without_tool_markers(finished=True)
+        is_empty = record.status is RunStatus.completed and not tool_executions and not body_text
+        if not is_empty and self.ctx.reply_to_event_id:
             await _persist_bound_seen_event_ids(
                 scope_context=run.scope,
                 event_ids=_run_metadata_seen_event_ids(run.run_metadata),
             )
-        tool_executions = team_tool_executions(record)
-        header = format_team_header(attempt.members.display_names)
-        # Neither path's text carries tool markers: a blocking reply delivers no tool trace, and a streamed reply shows
-        # its trace through its chunks. A blocking reply renders the finished runs and a streamed one records the
-        # document its events built and its failed member runs' reasons, both in the configured member order.
-        # The "No team response generated." fallback is display chrome, not replayable assistant text.
-        if blocking:
-            body_text = format_team_response(record, attempt.presentation)
-            leader_text = finished_run_text(record)
-            has_visible_output = bool(body_text) or bool(leader_text.strip())
-            rendered = header + (body_text or leader_text or NO_TEAM_RESPONSE)
-            silent = (
-                self.ctx.allow_no_report_response
-                and is_silent_schedule_no_report_response(leader_text)
-                and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
-            )
+        rendered = format_team_header(attempt.members.display_names) + (body_text or NO_TEAM_RESPONSE)
+        replayable_text = rendered if body_text else ""
+        response_text = "" if shown else rendered
+        leader_text = finished_run_text(record)
+        if (
+            self.ctx.allow_no_report_response
+            and is_silent_schedule_no_report_response(leader_text)
+            and not any(finished_run_text(member).strip() for member in record.ended_member_runs)
+        ):
             # A quiet scheduled reply delivers and records the bare token, not the team document.
-            response_text = leader_text.strip() if silent else rendered
-            replayable_text = response_text if has_visible_output else ""
-        else:
-            body_text = attempt.presentation.text_without_tool_markers(finished=True)
-            has_visible_output = bool(body_text)
-            rendered = header + (body_text or NO_TEAM_RESPONSE)
-            response_text = ""
-            replayable_text = rendered if has_visible_output else ""
+            response_text = replayable_text = leader_text.strip()
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,
@@ -766,8 +715,8 @@ class _TeamTurn:
         return CompletedAttempt(
             response_text=response_text,
             replayable_text=replayable_text,
-            has_visible_content=has_visible_output,
-            is_empty=record.status is RunStatus.completed and not tool_executions and not has_visible_output,
+            has_visible_content=bool(body_text),
+            is_empty=is_empty,
             session_id=record.session_id,
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,
@@ -913,7 +862,7 @@ def _team_turn(
 
 
 # ---------------------------------------------------------------------------
-# The blocking and streaming envelopes
+# The streaming envelope and its blocking collector
 # ---------------------------------------------------------------------------
 
 
@@ -940,24 +889,29 @@ async def team_response(
     turn_recorder: TurnRecorder,
     reason_prefix: str = "Team request",
     member_model_names: Mapping[str, str] | None = None,
+    tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> str:
-    """Run one team turn to its final text.
+    """Run one team turn to its final text: ``team_response_stream``'s turn, collected as its reply shows it.
 
-    ``ctx`` carries the per-turn Matrix identity; this entry refines its ``entity_label`` to the materialized team
-    label and appends the knowledge-availability enrichment before the turn runs.
+    Each chunk replaces the reply's text, as a streamed team reply's edits do, so the text is the last chunk's.
+    ``tool_trace_collector`` receives the trace of the last document shown.
     """
-    turn = await asyncio.to_thread(
-        _team_turn,
+    text = ""
+    tool_trace: list[ToolTraceEntry] = []
+    stream = team_response_stream(
+        agent_names,
+        mode,
+        message,
+        orchestrator,
+        execution_identity,
         ctx,
-        orchestrator=orchestrator,
-        execution_identity=execution_identity,
-        mode=mode,
-        requested_agent_names=requested_team_agent_names(agent_names),
         thread_history=thread_history,
         model_name=model_name,
         media=media,
         show_tool_calls=show_tool_calls,
         user_id=user_id,
+        current_timestamp_ms=current_timestamp_ms,
+        current_prompt_is_structured=current_prompt_is_structured,
         response_sender_id=response_sender_id,
         compaction_lifecycle=compaction_lifecycle,
         run_metadata_collector=run_metadata_collector,
@@ -967,26 +921,17 @@ async def team_response(
         reason_prefix=reason_prefix,
         member_model_names=member_model_names,
     )
-    if isinstance(turn, str):
-        return turn
-
-    adapter = BlockingTurnAdapter(
-        load_scope=turn.load_scope,
-        run_attempt=turn.run_blocking_attempt,
-        finalize_attempt=turn.finalize_attempt,
-        unexpected_error_text=turn.error_text,
-        discard_empty_run=turn.discard_empty_run,
-    )
-    return await run_blocking_response_turn(
-        turn.ctx,
-        adapter,
-        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
-        continuation=turn.initial_continuation(
-            message,
-            current_timestamp_ms=current_timestamp_ms,
-            current_prompt_is_structured=current_prompt_is_structured,
-        ),
-    )
+    async with closing_async_stream(stream):
+        async for chunk in stream:
+            if isinstance(chunk, str):
+                text = chunk
+                continue
+            text = chunk.content
+            if chunk.tool_trace is not None:
+                tool_trace = list(chunk.tool_trace)
+    if tool_trace_collector is not None:
+        tool_trace_collector.extend(tool_trace)
+    return text
 
 
 async def team_response_stream(
@@ -1046,7 +991,7 @@ async def team_response_stream(
 
     adapter = StreamingTurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
-        run_attempt=turn.run_streaming_attempt,
+        run_attempt=turn.run_attempt,
         finalize_attempt=turn.finalize_attempt,
         make_text_chunk=lambda text: text,
         unexpected_error_text=turn.error_text,

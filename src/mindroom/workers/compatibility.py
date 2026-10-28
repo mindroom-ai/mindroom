@@ -38,13 +38,13 @@ def worker_health_payload(*, mindroom_version: str) -> _WorkerHealthPayload:
 def worker_health_compatibility_error(
     response: httpx.Response,
     *,
-    backend_label: str,
-    image: str,
+    worker: str,
     older_worker_hint: str | None = None,
     newer_worker_hint: str | None = None,
 ) -> str | None:
     """Return an actionable error when a ready worker's health check reports another protocol.
 
+    ``worker`` names the worker in the error, such as ``Docker worker image 'mindroom:dev'``.
     ``older_worker_hint`` is appended only when the worker reports an older or no protocol,
     and ``newer_worker_hint`` only when it reports a newer one.
     """
@@ -66,7 +66,7 @@ def worker_health_compatibility_error(
             return None
         newer_worker = reported_protocol > _WORKER_PROTOCOL_VERSION
     mismatch = (
-        f"{backend_label} worker image '{image}' is incompatible with this MindRoom runtime: "
+        f"{worker} is incompatible with this MindRoom runtime: "
         f"expected worker protocol {_WORKER_PROTOCOL_VERSION}, got {reported_protocol} "
         f"(worker MindRoom version {reported_version})."
     )

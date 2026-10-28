@@ -6,6 +6,8 @@ import threading
 import time
 from dataclasses import dataclass
 
+import httpx
+
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.backend import (
@@ -23,10 +25,13 @@ from mindroom.workers.backends._lifecycle import (
     touch_worker_lifecycle,
     write_lifecycle_state,
 )
+from mindroom.workers.compatibility import worker_health_compatibility_error
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
+_HEALTH_CHECK_TIMEOUT_SECONDS = 5.0
 _SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
+_OLDER_RUNNER_HINT = "Restart the runner on this release, pulling its image again when it runs a tag such as ':latest'."
 
 
 def normalize_static_runner_api_root(base_url: str) -> str:
@@ -39,6 +44,12 @@ def normalize_static_runner_api_root(base_url: str) -> str:
     if normalized.endswith(_SANDBOX_RUNNER_API_ROOT):
         return normalized
     return f"{normalized}{_SANDBOX_RUNNER_API_ROOT}"
+
+
+def _read_runner_health(runner_root: str) -> httpx.Response:
+    """Return the runner's answer to its health probe."""
+    with httpx.Client(timeout=_HEALTH_CHECK_TIMEOUT_SECONDS) as client:
+        return client.get(f"{runner_root}/healthz")
 
 
 @dataclass
@@ -72,6 +83,9 @@ class StaticSandboxRunnerBackend:
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self._lock = threading.Lock()
         self._workers: dict[str, _StaticWorkerMetadata] = {}
+        # A probe that passed stands until the next recorded failure, which may mean the runner was replaced.
+        self._recorded_failures = 0
+        self._compatible_since_failures: int | None = None
 
     def shutdown(self) -> None:
         """Drop cached shared-runner worker handles before manager replacement."""
@@ -87,12 +101,7 @@ class StaticSandboxRunnerBackend:
     ) -> WorkerHandle:
         """Resolve or create one worker handle for the shared sandbox runner."""
         del progress_sink
-        if not self.api_root:
-            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
-            raise WorkerBackendError(msg)
-        if self.auth_token is None:
-            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
-            raise WorkerBackendError(msg)
+        self.require_compatible_runner()
 
         timestamp = time.time() if now is None else now
         with self._lock:
@@ -113,6 +122,41 @@ class StaticSandboxRunnerBackend:
             write_lifecycle_state(metadata, mark_worker_ready(read_lifecycle_state(metadata), now=timestamp))
             self._workers[spec.worker_key] = metadata
             return self._to_handle(metadata, now=timestamp)
+
+    def require_compatible_runner(self) -> None:
+        """Refuse an unconfigured runner, or one that speaks another worker protocol.
+
+        The protocol is asked at first use and again after a recorded failure.
+        A runner that ignores newer request fields, such as the variables a plugin removes from a shell call's
+        environment, would run the call without them, so the call fails instead.
+        """
+        if not self.api_root:
+            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
+            raise WorkerBackendError(msg)
+        if self.auth_token is None:
+            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
+            raise WorkerBackendError(msg)
+        with self._lock:
+            failures_before_probe = self._recorded_failures
+            if self._compatible_since_failures == failures_before_probe:
+                return
+        runner_root = self.api_root.removesuffix(_SANDBOX_RUNNER_API_ROOT)
+        try:
+            response = _read_runner_health(runner_root)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            msg = f"Sandbox runner at '{runner_root}' did not answer its health check: {exc}"
+            raise WorkerBackendError(msg) from exc
+        compatibility_error = worker_health_compatibility_error(
+            response,
+            worker=f"Sandbox runner at '{runner_root}'",
+            older_worker_hint=_OLDER_RUNNER_HINT,
+        )
+        if compatibility_error is not None:
+            raise WorkerBackendError(compatibility_error)
+        with self._lock:
+            # A failure recorded while the probe was in flight leaves the next call to probe again.
+            self._compatible_since_failures = failures_before_probe
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used bookkeeping for one shared-runner worker."""
@@ -154,6 +198,8 @@ class StaticSandboxRunnerBackend:
         del startup_count  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         with self._lock:
+            # The runner may have been replaced by one from another release, so the next call asks again.
+            self._recorded_failures += 1
             metadata = self._workers.get(worker_key) or self._new_metadata(worker_key, timestamp)
             write_lifecycle_state(
                 metadata,

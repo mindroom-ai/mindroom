@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
-from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
+from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
@@ -42,11 +42,6 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
     """Keep a child's full text in the job payload; job metadata keeps only its summary."""
     return BackgroundOutcome(status, text, result_payload=encode_result_payload(ToolResultPayload(value=text)))
-
-
-async def delegation_result(runtime: ToolJobRuntime, job: BackgroundJob) -> str | None:
-    """Read a child's full saved text."""
-    return (await read_result_payload(runtime, job)).value
 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
