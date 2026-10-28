@@ -99,12 +99,6 @@ class StaticSandboxRunnerBackend:
     ) -> WorkerHandle:
         """Resolve or create one worker handle for the shared sandbox runner."""
         del progress_sink
-        if not self.api_root:
-            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
-            raise WorkerBackendError(msg)
-        if self.auth_token is None:
-            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
-            raise WorkerBackendError(msg)
         self.require_compatible_runner()
 
         timestamp = time.time() if now is None else now
@@ -128,11 +122,18 @@ class StaticSandboxRunnerBackend:
             return self._to_handle(metadata, now=timestamp)
 
     def require_compatible_runner(self) -> None:
-        """Refuse a runner that speaks another worker protocol, asking at first use and again after a recorded failure.
+        """Refuse an unconfigured runner, or one that speaks another worker protocol.
 
+        The protocol is asked at first use and again after a recorded failure.
         A runner that ignores newer request fields, such as the variables a plugin removes from a shell call's
         environment, would run the call without them, so the call fails instead.
         """
+        if not self.api_root:
+            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
+            raise WorkerBackendError(msg)
+        if self.auth_token is None:
+            msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_token']} must be set when sandbox proxying is enabled."
+            raise WorkerBackendError(msg)
         with self._lock:
             if self._runner_compatible:
                 return

@@ -3289,22 +3289,18 @@ def _never_download_stock_avatars(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(managed_avatars_module, "_download_stock_avatar", offline)
 
 
-@pytest.fixture(autouse=True)
-def _static_runners_answer_this_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Answer the static sandbox runner's health probe as a runner of this release.
+@pytest.fixture
+def current_static_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the static sandbox runner's health probe as a runner of this release, for tests that fake no runner."""
 
-    Tests behave like an offline machine, where the probe would fail every call routed to the shared runner.
-    `tests/test_sandbox_proxy.py` installs its own answers to cover the protocol check.
-    """
-
-    def compatible(runner_root: str) -> httpx.Response:
+    def current(runner_root: str) -> httpx.Response:
         return httpx.Response(
             200,
             json=asdict(worker_health_payload(mindroom_version="test")),
             request=httpx.Request("GET", f"{runner_root}/healthz"),
         )
 
-    monkeypatch.setattr(static_runner_module, "_read_runner_health", compatible)
+    monkeypatch.setattr(static_runner_module, "_read_runner_health", current)
 
 
 # Captured before any test patches them, so the offline clients below still start from the production ones.
