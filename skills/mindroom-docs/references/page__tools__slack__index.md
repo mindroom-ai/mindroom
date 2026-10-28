@@ -294,6 +294,7 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 - Slack sends at most 30,000 events per hour per workspace, and events beyond that are not delivered, so in a very busy workspace some watch deliveries and mentions can be missed until the next hour.
 - If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
 - Messages sent directly to the app in Slack are not answered.
+- While anyone's watch takes direct messages, every direct message that a connected person sends or receives costs one Slack request to check who can see it, which counts against Slack's rate limits.
 - `slack_recent` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
   The call then answers with the conversations it read, `complete: false`, and a `next_cursor`; the agent waits `retry_after` seconds, calls again with that cursor to read the next conversations, and merges the batches.
 

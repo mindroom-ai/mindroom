@@ -59,14 +59,18 @@ _DELIVERED_SECONDS = 86_400
 _THREAD_SECONDS = 7 * 86_400
 _PENDING_THREAD_SECONDS = 300
 _TILDE_RUN = re.compile(r"~+")
-# Failures a later attempt may not meet: Slack or the replay store unavailable, or responses not admitted right now.
-RETRYABLE_ERRORS = (
+# Failures a delivery expects: a Slack call that failed, the replay store unavailable, or responses not admitted now.
+DELIVERY_ERRORS = (
     SlackApiError,
     httpx.HTTPError,
     DeliveryReplayStoreError,
     DeliveryReplayScopeFullError,
     ResponseAdmissionRefusedError,
 )
+# Slack's own failures, which a later call may not meet, like its HTTP 5xx answers and its rate limit.
+# Any other Slack error, such as a revoked token or a missing scope, fails every attempt alike.
+_PASSING_SLACK_ERRORS = frozenset({"ratelimited", "internal_error", "fatal_error", "service_unavailable"})
+_SLACK_SERVER_ERROR = re.compile(r"http_5[0-9]{2}")
 
 
 def slack_replay_store(control_state_root: Path) -> DeliveryReplayStore:
@@ -316,11 +320,11 @@ async def _send_slack_turn(
 
 
 async def retry_on_failure(event: SlackMessageEvent, delivery: Awaitable[DeliveryResult]) -> DeliveryResult:
-    """Await one target's delivery, so that its failure, which a later attempt may not meet, spares the others."""
+    """Await one target's delivery, so that its failure spares the others; see `delivery_failed` for what follows."""
     try:
         return await delivery
-    except RETRYABLE_ERRORS as exc:
-        return retry_later(event, failure_reason(exc))
+    except DELIVERY_ERRORS as exc:
+        return delivery_failed(exc, event_id=event.event_id, channel_id=event.channel_id)
     except Exception:
         logger.exception(
             "Slack event delivery failed unexpectedly and will be retried",
@@ -328,6 +332,37 @@ async def retry_on_failure(event: SlackMessageEvent, delivery: Awaitable[Deliver
             channel_id=event.channel_id,
         )
         return "retry"
+
+
+def delivery_failed(exc: Exception, *, event_id: str | None, channel_id: str | None = None) -> DeliveryResult:
+    """Log one of the `DELIVERY_ERRORS` and say what follows.
+
+    A Slack error that fails every attempt alike skips the target, so Slack is not asked to send the event again;
+    any other failure is retried.
+    """
+    if _fails_every_attempt(exc):
+        logger.error(
+            "Slack refused a call, so the event is not delivered",
+            event_id=event_id,
+            channel_id=channel_id,
+            reason=failure_reason(exc),
+        )
+        return "ignored"
+    logger.warning(
+        "Slack event delivery will be retried",
+        event_id=event_id,
+        channel_id=channel_id,
+        reason=failure_reason(exc),
+    )
+    return "retry"
+
+
+def _fails_every_attempt(exc: Exception) -> bool:
+    return (
+        isinstance(exc, SlackApiError)
+        and exc.error not in _PASSING_SLACK_ERRORS
+        and not _SLACK_SERVER_ERROR.fullmatch(exc.error)
+    )
 
 
 def failure_reason(exc: Exception) -> str:

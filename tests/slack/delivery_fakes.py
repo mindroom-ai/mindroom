@@ -59,7 +59,7 @@ AUTH_TEST = {"ok": True, "team_id": TEAM, "user_id": BOT_USER, "user": BOT_NAME,
 CANT_ANSWER = "MindRoom can't answer you here."
 UNRECEIVED = "MindRoom couldn't receive your message; try again"
 
-type Answer = dict[str, Any] | Callable[[httpx.Request], Awaitable[dict[str, Any]]]
+type Answer = dict[str, Any] | Callable[[httpx.Request], Awaitable[dict[str, Any] | httpx.Response]]
 
 
 def slack_user(name: str, **flags: object) -> dict[str, Any]:
@@ -70,8 +70,9 @@ def slack_user(name: str, **flags: object) -> dict[str, Any]:
 
 @dataclass
 class FakeSlack:
-    """Answer Slack Web API methods by name, recording every request; an answer may be a coroutine.
+    """Answer Slack Web API methods by name, recording every request.
 
+    An answer may be a coroutine, which may answer a whole HTTP response.
     `users.info` answers from `users` unless `answers` has an entry for it.
     """
 
@@ -89,7 +90,8 @@ class FakeSlack:
                 json={"ok": True, "user": user} if user else {"ok": False, "error": "user_not_found"},
             )
         answer = self.answers.get(method, {"ok": True})
-        return httpx.Response(200, json=answer if isinstance(answer, dict) else await answer(request))
+        body = answer if isinstance(answer, dict) else await answer(request)
+        return body if isinstance(body, httpx.Response) else httpx.Response(200, json=body)
 
     def client(self) -> httpx.AsyncClient:
         """Return an HTTP client whose Slack calls reach this fake."""

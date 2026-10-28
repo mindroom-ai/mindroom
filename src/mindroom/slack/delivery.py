@@ -19,11 +19,12 @@ from mindroom.slack.api import SlackApiError, slack_call, slack_http_client
 from mindroom.slack.app import load_slack_app, slack_bot_identity
 from mindroom.slack.events import parse_message_event, project_thread_key, project_wake_agent
 from mindroom.slack.turns import (
-    RETRYABLE_ERRORS,
+    DELIVERY_ERRORS,
     SlackAttempt,
     SlackTurn,
     claim_and_send,
     conversation_label,
+    delivery_failed,
     event_author,
     failure_reason,
     is_bound,
@@ -87,6 +88,7 @@ async def deliver_slack_event(
 
     `app` is the Slack app this attempt acts with, loaded once for it.
     `retry` means some target may still receive the message; targets that already did skip it next time.
+    A Slack error that fails every attempt alike, such as a revoked token, is not retried.
     On the `last_attempt`, a project wake that still fails tells its author to try again.
     """
     try:
@@ -101,12 +103,8 @@ async def deliver_slack_event(
             now=now,
             last_attempt=last_attempt,
         )
-    except RETRYABLE_ERRORS as exc:
-        logger.warning(
-            "Slack event delivery failed and will be retried",
-            event_id=_event_id(payload),
-            reason=failure_reason(exc),
-        )
+    except DELIVERY_ERRORS as exc:
+        return delivery_failed(exc, event_id=_event_id(payload))
     except Exception:
         logger.exception("Slack event delivery failed unexpectedly and will be retried", event_id=_event_id(payload))
     return "retry"

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.background_tasks import wait_for_background_tasks
@@ -549,12 +550,95 @@ async def test_other_team_ignored(harness: Harness) -> None:
     assert harness.matrix.sent == []
 
 
+async def _http_500(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(500)
+
+
+async def _http_429(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(429, headers={"Retry-After": "3"})
+
+
+# What a later attempt may not meet: Slack's own failures, its rate limit, and the network.
+_PASSING_FAILURES = pytest.mark.parametrize(
+    "answer",
+    [_http_500, _http_429, {"ok": False, "error": "internal_error"}, _slack_timeout],
+    ids=["http-500", "rate-limited", "internal-error", "timeout"],
+)
+# What no later attempt changes, such as a revoked token or a missing scope.
+_FINAL_ERRORS = pytest.mark.parametrize(
+    "error",
+    ["invalid_auth", "token_revoked", "account_inactive", "missing_scope", "not_allowed_token_type", "not_authed"],
+)
+
+
+def _final_error_log(logs: list[dict[str, Any]], error: str) -> dict[str, Any]:
+    (entry,) = [entry for entry in logs if entry["log_level"] == "error"]
+    assert entry["reason"] == error
+    return entry
+
+
+@_PASSING_FAILURES
 @pytest.mark.asyncio
-async def test_failing_identity_lookup_answers_retry(harness: Harness) -> None:
-    harness.slack.answers["auth.test"] = {"ok": False, "error": "invalid_auth"}
+async def test_failing_identity_lookup_answers_retry(harness: Harness, answer: Any) -> None:  # noqa: ANN401
+    harness.slack.answers["auth.test"] = answer
 
     assert await harness.deliver(event_payload()) == "retry"
     assert harness.matrix.sent == []
+
+
+@_FINAL_ERRORS
+@pytest.mark.asyncio
+async def test_identity_lookup_refused_for_good_is_not_retried(harness: Harness, error: str) -> None:
+    """A revoked bot token or a missing scope fails every attempt alike, so Slack is not asked to send it again."""
+    harness.slack.answers["auth.test"] = {"ok": False, "error": error}
+
+    with capture_logs() as logs:
+        assert await harness.deliver(event_payload()) == "ignored"
+
+    assert _final_error_log(logs, error)["event_id"] == f"Evapp_mention{ROOT_TS}"
+    assert harness.matrix.sent == []
+
+
+@_FINAL_ERRORS
+@pytest.mark.asyncio
+async def test_author_lookup_refused_for_good_skips_the_project_agent(harness: Harness, error: str) -> None:
+    harness.slack.answers["users.info"] = {"ok": False, "error": error}
+
+    with capture_logs() as logs:
+        assert await harness.deliver(event_payload()) == "ignored"
+    await harness.settle()
+
+    assert _final_error_log(logs, error)["channel_id"] == CHANNEL
+    assert harness.matrix.sent == []
+    assert harness.slack.calls("chat.postEphemeral") == []
+
+
+@_PASSING_FAILURES
+@pytest.mark.asyncio
+async def test_watch_visibility_lookup_failure_retries(harness: Harness, answer: Any) -> None:  # noqa: ANN401
+    alice_watch(harness.paths)
+    connect_alice(harness.paths)
+    harness.slack.answers["apps.event.authorizations.list"] = answer
+
+    assert await harness.deliver(_dm()) == "retry"
+    assert harness.matrix.sent == []
+
+
+@_FINAL_ERRORS
+@pytest.mark.asyncio
+async def test_watch_visibility_lookup_refused_for_good_skips_the_watches(harness: Harness, error: str) -> None:
+    """A watch Slack refuses to check for good is skipped, and the project agent still receives the event."""
+    alice_watch(harness.paths)
+    connect_alice(harness.paths)
+    harness.slack.answers["apps.event.authorizations.list"] = {"ok": False, "error": error}
+    payload = event_payload(text=f"<@{BOT_USER}> ask <@{SLACK_IDS['alice']}>")
+
+    with capture_logs() as logs:
+        assert await harness.deliver(payload) == "delivered"
+
+    _final_error_log(logs, error)
+    ((room_id, _),) = harness.matrix.sent
+    assert room_id == LAUNCH_ROOM
 
 
 def _recording_sleep(delays: list[float]) -> Callable[[float], Awaitable[None]]:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from mindroom.config.slack import has_personal_slack
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
@@ -14,7 +16,7 @@ from mindroom.oauth.credential_lifecycle import (
     resolve_oauth_credential_context,
 )
 from mindroom.response_admission import admitted_response_decision
-from mindroom.slack.api import slack_call
+from mindroom.slack.api import SlackApiError, slack_call
 from mindroom.slack.events import (
     is_direct_message,
     mentioned_user_ids,
@@ -28,6 +30,7 @@ from mindroom.slack.turns import (
     SlackTurn,
     claim_and_send,
     conversation_label,
+    delivery_failed,
     event_author,
     is_bound,
     refuse_while_closed,
@@ -70,7 +73,10 @@ async def deliver_to_watches(attempt: SlackAttempt) -> list[DeliveryResult]:
     candidates = watch_candidates(event, possible, bound_watch_ids=bound)
     if not candidates:
         return []
-    visible_to = await _visible_to(attempt, app_token)
+    try:
+        visible_to = await _visible_to(attempt, app_token)
+    except (SlackApiError, httpx.HTTPError) as exc:
+        return [delivery_failed(exc, event_id=event.event_id, channel_id=event.channel_id)]
     return [
         await retry_on_failure(
             event,
