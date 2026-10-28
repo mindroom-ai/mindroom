@@ -283,6 +283,9 @@ def apply_active(
         reason=None,
         metadata=metadata,
         grant_id=str(grant_row["grant_id"]),
+        # The deadline is judged at the instant the grant was found to cover the call, so its receipt and its
+        # decision agree.
+        now_ns=now,
     )
     if not decided.recorded:
         return False

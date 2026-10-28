@@ -97,7 +97,7 @@ Delivery and recovery:
 
 - A reply write made while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed, so after a homeserver outage an answer near the event size limit can be refused and end with the delivery-failed note.
 - A reply still streaming when an upgrade from an earlier release stops the backend can keep its partial text, and its replay may answer in a new message, because upgrades are assumed to run with no reply in flight.
-- An upgrade from an earlier release cancels every approval of a paused reply that release left pending, because it cannot rule out that one is pending; approvals of scheduled calls are kept.
+- An upgrade from a release before v2026.10.228 cancels every approval of a paused reply that release left pending, because it cannot rebuild the reply such an approval paused; approvals of scheduled calls are kept, and pending approvals survive an upgrade from any later release.
   A cancelled approval's Matrix message keeps what it showed, which can still say that it waits for approval, and a click on its card does nothing.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.

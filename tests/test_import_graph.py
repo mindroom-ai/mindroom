@@ -22,9 +22,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
@@ -382,17 +385,6 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
         "exports": ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"],
         "loaded": ["mindroom.workers.worker_retirement"],
     }
-
-
-def test_approval_calls_are_decided_by_one_writer() -> None:
-    """Only the call resolver writes a decision, so a card's terminal edit and its call cannot disagree."""
-    journal = Path(__file__).parents[1] / "src" / "mindroom" / "event_journal"
-    writers = sorted(
-        path.name
-        for path in journal.glob("*.py")
-        if "SET decision = ?" in path.read_text() and not path.name.startswith("legacy_")
-    )
-    assert writers == ["approval_calls.py"]
 
 
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:

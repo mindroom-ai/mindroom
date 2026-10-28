@@ -28,7 +28,7 @@ In-process notifications (`ApprovalSignals`) therefore belong to the store and s
 
 ### One decision per call, one row per card
 
-- `approval_calls` is the only owner of a decision and `resolve_call` its only writer; every path that decides a call goes through it, and the terminal edit is built from the decision in the same transaction.
+- `approval_calls` is the only owner of a decision: a policy decision is stored with the call when a paused generation is inserted, and every later decision goes through `resolve_call`, which builds the terminal edit from the decision in the same transaction.
 - A call's key leaves the principal out, so the database guarantees the global uniqueness card joins already relied on (`approval_id` was unique; detached run ids are UUID-based or install-unique job and task ids).
 - A reply-owned call outlives its paused reply until every card that shows it retires, because a responder departure deletes the paused reply but keeps the router's terminal-edit debt, whose decision would otherwise have no owner.
   The call keeps its principal for the same reason.

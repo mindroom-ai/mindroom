@@ -27,10 +27,8 @@ from mindroom.event_journal.history_recovery import (
 from mindroom.logging_config import get_logger
 
 from . import (
-    approval_calls,
     approval_cards,
     approval_continuations,
-    approval_signals,
     membership_hooks,
     replies,
     reply_messages,
@@ -708,16 +706,7 @@ def _advance_membership_epoch(
         """,  # noqa: S608 - a fixed SQL fragment, not input
         (principal_id, room_id),
     ):
-        approval_calls.delete_reply_calls(transaction, approval_id=str(departed["approval_id"]))
-        approval_signals.ended(transaction, principal_id, str(departed["approval_id"]))
-    transaction.execute(
-        f"""
-        DELETE FROM approval_continuations
-        WHERE principal_id = ?
-          AND {approval_continuations.holds_source_in_room("approval_continuations")}
-        """,  # noqa: S608 - a fixed SQL fragment, not input
-        (principal_id, room_id),
-    )
+        approval_continuations.delete(transaction, principal_id, approval_id=str(departed["approval_id"]))
     # Turn-backed work still pending from the membership that just ended can
     # never finish. Its answer would have to be enqueued, and enqueue refuses
     # any turn whose admitted epoch is not the room's current one -- correctly,

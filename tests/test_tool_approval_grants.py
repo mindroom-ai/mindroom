@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,6 +31,8 @@ from mindroom.event_journal import (
     EventKind,
     InboundEvent,
     MatrixDelivery,
+    approval_calls,
+    approval_grants,
 )
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.large_messages import content_fits_normal_event
@@ -2052,6 +2056,26 @@ async def test_an_active_grant_does_not_approve_a_call_already_past_its_deadline
         assert card.offers_timed_approval
         # The grant never approves it; the deadline sweep the card's publication woke may already have expired it.
         assert await _call_row(journal, "past-deadline") in {(None, None), ("expired", None)}
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_grant_receipt_and_its_decision_judge_the_deadline_at_one_instant(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call the grant covered just before its deadline is approved, even when the decision is written after it."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path)
+    try:
+        assert (await _approve(manager, await _card(journal, manager, "granted"))).consumed
+        deadline = time.time_ns() + 60 * 1_000_000_000
+        monkeypatch.setattr(approval_grants, "time", SimpleNamespace(time_ns=lambda: deadline - 1))
+        monkeypatch.setattr(approval_calls, "time", SimpleNamespace(time_ns=lambda: deadline + 1))
+        await _card(journal, manager, "at-deadline", expires_at_ns=deadline)
+        assert await _call_row(journal, "at-deadline") == ("approved", "@human:test")
     finally:
         await manager.shutdown()
 

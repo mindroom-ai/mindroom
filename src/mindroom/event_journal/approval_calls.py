@@ -2,10 +2,11 @@
 
 A paused reply owns the calls of each of its generations; a detached run (a
 background job, a background script, or a scheduled task) owns its calls at
-generation 0. ``resolve_call`` is the only code that decides a call: card clicks,
+generation 0. A policy decision is stored with the call when a paused generation
+is inserted; every later decision goes through ``resolve_call``: card clicks,
 timed grants, deadlines, failure settlement, detached settlement, scheduled
-withdrawal, and both departure paths go through it, so a card's terminal edit and
-its call's decision cannot disagree.
+withdrawal, and both departure paths, so a card's terminal edit and its call's
+decision cannot disagree.
 """
 
 from __future__ import annotations
@@ -322,13 +323,15 @@ def resolve_call(
     reason: str | None,
     metadata: ApprovalDecisionMetadata | None,
     grant_id: str | None = None,
+    now_ns: int | None = None,
 ) -> RecordedApprovalDecision:
     """Decide one call unless it is decided already, and queue its live request card's terminal edit.
 
     A reply-owned call is decided only while its paused reply is ``waiting`` or
     ``failing`` at the call's generation, and a failing reply turns an approval
-    into a denial. The deadline always wins. A paused reply whose calls are all
-    decided becomes ready once its publication lease is released.
+    into a denial. The deadline always wins, judged at ``now_ns`` when a caller
+    already judged the call's eligibility at that instant. A paused reply whose
+    calls are all decided becomes ready once its publication lease is released.
     """
     owner = transaction.fetchone(
         "SELECT owner_kind FROM approval_calls WHERE owner_id = ? AND generation = ? AND tool_call_id = ?",
@@ -378,7 +381,7 @@ def resolve_call(
         return approval_cards.RecordedApprovalDecision(resolution=None, recorded=False)
     # Only a paused reply joins a continuation, so only a reply-owned call can carry a failure.
     failure = approval_continuations.failure_of_row(row)
-    now = time.time_ns()
+    now = time.time_ns() if now_ns is None else now_ns
     decision, decision_reason = _effective_decision(
         requested=requested,
         reason=reason,
