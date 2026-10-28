@@ -4670,7 +4670,6 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.matrix_rtc.voice_agent",
-    "mindroom.session_storage.lanes",
     "mindroom.session_storage.types",
     "mindroom.tool_jobs.execution",
 ]
@@ -7168,6 +7167,7 @@ expose = [
     "resolve_current_session_id",
     "resolve_tool_runtime_hook_bindings",
     "runtime_context_from_dispatch_context",
+    "scope_hook_context_kwargs",
     "tool_runtime_context",
     "tool_runtime_model_context",
     "worker_progress_pump_scope",

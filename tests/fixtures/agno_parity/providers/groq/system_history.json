@@ -92,8 +92,7 @@
           "role": "user",
           "content": "And for the evening?"
         }
-      ],
-      "tools": []
+      ]
     },
     "headers": {
       "accept": "application/json",

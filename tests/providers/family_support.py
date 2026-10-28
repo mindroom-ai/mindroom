@@ -113,7 +113,8 @@ def ollama_chunk(content: str = "", *, done: bool = False) -> dict[str, Any]:
     return chunk
 
 
-def _chat_chunk(delta: dict[str, Any] | None, *, finish_reason: str | None = None) -> dict[str, Any]:
+def chat_chunk(delta: dict[str, Any] | None, *, finish_reason: str | None = None) -> dict[str, Any]:
+    """Return one Chat Completions stream chunk carrying ``delta``, or the final usage-only chunk when it is None."""
     chunk: dict[str, Any] = {
         "id": "chatcmpl-1",
         "object": "chat.completion.chunk",
@@ -155,7 +156,9 @@ def _responses_events(text: str, usage: dict[str, int]) -> list[dict[str, Any]]:
 
 
 def _claude_reply() -> httpx.Response:
-    return sse_response(claude_events([{"type": "text", "text": "ok"}]), named=True)
+    """A Claude stream whose text block opens empty and streams its text as a delta, as the API sends it."""
+    deltas = [{"type": "text_delta", "text": "ok"}]
+    return sse_response(claude_events([{"type": "text", "text": ""}], deltas=deltas), named=True)
 
 
 def _gemini_reply() -> httpx.Response:
@@ -168,15 +171,15 @@ def _ollama_reply() -> httpx.Response:
 
 def _chat_reply() -> httpx.Response:
     return sse_response(
-        [_chat_chunk({"content": "ok"}), _chat_chunk({}, finish_reason="stop"), _chat_chunk(None), "[DONE]"],
+        [chat_chunk({"content": "ok"}), chat_chunk({}, finish_reason="stop"), chat_chunk(None), "[DONE]"],
     )
 
 
 def _groq_reply() -> httpx.Response:
     """A Groq stream: its usage arrives in Groq's ``x_groq`` extension of the finishing chunk."""
-    finish = _chat_chunk({}, finish_reason="stop")
+    finish = chat_chunk({}, finish_reason="stop")
     finish["x_groq"] = {"id": "req_1", "usage": {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49}}
-    return sse_response([_chat_chunk({"content": "ok"}), finish, "[DONE]"])
+    return sse_response([chat_chunk({"content": "ok"}), finish, "[DONE]"])
 
 
 def _responses_reply() -> httpx.Response:
