@@ -1365,15 +1365,17 @@ _UNSTORED_OUTPUT = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("store", [True, False], ids=["stored", "unstored"])
 @pytest.mark.parametrize("listed", [True, False], ids=["listed-by-the-ended-response", "only-streamed"])
-async def test_an_unstored_response_keeps_its_output_for_replay_without_its_compaction_item(
+async def test_a_response_keeps_its_output_for_replay_without_its_compaction_item(
     tmp_path: Path,
     *,
     listed: bool,
+    store: bool,
 ) -> None:
-    """An unstored reply keeps its output for replay, from the ended response or, when that lists none, its stream.
+    """A reply keeps its output for replay, from the ended response or, when that lists none, its stream.
 
-    The compaction item stays out of that output.
+    It does on every route, whatever the route stores, and the compaction item stays out of that output.
     """
     done = [
         {"type": "response.output_item.done", "sequence_number": 2 + index, "output_index": index, "item": item}
@@ -1381,7 +1383,7 @@ async def test_an_unstored_response_keeps_its_output_for_replay_without_its_comp
     ]
     ended = _completed(_UNSTORED_OUTPUT if listed else None)
     reply = _responses_reply(*_text_events("Pack"), *done, ended)
-    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": False}}, reply)
+    built = _Built(tmp_path, {**_OPENAI_RESPONSES, "extra_kwargs": {"store": store}}, reply)
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 

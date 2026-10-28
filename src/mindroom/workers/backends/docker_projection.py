@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING, cast
 import yaml
 
 from mindroom import yaml_io
-from mindroom.config.personal_agents import expand_personal_agents, read_personal_agent_roster
+from mindroom.config.personal_agents import (
+    expand_personal_agents,
+    personal_agent_roster_path,
+    read_personal_agent_roster,
+)
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
@@ -50,6 +54,15 @@ if TYPE_CHECKING:
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 logger = get_logger(__name__)
+# Personal and created agents of the config each runtime last committed, by roster path. Only the runtime writes it,
+# because building these agents needs a validated config, and the config file on disk may hold an edit it rejected.
+_COMMITTED_GENERATED_AGENTS: dict[Path, dict[str, dict[str, object]]] = {}
+
+
+def publish_generated_agents(runtime_paths: RuntimePaths, agents: dict[str, dict[str, object]]) -> None:
+    """Give Docker worker configs the personal and created agents of the config the runtime just committed."""
+    _COMMITTED_GENERATED_AGENTS[personal_agent_roster_path(runtime_paths).resolve()] = agents
+
 
 _PROJECTED_ASSETS_DIRNAME = ".mindroom-worker-assets"
 _PROJECTED_CONFIGS_DIRNAME = ".mindroom-worker-config-projections"
@@ -473,7 +486,7 @@ class DockerProjectionManager:
         return self._with_personal_agents(copy.deepcopy(normalized_data))
 
     def _with_personal_agents(self, config_data: dict[str, object]) -> dict[str, object]:
-        """Add the generated personal agents, which live in the roster rather than the config file.
+        """Add the personal and created agents, which live in the roster rather than the config file.
 
         The cache keeps the raw file data, so a roster change shows up without a config change.
         """
@@ -482,7 +495,12 @@ class DockerProjectionManager:
         except (OSError, ValueError) as exc:
             msg = f"Failed to add personal agents to the Docker worker config: {exc}"
             raise WorkerBackendError(msg) from exc
-        return cast("dict[str, object]", expansion.data)
+        data = cast("dict[str, object]", expansion.data)
+        generated = _COMMITTED_GENERATED_AGENTS.get(personal_agent_roster_path(self._runtime_paths).resolve())
+        if not generated:
+            return data
+        authored = cast("dict[str, object]", data.get("agents", {}))
+        return {**data, "agents": {**authored, **copy.deepcopy(generated)}}
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()

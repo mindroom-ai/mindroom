@@ -58,6 +58,21 @@
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,
+        "mindroom_response_output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "Add a warm layer.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_parity",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ],
         "mindroom_response_stored": true,
         "response_id": "resp_parity"
       },
