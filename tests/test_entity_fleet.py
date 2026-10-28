@@ -351,3 +351,19 @@ async def test_cancelling_a_start_stuck_in_login_ends_it_without_another_attempt
 
     assert harness.started == []
     assert harness.fleet.bots["stuck"] is bot
+
+
+@pytest.mark.asyncio
+async def test_removal_ends_replies_only_for_entities_whose_bot_stopped(fake_sync: list[str]) -> None:
+    """A removal whose stop failed keeps its slot, and its replies stay open for the bot that still owns them."""
+    del fake_sync
+    harness = _Harness()
+    harness.add("stuck", stop_error=ResponseShutdownTimeoutError("reply still running"))
+    harness.add("done")
+    await harness.fleet.start({"stuck", "done"})
+
+    with pytest.raises(ResponseShutdownTimeoutError):
+        await harness.fleet.remove({"stuck", "done"})
+
+    assert "end_replies:done" in harness.order
+    assert set(harness.fleet.bots) == {"stuck"}

@@ -1053,16 +1053,26 @@ async def test_reload_restarts_refreshed_mcp_dependents_inline_only_after_a_drai
     )
     assert plan.requires_response_drain is plan_requires_drain
     assert not plan.restart
+    code_bot = orchestrator.agent_bots["code"]
+    plain_bot = orchestrator.agent_bots["plain"]
+
+    async def stop(names: set[str]) -> None:
+        for name in names:
+            swap_fleet_bot(orchestrator, name, None)
 
     with (
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value={"demo"})),
         patch.object(orchestrator, "_notify_mcp_catalog_change", new=AsyncMock()) as mock_notify,
-        patch.object(orchestrator.fleet, "stop", new=AsyncMock()) as mock_stop,
+        patch.object(orchestrator.fleet, "stop", new=AsyncMock(side_effect=stop)) as mock_stop,
+        patch.object(orchestrator.fleet, "create", new=AsyncMock()),
         patch.object(orchestrator.fleet, "start", new=AsyncMock(return_value=EntityStartResults())) as mock_start,
         patch.object(orchestrator, "_finalize_config_reload", new=AsyncMock()),
     ):
         await orchestrator._apply_config_update_plan(current_config, plan)
 
+    # Kept bots take the new config; a dependent being replaced is stopped before it could.
+    assert plain_bot.config is new_config
+    assert (code_bot.config is new_config) is not plan_requires_drain
     if plan_requires_drain:
         mock_notify.assert_not_awaited()
         assert mock_stop.await_args.args[0] == {"code", "dev_team"}

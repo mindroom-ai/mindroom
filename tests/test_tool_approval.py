@@ -2323,3 +2323,31 @@ async def test_manager_owns_recovery_across_bootstrap_rebind_and_shutdown(tmp_pa
         assert recovery._startup_cleanup_retry is None
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("settled", "unresolved"), [(True, set()), (False, {"removed"})])
+async def test_removed_entity_reconcile_reports_owners_it_could_not_settle(
+    *,
+    settled: bool,
+    unresolved: set[str],
+) -> None:
+    """Removal settles continuations before its config is published, and reports the ones still owed."""
+    continuation = MagicMock(approval_id="approval-1", entity_name="removed")
+    journal = MagicMock(approval_continuations=AsyncMock(return_value=(("agent@removed", continuation),)))
+    transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: None)
+    recovery = ApprovalRecovery(
+        deliver_unavailable_notice=transport.deliver_unavailable_notice,
+        journal_provider=lambda: journal,
+        # The removal is not published yet, so the live config still lists the entity.
+        entity_configured=lambda _name: True,
+    )
+
+    with (
+        patch.object(recovery, "_discard_unavailable", new=AsyncMock(return_value=settled)) as discard,
+        patch.object(recovery, "_schedule_startup_cleanup_retry") as schedule_retry,
+    ):
+        assert await recovery.reconcile_removed_entities({"removed"}) == unresolved
+
+    assert discard.await_args.args[2] == "Requesting agent 'removed' is no longer available."
+    assert schedule_retry.called is not settled

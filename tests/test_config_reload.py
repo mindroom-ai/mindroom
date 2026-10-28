@@ -2026,6 +2026,10 @@ def _remove_helper_and_change_docs_server(data: dict[str, Any]) -> None:
     data["mcp_servers"]["docs"]["command"] = "uvx"
 
 
+def _helper_uses_docs(data: dict[str, Any]) -> None:
+    data["agents"]["helper"]["tools"] = ["mcp_docs"]
+
+
 @pytest.mark.parametrize(
     ("change", "removed"),
     [
@@ -2038,7 +2042,15 @@ def test_config_update_plan_removes_deleted_entities_without_restarting_them(
     removed: set[str],
 ) -> None:
     """A deleted entity is only removed, so its removal path still finds its bot."""
-    plan = _entity_edit_plan(change)
+    entities = {ROUTER_AGENT_NAME, "helper", "other", "crew"}
+    current_config = _entity_edit_config(_helper_uses_docs)
+    new_config = _entity_edit_config(change)
+    plan = build_config_update_plan(
+        current_config=current_config,
+        new_config=new_config,
+        bots={entity: AsyncMock(running=True) for entity in entities},
+        plugin_changes=("plugins/changed",),
+    )
 
     assert plan.remove == removed
     assert not plan.restart & removed

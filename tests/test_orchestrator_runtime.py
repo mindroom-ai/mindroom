@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import httpx
 import nio
@@ -5784,3 +5784,20 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="No running Matrix owner"):
         await orchestrator.leave_matrix_room("general", "!room:localhost")
     assert gate.in_flight_response_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("entities", "fenced"), [({ROUTER_AGENT_NAME, "general"}, True), ({"general"}, False)])
+async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
+    tmp_path: Path,
+    entities: set[str],
+    *,
+    fenced: bool,
+) -> None:
+    """Room-backed reply grants are revoked before their only control client, the router, stops."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
+
+    with patch.object(orchestrator, "invalidate_agent_reply_memberships") as invalidate:
+        await orchestrator._entities_changing(entities)
+
+    assert invalidate.call_args_list == ([call(reason="router_replacement")] if fenced else [])
