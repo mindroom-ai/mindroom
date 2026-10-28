@@ -1280,7 +1280,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
                 return
             yield AttemptResolved(
-                HandledAttempt(get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)),
+                HandledAttempt(get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths), error=e),
             )
             return
         prepared_run = run_context.prepared_run
@@ -1326,6 +1326,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             RunStatus.error,
                             run_id=attempt.run_id,
                         ),
+                        error=state.error,
                     ),
                 )
             return

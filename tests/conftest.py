@@ -162,6 +162,7 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import CompletedAttempt, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
@@ -2442,6 +2443,32 @@ def create_mock_room(
     else:
         room.users = {}
     return room
+
+
+def completing(respond: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+    """Return an ``ai_response`` stand-in that answers as ``respond`` does and reports its turn completed.
+
+    A blocking caller reads a turn that reports no completed attempt as failed, so a plain stand-in is a failed turn.
+    """
+
+    async def complete(*args: object, sinks: TurnSinks | None = None, **kwargs: object) -> str:
+        text = await respond(*args, sinks=sinks, **kwargs)
+        if sinks is not None and sinks.on_completed is not None:
+            sinks.on_completed(CompletedAttempt(replayable_text=text, has_visible_content=bool(text)))
+        return text
+
+    return complete
+
+
+def completed_ai_response_mock(**kwargs: object) -> AsyncMock:
+    """Return an ``AsyncMock`` ``ai_response`` whose turn completes with its ``return_value``."""
+    mock = AsyncMock(**kwargs)
+
+    async def respond(*_args: object, **_kwargs: object) -> str:
+        return mock.return_value
+
+    mock.side_effect = completing(respond)
+    return mock
 
 
 def make_turn_context(

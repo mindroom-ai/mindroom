@@ -401,6 +401,8 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
+    # Receives the failure an attempt that failed with a reply text reports.
+    on_failed: Callable[[Exception], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
@@ -745,6 +747,8 @@ class HandledAttempt:
 
     text: str
     metadata_content: dict[str, Any] | None = None
+    # The failure the text reports, which ``TurnSinks.on_failed`` receives.
+    error: Exception | None = None
 
 
 @dataclass(frozen=True)
@@ -1063,6 +1067,10 @@ class _CompletionSettle:
     # continuation limit message, or an approval resume's restored text; the
     # driver emits it as a final chunk when non-empty.
     response_text: str = ""
+    # A quiet turn whose output holds no answer reports nothing: the driver
+    # emits an empty final text, which replaces a document a team's chunks
+    # showed, so delivery has no text to post.
+    reports_nothing: bool = False
 
 
 def _settle_completed_attempt(
@@ -1121,7 +1129,13 @@ def _settle_completed_attempt(
         # already streamed it. Tool presentation and fallback text are not
         # semantic prose: the tool records remain part of the completed turn,
         # but quiet delivery has no final assistant body to publish.
-        response_text = ""
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text=recorded_text,
+            recorded_tools=resolution.completed_tools,
+            reports_nothing=True,
+        )
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
@@ -1224,6 +1238,8 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 if isinstance(resolution, HandledAttempt):
                     _publish_run_metadata(sinks, resolution.metadata_content)
                     await _record_interrupted(ctx, adapter, sinks, run, RunStatus.error)
+                    if resolution.error is not None and sinks.on_failed is not None:
+                        sinks.on_failed(resolution.error)
                     yield resolution.text
                     return
                 settle = _settle_completed_attempt(
@@ -1238,7 +1254,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 keep_going = settle.keep_going
                 if not keep_going:
                     _record_completed_turn(sinks, run, resolution, settle)
-                if settle.response_text:
+                if settle.response_text or settle.reports_nothing:
                     yield adapter.make_text_chunk(settle.response_text)
             finally:
                 await cli_lifetime.retire_attempt()

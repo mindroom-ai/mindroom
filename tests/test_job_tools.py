@@ -312,17 +312,23 @@ async def test_a_team_leaders_wait_is_read_once_its_team_run_saves_the_call(tmp_
     [
         ("failed", None, "controlled HTTP 500 failure", "controlled HTTP 500 failure"),
         ("failed", ToolValue(content="rich failure"), None, "rich failure"),
+        ("cancelled", "This call was cancelled.", None, "This call was cancelled."),
+        ("denied", "The requester denied this call.", None, "The requester denied this call."),
+        ("interrupted", "A restart interrupted this call.", None, "A restart interrupted this call."),
         ("completed", None, None, "None"),
     ],
 )
 async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
     tmp_path: Path,
-    status: Literal["completed", "failed"],
-    value: ToolValue | None,
+    status: Literal["completed", "failed", "cancelled", "denied", "interrupted"],
+    value: ToolValue | str | None,
     stored_error: str | None,
     expected_result: str,
 ) -> None:
-    """The job controls report a failed job as the call's failure while consuming exact saved evidence."""
+    """The job controls report a job that did not complete as the call's failure, as the call that started it would.
+
+    Either way the call consumes the exact saved evidence.
+    """
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = _delegate_runtime_context(config, paths)
@@ -363,7 +369,7 @@ async def test_job_wait_reports_a_failure_and_acknowledges_the_saved_result(
             response = await run()
 
         tool = response.tools[0]
-        assert tool.is_error is (status == "failed")
+        assert tool.is_error is (status != "completed")
         assert tool.result == expected_result
         assert (await lookup(runtime, "ordinary", owner=owner, depth=0)).consumed
     finally:
@@ -482,7 +488,7 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_job_wait_on_a_cancelled_job_says_it_was_cancelled(tmp_path: Path) -> None:
-    """Waiting on a job a person cancelled returns why it has no result, so the model does not run it again."""
+    """Waiting on a job a person cancelled fails with why it has no result, so the model does not run it again."""
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -498,10 +504,10 @@ async def test_job_wait_on_a_cancelled_job_says_it_was_cancelled(tmp_path: Path)
     try:
         await start_job(runtime, "ordinary", tool_name="slow", depth=0, adapter={}, owner=owner, operation=operation)
         await runtime.request_cancel("ordinary")
-        with tool_runtime_context(context):
-            result = await tools.job("wait", "ordinary", wait_timeout=None)
-        assert "cancelled" in str(result)
-        assert "do not call it again" in str(result)
+        with tool_runtime_context(context), pytest.raises(RuntimeError) as raised:
+            await tools.job("wait", "ordinary", wait_timeout=None)
+        assert "cancelled" in str(raised.value)
+        assert "do not call it again" in str(raised.value)
     finally:
         await runtime.shutdown()
 

@@ -60,18 +60,25 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths, runtime_env_flag
+from mindroom.error_handling import needs_provider_key
+from mindroom.failure_text import failure_text
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext, load_bound_scope_session
-from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
+from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.response_activity import ActiveResponseIdentity  # noqa: TC001 - FastAPI evaluates dependency annotations.
-from mindroom.response_turn import TurnSinks, build_llm_request_log_context, stream_with_llm_request_log_context
+from mindroom.response_turn import (
+    CompletedAttempt,
+    TurnSinks,
+    build_llm_request_log_context,
+    stream_with_llm_request_log_context,
+)
 from mindroom.routing import suggest_responder
 from mindroom.run_storage import TerminalRecord
 from mindroom.teams.envelope import prepare_materialized_team_execution, run_prepared_team
@@ -829,18 +836,29 @@ async def _non_stream_completion(
         knowledge=knowledge,
         refresh_scheduler=refresh_scheduler,
     )
-    record = TurnRecorder()
+    completed: list[CompletedAttempt] = []
+    failures: list[Exception] = []
     response_text = await ai_response(
         replace(turn, show_tool_calls=False),
         runtime_paths,
         config,
-        sinks=TurnSinks(turn_recorder=record, run_metadata_collector=run_metadata),
+        sinks=TurnSinks(
+            run_metadata_collector=run_metadata,
+            on_completed=completed.append,
+            on_failed=failures.append,
+        ),
     )
 
-    # A failed attempt's error text can follow partial narration, so its record says it failed; a turn refused before
-    # any attempt ran leaves only its error text.
-    if record.outcome == "interrupted" or is_error_response(response_text):
-        logger.warning("AI response returned error", model=agent_name, session_id=session_id, error=response_text)
+    # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
+    # that failed for want of a provider key answers with its reply, the setup guidance the user has to read.
+    if not completed and not any(needs_provider_key(error) for error in failures):
+        # The reply text can hold the answer the turn had started, which is conversation content; log only why it failed.
+        logger.warning(
+            "AI response failed",
+            model=agent_name,
+            session_id=session_id,
+            error=redact_sensitive_text(failure_text(failures[-1])) if failures else None,
+        )
         return error_response(500, "Agent execution failed", error_type="server_error")
 
     logger.info("Chat completion sent", model=agent_name, stream=False, session_id=session_id)
@@ -931,15 +949,15 @@ async def _stream_completion(
                 if isinstance(event, RunFinished):
                     content = event.record.content
                     completed_body = content if content is not None else completed_body
-                elif (failure_text := extract_agent_stream_failure(event)) is not None:
+                elif (failure := extract_agent_stream_failure(event)) is not None:
                     stream_failed = True
                     logger.warning(
                         "Stream emitted terminal failure",
                         model=agent_name,
                         session_id=session_id,
-                        error=failure_text,
+                        error=failure,
                     )
-                    yield sse_chunk(state, {"content": failure_text})
+                    yield sse_chunk(state, {"content": failure})
                     break
                 elif text := extract_stream_text(event, state.tool_state):
                     if isinstance(event, TextDelta | str):

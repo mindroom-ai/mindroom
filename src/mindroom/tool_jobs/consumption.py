@@ -36,19 +36,30 @@ _JOB_FAILED_TEXT = "Background tool job failed."
 # exceptions such as ``TimeoutError`` and ``httpx.ReadTimeout``.
 # Last legacy release: v2026.10.512; replacement: v2026.10.513, whose writers save the exception's type name when its
 # text is empty.
-# Handling: such a job reads as ``_JOB_FAILED_TEXT`` wherever its outcome is read, when the call that started it reads
-# it, when the job tool waits for it, and when the job tool collects it, so the model reads that the call failed
-# instead of an empty failure.
+# Handling: such a job reads as ``_JOB_FAILED_TEXT`` wherever its outcome is read: when the call that started it, an
+# ordinary tool call or a delegation, reads it, when the job tool waits for it, and when the job tool collects it, so
+# the model reads that the call failed instead of an empty failure.
 # Coverage: tests/test_tool_job_execution.py::test_a_reattached_call_reads_a_job_saved_failed_without_error_text_as_failed;
 # tests/test_job_tools.py::test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed;
-# tests/test_job_tools.py::test_collect_reads_a_job_saved_failed_without_error_text_as_failed
+# tests/test_job_tools.py::test_collect_reads_a_job_saved_failed_without_error_text_as_failed;
+# tests/test_background_delegation.py::test_a_child_whose_failure_has_no_saved_text_still_answers_that_it_failed
 def job_failure_text(value: Any, payload: ToolResultPayload) -> str:  # noqa: ANN401 - A consumed job's value.
-    """Return what a reader of a consumed job reports for its failure: the payload's error, else the value's text.
+    """Return the text a consumed job reports for its failure: the payload's error, else the value's text.
 
-    ``value`` and ``payload`` are what ``consume_tool_job`` returned; each reader decides which statuses fail.
+    ``value`` and ``payload`` are what ``consume_tool_job`` returned. Which outcomes fail a read of one job is
+    ``job_failure``'s rule.
     """
     text = value.content if isinstance(value, ToolValue) else value
     return str(payload.error or text or _JOB_FAILED_TEXT)
+
+
+def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> str | None:  # noqa: ANN401 - A consumed job's value.
+    """Return why a read of one consumed job fails, or None when the job completed.
+
+    Every other outcome fails with its reason, such as why an approval was denied, for the call that started the job,
+    an ordinary tool call or a delegation, and for a later wait on it.
+    """
+    return None if job.status == "completed" else job_failure_text(value, payload)
 
 
 @dataclass(frozen=True)

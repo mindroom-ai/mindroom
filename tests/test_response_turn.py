@@ -727,8 +727,9 @@ def test_completion_records_and_updates_collector() -> None:
 @pytest.mark.parametrize(
     ("presentation", "allow_no_report_response", "expected_chunks"),
     [
-        pytest.param("Tool: matrix alert sent", True, [], id="silent-agent"),
-        pytest.param("Team Response: no team prose", True, [], id="silent-team"),
+        # A quiet turn reports nothing: an empty final text, which replaces any document a team showed.
+        pytest.param("Tool: matrix alert sent", True, ["notice:"], id="silent-agent"),
+        pytest.param("Team Response: no team prose", True, ["notice:"], id="silent-team"),
         pytest.param(
             "Tool: matrix alert sent",
             False,

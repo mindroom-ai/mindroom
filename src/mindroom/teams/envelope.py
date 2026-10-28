@@ -603,12 +603,17 @@ class _TeamTurn:
                 HandledAttempt(
                     self.error_text(error),
                     metadata_content=self.run_metadata_content(attempt, RunStatus.error),
+                    error=error,
                 ),
             )
             return
+        finally:
+            # A failed run's deltas never show why it failed. However the team run ended, finished, failed, or stopped,
+            # it stored its record before its events ended, and the document adds each failed run's reason from it, so
+            # the reply and what the turn records show the reason.
+            if (stored := attempt.records.record) is not None:
+                attempt.show_failure_reasons(stored)
         record = attempt.terminal_record()
-        # A failed member run's deltas never show why it failed; the document adds its reason now the team run ended.
-        attempt.show_failure_reasons(record)
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
             if paused.response_text:

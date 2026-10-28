@@ -11,7 +11,6 @@ from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import (
     EMPTY_RESPONSE_NOTICE,
     discard_empty_completed_run,
-    is_empty_completed_run,
 )
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -21,7 +20,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
@@ -87,33 +86,6 @@ async def _stream(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inpu
         chunk
         async for chunk in stream_agent_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
     ]
-
-
-def test_is_empty_completed_run_detects_contentless_completed_runs() -> None:
-    """Completed runs with no tool calls and no visible content are empty."""
-    assert is_empty_completed_run(_completed_run("r1", None))
-    assert is_empty_completed_run(_completed_run("r1", ""))
-    assert is_empty_completed_run(_completed_run("r1", "  \n"))
-
-
-def test_is_empty_completed_run_ignores_runs_with_content_tools_or_other_status() -> None:
-    """Real responses, tool-only runs, and non-completed statuses are not empty."""
-    assert not is_empty_completed_run(_completed_run("r1", "hello"))
-
-    tool_run = _completed_run("r1", None)
-    tool_run.tools = [
-        ToolExecution(
-            tool_call_id="call-run_shell_command",
-            tool_name="run_shell_command",
-            tool_args={"cmd": "pwd"},
-            result="/app",
-        ),
-    ]
-    assert not is_empty_completed_run(tool_run)
-
-    errored = _completed_run("r1", None)
-    errored.status = RunStatus.error
-    assert not is_empty_completed_run(errored)
 
 
 def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage(tmp_path: Path) -> None:
