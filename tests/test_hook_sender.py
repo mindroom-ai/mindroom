@@ -24,6 +24,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import mindroom_user_id
@@ -1649,7 +1650,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
 
 @pytest.mark.asyncio
 async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_path: Path) -> None:
-    """Deeper synthetic hook relays should stop before command parsing or AI dispatch."""
+    """A deeper synthetic hook relay stops at ingress, before it can run as a command or reach the queue."""
     bot = _agent_bot(tmp_path)
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
     event = nio.RoomMessageText.from_dict(
@@ -1667,21 +1668,14 @@ async def test_deep_hook_dispatch_stops_before_command_or_response_dispatch(tmp_
         },
     )
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
-    bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(_dispatch_context(bot)),
-    )
-    bot._turn_policy.plan_turn = AsyncMock()
+    replace_turn_deps(bot, normalizer=bot._inbound_turn_normalizer)
+    with patch.object(TurnDispatcher, "_dispatch_text_turn", new_callable=AsyncMock) as mock_dispatch:
+        outcome = await bot._turn_ingress.handle_text_event(room, event)
+        await bot._coalescing_gate.drain_all()
 
-    await dispatch_test_turn(
-        bot._turn_dispatcher,
-        room,
-        PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
-    )
-
-    bot._turn_policy.plan_turn.assert_not_awaited()
+    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
+    bot._inbound_turn_normalizer.resolve_text_event.assert_awaited_once()
+    mock_dispatch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2024,42 +2018,6 @@ async def test_first_hop_prepared_text_hook_dispatch_still_reaches_dispatch(tmp_
     dispatch = bot._turn_policy.plan_turn.await_args.args[2]
     assert dispatch.envelope.source_kind == "hook_dispatch"
     assert dispatch.envelope.message_received_depth == 1
-
-
-@pytest.mark.asyncio
-async def test_deep_prepared_text_hook_dispatch_stops_before_dispatch(tmp_path: Path) -> None:
-    """Prepared synthetic text should stop at the same deep-relay boundary as raw text."""
-    bot = _agent_bot(tmp_path)
-    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_code:localhost")
-    event = PreparedIngress(
-        sender="@mindroom_router:localhost",
-        event_id="$prepared-deep-hook-dispatch",
-        body="follow-up automation",
-        source={
-            "content": {
-                "msgtype": "m.text",
-                "body": "follow-up automation",
-                SOURCE_KIND_KEY: "hook_dispatch",
-                "com.mindroom.hook_source": "origin-plugin:message:before_response",
-                HOOK_MESSAGE_RECEIVED_DEPTH_KEY: 2,
-            },
-        },
-    )
-    bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-        return_value=dispatch_context_result(_dispatch_context(bot)),
-    )
-    bot._turn_policy.plan_turn = AsyncMock()
-
-    await dispatch_test_turn(
-        bot._turn_dispatcher,
-        room,
-        PrecheckedEvent(
-            event=event,
-            facts=bot._ingress_validator.classify(event),
-        ),
-    )
-
-    bot._turn_policy.plan_turn.assert_not_awaited()
 
 
 @pytest.mark.asyncio

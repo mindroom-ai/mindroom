@@ -221,26 +221,6 @@ def _tracked_route_turn(
     return prepared.handled_turn
 
 
-def should_skip_deep_synthetic_full_dispatch(
-    logger: structlog.stdlib.BoundLogger,
-    *,
-    event_id: str,
-    envelope: MessageEnvelope,
-) -> bool:
-    """Return True when a deep synthetic hook relay must stop before dispatch."""
-    resolved_policy = hook_ingress_policy(envelope)
-    if resolved_policy.allow_full_dispatch:
-        return False
-    logger.debug(
-        "Ignoring deep synthetic hook relay before command/response dispatch",
-        event_id=event_id,
-        source_kind=envelope.source_kind,
-        hook_source=envelope.hook_source,
-        message_received_depth=envelope.message_received_depth,
-    )
-    return True
-
-
 @dataclass(frozen=True)
 class TurnDispatchDeps:
     """Collaborators needed to dispatch a turn after the coalescing gate."""
@@ -290,7 +270,10 @@ class TurnDispatcher:
             dispatch_timing.mark("gate_exit")
         async with self.deps.resolver.turn_lookup_scope():
             dispatch_start = time.monotonic()
-            await self._dispatch_text_turn(turn)
+            if not await self._dispatch_text_turn(turn):
+                # Their callbacks deferred these sources to the gate, so they go back to the journal, whose ingress
+                # decides them one by one.
+                self.deps.retry_dispatch_sources(turn.room.room_id, turn.handled_turn.source_event_ids)
             emit_elapsed_timing(
                 "coalescing.handle_turn.dispatch_text_message",
                 dispatch_start,
@@ -301,21 +284,19 @@ class TurnDispatcher:
     async def dispatch_control_turn(self, turn: PreparedTurn) -> bool:
         """Dispatch one command that bypassed the coalescing gate, under the claim its ingress handed over.
 
-        Returns False when its sources went back to the journal instead of dispatching.
+        Returns False when that claim cannot cover the turn; its callback still owns the source then.
         """
         return await self._dispatch_text_turn(turn)
 
     async def _dispatch_text_turn(self, turn: PreparedTurn) -> bool:
-        """Run the normal text or command dispatch pipeline for a prepared turn, or hand its sources back.
+        """Run the normal text or command dispatch pipeline for a prepared turn.
 
         The turn's per-event claims become one claim on the whole turn, which this
-        dispatch owns until a response task takes it. Returns False when they cannot.
+        dispatch owns until a response task takes it. Returns False when they cannot,
+        because another live owner shares an event or a completed turn answered an alias.
         """
         claim = await self.deps.turn_store.merge_claims(turn.claims, turn.handled_turn)
         if claim is None:
-            # Another live owner shares an event, or a completed turn answered an alias: its sources go back to
-            # the journal, whose ingress decides them one by one.
-            self.deps.retry_dispatch_sources(turn.room.room_id, turn.handled_turn.source_event_ids)
             return False
         await self._dispatch_claimed_text_turn(turn, claim)
         return True
@@ -454,13 +435,6 @@ class TurnDispatcher:
             )
             if not command_owned:
                 await visible_responses.settle_source_events_ignored(prepared.handled_turn)
-            return True
-        if should_skip_deep_synthetic_full_dispatch(
-            self.deps.logger,
-            event_id=prepared.event.event_id,
-            envelope=prepared.dispatch.envelope,
-        ):
-            await visible_responses.settle_source_events_ignored(prepared.handled_turn)
             return True
 
         may_be_superseded = (

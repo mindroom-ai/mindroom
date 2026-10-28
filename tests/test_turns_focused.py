@@ -1803,12 +1803,18 @@ async def test_command_dispatch_keeps_the_alias_its_ingress_claimed(
 
 
 @pytest.mark.asyncio
-async def test_command_that_cannot_keep_its_claim_stays_with_the_journal(
+@pytest.mark.parametrize("handled_meanwhile", [False, True])
+async def test_command_that_cannot_keep_its_claim_ends_as_its_refused_claim(
     config: Config,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    handled_meanwhile: bool,
 ) -> None:
-    """A command whose claim cannot merge goes back to the journal: its callback defers it instead of settling it."""
+    """A command whose claim cannot merge ends its callback as a refused claim does, with no retry beside it.
+
+    A retry would only reach the same refusal, and a retried source the callback also defers has no live owner, so
+    the journal would reclaim it as a lost handoff.
+    """
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("!help", event_id="$refused-command:localhost")
@@ -1816,6 +1822,8 @@ async def test_command_that_cannot_keep_its_claim_stays_with_the_journal(
     async def refuse(claims: tuple[TurnClaim, ...], _turn_record: TurnRecord) -> None:
         for claim in claims:
             claim.release()
+        if handled_meanwhile:
+            await harness.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
 
     execute_if_owned = AsyncMock(return_value=True)
     monkeypatch.setattr(harness.turn_store, "merge_claims", refuse)
@@ -1823,8 +1831,8 @@ async def test_command_that_cannot_keep_its_claim_stays_with_the_journal(
 
     outcome = await harness.ingress.handle_text_event(room, event)
 
-    assert outcome is TurnDispatchOutcome.DEFERRED
-    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    assert outcome is (TurnDispatchOutcome.DEFERRED if handled_meanwhile else TurnDispatchOutcome.INTENTIONALLY_IGNORED)
+    assert harness.retried_dispatch_sources == []
     execute_if_owned.assert_not_awaited()
     assert not harness.turn_store.has_live_turn_claim(event.event_id)
 

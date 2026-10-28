@@ -613,7 +613,7 @@ def _set_context_histories(dispatch: PreparedDispatch, history: Sequence[Resolve
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal_path", ["policy_ignore", "deep_synthetic", "non_owner_command"])
+@pytest.mark.parametrize("terminal_path", ["policy_ignore", "non_owner_command"])
 async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation(
     tmp_path: Path,
     terminal_path: str,
@@ -635,10 +635,6 @@ async def test_post_gate_terminal_drop_settles_real_deferred_dispatch_obligation
             bot._turn_dispatcher,
             "_prepare_dispatch",
             new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
-        ),
-        patch(
-            "mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch",
-            return_value=terminal_path == "deep_synthetic",
         ),
         patch.object(
             bot._turn_policy,

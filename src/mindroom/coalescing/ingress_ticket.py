@@ -54,9 +54,16 @@ class IngressTicket:
                 return TurnDispatchOutcome.DEFERRED
             case ClaimRefused():
                 # It has no source, or a completed turn of another identity owns one of its aliases.
-                if await self.turn_store.handled_among(self.slot.room_id, record.source_event_ids):
+                if await self.refusal_defers(record):
                     return TurnDispatchOutcome.DEFERRED
                 return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+    async def refusal_defers(self, record: TurnRecord) -> bool:
+        """Return whether the callback of an item whose claim on this turn was refused defers instead of settling.
+
+        It defers when one of its sources is already handled: answered, or redacted.
+        """
+        return bool(await self.turn_store.handled_among(self.slot.room_id, record.source_event_ids))
 
     def take_claim(self) -> TurnClaim:
         """Hand this item's claim to a dispatch that bypasses the gate."""

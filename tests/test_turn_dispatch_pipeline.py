@@ -992,7 +992,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
-            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -1117,7 +1116,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(side_effect=fake_execute_router_relay),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
-            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -1586,7 +1584,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.conversation_resolver.ConversationResolver.build_envelope",
                 return_value=envelope,
             ),
-            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._response_runner,
                 "active_thread_ids_for_room",
@@ -1819,7 +1816,6 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(return_value=prepared_event),
             ),
-            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -1990,7 +1986,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
-            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",
@@ -2087,7 +2082,6 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(return_value=prepared_event),
             ),
             patch.object(bot._conversation_resolver, "build_envelope", return_value=envelope),
-            patch("mindroom.turns.dispatch.should_skip_deep_synthetic_full_dispatch", return_value=False),
             patch.object(
                 bot._conversation_resolver,
                 "coalescing_thread_id",

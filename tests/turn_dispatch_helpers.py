@@ -138,10 +138,10 @@ async def dispatch_test_turn(
     await dispatcher.handle_prepared_turn(replace(turn, claims=claims))
 
 
-def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
-    """Adapt legacy test observers to the single PreparedTurn callback boundary."""
+def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[bool]]:
+    """Adapt legacy test observers to the single PreparedTurn callback boundary, as a dispatch that took the turn."""
 
-    async def record(*args: object) -> None:
+    async def record(*args: object) -> bool:
         turn = args[-1]
         assert isinstance(turn, PreparedTurn)
         await callback(
@@ -154,5 +154,6 @@ def prepared_turn_recorder(callback: Callable[..., Awaitable[None]]) -> Callable
             payload_metadata=turn.payload,
             current_prompt_is_structured=turn.current_prompt_is_structured,
         )
+        return True
 
     return record

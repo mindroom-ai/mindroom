@@ -39,6 +39,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.hooks import hook_ingress_policy
 from mindroom.inbound_turn_normalizer import (
     InboundTurnNormalizer,
     TextNormalizationRequest,
@@ -73,7 +74,6 @@ from mindroom.timing import (
 )
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
-from mindroom.turns.dispatch import should_skip_deep_synthetic_full_dispatch
 from mindroom.turns.facts import PrecheckedEvent, command_for, is_router_voice_echo
 from mindroom.turns.queued_notice import mark_waiting_for_approval, queued_notice_reservation_if_busy
 
@@ -399,11 +399,16 @@ class TurnIngress:
         if facts.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND and is_router_voice_echo(facts, content):
             return _IngressAdmissionOutcome.CONSUMED
         envelope = self.deps.resolver.build_envelope(event=prepared_event, facts=facts, target=target)
-        if should_skip_deep_synthetic_full_dispatch(
-            self.deps.logger,
-            event_id=prepared_event.event_id,
-            envelope=envelope,
-        ):
+        if not hook_ingress_policy(envelope).allow_full_dispatch:
+            # A hook relay bypasses coalescing, so its turn would dispatch with exactly these facts: this is where
+            # the hook chain's depth limit stops it, before it can run as a command or reach the queue.
+            self.deps.logger.debug(
+                "Ignoring deep synthetic hook relay before command/response dispatch",
+                event_id=prepared_event.event_id,
+                source_kind=envelope.source_kind,
+                hook_source=envelope.hook_source,
+                message_received_depth=envelope.message_received_depth,
+            )
             return _IngressAdmissionOutcome.CONSUMED
         message_text = prepared_event.body.strip()
         if envelope.origin.may_answer_interactive_prompt and message_text.isdigit() and len(message_text) == 1:
@@ -424,15 +429,13 @@ class TurnIngress:
                 )
                 return _IngressAdmissionOutcome.DEFERRED
         if command_for(facts, dispatch_prompt_for_event(prepared_event)) is not None:
-            dispatched = await self._dispatch_command_control_input(
+            return await self._dispatch_command_control_input(
                 room=room,
                 dispatch_event=prepared_event,
                 facts=facts,
                 coalescing_thread_id=coalescing_thread_id,
                 ticket=ticket,
             )
-            # A command that could not keep its claim went back to the journal, which retries it.
-            return _IngressAdmissionOutcome.CONSUMED if dispatched else _IngressAdmissionOutcome.DEFERRED
         return await self._enqueue_prepared_text_for_dispatch(
             room=room,
             prepared_event=prepared_event,
@@ -594,11 +597,8 @@ class TurnIngress:
         facts: IngressFacts,
         coalescing_thread_id: str | None,
         ticket: IngressTicket,
-    ) -> bool:
-        """Dispatch one command as a control input without entering the coalescing gate, under its ingress claim.
-
-        Returns False when its source went back to the journal instead.
-        """
+    ) -> _IngressAdmissionOutcome:
+        """Dispatch one command as a control input without entering the coalescing gate, under its ingress claim."""
         # A command an entity wrote for a human runs with that human's authority, as its conversation would;
         # handle_command refuses the commands only the human may send.
         pending_event = PendingEvent(
@@ -612,7 +612,13 @@ class TurnIngress:
             [pending_event],
             queues_other_run=partial(self.deps.coalescing_gate.queues_other_run, key),
         )
-        return await self.deps.dispatcher.dispatch_control_turn(replace(turn, claims=(ticket.take_claim(),)))
+        if await self.deps.dispatcher.dispatch_control_turn(replace(turn, claims=(ticket.take_claim(),))):
+            return _IngressAdmissionOutcome.CONSUMED
+        # Its claim was refused as a fresh claim of this turn would be now, so the callback ends as that refusal does:
+        # a retry would only reach the same refusal.
+        if await ticket.refusal_defers(turn.handled_turn):
+            return _IngressAdmissionOutcome.DEFERRED
+        return _IngressAdmissionOutcome.CONSUMED
 
     async def _adaptive_text_debounce_seconds(
         self,
