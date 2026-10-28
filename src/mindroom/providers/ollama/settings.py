@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.providers.extra_kwargs import SECRET
 
@@ -21,6 +21,8 @@ class OllamaSettings:
     format: str | Mapping[str, Any] | None = None
     options: Mapping[str, Any] | None = None
     keep_alive: float | str | None = None
+    # Thinking on or off, or a thinking model's effort; unset leaves it to the model.
+    think: bool | Literal["low", "medium", "high"] | None = None
     request_params: Mapping[str, Any] | None = None
 
 

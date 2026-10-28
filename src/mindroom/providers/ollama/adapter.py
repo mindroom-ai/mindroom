@@ -24,6 +24,7 @@ from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
+    ReasoningDelta,
     StreamProgress,
     TextDelta,
     ToolCallReady,
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import ModelRequest, ReasoningDelta, StopReason, StreamEvent, ToolSpec
+    from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
 
 logger = get_logger(__name__)
 
@@ -61,7 +62,7 @@ _IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
 
 @dataclass(slots=True)
 class _OllamaReply:
-    """What one streamed reply produced so far; a model's inline ``<think>`` block becomes its reasoning."""
+    """What one streamed reply produced so far; a model's ``thinking`` and its inline ``<think>`` block are reasoning."""
 
     content: str = ""
     reasoning: str = ""
@@ -72,7 +73,7 @@ class _OllamaReply:
     think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
 
     def add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[TextDelta | ReasoningDelta]:
-        """Record the reply text and inline reasoning the think-tag splitter released, and return them."""
+        """Record the reply text and reasoning of ``deltas``, and return them."""
         for delta in deltas:
             if isinstance(delta, TextDelta):
                 self.content += delta.text
@@ -147,7 +148,12 @@ class OllamaProvider:
         options = dict(settings.options or {})
         if request.overrides.temperature is not None:
             options["temperature"] = request.overrides.temperature
-        authored = {"format": settings.format, "options": options or None, "keep_alive": settings.keep_alive}
+        authored = {
+            "format": settings.format,
+            "options": options or None,
+            "keep_alive": settings.keep_alive,
+            "think": settings.think,
+        }
         kwargs: dict[str, Any] = {key: value for key, value in authored.items() if value is not None}
         if tools := _format_tools(request.tools):
             kwargs["tools"] = tools
@@ -265,7 +271,7 @@ def _read_image(path: Path, provider: str) -> bytes:
 
 
 def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
-    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then its text and tool calls.
+    """Add one chunk to ``reply`` and return its events: the done chunk's usage first, then reasoning, text, and calls.
 
     The done chunk ends the reply, so it also releases the text the think-tag splitter held back.
     """
@@ -276,6 +282,8 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
         reply.usage = _usage(chunk)
         events.append(UsageReported(reply.usage, final=False))
     message = chunk.message
+    if message.thinking:
+        events.extend(reply.add_text([ReasoningDelta(message.thinking)]))
     if message.content:
         events.extend(reply.add_text(reply.think.add(message.content)))
     if chunk.done:
