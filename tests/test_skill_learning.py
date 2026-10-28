@@ -1045,7 +1045,7 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(
         *[("get_skill_instructions", {"skill_name": "handwritten"})] * 12,
     )
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await _review(config, paths)
     assert "not in its own workspace skill directory and is read-only" in json.loads(model.requests[1][-1])["error"]
     assert "user-owned and read-only" in json.loads(model.requests[3][-1])["error"]
@@ -1069,7 +1069,7 @@ async def test_a_review_never_runs_a_call_the_output_limit_cut_off(
     model.cut_off_requests = frozenset({1})
     progress = ReviewProgress()
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -1099,7 +1099,7 @@ async def test_the_budget_counts_what_each_request_sends(tmp_path: Path, monkeyp
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check logs."}),
     )
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await _review(config, paths)
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert len(model.requests) == 3
@@ -1227,7 +1227,7 @@ async def test_skill_manage_offers_its_actions_as_a_string_enum(
     _seed(config, paths, _tool_turn("r1"))
     model = _model()
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await _review(config, paths)
     action = model.tool_parameters["skill_manage"]["properties"]["action"]
     assert (action["type"], action["enum"]) == ("string", ["create", "patch", "edit", "write_file", "remove_file"])
@@ -1273,7 +1273,7 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(
     )
     progress = ReviewProgress()
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await review_conversation(
             config=config,
             runtime_paths=paths,
@@ -1313,7 +1313,7 @@ async def test_reviewer_refuses_edits_to_unknown_skills(tmp_path: Path, monkeypa
         ("skill_manage", {"action": "write_file", "name": "", "file_path": "references/x.md", "file_content": "x"}),
     )
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await _review(config, paths)
     assert "Unknown skill" in json.loads(model.requests[1][-1])["error"]
     # Without skills the agent offers no skill readers, so the review is told it can only call skill_manage.
@@ -2007,7 +2007,7 @@ async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(
         ("skill_manage", {**patch_step, "new_string": "1. Smoke.", "replace_all": "false"}),
     )
     install_model_providers(monkeypatch, {"default": model})
-    with patch("mindroom.skill_learning.reviewer.record_helper_usage", AsyncMock()):
+    with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
         await _review(config, paths)
     assert "Input should be 'create', 'patch', 'edit', 'write_file' or 'remove_file'" in model.requests[2][-1]
     assert "occurs 2 times" in json.loads(model.requests[3][-1])["error"]

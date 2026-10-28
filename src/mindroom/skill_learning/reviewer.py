@@ -26,7 +26,7 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.custom_tools.skill_manage import SkillManageTools
-from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
+from mindroom.helper_usage import HelperUsageOwner, record_run_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
@@ -402,7 +402,7 @@ async def review_conversation(
         # the conversation it reviewed, also when a timeout or a stop ended the review.
         record.messages = messages[len(review.messages) :]
         if record.messages:
-            await record_helper_usage(
+            await record_run_usage(
                 record,
                 owner=HelperUsageOwner(
                     storage_factory=partial(
@@ -414,7 +414,6 @@ async def review_conversation(
                     ),
                     session_id=session_id,
                 ),
-                invocation_id=invocation_id,
                 kind="skill_learning",
                 requester_id=identity.requester_id if identity is not None else None,
             )

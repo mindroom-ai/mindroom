@@ -37,8 +37,8 @@ from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, Knowledge
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ModelIdentity, ModelRequest
-from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import ModelMetrics, RunMetrics, TokenCounts
+from mindroom.llm.runs import RunStatus
+from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.matrix_rtc.call_tools import (
     _TEXT_CHAT_REQUIRED_MESSAGE,
     CallAgentTooling,
@@ -1707,12 +1707,13 @@ async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage
             provider="Anthropic",
         )
         await record_helper_usage(
-            RunRecord(
+            HelperUsage(
                 run_id="turn",
+                model=None,
+                provider=None,
                 metrics=RunMetrics(tokens=TokenCounts(input_tokens=100, total_tokens=100), details={"model": [model]}),
             ),
             owner=owner,
-            invocation_id="turn",
             kind="claude_agent",
             requester_id=REQUESTER,
         )

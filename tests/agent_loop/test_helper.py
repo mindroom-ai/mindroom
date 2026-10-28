@@ -1,4 +1,4 @@
-"""One-shot helper calls send one tool-less request and return the answer with a usage-ready run record."""
+"""One-shot helper calls send one tool-less request and return the answer with the call's usage."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.structured import output_format_prompt
 from mindroom.llm.errors import ProviderUnavailable
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, ModelProvenance
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
@@ -24,7 +24,6 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from tests.agno_parity.golden_files import turn_message
@@ -33,6 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic")
+# A route whose stored provider and usage provider differ.
+OPENAI_CHAT = ModelIdentity(id="gpt-6-luna", provider="OpenAI", provider_name="OpenAI Chat")
+_ANSWERED_AT = 1_790_000_000
 
 
 @dataclass
@@ -46,6 +48,7 @@ class _RecordingProvider:
     replay_estimator: None = None
     model_params: dict[str, object] = field(default_factory=dict)
     finish: bool = True
+    sums_attempts: bool = False
     requests: list[ModelRequest] = field(default_factory=list)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -64,10 +67,13 @@ class _RecordingProvider:
             "function": {"name": STRUCTURED_OUTPUT_TOOL, "arguments": self.answer},
         }
         message = (
-            Message(role="assistant", tool_calls=[call], metrics=usage)
+            Message(role="assistant", tool_calls=[call], metrics=usage, created_at=_ANSWERED_AT)
             if forced
-            else Message(role="assistant", content=self.answer, metrics=usage)
+            else Message(role="assistant", content=self.answer, metrics=usage, created_at=_ANSWERED_AT)
         )
+        if self.sums_attempts:
+            # The retrying stage marks a finished turn whose usage adds up failed attempts.
+            message.provider_data = {AGGREGATE_USAGE_KEY: True}
         stamp_model(message, self.identity)
         yield TurnCompleted(message=message, stop_reason="end")
 
@@ -96,7 +102,7 @@ async def test_a_prompt_is_sent_under_its_instructions_as_written(structured_out
     )
 
     assert result.content == _Verdict(answer="yes")
-    assert result.record.run_id == "decide-1"
+    assert result.usage.run_id == "decide-1"
     [request] = provider.requests
     json_tail = f"\n\n{output_format_prompt(capabilities, _Verdict)}" if json_prompt else ""
     assert [turn_message(message) for message in request.messages] == [
@@ -126,9 +132,9 @@ async def test_a_prompt_without_a_schema_returns_text_with_the_callers_overrides
 
 
 @pytest.mark.asyncio
-async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
-    """Without a schema the answer is the text, and the record carries the request's messages, model, and usage."""
-    provider = _RecordingProvider(answer="The user prefers aisle seats.")
+async def test_a_text_answer_returns_its_text_and_the_calls_usage() -> None:
+    """Without a schema the answer is the text, and the usage names the model and holds its one request's report."""
+    provider = _RecordingProvider(answer="The user prefers aisle seats.", identity=OPENAI_CHAT)
 
     result = await complete_prompt(
         provider,
@@ -138,17 +144,26 @@ async def test_a_text_answer_returns_its_text_and_a_completed_record() -> None:
     )
 
     assert result.content == "The user prefers aisle seats."
-    record = result.record
-    assert (record.run_id, record.status, record.content) == ("flush-1", RunStatus.completed, result.content)
-    assert (record.model, record.model_provider) == ("claude-sonnet-5-5", "Anthropic")
-    assert [message.role for message in record.messages] == ["system", "user", "assistant"]
-    assert record.messages[:2] == list(provider.requests[0].messages)
-    assert record.metrics is not None
-    usage = record.metrics.to_dict()
-    assert (usage["input_tokens"], usage["output_tokens"], usage["total_tokens"]) == (12, 5, 17)
-    [details] = usage["details"]["model"]
-    assert (details["id"], details["provider"], details["total_tokens"]) == ("claude-sonnet-5-5", "Anthropic", 17)
-    assert record.to_dict()["content"] == "The user prefers aisle seats."
+    usage = result.usage
+    assert (usage.run_id, usage.model, usage.provider) == ("flush-1", "gpt-6-luna", "OpenAI")
+    totals = usage.metrics.to_dict()
+    assert (totals["input_tokens"], totals["output_tokens"], totals["total_tokens"]) == (12, 5, 17)
+    [details] = totals["details"]["model"]
+    assert (details["id"], details["provider"], details["total_tokens"]) == ("gpt-6-luna", "OpenAI Chat", 17)
+    [request] = usage.requests
+    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI Chat")
+    assert (request.created_at, request.metrics.tokens.total_tokens) == (_ANSWERED_AT, 17)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_request_counts_toward_the_usage_but_is_not_listed_as_a_request() -> None:
+    """A reply whose usage sums retried attempts describes no one request, so only the totals count it."""
+    provider = _RecordingProvider(answer="ok", sums_attempts=True)
+
+    result = await complete_prompt(provider, "Thread: ...", instructions=["Summarize."])
+
+    assert result.usage.metrics.tokens.total_tokens == 17
+    assert result.usage.requests == ()
 
 
 @pytest.mark.asyncio
@@ -161,7 +176,6 @@ async def test_a_structured_answer_is_read_into_the_schema(structured_output: st
     result = await complete_prompt(provider, "Is it raining?", instructions=["Decide."], schema=_Verdict)
 
     assert result.content == _Verdict(answer="yes")
-    assert result.record.content == '{"answer": "yes"}'
     [request] = provider.requests
     assert request.output_schema is _Verdict
 
@@ -190,7 +204,6 @@ async def test_an_unreadable_structured_answer_stays_text() -> None:
         result = await complete_prompt(provider, "?", instructions=["Decide."], schema=_Verdict)
 
     assert result.content == "I cannot decide."
-    assert result.record.content == "I cannot decide."
     assert {"event": "helper_structured_output_unparsed", "schema": "_Verdict", "log_level": "warning"} in logs
 
 

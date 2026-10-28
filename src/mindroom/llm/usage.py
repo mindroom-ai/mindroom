@@ -7,11 +7,14 @@ code read.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
+from time import time
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from mindroom.llm.messages import ModelProvenance
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -277,6 +280,40 @@ class RunMetrics(_Counts):
         return result
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RequestUsage:
+    """The usage one provider request reported: its time, its metrics, and the model that answered it.
+
+    ``created_at`` is when the request was answered, except voice transcription, which dates it when it was sent.
+    ``model`` is None when the usage report names no model.
+    """
+
+    created_at: int
+    metrics: MessageMetrics
+    model: ModelProvenance | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HelperUsage:
+    """The usage of paid model work that no stored run holds, such as one helper prompt's, without any of its content.
+
+    ``run_id`` is the id the usage is recorded under. ``model`` and ``provider`` are the model and provider strings
+    its usage row stores, None when unknown: a helper prompt stores its route's ``ModelIdentity.id`` and
+    ``ModelIdentity.provider``, while other writers store a label of their own, such as the name Mem0's usage is
+    priced by (``"OpenAI Chat"``). ``metrics`` sums its requests by model, and ``requests`` lists each request whose
+    usage describes it alone: a retried request's usage sums its attempts, so ``metrics`` counts it but ``requests``
+    does not list it. ``created_at`` defaults to when the value is built, which is when a helper prompt finished;
+    Mem0 dates it by its first call, and voice transcription by when its request was sent.
+    """
+
+    run_id: str
+    model: str | None
+    provider: str | None
+    metrics: RunMetrics
+    requests: tuple[RequestUsage, ...] = ()
+    created_at: int = field(default_factory=lambda: int(time()))
+
+
 @dataclass(slots=True, kw_only=True)
 class SessionMetrics(_Counts):
     """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row.
@@ -341,8 +378,10 @@ def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
 
 __all__ = [
     "TOKEN_FIELDS",
+    "HelperUsage",
     "MessageMetrics",
     "ModelMetrics",
+    "RequestUsage",
     "RunMetrics",
     "SessionMetrics",
     "TokenCounts",

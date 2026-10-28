@@ -8,7 +8,7 @@ Agno at import and this one stays free of Agno and provider SDKs.
 
 from __future__ import annotations
 
-from mindroom.agent_loop.helper import complete_prompt
+from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
 from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, resolve_config_relative_path
 from mindroom.file_access import resolve_agent_file
@@ -147,6 +147,7 @@ __all__ = [
     "FinalResponseDraft",
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
+    "HelperResult",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
