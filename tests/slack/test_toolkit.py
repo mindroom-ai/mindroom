@@ -1303,6 +1303,29 @@ async def test_project_upload_uses_the_bot_token_in_a_member_channel_and_never_t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("target", "message"),
+    [
+        (UNLISTED, "Not one of this agent's Slack channels"),
+        (DANA["id"], "Project agents post only in their channels"),
+    ],
+)
+async def test_project_upload_checks_its_channel_before_reading_the_file(
+    paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    message: str,
+) -> None:
+    """A project agent without a workspace still gets the channel refusal, so the file was never looked at."""
+    fake = FakeSlack().install(monkeypatch)
+
+    result = json.loads(await _tools(paths, channels=[CHANNEL]).slack_upload("missing.txt", target))
+
+    assert result["message"] == message
+    assert fake.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "upload_url",
     [
         "https://uploads.example.com/upload/v1/x",

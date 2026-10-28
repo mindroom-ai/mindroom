@@ -921,8 +921,8 @@ class SlackTools(Toolkit):
 
         async def operation(session: _Session) -> Mapping[str, object]:
             parsed = _parse_target(target)
-            filename, content = await asyncio.to_thread(_read_upload, path, self._workspace_root, self._file_access)
             channel_id = await self._destination(session, parsed)
+            filename, content = await asyncio.to_thread(_read_upload, path, self._workspace_root, self._file_access)
             root = reply_root(parsed)
             file_id = await upload_file(
                 session.client,
