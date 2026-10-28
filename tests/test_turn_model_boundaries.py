@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -27,7 +28,7 @@ from pydantic import ValidationError
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
@@ -162,6 +163,24 @@ def test_a_team_must_name_a_model() -> None:
     """A team without a model is rejected when the config loads, not at its first reply."""
     with pytest.raises(ValidationError):
         TeamConfig(display_name="Crew", role="Work", agents=["a"], model=None)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("raw", "reference"),
+    [
+        pytest.param({"agents": {"a": {"display_name": "A", "model": "gone"}}}, "agents.a.model: 'gone'", id="agent"),
+        pytest.param({"room_models": {"lobby": "gone"}}, "room_models.lobby: 'gone'", id="room-models"),
+    ],
+)
+def test_a_model_choice_naming_no_configured_model_fails_the_config_load(
+    tmp_path: Path,
+    raw: dict[str, object],
+    reference: str,
+) -> None:
+    """An entity or room model that names no configured model is rejected at load, not at the reply that runs it."""
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(ConfigRuntimeValidationError, match=re.escape(f"Unknown model for {reference}")):
+        Config.validate_with_runtime({"models": {"default": {"provider": "openai", "id": "d"}}, **raw}, paths)
 
 
 def test_the_budget_swaps_the_model_a_turn_runs_and_keeps_the_one_it_asked_for(tmp_path: Path) -> None:
