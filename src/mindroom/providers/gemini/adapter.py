@@ -240,7 +240,7 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
         return failure
     if isinstance(error, APIError):
         message = error.message or ""
-        if any(wording in message for wording in _BILLING_STOP_WORDING):
+        if any(wording in message.casefold() for wording in _BILLING_STOP_WORDING):
             return ProviderError(message, provider=provider, status_code=error.code, code=QUOTA_EXHAUSTED)
         return classify_provider_error(str(error), provider=provider, status_code=error.code)
     if isinstance(error, ValidationError):

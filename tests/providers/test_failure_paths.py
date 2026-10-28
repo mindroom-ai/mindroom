@@ -1039,6 +1039,8 @@ _GEMINI_CASES = [
         for status, reason, failure, message in (
             (429, "RESOURCE_EXHAUSTED", "prepayment_credits_depleted", _GEMINI_CREDITS_DEPLETED),
             (402, "PAYMENT_REQUIRED", "prepayment_credits_depleted", _GEMINI_CREDITS_DEPLETED),
+            # The wording matches in any case, as the shared classifier's markers do.
+            (429, "RESOURCE_EXHAUSTED", "prepayment_credits_depleted_capitalized", "Prepayment credits are depleted."),
             (429, "RESOURCE_EXHAUSTED", "project_spending_cap", "Your project has exceeded its monthly spending cap."),
             (
                 429,
