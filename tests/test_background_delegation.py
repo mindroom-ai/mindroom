@@ -49,6 +49,7 @@ from mindroom.tool_jobs.control import (
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.results import ToolResultPayload
 from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
     BackgroundOutcome,
@@ -1199,6 +1200,31 @@ async def test_a_child_that_ran_and_did_not_complete_answers_its_parent_s_call_a
         )
 
 
+@pytest.mark.asyncio
+async def test_a_child_whose_failure_has_no_saved_text_still_answers_that_it_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed child's job saved without text answers its parent's call with the job failure, not the job's handle.
+
+    Releases through v2026.10.512 could save a failed job without text, and every reader of one job says it failed.
+    """
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        msg = "provider down"
+        raise RuntimeError(msg)
+
+    async def saved_without_text(*_args: object) -> ToolResultPayload:
+        return ToolResultPayload(value="")
+
+    monkeypatch.setattr(delegation_execution, "read_result_payload", saved_without_text)
+    response = await _drive_background_child(tmp_path, monkeypatch, await tool_job_runtime(tmp_path), run_child)
+
+    [answered] = [message for message in response.messages or () if message.tool_call_id == "waiting"]
+    assert str(answered.content).startswith("Background tool job failed.")
+    assert answered.tool_call_error is True
+
+
 async def _drive_inline_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1241,7 +1267,7 @@ async def test_unreadable_background_result_still_runs_the_after_hook(
         return "Child finished"
 
     monkeypatch.setattr(delegation_execution, "after_delegation", after)
-    monkeypatch.setattr(delegation_execution, "delegation_result", unreadable)
+    monkeypatch.setattr(delegation_execution, "read_result_payload", unreadable)
     with pytest.raises(RuntimeError, match="result unreadable"):
         await _drive_background_child(tmp_path, monkeypatch, await tool_job_runtime(tmp_path), run_child)
     assert [type(error) for error in after_errors] == [RuntimeError]

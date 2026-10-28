@@ -106,6 +106,8 @@ class KnowledgeGitConfig(BaseModel):
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     mode: KnowledgeBaseMode = Field(
         default="semantic",
         description=(

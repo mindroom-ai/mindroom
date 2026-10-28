@@ -25,6 +25,7 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from tests.budget_helpers import budget_monitor_with_spend
+from tests.conftest import completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -128,7 +129,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         yield await delegate(ctx, execution_identity=execution_identity)
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=delegate),
+        patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
         patch.object(openai_compat, "stream_agent_response", side_effect=streaming),
         patch("mindroom.ai.ai_response", side_effect=child),
     ):
@@ -174,7 +175,7 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=delegate),
+        patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
         patch("mindroom.ai.ai_response", side_effect=child),
     ):
         response = api.client.post(
@@ -201,7 +202,7 @@ def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> Non
         return await tool.run_subagent(agent_name=target, task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=delegate),
+        patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
         patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
@@ -289,7 +290,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
         return await tool.run_subagent(agent_name="forbidden", task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=parent),
+        patch.object(openai_compat, "ai_response", side_effect=completing(parent)),
         patch("mindroom.ai.ai_response", side_effect=child) as child_mock,
     ):
         response = api.client.post(
@@ -320,7 +321,7 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=parent),
+        patch.object(openai_compat, "ai_response", side_effect=completing(parent)),
         patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
@@ -344,7 +345,7 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=parent),
+        patch.object(openai_compat, "ai_response", side_effect=completing(parent)),
         patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
@@ -365,7 +366,7 @@ def test_auto_route_only_receives_permitted_agents(api: _ApiHarness) -> None:
             "suggest_responder",
             new=AsyncMock(return_value=ResponderSelection("specialist")),
         ) as route,
-        patch.object(openai_compat, "ai_response", new=AsyncMock(return_value="done")),
+        patch.object(openai_compat, "ai_response", new=completed_ai_response_mock(return_value="done")),
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -385,7 +386,7 @@ def test_rebound_key_has_a_separate_session(api: _ApiHarness) -> None:
         return "done"
 
     api.config.agents["leader"].access = ResponderAccessConfig(users=["@alice:example.org", "@bob:example.org"])
-    with patch.object(openai_compat, "ai_response", side_effect=parent):
+    with patch.object(openai_compat, "ai_response", side_effect=completing(parent)):
         for requester in ["@alice:example.org", "@bob:example.org"]:
             with patch.object(openai_compat, "_api_key_requester", return_value=requester):
                 response = api.client.post(

@@ -239,7 +239,6 @@ def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices
             failed_agent_names=[],
         ),
         presentation=TeamStreamPresentation.new(["general"], ["GeneralAgent"], show_tool_calls=False),
-        stream=False,
         team_name="team",
         runtime_model_name="leader",
         prepared_history=None,

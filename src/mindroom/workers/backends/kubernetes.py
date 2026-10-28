@@ -638,8 +638,7 @@ class KubernetesWorkerBackend:
         """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
         compatibility_error = worker_health_compatibility_error(
             self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
-            backend_label="Kubernetes",
-            image=self.config.image,
+            worker=f"Kubernetes worker image '{self.config.image}'",
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
             newer_worker_hint=_RESTART_RUNTIME_HINT,

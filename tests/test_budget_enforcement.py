@@ -37,6 +37,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
+    completed_ai_response_mock,
     install_model_providers,
     patch_response_runner_module,
     unwrap_extracted_collaborator,
@@ -379,7 +380,11 @@ def test_openai_compat_agent_completion_budgets_mapped_requesters(
 ) -> None:
     with (
         _openai_client(tmp_path, _openai_config(), authenticated=authenticated) as client,
-        patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi") as response,
+        patch(
+            "mindroom.api.openai_compat.ai_response",
+            new_callable=completed_ai_response_mock,
+            return_value="Hi",
+        ) as response,
     ):
         reply = client.post(
             "/v1/chat/completions",
@@ -483,7 +488,7 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
     with (
         _openai_client(tmp_path, _openai_config(), authenticated=True) as client,
         patch.object(monitor, "response_finished") as response_finished,
-        patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock, return_value="Hi"),
+        patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock, return_value="Hi"),
         patch("mindroom.api.openai_compat._build_team", return_value=_memberless_team()),
         patch(
             "mindroom.api.openai_compat._prepare_openai_team_execution",

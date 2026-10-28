@@ -54,6 +54,8 @@ class MatrixSyncConfig(BaseModel):
 class MindRoomUserConfig(BaseModel):
     """Configuration for the internal MindRoom user account."""
 
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(
         default="mindroom_user",
         description="Matrix username localpart for the internal user account (without @ or domain); set before first startup",
@@ -93,6 +95,8 @@ class MindRoomUserConfig(BaseModel):
 
 class MatrixSpaceConfig(BaseModel):
     """Configuration for the optional root Matrix Space."""
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=True,
