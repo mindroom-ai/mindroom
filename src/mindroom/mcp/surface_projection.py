@@ -159,17 +159,10 @@ def _partition_tool_configs(
     return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
 
 
-def _metadata_only_tool_function_names(
-    tool_name: str,
-    *,
-    config: Config,
-    agent_name: str,
-) -> set[str]:
+def _metadata_only_tool_function_names(tool_name: str) -> set[str]:
     """Return provider-visible names for context-built tools declared in metadata."""
     metadata = TOOL_METADATA.get(tool_name)
     if metadata is None or metadata.factory is not None:
-        return set()
-    if tool_name == "memory" and config.resolve_entity(agent_name).memory_backend == "none":
         return set()
     return set(metadata.function_names)
 
@@ -200,12 +193,7 @@ def _configured_function_surface(
         # Local names only collide with this agent's MCP functions; building toolkits can auto-install deps.
         return set(), {}
     metadata_function_names = {
-        tool_config.name: _metadata_only_tool_function_names(
-            tool_config.name,
-            config=context.config,
-            agent_name=agent_name,
-        )
-        for tool_config in local_tool_configs
+        tool_config.name: _metadata_only_tool_function_names(tool_config.name) for tool_config in local_tool_configs
     }
     function_names = {function_name for names in metadata_function_names.values() for function_name in names}
     for tool_config in sorted(local_tool_configs, key=lambda entry: entry.name):
