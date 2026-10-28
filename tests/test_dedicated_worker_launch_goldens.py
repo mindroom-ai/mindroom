@@ -188,7 +188,8 @@ def test_kubernetes_worker_deployment_matches_its_golden(tmp_path: Path, case: s
     apps_api = backend._resources.apps_api
     if options.get("private"):
         _materialize_private_workspace(backend.storage_root, _USER_AGENT_KEY, "@alice:example.org")
-    spec = _kubernetes_spec(worker_key,
+    spec = _kubernetes_spec(
+        worker_key,
         private_agent_names=frozenset({"mind"}),
         state_scope_worker_key=options.get("state_scope_worker_key"),
     )
