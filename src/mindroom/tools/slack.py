@@ -72,7 +72,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.CURRENT_ROOM_ID,
     ),
     dependencies=[],
-    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#slack",
+    docs_url="https://docs.mindroom.chat/tools/slack/",
     helper_text=(
         "Each user connects their own Slack account through the MindRoom Slack app. "
         "Store the app's client ID and secret in the slack_oauth_client credential service, "

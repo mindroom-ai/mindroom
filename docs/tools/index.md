@@ -147,6 +147,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](atlassian.md) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Slack](slack.md) - Per-user OAuth Slack search, reading, posting, and downloads, project agents that answer mentions of the MindRoom app, and watches that forward a person's Slack mentions and direct messages to Matrix.
 - [Microsoft 365](microsoft-365.md) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](memory-and-storage.md) - Mem0 and Zep external memory services; the built-in [`memory`](../memory.md#memory) tool is documented with the memory system.

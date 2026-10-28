@@ -1495,6 +1495,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](https://docs.mindroom.chat/rooms/#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](https://docs.mindroom.chat/scheduling/#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
+| `slack` | How Slack workspace members map to Matrix users | [Slack](https://docs.mindroom.chat/tools/slack/#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
 | `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
@@ -7461,6 +7462,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) - Per-user OAuth Jira and Confluence Cloud access, additional connected sites, and attachment downloads.
+- [Slack](https://docs.mindroom.chat/tools/slack/) - Per-user OAuth Slack search, reading, posting, and downloads, project agents that answer mentions of the MindRoom app, and watches that forward a person's Slack mentions and direct messages to Matrix.
 - [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) - Per-user OAuth OneDrive and SharePoint files, Excel ranges, SharePoint lists and pages, Outlook mail and calendars, To Do tasks, Teams channels and chats, Teams meeting transcripts, OneNote pages, and the people directory through Microsoft Graph.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar and task APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Mem0 and Zep external memory services; the built-in [`memory`](https://docs.mindroom.chat/memory/#memory) tool is documented with the memory system.
@@ -11944,7 +11946,7 @@ Use it to pick a tool, configure its credentials, and understand why a tool is u
 | Tool | Use it for | Setup |
 | --- | --- | --- |
 | [`gmail`](#gmail) | Reading, searching, drafting, sending, and labeling mail in a Gmail mailbox | Google Gmail OAuth |
-| [`slack`](#slack) | Slack messages, threaded replies, channel and user lookups, history, search, and files | Bot or user token |
+| [`slack`](https://docs.mindroom.chat/tools/slack/) | Searching, reading, posting, and reacting in Slack as the connected person or in a project's channels, and answering mentions of the MindRoom app | Slack app with OAuth |
 | [`discord`](#discord) | Discord channel messages, channel info and history, and message deletion | Bot token |
 | [`telegram`](#telegram) | Text and media sent by a Telegram bot to one fixed chat | Bot token and chat ID |
 | [`whatsapp`](#whatsapp) | WhatsApp Business text, template, interactive, and media messages | Access token and phone number ID |
@@ -11963,7 +11965,7 @@ For Outlook mail, see `outlook_mail` in [Microsoft 365](https://docs.mindroom.ch
 
 Set fields of type `password` through the dashboard or credential store; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
 Many credential fields below are optional in the dashboard but required in practice, and the tool fails to load or errors on its first call without them.
-Instead of stored fields, these tools also read the environment variables `SLACK_TOKEN`, `SLACK_USER_TOKEN`, `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
+Instead of stored fields, these tools also read the environment variables `DISCORD_BOT_TOKEN`, `TELEGRAM_TOKEN`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `WEBEX_ACCESS_TOKEN`, `RESEND_API_KEY`, `X_BEARER_TOKEN`, `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, and `ZOOM_CLIENT_SECRET`.
 `gmail` instead connects through Google OAuth; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Most tools enable or disable individual functions with `enable_<function>` flags, and `all: true` enables every function; `include_tools` and `exclude_tools` filter further, as described in [Filtering Toolkit Functions](https://docs.mindroom.chat/tools/#filtering-toolkit-functions).
 
@@ -11998,50 +12000,6 @@ Each option below defaults to `true`, and setting it to `false` removes the matc
 | `send_email_reply` | `boolean` | `true` | `send_email_reply()` |
 
 Use `exclude_tools` to remove other functions, such as `delete_custom_label`.
-
-## [`slack`]
-
-`slack` sends messages and threaded replies, lists channels and users, reads channel history and threads, searches messages, and uploads or downloads files.
-Use channel IDs rather than names, especially for threaded replies and history reads.
-`get_channel_history()` returns only top-level messages; to read a thread's replies, enable `get_thread()` and pass the parent message's timestamp.
-`slack` always runs in the primary runtime, and its file uploads and downloads are not confined by the agent's `file_access`, so enable it only for agents trusted with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
-
-To search messages, set `enable_search_messages: true` and store a user token with the [`search:read`](https://docs.slack.dev/reference/methods/search.messages/) scope in `user_token`; a bot token alone cannot search.
-A user token stored as the primary `token` also works for search.
-`search_workspace()` works only when Slack itself invokes the agent and supplies an action token, so it fails in ordinary Matrix conversations; use `search_messages()` there.
-Slack's tool-selection guide reaches the agent's prompt only while every function it names is enabled, and with messaging enabled it names `list_users()`, so set `enable_list_users: true` to include it.
-
-| Option | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `token` | `password` | `null` | Bot or user token, or `SLACK_TOKEN`; required. |
-| `user_token` | `password` | `null` | User token for `search_messages()`, or `SLACK_USER_TOKEN`. |
-| `markdown` | `boolean` | `true` | Render Slack markdown in sent messages. |
-| `output_directory` | `text` | `null` | Directory for saved downloads; setting it also enables saving. |
-| `save_downloads` | `boolean` | `false` | Save downloads to disk instead of returning their content; without `output_directory`, files go to the current working directory. |
-| `enable_send_message` | `boolean` | `true` | Enable `send_message()`. |
-| `enable_send_message_thread` | `boolean` | `true` | Enable `send_message_thread()`. |
-| `enable_list_channels` | `boolean` | `true` | Enable `list_channels()`. |
-| `enable_get_channel_history` | `boolean` | `true` | Enable `get_channel_history()`. |
-| `enable_upload_file` | `boolean` | `true` | Enable `upload_file()`. |
-| `enable_download_file` | `boolean` | `true` | Enable `download_file()`. |
-| `enable_search_messages` | `boolean` | `false` | Enable `search_messages()`; needs a user token. |
-| `enable_search_workspace` | `boolean` | `false` | Enable `search_workspace()`. |
-| `enable_get_thread` | `boolean` | `false` | Enable `get_thread()`. |
-| `enable_list_users` | `boolean` | `false` | Enable `list_users()`. |
-| `enable_get_user_info` | `boolean` | `false` | Enable `get_user_info()`. |
-| `enable_get_channel_info` | `boolean` | `false` | Enable `get_channel_info()`. |
-| `all` | `boolean` | `false` | Enable every function. |
-| `max_file_size` | `number` | `1073741824` | Maximum upload or download size in bytes. |
-| `thread_message_limit` | `number` | `20` | Maximum messages returned by `get_thread()`. |
-
-```yaml
-agents:
-  support:
-    tools:
-      - slack:
-          enable_get_thread: true
-          enable_search_messages: true
-```
 
 ## [`discord`]
 
@@ -12915,6 +12873,323 @@ Other Atlassian errors keep Atlassian's message with URLs removed.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/)
 - [Plugins](https://docs.mindroom.chat/plugins/)
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
+
+# Slack
+
+The `slack` tool lets agents search, read, download from, post to, and react in Slack through one Slack app that your organization creates for MindRoom.
+Agents can also answer mentions of that app in Slack channels, and people can have their own Slack mentions and direct messages forwarded into a Matrix room.
+OAuth connection mechanics shared with other providers are on [OAuth Integration Framework](https://docs.mindroom.chat/oauth-framework/).
+
+An agent works in one of two modes, chosen by whether its `slack` entry lists `channels`:
+
+| | Personal | Project |
+| --- | --- | --- |
+| Chosen by | no `channels` | `channels` |
+| Acts as | each requester, with their own Slack account | the MindRoom Slack app |
+| Reads and posts | everything that person can see in Slack, including direct messages | only the listed channels the app has joined, never direct messages |
+| Slack events | a person's [watch](#watches) forwards their mentions and direct messages to Matrix | with `room`, a mention of the app [starts a thread](#project-agents) |
+
+## Functions
+
+| Function | Does | Personal | Project |
+| --- | --- | --- | --- |
+| `slack_search` | Finds messages, conversations, or people and returns the IDs the other functions take | `messages` (Slack search syntax, such as `launch in:#general from:@dana after:2026-10-01`), `conversations`, and `people` | `conversations` only, among the agent's channels |
+| `slack_read` | Reads a conversation's latest messages, or one thread | any conversation the person can see | the agent's channels |
+| `slack_download` | Saves a file of up to 50 MB in the agent workspace's `slack-downloads/` folder | any file the person can see | files shared in the agent's channels |
+| `slack_post` | Posts a message, or a reply in a thread | as the person; a user ID opens a direct message | as the app, in the agent's channels |
+| `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
+| `slack_watch` | Starts, stops, or checks a [watch](#watches) | in a Matrix conversation | not offered |
+
+Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
+Agents cannot edit or delete messages or upload files.
+[Background scripts](https://docs.mindroom.chat/tools/background-scripts/) cannot call `slack`.
+
+## Set Up The Slack App
+
+An administrator creates one Slack app for the MindRoom installation.
+One MindRoom serves one Slack workspace; connections and events from other workspaces are ignored, and Enterprise Grid org-wide installs are not supported.
+Slack must reach MindRoom for the OAuth redirect and for events, so set `MINDROOM_PUBLIC_URL` to a public HTTPS address.
+
+1. In Slack, open [Your Apps](https://api.slack.com/apps), choose **Create New App**, then **From a manifest**, pick the workspace, and paste this manifest with `mindroom.example.com` replaced by your public MindRoom host:
+
+   ```yaml
+   display_information:
+     name: MindRoom
+   features:
+     app_home:
+       home_tab_enabled: false
+       messages_tab_enabled: false
+     bot_user:
+       display_name: MindRoom
+       always_online: true
+   oauth_config:
+     redirect_urls:
+       - https://mindroom.example.com/api/oauth/slack/callback
+     scopes:
+       bot:
+         - app_mentions:read
+         - channels:history
+         - channels:read
+         - groups:history
+         - groups:read
+         - chat:write
+         - reactions:write
+         - files:read
+         - users:read
+         - users:read.email
+       user:
+         - search:read
+         - channels:history
+         - channels:read
+         - groups:history
+         - groups:read
+         - im:history
+         - im:read
+         - mpim:history
+         - mpim:read
+         - users:read
+         - users:read.email
+         - chat:write
+         - im:write
+         - reactions:write
+         - files:read
+   settings:
+     event_subscriptions:
+       request_url: https://mindroom.example.com/api/slack/events
+       bot_events:
+         - app_mention
+         - message.channels
+         - message.groups
+       user_events:
+         - message.channels
+         - message.groups
+         - message.im
+         - message.mpim
+     org_deploy_enabled: false
+     socket_mode_enabled: false
+     token_rotation_enabled: false
+   ```
+
+   The bot's `users:read.email` scope is what maps a Slack author to a MindRoom account; without it nobody can wake a project agent.
+   Keep `token_rotation_enabled` and `socket_mode_enabled` off, because MindRoom stores Slack user tokens that do not expire and receives events over HTTP.
+
+2. Install the app to the workspace and copy the **Bot User OAuth Token**.
+3. On **Basic Information**, copy the **Client ID**, **Client Secret**, and **Signing Secret**.
+   Under **App-Level Tokens**, generate a token with the `authorizations:read` scope; watches need it, and everything else works without it.
+4. Store the credentials in the two credential services below, through the dashboard credentials page or a [credential seed](https://docs.mindroom.chat/oauth-framework/#credential-seeds).
+5. Set the [`slack` section](#slack-configuration) of `config.yaml` so Slack people map to MindRoom accounts.
+6. If MindRoom sits behind an SSO proxy, let `POST /api/slack/events` through without SSO.
+   Slack signs every request and MindRoom rejects unsigned ones.
+7. In the app's **Event Subscriptions**, retry the request URL's verification.
+   MindRoom answers Slack's verification only once step 4 is done, so the first check fails.
+
+| Credential service | Fields |
+| --- | --- |
+| `slack_oauth_client` | `client_id`, `client_secret` |
+| `slack_app` | `bot_token`, `signing_secret`, and `app_token` (the app-level token) |
+
+```json
+[
+  {
+    "service": "slack_oauth_client",
+    "credentials": {
+      "client_id": {"env": "SLACK_CLIENT_ID"},
+      "client_secret": {"env": "SLACK_CLIENT_SECRET"}
+    }
+  },
+  {
+    "service": "slack_app",
+    "credentials": {
+      "bot_token": {"env": "SLACK_BOT_TOKEN"},
+      "signing_secret": {"env": "SLACK_SIGNING_SECRET"},
+      "app_token": {"env": "SLACK_APP_TOKEN"}
+    }
+  }
+]
+```
+
+A seed with an empty field is skipped, so leave `app_token` out of the seed when you have no app-level token.
+The Slack app's credentials stay in the primary runtime and are never given to workers.
+
+## Slack Configuration
+
+```yaml
+slack:
+  email_domain: example.com
+  matrix_user_id_template: "@{localpart}:example.org"
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `email_domain` | string | unset | Email domain of the workspace members who may wake project agents, such as `example.com`. Set it together with `matrix_user_id_template`. |
+| `matrix_user_id_template` | string | unset | Matrix user ID that a member's email address maps to, with exactly one `{localpart}`: with the values above, `dana@example.com` becomes `@dana:example.org`. Set it together with `email_domain`. |
+
+Only project agents that answer mentions need this section; personal agents and watches do not.
+
+The `slack` entry of an agent takes these options:
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `channels` | list of channel IDs | unset | Makes the agent a [project agent](#project-agents) with these channels, such as `C0123ABCD`; leave it out for a personal agent. A channel's ID is at the bottom of its details in Slack. Set it on the agent's own entry, not in `defaults.tools`. |
+| `room` | string | unset | One of the agent's `rooms`, where Slack mentions of the app in its channels start threads. Needs `channels` and the `slack` section above. |
+| `write` | boolean | `true` | When `false`, the agent has no `slack_post` and `slack_react`. Replies to Slack mentions are still posted. |
+
+## Personal Agents
+
+```yaml
+agents:
+  mind:
+    private:
+      per: user
+    tools:
+      - slack
+```
+
+The first time a person asks for something in Slack, the agent replies with a link to connect Slack.
+After the person approves in Slack, the agent searches, reads, and posts with that person's own account, so it finds only what they can see and posts as them.
+A person can also connect or disconnect on the [Connections portal](https://docs.mindroom.chat/connections-portal/); when Slack revokes a token, the agent replies with a new link.
+Only accounts from the app's workspace can connect.
+
+Downloads are saved in the agent's workspace.
+On an agent that is not `private`, every requester of the agent shares that workspace and can read what another person downloaded, so use a `private` agent for personal Slack.
+
+## Project Agents
+
+```yaml
+agents:
+  launch:
+    rooms: [launch]
+    tools:
+      - slack:
+          channels: [C0123ABCD, C0456EFGH]
+          room: launch
+```
+
+Invite the MindRoom app to each listed channel, for example with `/invite @MindRoom`.
+The agent reads and posts only in listed channels that the app has joined, never in direct messages, even when one is listed.
+Without `room`, the agent works in those channels only when someone asks it in Matrix.
+
+With `room`, the agent answers Slack:
+
+1. A person mentions the app in a listed channel, and a 👀 reaction appears on their message.
+2. A thread opens in `room`, showing the Slack message with its author's name and a link, marked as from Slack.
+3. The agent answers as that person's MindRoom account, so the agent's access rules and the person's own connected accounts apply.
+4. The agent's final reply is posted in the Slack thread by the app, cut with "…" at Slack's length limit.
+   The agent does not need `slack_post` to answer.
+5. Replies in that Slack thread need no mention for 7 days after the last message; they continue the same Matrix thread, as whoever wrote them.
+   After that, mention the app again.
+
+Who can wake the agent:
+
+- The author's Slack email must be in `slack.email_domain`, and its localpart maps to a Matrix account through `slack.matrix_user_id_template`.
+- Guests, bots and other apps, deactivated accounts, and people from other workspaces never wake an agent.
+- The mapped account must also pass the agent's [`access`](https://docs.mindroom.chat/authorization/#responder-access) check in `room`; with the default `access`, that means being joined to one of the agent's rooms.
+- Anyone else sees a message in Slack that only they can see, `MindRoom can't answer you here.`, at most once a day per thread, and nothing reaches Matrix.
+
+Only replies to Slack messages are posted to Slack; what people write in the Matrix thread stays in Matrix.
+A reply can be missing in Slack when Slack is unavailable, although it exists in Matrix.
+A channel has one answering agent, so two agents cannot both set `room` with the same channel.
+
+## Watches
+
+A watch forwards a person's own Slack mentions and direct messages into the Matrix room where they start it.
+It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
+
+In the room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `slack_watch`:
+
+- `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
+- `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
+- `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
+- `direct_messages` (default `true`) delivers every message in the person's direct messages and group direct messages.
+- `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
+  Replies in a thread where the person was mentioned also arrive, within those channels.
+
+Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel, and a link.
+Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, until 7 days pass without a message.
+The agent can then summarize it or draft a reply; its turn runs as the watch's owner.
+A watch lasts until it is stopped.
+
+A watch delivers only while all of these hold, so someone else never reads a private message:
+
+- Only the owner and MindRoom's own accounts are in the room, and nobody is invited; a bridge or other bot counts as a person.
+- The room hides earlier messages from people who join later.
+  A [personal room](https://docs.mindroom.chat/personal-rooms/) MindRoom created already does.
+- The owner's Slack connection works and is still the Slack account the watch started with.
+
+`slack_watch(action="status")` reports a paused watch with one of these texts:
+
+| Status | Fix |
+| --- | --- |
+| `paused: Slack is not connected` | Connect Slack again from the link the agent gives. |
+| `paused: Slack account changed; start the watch again` | Start the watch again. |
+| `paused: you are not in this room` | Rejoin the room. |
+| `paused: another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
+| `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
+| `paused: room members could not be checked` | Try again when the homeserver answers. |
+
+Security: Slack text comes from other people, so during a turn that a watch started, `slack_post` and `slack_react` refuse with `Ask me in a new message to post to Slack`, and so do `slack_watch` start and stop.
+A new message from the owner in the same thread can post.
+Work that turn schedules or delegates still runs as the owner, so add a [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `slack_post` and `slack_react` to keep Slack writes behind a person's approval.
+
+## MCP
+
+`slack` works through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/): select the agent and the `slack` tool on the Connections portal, and calls use the signed-in person's own Slack account, as in Matrix.
+`slack_watch` does not work there.
+A project agent's channels are readable over MCP by everyone allowed to use that agent, and writable unless `write` is `false`, because its calls use the app's token.
+Which agents the gateway offers is described in [Agent eligibility](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility).
+
+## Approval
+
+Add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules to make Slack writes wait for a person:
+
+```yaml
+tool_approval:
+  rules:
+    - match: slack_post
+      action: require_approval
+    - match: slack_react
+      action: require_approval
+```
+
+The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool calls, so these rules do not gate them.
+
+## Limits
+
+- Slack sends at most 30,000 events per hour per workspace, and events beyond that are not delivered, so in a very busy workspace some watch deliveries and mentions can be missed until the next hour.
+- If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
+- Messages sent directly to the app in Slack are not answered.
+
+## Troubleshooting
+
+| You see | Meaning and fix |
+| --- | --- |
+| `The MindRoom Slack app is not configured` | `slack_app` has no bot token or signing secret, or Slack rejected the bot token. Store valid ones. |
+| `Invite the MindRoom app to <#C0123ABCD>` | The app has not joined that listed channel. Invite it. |
+| `Not one of this agent's Slack channels` | The conversation is not in the agent's `channels`, or it is a direct message. |
+| `This file is not in one of this agent's Slack channels` | A project agent downloads only files shared in its channels. |
+| `Message and people search need a personal Slack connection` | A project agent searches only conversations. |
+| `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
+| `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
+| `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
+| `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post may have gone through; check before posting again. |
+| `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
+| `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
+| `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
+| `Watch mentions, direct messages, or both` | `start` needs `mentions` or `direct_messages` set to `true`. |
+| `Slack watches work only in a Matrix conversation` | Start the watch from a Matrix room, not from MCP or a script. |
+| `MindRoom couldn't receive your message; try again` | Shown in Slack when delivery to the agent failed; mention the app again. |
+| Slack cannot verify the request URL | MindRoom answers 404 until `slack_app` has a bot token and signing secret, and 401 for a wrong signing secret; an SSO proxy in front of `/api/slack/events` also blocks it. |
+
+Config errors name the setting:
+
+| Error | Fix |
+| --- | --- |
+| `Set email_domain and matrix_user_id_template together` | Set both fields of `slack`, or neither. |
+| `Answering Slack mentions needs slack.email_domain and slack.matrix_user_id_template` | Add the `slack` section before setting `room`. |
+| `agents.<name>.tools.slack.room needs channels` | `room` is only for project agents. |
+| `agents.<name>.tools.slack.room must be one of the agent's rooms` | Add the room to the agent's `rooms`. |
+| `agents.<name>.tools.slack.channels: Slack channel IDs look like C0123ABCD` | Use channel IDs, not names. |
+| `Slack channel C0123ABCD is answered by both first and second` | Remove the channel from one agent's `room` setup. |
 
 # Microsoft 365
 
@@ -14918,16 +15193,16 @@ None of these ownership rules grants responder access.
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack message sending and file uploads, plus shell calls selected by a review script:
+This example gates Slack posting and reactions, plus shell calls selected by a review script:
 
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: send_message*
+    - match: slack_post
       action: require_approval
-    - match: upload_file
+    - match: slack_react
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
@@ -15123,7 +15398,7 @@ See [Authorization](https://docs.mindroom.chat/authorization/#platform-and-crede
 
 ### Where Connections Are Stored
 
-Providers that store credentials per requester, such as GitHub, Atlassian, and Microsoft 365, always save the token in the requester's `user` scope and never fall back to a shared or global token.
+Providers that store credentials per requester, such as GitHub, Atlassian, Microsoft 365, and Slack, always save the token in the requester's `user` scope and never fall back to a shared or global token.
 For other providers, the token follows the agent's effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`.
 
 | Scope | Whose connection is used |
@@ -15134,7 +15409,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, and Microsoft 365 OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, and Slack OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -15144,6 +15419,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Atlassian Cloud (Jira and Confluence) | [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/) |
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
+| Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
@@ -15610,6 +15886,8 @@ Automations likewise run for a private instance only as the requester that recor
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
 Knowledge indexes, including private agents' indexes, their metadata, and candidate checkpoints, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
+The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
+
 Egress broker secrets (credential services named `egress_*`) are stored in primary-only credential stores and never reach worker-writable locations, matching the placement of primary-built tool settings.
 When the broker is enabled, the worker-routed `shell` and `python` calls of agents with the `egress_credentials` tool receive a signed proxy token in their environment, and the broker injects the configured secret when such a request matches a service rule; other agents' calls get no token and no secret.
 Worker code can read its own proxy token, but the token only authorizes that worker's scope and expires after `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so a leaked token exercises only that scope's configured services until it expires.
@@ -15670,7 +15948,7 @@ It writes an approved proposal into `memory/` from bytes worker code staged, whi
 Delegation records keep their working state below `tracking/`, and the `run.json`, `events.jsonl`, and `transcript.md` in the child's workspace are exports the primary never reads.
 Worker code that makes one of those exports or the caller's receipt unwritable only leaves the record's exports or the receipt stale; the delegation still records its events and settles.
 
-In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
+In the primary, `mindroom_output_path`, attachment saves, Google Drive, Microsoft Files, Outlook mail attachment, Slack, and E2B downloads, `file_generation` saves, `visualization` charts, workspace knowledge links, workspace todo templates, and `file` and `coding` reads, writes, and deletes refuse a workspace replaced by a link after runtime resolution.
 That check covers only the workspace's final path component, so a replaced parent such as `agents/<name>` is not refused.
 With the default workspace names that is not exploitable in the hosted layout, because no primary-only directory there contains an entry named `workspace`; an authored `private.root` that matches a primary directory name, such as `credentials`, could be reached through a replaced parent.
 
@@ -15731,7 +16009,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 |---|---|---|
 | Path tools | `attachments` (including `view_file`), `matrix_message`, `chat_ui` canvas pages (`show_canvas` with `path`), `gmail`, `google_drive`, `microsoft_files`, `outlook_mail` attachments, `browser` uploads, `e2b` uploads, `openai` and `groq` audio files, `airflow`, `moviepy_video_tools` | Follow the agent's `file_access` and refuse replaced workspace roots and swapped files; `airflow` and `moviepy_video_tools` writes do not follow links below the workspace, and MoviePy and FFmpeg work only on private staged copies, refusing video inputs that FFmpeg would open as playlists or manifests |
 | Worker path tools | `file`, `coding` | Follow the agent's `file_access`; reads, writes, edits, deletes, and every file a `file` content search reads refuse replaced workspace roots and swapped files, while listing and the other searches walk by path, as the known gap below describes |
-| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`, `slack`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
+| Unconfined tools | Code-execution tools (`shell`, `python`, `docker`, `script`, `claude_agent`) and tools whose queries, paths, or URLs reach local files without confinement (`duckdb`, `csv`, `pandas`, `sql`, `composio`, `postgres`, `redshift`, `browserbase`) | Class `unconfined`: not confined by `file_access`, whatever the agent's setting; authored tool config may only state `file_access: unconfined` |
 | Other tools | Everything else, including `web_browser_tools`, which opens only `http` and `https` URLs | Take no local file paths |
 
 [`browser_mcp`](https://docs.mindroom.chat/tools/worker-computer/#native-playwright-mcp-provider) runs only in a worker and confines its upload, drop, screenshot, and PDF paths to the worker workspace whatever the agent's `file_access`.
@@ -15739,7 +16017,7 @@ Every tool, including plugin tools, must declare one of these file access classe
 MCP servers on the local `stdio` transport are unconfined too, because they are operator-launched programs; remote `sse` and `streamable-http` servers take no local file paths.
 Whether a tool executes code is a separate metadata flag from its file access class; only the code-execution tools above carry it.
 A worker isolates the unconfined tools that support worker routing (`shell`, `python`, `docker`, `csv`, `postgres`, `redshift`).
-The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`, `slack`), so enable them only for agents trusted with everything the primary runtime can reach.
+The rest require the primary runtime and cannot run in a worker (`claude_agent`, `script`, `duckdb`, `pandas`, `sql`, `composio`, `browserbase`), so enable them only for agents trusted with everything the primary runtime can reach.
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools or path tools under `file_access: unrestricted`, because those tools can then read runtime secrets the worker was meant to keep away.
 The model sees the effective file access and the unconfined tools in its tool execution environment description.
 
@@ -15770,7 +16048,7 @@ Such a session authenticates dashboard routes as the administrator's Matrix ID, 
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.
 
-- The unconfined non-code tools `composio`, `postgres`, `redshift`, `browserbase`, and `slack` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
+- The unconfined non-code tools `composio`, `postgres`, `redshift`, and `browserbase` do not yet follow `file_access`; a separate change will confine their explicit path and URL arguments.
 - SQL-capable tools (`duckdb`, `csv`, `sql`, and `pandas` query helpers) embed file paths inside queries, so guarding explicit path arguments cannot confine them; they stay unconfined until a query-level mechanism exists.
 - The listing and search functions of `file` and `coding` (`list_files`, `search_files`, `grep`, `find_files`, and `ls`) refuse a workspace that no longer resolves to the pinned directory and paths that lead outside it, but then walk and read by path.
   This matters only when an operator routes these tools to the primary process while worker code writes the same workspace, such as the Kubernetes `static_runner` sidecar with `worker_tools` that leave out `file` and `coding`.
@@ -15793,7 +16071,7 @@ Do not report or "fix" these; they are deliberate.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, and Outlook mail may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries on, through the addresses it requests, so agents should only show pages they wrote; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
 - The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation; Gmail, Google Drive, Microsoft Files, and Outlook mail take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
-- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
+- `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `file` and `coding` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - A skill review may resend the reviewed conversation unredacted to the provider that just received it, and a digest replay redacts credentials only on a best-effort basis; see [What a review sees](https://docs.mindroom.chat/skills/#what-a-review-sees).
   The check that refuses skill files holding a literal credential is a heuristic for common formats; a miss is not a vulnerability, because skills live in the agent's own workspace next to the conversation history that already held the value.
@@ -15824,6 +16102,7 @@ Do not report or "fix" these; they are deliberate.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
+- A personal `slack_download` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, so one requester can use web sessions another signed in and upload screenshots another took; they never cross agents or the requesters of a private agent.
 - A browser egress proxy in a sandbox runner receives destination hostnames, because an approved-egress proxy decides by name, so rebinding between the relay's check and that proxy's own lookup is the proxy's responsibility; in the primary the relay tunnels to the address it validated.
@@ -15849,6 +16128,10 @@ Do not report or "fix" these; they are deliberate.
   The `/connections` page shell is served without authentication, while every API stays protected.
 - With `personal_rooms.agent` naming a `personal_agents` template, every human member of an onboarding room gets a Matrix account and a running agent; membership of that room is the only gate, so its join policy and invitations control who gets one.
 - A `personal_agents` template whose `access` admits other people exposes each owner's agent, including its memory, files, and shared credentials, to them and to their own agents acting for them; owner-only access is the default.
+- `POST /api/slack/events` is public, like the external-trigger routes: it has no dashboard login, accepts a request only when it carries a valid signature from the Slack app's signing secret made within five minutes, and answers 404 while no Slack app is configured.
+- A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, and other workspaces never map.
+  Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
+- A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so a `tool_approval` rule for `slack_post` and `slack_react` is the boundary for those.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings
@@ -18028,6 +18311,7 @@ Under **MCP gateway**, select **All tools** for an agent or choose tools individ
 
 Tools that share a service connection share its OAuth controls, and tools that need a Matrix room or an agent conversation, such as `claude_agent`, are labeled **MindRoom only** and are not exposed.
 A shared agent's configured worker and credential scopes still decide whose service connection runs a call.
+The `slack` tool works through the gateway with each person's own Slack account, but its `slack_watch` function is not offered; see [Slack](https://docs.mindroom.chat/tools/slack/#mcp).
 When managed account provisioning is enabled, users without an active provisioned account see an access notice instead of MCP controls until an administrator provisions them; their ordinary connections remain available.
 [Connections sessions from MindRoom Chat](https://docs.mindroom.chat/connections-portal/#open-it-from-mindroom-chat) carry no email, so with managed account provisioning they reach the MCP controls, and in built-in authorization mode client consent, through the one active account whose `userName` the trusted upstream email template maps to their Matrix user.
 Without such a template, when trusted upstream auth uses a signed Matrix claim, or when several accounts map to the same user, those users see that notice and need trusted upstream sign-in for them.

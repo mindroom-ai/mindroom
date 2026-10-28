@@ -74,6 +74,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `matrix_space` | Root Matrix Space for managed rooms | [Matrix Space](../rooms.md#matrix-space) |
 | `timezone`, `scheduler_catch_up_grace_seconds` | Default timezone for dates, times, and schedules (default `UTC`; agents can override it) and missed-run catch-up | [Scheduling](../scheduling.md#timezone) |
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](../external-triggers.md) |
+| `slack` | How Slack workspace members map to Matrix users | [Slack](../tools/slack.md#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
 | `background_tool_jobs` | Experimental background execution of tool calls, off by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |

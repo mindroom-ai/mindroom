@@ -498,7 +498,7 @@
       "dependencies": [],
       "description": "Search, read, download, post, and react in Slack as the connected user or in a project's channels",
       "display_name": "Slack",
-      "docs_url": "https://docs.mindroom.chat/tools/messaging-and-social/#slack",
+      "docs_url": "https://docs.mindroom.chat/tools/slack/",
       "executes_code": false,
       "file_access": "none",
       "function_names": [
