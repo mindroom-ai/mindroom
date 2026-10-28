@@ -2204,7 +2204,8 @@ def test_a_service_with_its_own_account_never_takes_a_key(oauth_egress_portal: d
     response = _put_key(portal, "alice", "personal", "mine", "never-used")
 
     assert response.status_code == 422
-    assert response.json()["detail"] == egress_status._OWN_ACCOUNT_KEY_REFUSAL
+    own = EgressService.model_validate({"preset": "google_drive", "oauth_separate_account": True})
+    assert response.json()["detail"] == egress_status.key_refusal(own)
     assert _stored_key(portal, "mine") is None
 
 
@@ -3122,16 +3123,17 @@ def test_a_restrict_only_limit_is_saved_listed_and_never_takes_a_key(egress_port
     }
 
     # Neither page stores a key for it: the broker would never send one.
+    refusal = egress_status.key_refusal(EgressService.model_validate(limit))
     personal_put = _put_key(portal, "bob", "shared_dev", "github-limited", "never-used")
     assert personal_put.status_code == 422
-    assert personal_put.json()["detail"] == egress_status._RESTRICT_ONLY_KEY_REFUSAL
+    assert personal_put.json()["detail"] == refusal
     admin_put = client.put(
         "/api/egress-broker/services/github-limited/secret?agent_name=shared_dev",
         json={"secret": "never-used"},
         headers=admin,
     )
     assert admin_put.status_code == 422
-    assert admin_put.json()["detail"] == egress_status._RESTRICT_ONLY_KEY_REFUSAL
+    assert admin_put.json()["detail"] == refusal
     assert _stored_key(portal, "github-limited", "shared_dev") is None
 
     # The scope's rules keep the config service's credential on the listed paths and refuse the rest.
