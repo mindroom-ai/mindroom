@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import ai_runtime
-from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
@@ -66,10 +65,10 @@ from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     allow_direct_private_team_agents,
     build_team_spec,
-    materialize_team_members,
     materialized_team_label,
     requested_team_agent_names,
     resolve_team_member_model_names,
+    resolve_team_members,
 )
 from mindroom.teams.presentation import (
     NO_TEAM_RESPONSE,
@@ -363,12 +362,11 @@ class TeamTurnSpec:
 class _TeamTurnHolder:
     """Live per-turn team state shared between attempt closures and adapter callbacks.
 
-    ``members`` are the members the turn's latest attempt runs with: the ones the turn built, which its first attempt
-    takes (``first_members_taken``), then each later attempt's rebuild.
+    ``members`` are the members the turn's latest attempt runs with: the ones the turn resolved, on the models the
+    latest continuation that applied a model to the members chose.
     """
 
     members: ResolvedExactTeamMembers
-    first_members_taken: bool = False
     attempt_started: bool = False
 
 
@@ -377,7 +375,8 @@ class _TeamTurn:
     """The constants of one team turn, shared by its attempts.
 
     ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
-    agent turn runs on the config it was given; ``orchestrator`` says which agents are running now.
+    agent turn runs on the config it was given; ``orchestrator`` supplies the runtime paths and the knowledge refresh
+    scheduler.
     """
 
     ctx: ResponseTurnContext
@@ -437,33 +436,17 @@ class _TeamTurn:
             metadata=metadata,
         )
 
-    async def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
-        """Return the attempt's member set: the turn's members for its first attempt, rebuilt for every later one.
+    def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
+        """Return the attempt's members: the latest attempt's, on the new model a continuation applies to the members.
 
-        A rebuild keeps the latest members' models unless a continuation applies a new model to the members.
+        Each attempt's team builds only the members its leader delegates to.
         """
         holder = self.holder
-        if not holder.first_members_taken:
-            holder.first_members_taken = True
-            return holder.members
-        # TODO(simplify): an empty-reply retry or a continuation that keeps the members' models rebuilds them too.
-        # Rebuild only when a continuation applies a new model to the members. Plugin authors would notice:
-        # member toolkit factories and MCP servers start fewer times.
-        model_names = (
-            dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name)
-            if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None
-            else holder.members.model_names
-        )
-        holder.members = await asyncio.to_thread(
-            materialize_team_members,
-            self.requested_agent_names,
-            self.spec.orchestrator,
-            self.execution_identity,
-            config=self.config,
-            reason_prefix=self.spec.reason_prefix,
-            configured_team_name=self.configured_team_name,
-            active_model_names=model_names,
-        )
+        if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
+            holder.members = replace(
+                holder.members,
+                model_names=dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name),
+            )
         return holder.members
 
     async def start_attempt(
@@ -472,7 +455,7 @@ class _TeamTurn:
         continuation_state: TurnContinuationRunState,
     ) -> tuple[TeamAttempt, AsyncIterator[TeamRunEvent]]:
         """Build the attempt's team and prepared input, and return its state with the run's event stream."""
-        members = await self.members_for_attempt(continuation_state)
+        members = self.members_for_attempt(continuation_state)
         config = self.config
         # Resolve the runtime model once here and hand it down so the team spec and the run metadata cannot disagree.
         runtime_model = config.resolve_runtime_model(
@@ -523,6 +506,7 @@ class _TeamTurn:
         attempt = TeamAttempt(
             run_id=continuation_state.active_run_id or str(uuid4()),
             members=members,
+            team=built.spec,
             presentation=presentation,
             team_name=self.entity_name,
             runtime_model_name=prepared.runtime_model_name,
@@ -530,7 +514,11 @@ class _TeamTurn:
         )
         run.attempt = attempt
         self.holder.attempt_started = True
-        logger.info("executing_team_response", agent_count=len(members.builds), mode=self.spec.mode.value)
+        logger.info(
+            "executing_team_response",
+            agent_count=len(members.requested_agent_names),
+            mode=self.spec.mode.value,
+        )
         run_input = prepared.run_input(self.ctx.media or MediaInputs())
         logger.info(
             "team_prompt_preview",
@@ -570,7 +558,6 @@ class _TeamTurn:
                 records=attempt.records,
                 plan=prepared.prepared_history.replay_plan,
                 user_id=self.ctx.requester_id,
-                toolkit_owners=tool_owners_by_agent(*members.builds),
             ),
             team_name=self.entity_name,
             config=config,
@@ -669,10 +656,7 @@ class _TeamTurn:
         The pause freezes that document, which does not show the paused notices its runs hold as their content
         (``paused_content``, ``team_paused_content``); the approval card says what it waits for.
         """
-        paused = paused_attempt_from_response(
-            record,
-            toolkit_owners=tool_owners_by_agent(*attempt.members.builds),
-        )
+        paused = paused_attempt_from_response(record, toolkit_owners=attempt.team.tool_owners())
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
         return replace(
@@ -776,7 +760,11 @@ class _TeamTurn:
 
 
 def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -> _TeamTurn | str:
-    """Materialize the team's members and return the turn's constants, or the text that explains why it cannot run."""
+    """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
+
+    Resolving the members' knowledge and models reads the filesystem, so the caller runs this off the event loop
+    (#1260); the members themselves build on their first delegation.
+    """
     orchestrator = spec.orchestrator
     assert orchestrator.config is not None
     if not ctx.session_id:
@@ -804,9 +792,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext, sinks: TurnSinks) -
     )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
-        # Member agent builds walk the filesystem (workspace scaffolding,
-        # context files, session storage); keep them off the event loop (#1260).
-        team_members = materialize_team_members(
+        team_members = resolve_team_members(
             requested_agent_names,
             orchestrator,
             ctx.execution_identity,
@@ -857,7 +843,7 @@ async def team_response_stream(
     """
     turn = await asyncio.to_thread(_team_turn, spec, ctx, sinks)
     if isinstance(turn, str):
-        # A turn whose members cannot be built ran nothing to record; its message and this reply stay in the thread.
+        # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
         yield turn
         return
 

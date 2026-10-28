@@ -166,7 +166,7 @@ class ModelCall:
     # The stored ``model`` and ``model_provider`` of the model that received the request.
     model_id: str
     model_provider: str
-    # Models in the order MindRoom built them, which is deterministic where concurrent calls are not.
+    # Which model received the request, numbered in the order MindRoom built them.
     model_index: int
     messages: list[OwnedMessage]
     tools: list[ToolSpec]
@@ -193,11 +193,20 @@ class Recorder:
     _built_models: int = field(default=0, init=False)
 
     def ordered_calls(self) -> list[ModelCall]:
-        """Return the calls grouped by model in build order, each model's calls in the order it received them.
+        """Return the calls grouped by model, each model's calls in the order it received them.
 
-        A team runs its members concurrently, so only each model's own sequence is stable.
+        The groups are ordered by their first request's opening message, then by build order. A team builds its members
+        as it first delegates to them, concurrently, so neither build order nor request order is stable across models,
+        while each model's own sequence and opening message are.
         """
-        return sorted(self.calls, key=lambda call: call.model_index)
+        groups: dict[int, list[ModelCall]] = {}
+        for call in sorted(self.calls, key=lambda call: call.model_index):
+            groups.setdefault(call.model_index, []).append(call)
+
+        def opening(group: list[ModelCall]) -> str:
+            return json.dumps(turn_message(group[0].messages[0]), sort_keys=True)
+
+        return [call for group in sorted(groups.values(), key=opening) for call in group]
 
     def _respond_to_request(self, adapter: ModelProvider, index: int, request: ModelRequest) -> OwnedMessage:
         call = ModelCall(

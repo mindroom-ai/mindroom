@@ -114,18 +114,23 @@ async def test_an_empty_completed_attempt_is_discarded_and_retried_once(
 
 
 @pytest.mark.asyncio
-async def test_the_empty_retry_runs_on_rebuilt_members(
+async def test_the_empty_retry_builds_only_the_members_it_delegates_to(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The retry builds its members again, as a model-switch continuation does."""
-    team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
+    """The empty attempt delegated to no member, so only the retry, which delegates, builds one."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer(""), delegate("call-general", "general", "Help"), answer("Recovered answer")],
+        general=[answer("Helped.")],
+    )
 
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
         text = await team.respond()
 
     assert text.endswith("Recovered answer")
-    assert build.call_count == 2
+    assert [call.args[0] for call in build.call_args_list] == ["general"]
 
 
 @pytest.mark.asyncio

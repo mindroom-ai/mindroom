@@ -21,7 +21,7 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
   A whole delivery collects the turn to its end before its delivery hooks run, so a Stop in `message:before_response` leaves the completed run in history while the reply ends stopped; recording it again after delivery would make the runner a second writer of the record. Its run-only effects (memory, skill review) still skip it, because the turn's generation never returned a delivery.
 - The streamer now closes the response stream in its consumer task, and forwards the supervising task's shutdown tag to that task.
   Before, a Stop that landed while the streamer awaited Matrix left the driver suspended until garbage collection closed it in a different task, which carried no shutdown tag.
-- A turn rejected before any attempt ran (team members that cannot be built, a team name sent to the agent path) records nothing; its message and the rejection reach the next turn through the thread as unseen events.
+- A turn rejected before any attempt ran (a team member that is not running or that the requester may not use, a team name sent to the agent path) records nothing; its message and the rejection reach the next turn through the thread as unseen events.
 - The cancel source has one owner, the cancellation's message; the per-task source registry nobody read is gone, and with it the promise to keep the first source, which `Task.cancel` never kept.
 - Agent and team turns run one locked sequence; what differs is decided in one preparation step per kind, which returns the values the shared generation and settlement read.
   A team Stop therefore takes the agent's path and is no longer logged as an error.

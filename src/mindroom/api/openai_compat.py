@@ -86,7 +86,7 @@ from mindroom.teams.members import (
     BuiltTeam,
     TeamTurnModelSelection,
     build_team_spec,
-    materialize_exact_team_members,
+    resolve_exact_team_members,
 )
 from mindroom.teams.presentation import finished_run_text
 from mindroom.teams.runtime import MemberEvent, team_usage_runs
@@ -1010,14 +1010,14 @@ def _build_team(
     *,
     models: TeamTurnModelSelection,
 ) -> BuiltTeam:
-    """Create member builds and build one team for a configured team.
+    """Build one configured team, whose members build on their first delegation.
 
-    Raises when the configured team cannot be materialized.
+    Raises when the configured team's members are not supported.
     """
     team_config = config.teams[team_name]
     config.assert_team_agents_supported(team_config.agents, team_name=team_name)
 
-    team_members = materialize_exact_team_members(
+    team_members = resolve_exact_team_members(
         team_config.agents,
         config=config,
         runtime_paths=runtime_paths,
@@ -1025,7 +1025,6 @@ def _build_team(
         include_openai_compat_guidance=True,
         unavailable_bases=unavailable_bases,
         refresh_scheduler=refresh_scheduler,
-        reason_prefix=f"Team '{team_name}'",
         active_model_names=models.member_model_names,
     )
     return build_team_spec(

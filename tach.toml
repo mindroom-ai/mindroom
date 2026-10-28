@@ -6557,7 +6557,7 @@ expose = [
     "members.ResolvedExactTeamMembers",
     "members.TeamTurnModelSelection",
     "members.build_team_spec",
-    "members.materialize_exact_team_members",
+    "members.resolve_exact_team_members",
     "members.resolve_team_turn_models",
     "members.select_model_for_team",
     "presentation.finished_run_text",

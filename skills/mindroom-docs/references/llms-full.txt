@@ -2652,6 +2652,7 @@ A team lets several agents answer one request together, either as a named team u
 | `collaborate` | Every member works on the same task independently, and the team model synthesizes their answers | You want several perspectives on one question | "What do you think about X?": every agent answers, then the views are combined |
 
 A team reply opens with a `🤝 Team Response (<members>)` header, shows each member's contribution under its name, and ends with a **Team Consensus** section; without a consensus it notes that only the individual responses are shown.
+A member that fails, including one that cannot start because of a configuration error such as invalid model settings, fails only the work handed to it: the team model reads why and still answers, and the reply shows the reason under the member's name.
 
 ## Named Teams
 
