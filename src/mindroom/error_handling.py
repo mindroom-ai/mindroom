@@ -45,11 +45,6 @@ def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool
     return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
 
 
-def is_model_safeguard_refusal(error: Exception) -> bool:
-    """Return whether the model's safeguards refused the request."""
-    return isinstance(error, ModelSafeguardRefusal)
-
-
 def _missing_provider_key_message(runtime_paths: RuntimePaths | None) -> str:
     dashboard_url = (runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").strip() if runtime_paths else ""
     dashboard = f"the MindRoom dashboard ({dashboard_url.rstrip('/')})" if dashboard_url else "the MindRoom dashboard"
@@ -81,7 +76,7 @@ def get_user_friendly_error_message(
         error=repr(error),
     )
 
-    if is_model_safeguard_refusal(error):
+    if isinstance(error, ModelSafeguardRefusal):
         return (
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
             "Choose a different model (`!model list`) or revise the prompt, then try again."

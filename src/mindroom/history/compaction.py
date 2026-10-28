@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.failure_text import failure_text
 from mindroom.history.conversation_text import utterances
 from mindroom.history.replay import current_summary_text, estimate_prompt_visible_history_tokens, scope_visible_runs
@@ -40,6 +39,7 @@ from mindroom.history.types import (
     ScopeSummary,
 )
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, TranscriptLine, emit
+from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_summary, replay_basis
@@ -845,7 +845,11 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 duration_ms=int((asyncio.get_running_loop().time() - started) * 1000),
                 error=failure_text(exc),
             )
-            if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
+            if (
+                fallback_model is not None
+                and attempt < retry_policy.max_attempts
+                and isinstance(exc, ModelSafeguardRefusal)
+            ):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
                 fits_fallback = (
                     await asyncio.to_thread(fallback_token_estimator, summary_input)

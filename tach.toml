@@ -2742,7 +2742,6 @@ depends_on = [
     "mindroom.session_storage.lanes",
     "mindroom.session_storage.store",
     "mindroom.background_tasks",
-    "mindroom.error_handling",
     "mindroom.history.conversation_text",
     "mindroom.history.replay",
     "mindroom.history.storage",

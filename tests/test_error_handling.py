@@ -7,7 +7,6 @@ import pytest
 from mindroom import constants
 from mindroom.error_handling import (
     get_user_friendly_error_message,
-    is_model_safeguard_refusal,
     minimal_mode_failure_message,
 )
 from mindroom.llm.errors import (
@@ -54,7 +53,6 @@ def test_an_error_reply_redacts_secrets() -> None:
 def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     """An explicit safeguard stop should not look like an empty model response."""
     error = ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics())
-    assert is_model_safeguard_refusal(error)
 
     message = get_user_friendly_error_message(error, "mind")
 
@@ -65,11 +63,10 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     assert "stop_reason" not in message
 
 
-def test_only_the_typed_refusal_reads_as_a_refusal() -> None:
+def test_only_the_typed_refusal_gets_the_refusal_reply() -> None:
     """An error that merely carries the refusal's text is no refusal, since every refusal reaches the reply typed."""
     error = RuntimeError(MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
-    assert not is_model_safeguard_refusal(error)
     assert get_user_friendly_error_message(error) == f"⚠️ Error: {MODEL_SAFEGUARD_REFUSAL_MESSAGE}"
 
 
