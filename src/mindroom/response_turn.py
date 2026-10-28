@@ -317,11 +317,11 @@ class TurnContinuationRunState:
 class ResponseTurnContext:
     """Every input of one response turn: its Matrix identity, its prompt and context, and how it runs.
 
-    Built once by the caller that owns the turn, then passed unchanged through
-    the entity envelope, its prepare chain, and the turn drivers. For agent
-    turns ``entity_label`` is the configured agent name; team turns arrive
-    named by the entity whose bot runs them, whose timezone dates the turn,
-    and refine it to the materialized team label via ``dataclasses.replace``.
+    Built once by the caller that owns the turn; the entity envelope and its
+    prepare chain narrow it with ``dataclasses.replace``, and the turn driver
+    reads the result. For agent turns ``entity_label`` is the configured agent
+    name; team turns arrive named by the entity whose bot runs them, whose
+    timezone dates the turn, and refine it to the materialized team label.
     What the turn writes back (its recorder and collectors) crosses in ``TurnSinks`` instead.
     """
 
@@ -394,7 +394,7 @@ class ResponseTurnContext:
 
 @dataclass(frozen=True)
 class TurnSinks:
-    """Mutable turn outputs owned by the caller and updated by the drivers."""
+    """Mutable turn outputs owned by the caller and updated by the driver."""
 
     # The turn's record, which the driver writes and the caller reads once the turn ended; a turn whose caller passes
     # none keeps its own.

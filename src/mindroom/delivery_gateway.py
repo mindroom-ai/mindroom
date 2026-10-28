@@ -2494,7 +2494,6 @@ class DeliveryGateway:
                         is_visible_response=True,
                         final_visible_body=streamed_text or None,
                         delivery_kind="edited",
-                        failure_reason=stream_outcome.failure_reason,
                         tool_trace=tuple(request.tool_trace or ()),
                         extra_content=request.extra_content,
                     )
@@ -2528,13 +2527,12 @@ class DeliveryGateway:
                     extra_content=request.extra_content,
                 )
             if stream_outcome.failure_reason is not None:
-                failure_reason = stream_outcome.failure_reason or "terminal_update_failed"
                 return FinalDeliveryOutcome(
                     terminal_status="error",
                     event_id=visible_stream_event_id,
                     is_visible_response=True,
                     final_visible_body=streamed_text,
-                    failure_reason=failure_reason,
+                    failure_reason=stream_outcome.failure_reason,
                     tool_trace=tuple(request.tool_trace or ()),
                     extra_content=request.extra_content,
                 )
@@ -2554,7 +2552,6 @@ class DeliveryGateway:
                 is_visible_response=True,
                 final_visible_body=streamed_text or interactive_response.formatted_text,
                 delivery_kind=request.initial_delivery_kind,
-                failure_reason=stream_outcome.failure_reason,
                 tool_trace=tuple(request.tool_trace or ()),
                 extra_content=request.extra_content,
                 interactive_metadata=interactive_response.interactive_metadata,

@@ -773,9 +773,12 @@ class _LockedTurn:
     runtime: _PreparedResponseRuntime
     run_id: str
     streaming_cls: type[StreamingResponse]
-    # The entity's response stream for one generation, given the room's live replies, its compaction notices, and
-    # what the turn writes back.
-    stream: Callable[[set[str], MatrixCompactionLifecycle | None, TurnSinks], AsyncIterator[StreamInputChunk]]
+    # The entity's response stream for one generation, given the runtime the turn delivers with, the room's live
+    # replies, its compaction notices, and what the turn writes back.
+    stream: Callable[
+        [_PreparedResponseRuntime, set[str], MatrixCompactionLifecycle | None, TurnSinks],
+        AsyncIterator[StreamInputChunk],
+    ]
     post_response_deps: Callable[[], PostResponseEffectsDeps]
     team_member_names: tuple[str, ...] = ()
     team_mode: str | None = None
@@ -3997,6 +4000,7 @@ class ResponseRunner:
         )
 
         def stream(
+            _runtime: _PreparedResponseRuntime,
             active_event_ids: set[str],
             compaction_lifecycle: MatrixCompactionLifecycle | None,
             sinks: TurnSinks,
@@ -4178,7 +4182,7 @@ class ResponseRunner:
         )
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:
-            return turn.stream(active_event_ids, compaction_lifecycle, sinks)
+            return turn.stream(turn.runtime, active_event_ids, compaction_lifecycle, sinks)
 
         def final_extra_content() -> dict[str, Any] | None:
             # A turn that published no run metadata still names the run the record holds.
@@ -4643,6 +4647,7 @@ class ResponseRunner:
         turn_request = self._request_with_locked_target(normalized_request, runtime.resolved_target)
 
         async def stream(
+            runtime: _PreparedResponseRuntime,
             active_event_ids: set[str],
             compaction_lifecycle: MatrixCompactionLifecycle | None,
             sinks: TurnSinks,

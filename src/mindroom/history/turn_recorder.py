@@ -20,8 +20,8 @@ type _TurnOutcome = Literal["pending", "completed", "skipped", "suspended", "int
 class TurnRecorder:
     """What one top-level turn was asked, how it ended, and what an interruption keeps of it.
 
-    Only the turn driver writes it, besides the run's mid-turn compaction, which notes the calls a fold summarized;
-    callers read it once the turn ended.
+    Only the turn driver writes it, besides the run's mid-turn compaction, which notes the calls a fold summarized, and
+    a voice call, which seeds the transcript it answers; callers read it once the turn ended.
     """
 
     user_message: str = ""

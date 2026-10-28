@@ -45,4 +45,5 @@ A non-success reply ending was decided by the streamer (a terminal row with the 
 ## Open
 
 - An ordinary answer whose final write is recorded but not yet acknowledged reports `suspended`, so its after-response work never runs (only approvals re-run it after acknowledgement); whether its run-only effects should run at once is a product decision.
+- After a Stop the streamer waits 0.5 s for its stream task to unwind, and that task now stores the interrupted turn; a store slower than that still lands the row, but possibly after the conversation's next turn started.
 - The empty-reply and failure outcomes still differ between delivery modes in `failure_reason` strings that plugins read (`stream_completed_without_visible_body` for a reply with nothing to show; `str(error)` for a delivery failure in either mode).

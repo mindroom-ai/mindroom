@@ -460,7 +460,7 @@ def _begin_attempt(
     *,
     stream_state: _StreamingAttemptState,
 ) -> tuple[RunStorage, _AgentAttempt]:
-    """Record one prepared attempt on the turn's run state and recorder, and return where it is stored and its request."""
+    """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.unseen_event_ids = prepared_run.unseen_event_ids
     run.run_metadata = run_context.metadata
