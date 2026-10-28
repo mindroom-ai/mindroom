@@ -378,6 +378,14 @@ export function splitHostInput(value: string): { host: string; path: string } {
 
 export const MAX_NAME_LENGTH = 63;
 
+/** `base`, or the first of `{base}-2`, `{base}-3`... that `taken` does not have. */
+export function firstFreeName(base: string, taken: readonly string[]): string {
+  for (let n = 1; ; n += 1) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    if (!taken.includes(name)) return name;
+  }
+}
+
 /**
  * `text` as a service name: accents folded (`é` gives `e`), lowercase, spaces
  * as `_`, what a name cannot hold dropped, and each run of `-` and `_` cut to

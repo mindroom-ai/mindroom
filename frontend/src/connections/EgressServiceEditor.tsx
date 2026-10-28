@@ -22,6 +22,7 @@ import {
   type RuleForm,
   NOT_EXPLICITLY_EMPTY,
   emptyRule,
+  firstFreeName,
   formFromService,
   offersSeparateAccount,
   presetOf,
@@ -86,15 +87,6 @@ import type {
 /** A problem with no field to show it, or with a field the basic form does not have. */
 function needsMoreOptions(problem: ServiceProblem): boolean {
   return problem.field !== "form" && !isBasicField(problem.field);
-}
-
-/** The name a new limit starts with: `github-limited`, or the first of `-2`, `-3`... that is free. */
-function limitedServiceName(taken: readonly string[]): string {
-  const base = "github-limited";
-  for (let n = 1; ; n += 1) {
-    const name = n === 1 ? base : `${base}-${n}`;
-    if (!taken.includes(name)) return name;
-  }
 }
 
 export interface EgressServiceEditorProps {
@@ -211,7 +203,10 @@ export function EgressServiceEditor({
   const [form, setForm] = useState(() => {
     if (addingLimit)
       return {
-        ...formFromService(limitedServiceName(openedWithNames), service),
+        ...formFromService(
+          firstFreeName("github-limited", openedWithNames),
+          service,
+        ),
         restrictOnly: true,
         rules: [],
       };
@@ -239,8 +234,8 @@ export function EgressServiceEditor({
   // them anew only after they change and keeps rules edited by hand until then.
   const appliedHelper = useRef<string | null>(restored.applied);
   const showGithubHelper = limiting ? restored.exact : looksLikeGithub(form);
-  // A new service that starts from another, such as another account, is still
-  // new: the save writes it from the form alone.
+  // A new service that starts from another is still new: the save writes it
+  // from the form alone.
   const initial = editing ? service : null;
   const settings = { editing, takenNames: openedWithNames, service: initial };
 
@@ -752,7 +747,6 @@ export function EgressServiceEditor({
               ruleEditing={ruleEditing}
               accountChoice={accountChoice}
               newService={!editing}
-              focusDisplayName={!editing && service !== null}
             />
           )}
         </section>

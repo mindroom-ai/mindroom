@@ -331,6 +331,14 @@ export function EgressServiceItem({
     (!oauth || (!canConnect && !oauth.connected && !oauth.reset_required));
   const editable = canEdit(serviceEditing, service);
   const addAccount = serviceEditing.addAccount?.(service);
+  // A service just saved with an account of its own asks to sign in to it,
+  // once, when the listing shows it so; one that cannot connect asks nothing.
+  const { signInNext, onSignInOpened } = serviceEditing;
+  useEffect(() => {
+    if (signInNext !== service.name || !service.separate_account) return;
+    onSignInOpened?.();
+    if (canConnect) askReuse("read");
+  });
   // Everything but the action that makes the service work, which is a button of its own.
   const actions: RowAction[] = [
     ...(oauth && canManageKey && !showKeyControls && !setKeyFirst
@@ -425,16 +433,6 @@ export function EgressServiceItem({
           },
         ]
       : []),
-    ...(addAccount
-      ? [
-          {
-            label: "Add another account",
-            ariaLabel: `Add another account for ${name}`,
-            disabled: serviceEditing.disabled || serviceEditing.limitDisabled,
-            onSelect: addAccount,
-          },
-        ]
-      : []),
     ...(oauth?.connected && canResetAccount
       ? [
           {
@@ -512,6 +510,17 @@ export function EgressServiceItem({
           />
           {unsetText && (
             <span className="text-xs text-muted-foreground">{unsetText}</span>
+          )}
+          {addAccount && oauth && (
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0 text-xs"
+              disabled={serviceEditing.disabled || serviceEditing.limitDisabled}
+              onClick={addAccount}
+            >
+              Add another {oauth.display_name} account
+            </Button>
           )}
         </div>
       </td>

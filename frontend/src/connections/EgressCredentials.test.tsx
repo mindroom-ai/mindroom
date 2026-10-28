@@ -2641,50 +2641,80 @@ describe("who uses a personal agent's keys", () => {
 });
 
 describe("adding another account", () => {
-  const calendar: EgressCredentialService = {
+  // The administrator's Gmail, signed in with the account the agent's tools use.
+  const gmail: EgressCredentialService = {
     ...service,
-    name: "google_calendar",
-    display_name: "Google Calendar",
-    description: "Google Calendar API",
+    name: "google_gmail",
+    display_name: "Gmail",
+    description: "Gmail API",
     rules: [
-      { host: "www.googleapis.com", port: null, path_prefix: "/calendar/v3/" },
+      { host: "gmail.googleapis.com", port: null, path_prefix: "/" },
+      { host: "www.googleapis.com", port: null, path_prefix: "/gmail/" },
     ],
     read_only_supported: true,
     configured: true,
     active_source: "oauth",
     oauth: {
       ...account,
-      provider: "google_calendar",
-      display_name: "Google Calendar",
+      provider: "google_gmail",
+      display_name: "Gmail",
       connected: true,
-      account_label: "me@example.com",
+      account_label: "alex@example.com",
       reuse_access: "read",
     },
   };
   const github = { ...service, oauth: account };
   // The new service as the listing sends it once saved, before its account is connected.
-  const teamCalendar: EgressCredentialService = {
-    ...calendar,
-    name: "team_calendar",
-    display_name: "Team calendar",
+  const ownGmail: EgressCredentialService = {
+    ...gmail,
+    name: "google_gmail-2",
     source: "user",
     separate_account: true,
     configured: false,
     active_source: null,
     oauth: {
-      ...calendar.oauth!,
+      ...gmail.oauth!,
       connected: false,
       account_label: null,
       reuse_enabled: false,
       reuse_access: null,
     },
   };
+  const OWN = `${SERVICES}/google_gmail-2`;
+  const OWN_ACCOUNT = `${KEYS}/google_gmail-2`;
   let listing: EgressCredentialAgent[];
   let calls: { method: string; path: string; body: unknown }[];
+  let savePut: () => Response | Promise<Response>;
+
+  const writes = () => calls.filter((call) => call.method !== "GET");
+  // The new service has no display name, so its row is Gmail too; only the administrator's has the link.
+  const link = async () => {
+    const [only, ...others] = await screen.findAllByRole("button", {
+      name: "Add another Gmail account",
+    });
+    expect(others).toEqual([]);
+    return only;
+  };
 
   beforeEach(() => {
     calls = [];
-    listing = [{ ...agents[0], services: [calendar, github] }];
+    listing = [{ ...agents[0], services: [gmail, github] }];
+    // The new row is not the last one of its group.
+    savePut = () => {
+      listing = [
+        {
+          ...agents[0],
+          services: [gmail, ownGmail, { ...userService, name: "zz" }, github],
+        },
+      ];
+      return new Response(null, { status: 204 });
+    };
+    vi.spyOn(window, "open").mockReturnValue({
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
+    } as unknown as Window);
     vi.mocked(fetch).mockImplementation(async (input, options) => {
       const path = String(input);
       const method = options?.method ?? "GET";
@@ -2696,84 +2726,233 @@ describe("adding another account", () => {
       if (path === "/api/connections/me") return json(identity);
       if (path === "/api/connections/egress") return json({ agents: listing });
       if (path === PRESETS) return json(egressPresets);
-      if (method === "PUT" && path === `${SERVICES}/team_calendar`) {
-        listing = [
-          { ...agents[0], services: [calendar, github, teamCalendar] },
-        ];
+      if (method === "PUT" && path === OWN) return savePut();
+      if (method === "PUT" && path === `${OWN_ACCOUNT}/oauth-reuse`)
         return new Response(null, { status: 204 });
-      }
+      if (method === "POST" && path === `${OWN_ACCOUNT}/connect`)
+        return json({
+          provider: "google_gmail",
+          auth_url: "https://accounts.example.com/authorize",
+          completion_origin: "https://portal.example.com",
+        });
+      if (method === "PUT" && path === `${KEYS}/github`)
+        return new Response(null, { status: 204 });
       throw new Error(`Unexpected request: ${method} ${path}`);
     });
   });
 
-  it("opens Add service with the row's preset and its own account, for a display name, and saves it as usual", async () => {
-    await renderPage();
-    fireEvent.click(await rowAction("Add another account for Google Calendar"));
-    const form = await screen.findByRole("form", { name: "Add service" });
-    await presetsReady();
-    expect(within(form).getByLabelText("Preset")).toHaveValue(
-      "google_calendar",
+  /** The open allow dialog of the new row, starting on Read only; Continue allows the account to read and signs in. */
+  async function expectSignInDialog() {
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAccessibleName(
+      "Use your Gmail account for Agent Keys?",
     );
     expect(
-      within(form).getByLabelText("Another Google Calendar account"),
+      within(dialog).getByRole("radio", { name: "Read only" }),
     ).toBeChecked();
-    fireEvent.click(within(form).getByRole("button", { name: "More options" }));
-    expect(within(form).getByLabelText("Display name")).toHaveFocus();
-    fireEvent.change(within(form).getByLabelText("Display name"), {
-      target: { value: "Team calendar" },
+    await pressInDialog("Continue");
+    await waitFor(() =>
+      expect(writes().slice(1)).toEqual([
+        {
+          method: "PUT",
+          path: `${OWN_ACCOUNT}/oauth-reuse`,
+          body: { acknowledge_approval_bypass: true, access: "read" },
+        },
+        { method: "POST", path: `${OWN_ACCOUNT}/connect`, body: {} },
+      ]),
+    );
+  }
+
+  it("the row link adds the account and opens its dialog", async () => {
+    await renderPage();
+    await expectNoAction("Add another account for Gmail");
+    fireEvent.click(await link());
+    await expectSignInDialog();
+    expect(writes()[0]).toEqual({
+      method: "PUT",
+      path: OWN,
+      body: { preset: "google_gmail", oauth_separate_account: true },
     });
-    expect(within(form).getByLabelText("Name")).toHaveValue("team_calendar");
+    expect(screen.queryByRole("form", { name: "Add service" })).toBeNull();
+  });
+
+  it("Save and sign in opens the new row's allow dialog", async () => {
+    await renderPage();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Add service for Personal Mind",
+      }),
+    );
+    const form = await screen.findByRole("form", { name: "Add service" });
+    await presetsReady();
+    fireEvent.change(within(form).getByLabelText("Preset"), {
+      target: { value: "google_gmail" },
+    });
+    expect(within(form).getByLabelText("Another Gmail account")).toBeChecked();
     fireEvent.click(
       within(form).getByRole("button", { name: "Save and sign in" }),
     );
+    await expectSignInDialog();
+    expect(writes()[0]).toEqual({
+      method: "PUT",
+      path: OWN,
+      body: { preset: "google_gmail", oauth_separate_account: true },
+    });
+    expect(screen.queryByRole("form", { name: "Add service" })).toBeNull();
+  });
 
-    // The new row offers its own account's sign-in as any other row does.
+  it("the dialog opens once", async () => {
+    await renderPage();
+    fireEvent.click(await link());
+    await screen.findByRole("dialog");
+    await pressInDialog("Cancel");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Another change reloads the listing; the new row keeps its Connect button and asks nothing.
+    fireEvent.click(await rowAction("Use an API key instead for GitHub"));
+    fireEvent.change(screen.getByLabelText("GitHub API key"), {
+      target: { value: "ghp_x" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        calls.filter((call) => call.path === "/api/connections/egress"),
+      ).toHaveLength(3),
+    );
     expect(
       await screen.findByRole("button", {
-        name: "Connect Google Calendar for Agent Keys for Team calendar",
+        name: "Connect Gmail for Agent Keys for Gmail",
       }),
     ).toBeVisible();
-    expect(calls.filter((call) => call.method !== "GET")).toEqual([
-      {
-        method: "PUT",
-        path: `${SERVICES}/team_calendar`,
-        body: {
-          preset: "google_calendar",
-          display_name: "Team calendar",
-          oauth_separate_account: true,
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("a new row that cannot connect asks nothing", async () => {
+    savePut = () => {
+      listing = [
+        {
+          ...agents[0],
+          services: [
+            gmail,
+            {
+              ...ownGmail,
+              oauth: { ...ownGmail.oauth!, reset_required: true },
+            },
+          ],
         },
+      ];
+      return new Response(null, { status: 204 });
+    };
+    await renderPage();
+    fireEvent.click(await link());
+    expect(
+      await screen.findByRole("button", {
+        name: "Reset connection for Gmail",
+      }),
+    ).toBeVisible();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("own-account rows show no link", async () => {
+    listing = [{ ...agents[0], services: [gmail, ownGmail] }];
+    await renderPage();
+    const [administrators, own] = screen.getAllByRole("row", { name: "Gmail" });
+    expect(
+      within(administrators).getByRole("button", {
+        name: "Add another Gmail account",
+      }),
+    ).toBeVisible();
+    expect(
+      within(own).queryByRole("button", { name: /^Add another / }),
+    ).toBeNull();
+    await expectNoAction(/^Add another account for /);
+    // A row whose own account is not connected yet asks nothing on its own.
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("the link is disabled while a write runs", async () => {
+    let finish = () => {};
+    savePut = () =>
+      new Promise<Response>((resolve) => {
+        finish = () => resolve(new Response(null, { status: 204 }));
+      });
+    await renderPage();
+    const button = await link();
+    fireEvent.click(button);
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    expect(writes()).toHaveLength(1);
+    finish();
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it("a failed save shows the error and opens nothing", async () => {
+    savePut = () => json({ detail: "Too many services for this agent." }, 422);
+    await renderPage();
+    fireEvent.click(await link());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many services for this agent.",
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(writes()).toHaveLength(1);
+  });
+
+  it("picks the next free name", async () => {
+    listing = [
+      {
+        ...agents[0],
+        services: [gmail, ownGmail, { ...ownGmail, name: "google_gmail-3" }],
+        inactive_services: [{ name: "google_gmail-4", reason: "invalid" }],
       },
-    ]);
+    ];
+    savePut = () => new Response(null, { status: 204 });
+    vi.mocked(fetch).mockImplementation(async (input, options) => {
+      const path = String(input);
+      const method = options?.method ?? "GET";
+      calls.push({ method, path, body: undefined });
+      if (path === "/api/connections/me") return json(identity);
+      if (path === "/api/connections/egress") return json({ agents: listing });
+      if (path === PRESETS) return json(egressPresets);
+      return new Response(null, { status: 204 });
+    });
+    await renderPage();
+    fireEvent.click(await link());
+    await waitFor(() =>
+      expect(writes()).toEqual([
+        { method: "PUT", path: `${SERVICES}/google_gmail-5`, body: undefined },
+      ]),
+    );
   });
 
   it("is offered only where a service of one's own can have its own account", async () => {
     await renderPage();
-    await rowAction("Add another account for Google Calendar");
+    await link();
     // GitHub accounts belong to each user, not to one agent.
-    await expectNoAction("Add another account for GitHub");
+    expect(
+      screen.queryByRole("button", { name: "Add another GitHub account" }),
+    ).toBeNull();
     cleanup();
     listing = [
       {
         ...agents[1],
         can_manage: true,
-        services: [{ ...calendar, is_shared: true }],
+        services: [{ ...gmail, is_shared: true }],
       },
     ];
     await renderPage();
     await screen.findByRole("region", { name: "Shared Dev" });
-    await expectNoAction("Add another account for Google Calendar");
+    expect(screen.queryByRole("button", { name: /^Add another / })).toBeNull();
   });
 
   it("is not offered where a shared service account serves the provider", async () => {
     const drive: EgressCredentialService = {
-      ...calendar,
+      ...gmail,
       name: "google_drive",
       display_name: "Google Drive",
       rules: [
         { host: "www.googleapis.com", port: null, path_prefix: "/drive/v3/" },
       ],
       oauth: {
-        ...calendar.oauth!,
+        ...gmail.oauth!,
         provider: "google_drive",
         display_name: "Google Drive",
         can_connect: false,
@@ -2781,10 +2960,14 @@ describe("adding another account", () => {
         service_account: true,
       },
     };
-    listing = [{ ...agents[0], services: [calendar, drive] }];
+    listing = [{ ...agents[0], services: [gmail, drive] }];
     await renderPage();
-    await rowAction("Add another account for Google Calendar");
-    await expectNoAction("Add another account for Google Drive");
+    await link();
+    expect(
+      screen.queryByRole("button", {
+        name: "Add another Google Drive account",
+      }),
+    ).toBeNull();
   });
 
   it("is not offered when the presets cannot be loaded, and the rows still show", async () => {
@@ -2797,8 +2980,8 @@ describe("adding another account", () => {
     });
     await renderPage();
     await waitFor(() => expect(failed).toBe(true));
-    for (const name of ["Google Calendar", "GitHub"])
+    for (const name of ["Gmail", "GitHub"])
       expect(await screen.findByRole("row", { name })).toBeVisible();
-    await expectNoAction(/^Add another account for /);
+    expect(screen.queryByRole("button", { name: /^Add another / })).toBeNull();
   });
 });

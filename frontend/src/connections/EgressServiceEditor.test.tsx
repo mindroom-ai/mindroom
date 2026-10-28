@@ -1778,7 +1778,7 @@ describe("the name of a new service", () => {
     expect(name()).toHaveValue("mine");
     cleanup();
 
-    // Another account of a row's preset, from Add another account.
+    // A new service that starts from another, with an account of its own.
     await renderEditor({
       service: { preset: "google_calendar", oauth_separate_account: true },
       takenNames: ["google_calendar"],
@@ -3276,7 +3276,7 @@ describe("the display name of a new service", () => {
     expect(over.onSave).not.toHaveBeenCalled();
   });
 
-  it("is the host for a new service that starts from another too, such as another account", async () => {
+  it("is the host for a new service that starts from another too", async () => {
     const { onSave } = await renderEditor({
       service: { preset: "google_calendar", oauth_separate_account: true },
     });

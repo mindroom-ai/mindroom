@@ -48,8 +48,12 @@ export interface ServiceEditing {
   onLimitToRepositories?: (service: EgressCredentialService) => void;
   /** Turns Limit to repositories and Add another account off while the editor is open. */
   limitDisabled?: boolean;
-  /** Add another account on a row: opens Add service for another account of its provider; null where none can be added. */
+  /** Add another account on a row: adds a service with another account of its provider; null where none can be added. */
   addAccount?: (service: EgressCredentialService) => (() => void) | null;
+  /** A service just saved with an account of its own: its row asks to sign in to it once the listing shows it. */
+  signInNext?: string | null;
+  /** Called once that row has asked, so it asks only once. */
+  onSignInOpened?: () => void;
 }
 
 /** Whether a service or limit gets its edit actions: it has the `editableSource` and the viewer manages it. */
