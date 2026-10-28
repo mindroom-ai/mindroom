@@ -418,7 +418,6 @@ def _after_response_service(
     config = _config(tmp_path)
     hook_context = HookContextSupport(
         runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
-        logger=get_logger("tests"),
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(HookRegistry.from_plugins(plugins or [])),

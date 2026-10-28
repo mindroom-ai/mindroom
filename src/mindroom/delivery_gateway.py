@@ -70,6 +70,7 @@ from mindroom.hooks import (
     emit_final_response_transform,
     emit_transform,
 )
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -160,6 +161,8 @@ if TYPE_CHECKING:
     from mindroom.streaming import CancelSource, ProgressPublisher, StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
+
+logger = get_logger(__name__)
 
 _BEFORE_RESPONSE_HOOK_FAILURE_TEXT = "Response failed. Please retry."
 _PLACEHOLDER_DELIVERY_FAILURE_REASONS = frozenset(
@@ -447,7 +450,11 @@ class ResponseHookService:
                         context=Context(),
                     )
             except Exception:
-                self.hook_context.logger.exception("Reply mirror failed", correlation_id=identity.correlation_id)
+                logger.exception(
+                    "Reply mirror failed",
+                    agent=self.hook_context.agent_name,
+                    correlation_id=identity.correlation_id,
+                )
         if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_AFTER_RESPONSE):
             return
         context = AfterResponseContext(
