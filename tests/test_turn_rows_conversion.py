@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom.event_journal import (
+    ApprovalFailure,
     DeliveryStage,
     EventJournalStore,
     turn_rows,
@@ -30,8 +31,12 @@ from mindroom.event_journal.legacy_turn_rows import (
     legacy_summary_sources,
     upgrade_turn_records_to_rows,
 )
+from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import PreparedVoiceSource, SourceVisibleEcho, TurnRecord
+from tests import test_event_journal_store as journal_tests
 from tests.conftest import postgres_journal_schema_url
+from tests.reply_span_helpers import paused_for_approval
 from tests.test_event_journal_store import admit
 from tests.turn_state_oracle.adapter import AGENT, PRINCIPAL, ROOMS, TARGETS, record_json
 from tests.turn_state_oracle.legacy import FIXTURES
@@ -751,6 +756,58 @@ async def test_journal_tombstones_apply_to_every_login_of_their_agent(journal: J
     found = await read(reopened, turn_rows.get_turn_record, "$m")
     assert found.source_event_prompts is None
     assert await read(reopened, turn_rows.redacted_events, ROOM, ["$m"]) == {"$m"}
+
+
+@pytest.mark.parametrize("recorded_in", ["tombstones", "turn_record"])
+async def test_a_deleted_original_ends_the_paused_reply_to_its_relay(journal: Journal, recorded_in: str) -> None:
+    """Deleting the messages a router relayed, before the upgrade, ends the reply an approval holds for the relays."""
+    store = await journal.legacy()
+    principal = store.principal(PRINCIPAL)
+    relays = ("$relay-1", "$relay-2")
+    for relay in relays:
+        await admit(principal, relay, room_id=ROOM)
+    waiting = journal_tests.TestApprovalContinuations.continuation(state="waiting")
+    waiting = replace(
+        waiting,
+        room_id=ROOM,
+        sources=ResponseSources(relays, relays),
+        execution_identity=replace(waiting.execution_identity, room_id=ROOM),
+    )
+    assert await paused_for_approval(principal, waiting)
+    relayed = {relay: {"sender": "@alice:example.org", "discovery_event_id": f"$human-{relay[-1]}"} for relay in relays}
+    await seed_rows(
+        store,
+        every_index(
+            blob(
+                list(relays),
+                completed=False,
+                discovery_event_ids=["$human-1", "$human-2"],
+                source_event_metadata=relayed,
+                redacted_source_event_ids=["$human-1", "$human-2"] if recorded_in == "turn_record" else [],
+            ),
+        ),
+    )
+
+    def tombstone(transaction: Transaction) -> None:
+        for human in ("$human-1", "$human-2"):
+            transaction.execute(
+                "INSERT INTO redaction_tombstones (principal_id, room_id, redacted_event_id) VALUES (?, ?, ?)",
+                (PRINCIPAL, ROOM, human),
+            )
+
+    if recorded_in == "tombstones":
+        await store.backend.write(tombstone)
+    await store.close()
+    journal.opened.remove(store)
+
+    upgraded = journal.upgraded().principal(PRINCIPAL)
+    reply = await upgraded.replies.for_sources(("$relay-1",))
+    assert reply is not None
+    assert reply.state is ReplyState.GONE
+    failing = await upgraded.approvals.approval_continuation(waiting.approval_id)
+    assert failing is not None
+    assert failing.state == "failing"
+    assert failing.failure == ApprovalFailure(ApprovalFailureKind.USER_STOP)
 
 
 async def test_a_failed_conversion_rolls_back_and_the_next_open_converts(journal: Journal) -> None:

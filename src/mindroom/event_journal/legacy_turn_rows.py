@@ -270,7 +270,9 @@ def upgrade_turn_records_to_rows(transaction: Transaction, inspector: SchemaInsp
     The whole current schema runs first: a redaction's effects read
     membership, reply, and continuation tables that a database from an
     earlier release gains only from those statements, and running them twice
-    changes nothing.
+    changes nothing. Each redaction is recorded before the turns are written,
+    so their payload drops what it deleted, and applied after, so its deletion
+    reaches the reply to a relay of the deleted message through the relay's turn.
     """
     existing_tables = inspector.tables()
     if "turn_records" not in existing_tables and "redaction_tombstones" not in existing_tables:
@@ -278,8 +280,7 @@ def upgrade_turn_records_to_rows(transaction: Transaction, inspector: SchemaInsp
     outbox_columns = inspector.columns("matrix_delivery_outbox")
     for statement in schema_statements(inspector.dialect):
         transaction.execute(statement)
-    if "redaction_tombstones" in existing_tables:
-        _copy_redaction_tombstones(transaction)
+    tombstones = _record_redaction_tombstones(transaction) if "redaction_tombstones" in existing_tables else ()
     if "turn_records" in existing_tables:
         deliveries = _outstanding_final_deliveries(transaction) if outbox_columns else {}
         agents = transaction.fetchall("SELECT agent_name FROM turn_records ORDER BY agent_name/*bytes*/")
@@ -301,6 +302,8 @@ def upgrade_turn_records_to_rows(transaction: Transaction, inspector: SchemaInsp
                 final_deliveries=deliveries.get(agent_name, {}),
             )
             logger.info("turn_records_converted", agent=agent_name, row_count=len(entries), turn_count=converted)
+    for agent_name, room_id, event_id in tombstones:
+        _apply_redaction(transaction, agent_name, room_id, event_id)
     transaction.execute("DROP TABLE IF EXISTS turn_records")
     transaction.execute("DROP TABLE IF EXISTS redaction_tombstones")
 
@@ -310,19 +313,25 @@ def upgrade_turn_records_to_rows(transaction: Transaction, inspector: SchemaInsp
 # deleted when that login left the room.
 # Last legacy release: v2026.10.657 (the table arrived in v2026.8.31); replacement: the next release records each
 # redaction once per agent in event_redactions and keeps it when the bot leaves.
-# Handling: every row becomes (agent of its principal, room, event) and applies the redaction to every login of that
-# agent, as a live redaction does; the table is dropped.
-# Coverage: tests/test_turn_rows_conversion.py::test_journal_tombstones_apply_to_every_login_of_their_agent.
-def _copy_redaction_tombstones(transaction: Transaction) -> None:
+# Handling: every row becomes (agent of its principal, room, event) and, once the agent's turns are converted, applies
+# the redaction to every login of that agent, as a live redaction does; the table is dropped.
+# Coverage: tests/test_turn_rows_conversion.py::test_journal_tombstones_apply_to_every_login_of_their_agent,
+# tests/test_turn_rows_conversion.py::test_a_deleted_original_ends_the_paused_reply_to_its_relay.
+def _record_redaction_tombstones(transaction: Transaction) -> tuple[tuple[str, str, str], ...]:
+    """Record each tombstone's redaction for its agent, returning (agent, room, event) for each to apply."""
+    redactions: list[tuple[str, str, str]] = []
     for row in transaction.fetchall(
         "SELECT principal_id, room_id, redacted_event_id FROM redaction_tombstones "
         "ORDER BY principal_id/*bytes*/, room_id/*bytes*/, redacted_event_id/*bytes*/",
     ):
         if agent_name := turn_rows.agent_of_principal(str(row["principal_id"])):
-            _redact(transaction, agent_name, str(row["room_id"]), str(row["redacted_event_id"]))
+            room_id, event_id = str(row["room_id"]), str(row["redacted_event_id"])
+            turn_rows.record_redaction(transaction, agent_name, room_id=room_id, event_id=event_id)
+            redactions.append((agent_name, room_id, event_id))
+    return tuple(redactions)
 
 
-def _redact(transaction: Transaction, agent_name: str, room_id: str, event_id: str) -> None:
+def _apply_redaction(transaction: Transaction, agent_name: str, room_id: str, event_id: str) -> None:
     # No redaction event is admitted here, so no receipt order exists; hydration installs use 0 the same way.
     journal.redact_for_agent(transaction, agent_name, room_id=room_id, event_id=event_id, receipt_order=0)
 
@@ -359,12 +368,12 @@ def _convert(
     occupied: frozenset[str],
     final_deliveries: Mapping[str, str],
 ) -> int:
-    """Write the turns these blob groups own, after taking their redactions; return how many turns were written.
+    """Write the turns these blob groups own between recording and applying their redactions; return the count written.
 
     ``occupied`` names events the row store already indexes, which keep their
     owner. ``final_deliveries`` maps an outstanding non-AI FINAL delivery to its room.
     """
-    _extract_redactions(transaction, agent_name, groups)
+    redactions = _extract_redactions(transaction, agent_name, groups)
     owned, evidence = _owned_members(groups, occupied)
     rooms = _admitted_rooms(
         transaction,
@@ -399,6 +408,8 @@ def _convert(
     for record, updated_at in evidence:
         turn_rows.insert_turn(transaction, agent_name, record, room_id=None, updated_at=updated_at or time.time())
         written += 1
+    for room_id, event_id in redactions:
+        _apply_redaction(transaction, agent_name, room_id, event_id)
     return written
 
 
@@ -409,13 +420,17 @@ def _convert(
 # Last legacy release: v2026.10.657 (since v2026.7.197 and v2026.9.43); replacement: the next release keeps
 # redactions only in event_redactions.
 # Handling: from every blob, including ones the row ownership below discards, each redaction of a record that has a
-# conversation_target is applied in that conversation's room, and a revision such a record selected or consumed is
-# redacted there when the standalone record tombstones it, as the warm-up joined it. Redactions of records without a
+# conversation_target is recorded in that conversation's room before the agent's turns are written and applied after
+# them, and a revision such a record selected or consumed is redacted there when the standalone record tombstones it,
+# as the warm-up joined it. Redactions of records without a
 # conversation_target are dropped: they cannot be told apart from the room-less tombstones of v2026.10.30 and earlier
 # that wedge another room's thread (#2544), and the legitimate ones already age out within 30 days.
-# Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables.
-def _extract_redactions(transaction: Transaction, agent_name: str, groups: Sequence[_Group]) -> None:
+# Coverage: tests/test_turn_rows_conversion.py::test_every_oracle_legacy_input_converts_to_its_recorded_observables,
+# tests/test_turn_rows_conversion.py::test_a_deleted_original_ends_the_paused_reply_to_its_relay.
+def _extract_redactions(transaction: Transaction, agent_name: str, groups: Sequence[_Group]) -> list[tuple[str, str]]:
+    """Record the redactions these blobs hold for their agent, returning (room, event) for each to apply."""
     tombstoned = {index for group in groups for index in group.rows if _tombstones(group.decoded, index)}
+    redactions: list[tuple[str, str]] = []
     for group in groups:
         record = group.record
         if record.conversation_target is None:
@@ -429,8 +444,10 @@ def _extract_redactions(transaction: Transaction, agent_name: str, groups: Seque
             *(tombstoned & {*replay, *selected}),
         }
         for event_id in sorted(redacted):
-            _redact(transaction, agent_name, room_id, event_id)
+            turn_rows.record_redaction(transaction, agent_name, room_id=room_id, event_id=event_id)
+            redactions.append((room_id, event_id))
         _record_summary_provenance(transaction, agent_name, room_id, group.decoded)
+    return redactions
 
 
 def _tombstones(decoded: _Decoded, index_event_id: str) -> bool:
