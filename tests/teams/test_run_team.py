@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -874,8 +875,32 @@ async def test_a_member_that_cannot_be_built_fails_its_delegation_and_the_leader
     assert [(message.role, message.content) for message in failed.messages] == [("user", "Check 5.")]
 
 
+async def test_runs_that_start_together_wait_for_one_build_of_their_member() -> None:
+    """The first run builds the member off the event loop, and a run that starts meanwhile waits for that build."""
+    writer = squad(scripted("leader-model"), scripted("writer-model"), scripted("checker-model")).members[0]
+    release = threading.Event()
+    builds: list[str] = []
+
+    def build() -> MemberBuild:
+        builds.append(writer.id)
+        release.wait(timeout=10)
+        return writer.build()
+
+    member = TeamMember(id=writer.id, name=writer.name, role=writer.role, build=build)
+    first = asyncio.ensure_future(member.ensure_built())
+    second = asyncio.ensure_future(member.ensure_built())
+    # Both runs reach the member before its build ends.
+    await asyncio.sleep(0)
+    release.set()
+    built = await first
+
+    assert await second is built
+    assert member.built is built
+    assert builds == ["writer"]
+
+
 async def test_a_member_is_built_once_on_its_first_delegation_and_an_idle_member_never() -> None:
-    """Two first delegations in one batch share one build, a later one reuses it, and an idle member builds nothing."""
+    """A member's first delegations build it once, a later one reuses the build, and an idle member builds nothing."""
     leader = scripted(
         "leader-model",
         calls(

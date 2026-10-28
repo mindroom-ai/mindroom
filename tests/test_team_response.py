@@ -29,6 +29,12 @@ from mindroom.history.interrupted_replay import _render_interrupted_replay_conte
 from mindroom.history.session_context import load_bound_scope_session
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.hooks import EnrichmentItem
+from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.utils import (
+    KnowledgeAvailabilityDetail,
+    _KnowledgeResolution,
+    format_knowledge_availability_notice,
+)
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message, system_text
@@ -272,6 +278,32 @@ async def test_a_team_builds_only_the_members_its_leader_delegates_to(
     assert text.endswith("Done.")
     leader_prompt = str(_leader(team).requests[0].messages[0].content)
     assert '<member id="research" name="ResearchAgent">\n  Role: Researches.\n</member>' in leader_prompt
+
+
+@pytest.mark.asyncio
+async def test_the_leader_is_told_which_member_knowledge_is_unavailable_before_any_member_builds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The members' knowledge resolves as the turn starts, so the leader's request carries its availability notice."""
+    team = _team(tmp_path, monkeypatch, leader=[answer("Team response")])
+    unavailable = {
+        "docs": KnowledgeAvailabilityDetail(availability=KnowledgeAvailability.INITIALIZING, search_available=False),
+    }
+
+    with (
+        patch(
+            "mindroom.teams.members.resolve_agent_knowledge_access",
+            return_value=_KnowledgeResolution(knowledge=None, unavailable=unavailable),
+        ),
+        patch("mindroom.teams.members.create_agent") as build,
+    ):
+        await team.respond()
+
+    build.assert_not_called()
+    notice = format_knowledge_availability_notice(unavailable)
+    assert notice is not None
+    assert any(notice in str(message.content) for message in _leader(team).requests[0].messages)
 
 
 @pytest.mark.asyncio
