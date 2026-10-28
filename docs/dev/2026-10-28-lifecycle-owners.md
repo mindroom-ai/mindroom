@@ -36,6 +36,6 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - A file edit made while another reload applies, or a second file edit made while an MCP catalog restart drains responses, reaches the dashboard only after that step; a dashboard save in that window overwrites it.
   The drain lasts at most 600 seconds, but an apply that creates Matrix accounts waits for an unreachable homeserver for as long as it is down.
   Closing it would need a loader beside the reload loop, a second owner of each load, and loading plugin modules concurrently with plugin staging.
-- A removal whose reply is still running after the drain and its cancellation fails the whole reload before publication, and that entity stays in its rooms and stops answering until its Matrix sync restarts.
+- A removal whose reply is still running after the drain and its cancellation fails the whole reload before publication, and that entity stays in its rooms and keeps answering.
   The next config change first restores the last fully applied config, which rebuilds that entity, may replay the reply, and returns the entities whose removal succeeded to their rooms; it then removes each of these entities that the new config still omits.
   Removal runs before publication so the departing entity settles its approvals while the current router still delivers notices.
