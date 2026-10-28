@@ -71,7 +71,6 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "no_proxy",
     },
 )
-_NO_CALL_ENVIRONMENT = ToolEnvironment()
 _SHELL_ARGS_ERROR = (
     '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
 )
@@ -166,7 +165,7 @@ def _workspace_home_contract_env_from_process_env(base_process_env: dict[str, st
 def _shell_subprocess_env(
     runtime_env: dict[str, str],
     *,
-    call_environment: ToolEnvironment = _NO_CALL_ENVIRONMENT,
+    call_environment: ToolEnvironment,
     base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
     workspace_dir: Path | None = None,
