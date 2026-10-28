@@ -196,6 +196,7 @@ from tests.response_runner_helpers import (
     streamed_answer,
 )
 from tests.scripted_agent_helpers import stored_runs
+from tests.streaming_helpers import FakeReplyRecords
 from tests.test_agent_tool_calls import _catalog
 from tests.test_response_attempt import _Span
 from tests.test_response_turn import (
@@ -6728,10 +6729,12 @@ async def test_terminal_send_cancellation_leaves_the_ending_to_the_span_exit(tmp
     """
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     target = _target(thread_id="$thread")
+    records = FakeReplyRecords(edit=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")))
     streaming = StreamingResponse(
         target=target,
         config=coordinator.deps.runtime.config,
         runtime_paths=coordinator.deps.runtime_paths,
+        **records.hooks(),
     )
     streaming.event_id = "$response"
     streaming.accumulated_text = "partial answer"
@@ -6742,14 +6745,9 @@ async def test_terminal_send_cancellation_leaves_the_ending_to_the_span_exit(tmp
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=delivered)):
         assert await streaming._send_or_edit_message(coordinator._client(), is_final=False)
 
-    with (
-        patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(side_effect=asyncio.CancelledError("sync_restart")),
-        ),
-        pytest.raises(asyncio.CancelledError, match="sync_restart"),
-    ):
+    with pytest.raises(asyncio.CancelledError, match="sync_restart"):
         await streaming.finalize(coordinator._client())
+    assert [write.kind for write in records.writes] == ["progress", "progress_delivered", "terminal"]
 
 
 @pytest.mark.asyncio

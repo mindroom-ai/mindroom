@@ -27,7 +27,7 @@ from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.legacy_streaming import has_legacy_terminal_suffix, strip_legacy_terminal_suffixes
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
+from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import markdown_to_html
@@ -79,6 +79,7 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
+    "ProgressDelivered",
     "ProgressPermission",
     "ProgressPublisher",
     "ProgressState",
@@ -490,7 +491,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
 
 @dataclass(frozen=True, slots=True)
 class ProgressState:
-    """What one direct progress edit of a durable reply shows."""
+    """What one direct progress edit of a reply shows."""
 
     text: str
     tool_trace: tuple[ToolTraceEntry, ...]
@@ -510,6 +511,8 @@ class ProgressPermission(Enum):
 
 
 type ProgressWriteAhead = Callable[[ProgressState], Awaitable[ProgressPermission]]
+# Reports the progress edit that landed on the reply's event.
+type ProgressDelivered = Callable[[ProgressState, str], None]
 type TerminalEdit = Callable[..., Awaitable[DeliveredMatrixEvent | None]]
 # The same contract for a stream whose answer is its first visible event: no
 # placeholder was sent, so the terminal update is a send rather than an edit.
@@ -557,22 +560,19 @@ class StreamingResponse:
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
-    # How the terminal edit reaches Matrix, when the caller wants it durable.
-    # A streamed answer becomes visible through edits, so the last one is the
-    # delivery whose loss leaves a user reading a half-finished reply. The
-    # caller supplies a sender that records the edit before attempting it;
-    # every earlier edit is transport and goes out directly.
-    terminal_edit: TerminalEdit | None = None
-    terminal_send: TerminalSend | None = None
-    # Set when the stream writes a durable reply: the first visible create and
-    # every terminal update (an answer, a cancellation, or an error) are
-    # durable rows, and each direct progress edit is recorded before it is
-    # sent. ``progress_write_ahead`` defers an edit the reply's records hold
-    # back, and refuses one they reject, which fails the stream like a
-    # refused edit.
+    # The stream writes its reply through the reply's records. Each direct
+    # progress edit is recorded before it is sent: ``progress_write_ahead``
+    # defers an edit the records hold back, and refuses one they reject, which
+    # fails the stream like a refused edit; ``progress_delivered`` reports the
+    # edit that landed.
+    progress_write_ahead: ProgressWriteAhead = field(kw_only=True)
+    progress_delivered: ProgressDelivered = field(kw_only=True)
+    # The first visible create and the terminal update are the reply's rows.
+    # A progress-only stream edits an existing reply whose terminal update its
+    # caller owns, so it has none of these.
     initial_send: TerminalSend | None = None
-    progress_write_ahead: ProgressWriteAhead | None = None
-    progress_delivered: Callable[[ProgressState, str], None] | None = None
+    terminal_send: TerminalSend | None = None
+    terminal_edit: TerminalEdit | None = None
     # A caller may still be deciding whether this turn should become visible.
     # Terminal cleanup can finish an owned event, but must not invent a reply.
     allow_new_terminal_message: Callable[[], bool] | None = None
@@ -635,11 +635,6 @@ class StreamingResponse:
             self._last_delivered_tool_trace = list(self.resumed_tool_trace)
             self._last_committed_rendered_body = self.resumed_text.rstrip()
             self._last_committed_visible_body_state = "visible_body"
-
-    @property
-    def durable_reply(self) -> bool:
-        """Return whether this stream writes a durable reply record."""
-        return self.progress_write_ahead is not None
 
     def _update(self, new_chunk: str) -> None:
         """Append new chunk to accumulated text."""
@@ -936,12 +931,10 @@ class StreamingResponse:
         if prepared_delivery is None:
             return True
 
-        durable_terminal = is_final and (stream_status == STREAM_STATUS_COMPLETED or self.durable_reply)
         return await self._send_prepared_delivery(
             client,
             prepared_delivery=prepared_delivery,
             is_final=is_final,
-            durable_terminal=durable_terminal,
             boundary_refresh=boundary_refresh,
             force_nonterminal_delivery=force_nonterminal_delivery,
             capture_completions=capture_completions,
@@ -954,7 +947,6 @@ class StreamingResponse:
         *,
         prepared_delivery: _PreparedStreamingDelivery,
         is_final: bool,
-        durable_terminal: bool = False,
         boundary_refresh: bool = False,
         force_nonterminal_delivery: bool = False,
         capture_completions: tuple[asyncio.Future[None], ...] = (),
@@ -970,7 +962,7 @@ class StreamingResponse:
         ):
             _complete_capture_completions(capture_completions)
             return True
-        if not durable_terminal and not await self._direct_transport_allowed():
+        if not is_final and not await self._direct_transport_allowed():
             # Nothing owed and nothing failed. The room this stream is writing
             # into is not one this bot is in any more, so there is no delivery
             # left to make and no failure to report about not making it --
@@ -1002,8 +994,8 @@ class StreamingResponse:
                 content=prepared_delivery.content,
                 display_text=prepared_delivery.display_text,
                 retry_on_failure=retry_on_failure,
-                is_final=durable_terminal,
-                progress=_progress_state(prepared_delivery.committed_state) if self.durable_reply else None,
+                is_final=is_final,
+                progress=_progress_state(prepared_delivery.committed_state),
             )
         finally:
             if self._inflight_nonterminal_capture is capture:
@@ -1018,7 +1010,7 @@ class StreamingResponse:
 
         self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
         if not is_final:
-            if not is_initial_send and self.progress_delivered is not None and self.event_id is not None:
+            if not is_initial_send and self.event_id is not None:
                 self.progress_delivered(_progress_state(prepared_delivery.committed_state), self.event_id)
             self._warmup_state.note_nonterminal_delivery(
                 had_warmup_suffix=prepared_delivery.had_warmup_suffix,
@@ -1038,8 +1030,6 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...],
     ) -> bool:
         """Ask the reply's records about one progress edit: ``False`` defers it, and a refusal fails the stream."""
-        if self.progress_write_ahead is None:
-            return True
         permission = await self.progress_write_ahead(_progress_state(prepared_delivery.committed_state))
         if permission is ProgressPermission.SEND:
             return True
@@ -1226,8 +1216,8 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        is_final: bool = False,
-        progress: ProgressState | None = None,
+        is_final: bool,
+        progress: ProgressState,
     ) -> bool:
         """Send the initial streaming event.
 
@@ -1236,22 +1226,9 @@ class StreamingResponse:
         stream's first visible event, and it has to become durable here or it
         never does.
         """
-        durable_progress = {} if progress is None else {"progress": progress}
         send = self.terminal_send if is_final else self.initial_send
-        if send is not None:
-            delivered = await send(
-                client,
-                self.room_id,
-                content,
-                display_text,
-                **durable_progress,
-            )
-        else:
-            delivered = await send_message_result(
-                client,
-                self.room_id,
-                content,
-            )
+        assert send is not None, "only a stream that owns its reply's create and terminal update sends a new event"
+        delivered = await send(client, self.room_id, content, display_text, progress=progress)
         if delivered is None:
             return False
         self.event_id = delivered.event_id
@@ -1266,20 +1243,20 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
-        is_final: bool = False,
-        progress: ProgressState | None = None,
+        is_final: bool,
+        progress: ProgressState,
     ) -> bool:
         """Send one streaming edit event for the existing message."""
         assert self.event_id is not None
-        if is_final and self.terminal_edit is not None:
-            durable_progress = {} if progress is None else {"progress": progress}
+        if is_final:
+            assert self.terminal_edit is not None, "only a stream that owns its reply's terminal update finalizes it"
             delivered = await self.terminal_edit(
                 client,
                 self.room_id,
                 self.event_id,
                 content,
                 display_text,
-                **durable_progress,
+                progress=progress,
             )
         else:
             delivered = await edit_message_result(
@@ -1310,15 +1287,14 @@ class StreamingResponse:
         *,
         content: dict[str, Any],
         display_text: str,
+        is_final: bool,
+        progress: ProgressState,
         retry_on_failure: bool = False,
-        is_final: bool = False,
-        progress: ProgressState | None = None,
     ) -> bool:
         """Send a new event or edit the existing one.
 
-        ``is_final`` selects the terminal delivery callbacks: the turn's answer,
-        and for a durable reply also its cancelled or error notice. A cancelled
-        or failed stream of any other kind ends with a direct edit.
+        ``is_final`` selects the terminal update, the turn's answer; every
+        other edit is a direct progress edit.
         """
         total_attempts = 2 if retry_on_failure else 1
         for attempt in range(1, total_attempts + 1):
@@ -1997,6 +1973,11 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     runtime_paths: RuntimePaths,
     response_stream: AsyncIterator[StreamInputChunk],
     *,
+    initial_send: TerminalSend,
+    terminal_send: TerminalSend,
+    terminal_edit: TerminalEdit,
+    progress_write_ahead: ProgressWriteAhead,
+    progress_delivered: ProgressDelivered,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
     existing_event_id: str | None = None,
     adopt_existing_placeholder: bool = False,
@@ -2007,17 +1988,12 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     visible_event_id_callback: Callable[[str], None] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     latest_thread_event_id: str | None = None,
-    terminal_edit: TerminalEdit | None = None,
-    terminal_send: TerminalSend | None = None,
     final_text_transform: FinalTextTransform | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
     interactive_creator_agent: str | None = None,
     interactive_source_event_id: str | None = None,
     allow_new_terminal_message: Callable[[], bool] | None = None,
     resumed: UnfinishedStreamedReply | None = None,
-    initial_send: TerminalSend | None = None,
-    progress_write_ahead: ProgressWriteAhead | None = None,
-    progress_delivered: Callable[[ProgressState, str], None] | None = None,
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome.
@@ -2268,11 +2244,11 @@ async def stream_progress_edits(
     *,
     event_id: str,
     show_tool_calls: bool,
+    progress_write_ahead: ProgressWriteAhead,
+    progress_delivered: ProgressDelivered,
     extra_content: dict[str, Any] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
-    progress_write_ahead: ProgressWriteAhead | None = None,
-    progress_delivered: Callable[[ProgressState, str], None] | None = None,
 ) -> AsyncIterator[ProgressPublisher]:
     """Stream progress into one existing reply whose terminal update belongs to the caller.
 

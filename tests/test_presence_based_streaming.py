@@ -308,14 +308,6 @@ class TestBotIntegration:
         install_runtime_journal_support(bot)
         expected_config = config
 
-        async def mock_send_message_result(
-            _client: object,
-            _room_id: str,
-            content: dict,
-        ) -> object:
-            assert config is expected_config
-            return delivered_matrix_event("$stream", content)
-
         async def mock_edit_message_result(
             _client: object,
             _room_id: str,
@@ -328,7 +320,6 @@ class TestBotIntegration:
 
         # Simulate a message from a user
         with (
-            patch("mindroom.streaming.send_message_result", side_effect=mock_send_message_result),
             patch("mindroom.streaming.edit_message_result", side_effect=mock_edit_message_result),
             patch.object(
                 DeliveryGateway,

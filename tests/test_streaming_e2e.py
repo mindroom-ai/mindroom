@@ -35,6 +35,7 @@ from tests.conftest import (
     orchestrator_runtime_paths,
     runtime_paths_for,
 )
+from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
@@ -160,10 +161,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         await asyncio.sleep(0.02)
         yield "x" * 300
 
-    with (
-        patch("mindroom.streaming.send_message_result", new=AsyncMock(side_effect=record_send)),
-        patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-    ):
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
         await send_streaming_response(
             client=client,
             target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
@@ -172,6 +170,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
             response_stream=stream(),
             show_tool_calls=False,
             streaming_cls=FastProgressStreamingResponse,
+            **FakeReplyRecords(send=record_send, edit=record_edit).hooks(),
         )
 
     assert len(deliveries) == 6

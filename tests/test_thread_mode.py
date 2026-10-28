@@ -62,6 +62,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.streaming_helpers import FakeReplyRecords
 from tests.threading_helpers import seed_thread_history
 
 
@@ -153,6 +154,7 @@ def _streaming_response(
     thread_id: str | None,
     room_mode: bool = False,
     latest_thread_event_id: str | None = None,
+    records: FakeReplyRecords | None = None,
 ) -> StreamingResponse:
     """Construct a streaming response with the explicit runtime bound to the test config."""
     return StreamingResponse(
@@ -160,6 +162,7 @@ def _streaming_response(
         config=config,
         runtime_paths=runtime_paths_for(config),
         latest_thread_event_id=latest_thread_event_id,
+        **(records if records is not None else FakeReplyRecords()).hooks(),
     )
 
 
@@ -1239,6 +1242,12 @@ class TestStreamingResponseRoomMode:
     @pytest.mark.asyncio
     async def test_room_mode_keeps_plain_reply_relation(self, streaming_config: Config) -> None:
         """In room mode, _send_or_edit_message should emit a plain reply relation only."""
+        captured: dict = {}
+
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
+            captured.update(content)
+            return delivered_matrix_event("$sent", content)
+
         sr = _streaming_response(
             streaming_config,
             room_id="!room:localhost",
@@ -1246,24 +1255,24 @@ class TestStreamingResponseRoomMode:
             thread_id="$thread123",
             room_mode=True,
             latest_thread_event_id="$latest",
+            records=FakeReplyRecords(send=mock_send),
         )
         sr.accumulated_text = "Hello!"
 
-        captured: dict = {}
-
-        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
-            captured.update(content)
-            return delivered_matrix_event("$sent", content)
-
         client = AsyncMock()
-        with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
-            await sr._send_or_edit_message(client, is_final=True)
+        await sr._send_or_edit_message(client, is_final=True)
 
         assert captured["m.relates_to"] == {"m.in_reply_to": {"event_id": "$event123"}}
 
     @pytest.mark.asyncio
     async def test_thread_mode_has_relations(self, streaming_config: Config) -> None:
         """In default thread mode, _send_or_edit_message should emit m.relates_to."""
+        captured: dict = {}
+
+        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
+            captured.update(content)
+            return delivered_matrix_event("$sent", content)
+
         sr = _streaming_response(
             streaming_config,
             room_id="!room:localhost",
@@ -1271,18 +1280,12 @@ class TestStreamingResponseRoomMode:
             thread_id="$thread123",
             room_mode=False,
             latest_thread_event_id="$latest",
+            records=FakeReplyRecords(send=mock_send),
         )
         sr.accumulated_text = "Hello!"
 
-        captured: dict = {}
-
-        async def mock_send(_client: object, _room_id: str, content: dict, **_kwargs: object) -> object:
-            captured.update(content)
-            return delivered_matrix_event("$sent", content)
-
         client = AsyncMock()
-        with patch("mindroom.streaming.send_message_result", side_effect=mock_send):
-            await sr._send_or_edit_message(client, is_final=True)
+        await sr._send_or_edit_message(client, is_final=True)
 
         assert "m.relates_to" in captured
         assert captured["m.relates_to"]["rel_type"] == "m.thread"
@@ -1326,16 +1329,14 @@ class TestSendStreamingResponseRoomMode:
             captured.update(content)
             return delivered_matrix_event("$edit", content)
 
-        with (
-            patch("mindroom.streaming.send_message_result", side_effect=mock_send),
-            patch("mindroom.streaming.edit_message_result", side_effect=mock_edit),
-        ):
+        with patch("mindroom.streaming.edit_message_result", side_effect=mock_edit):
             await send_streaming_response(
                 client,
                 MessageTarget.resolve("!room:localhost", "$thread123", "$event123", room_mode=True),
                 config,
                 runtime_paths_for(config),
                 empty_stream(),
+                **FakeReplyRecords(send=mock_send, edit=mock_edit).hooks(),
             )
 
         assert captured["m.relates_to"] == {

@@ -36,6 +36,7 @@ from mindroom.streaming import (
 )
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, StructuredStreamChunk, ToolTraceEntry
 from tests.conftest import push_stream_chunk
+from tests.streaming_helpers import reply_hooks
 
 
 class MockClient:
@@ -257,6 +258,7 @@ async def test_streaming_initial_message_under_limit() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Small initial content
@@ -279,6 +281,7 @@ async def test_streaming_initial_message_over_limit() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Large initial content (60KB - over normal limit)
@@ -306,6 +309,7 @@ async def test_streaming_edit_grows_over_limit() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Start with small message
@@ -358,6 +362,7 @@ async def test_streaming_multiple_edits_with_growth(monkeypatch: pytest.MonkeyPa
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Simulate progressive growth
@@ -410,6 +415,7 @@ async def test_streaming_with_thread_context() -> None:
         target=MessageTarget.resolve("!test:room", "$thread_root", "$reply_to"),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Large message
@@ -561,6 +567,7 @@ async def test_streaming_finalize() -> None:
         target=MessageTarget.resolve("!test:room", None, None),
         config=config,
         runtime_paths=_runtime_paths(),
+        **reply_hooks(),
     )
 
     # Large content
@@ -595,6 +602,7 @@ async def test_structured_stream_chunk_adds_tool_trace_metadata() -> None:
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -625,6 +633,7 @@ async def test_streaming_with_extra_content_metadata() -> None:
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
         extra_content=extra_content,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -656,6 +665,7 @@ async def test_structured_stream_chunk_does_not_drop_trace_on_stale_snapshot() -
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -686,6 +696,7 @@ async def test_replacement_streaming_preserves_text_on_tool_completion() -> None
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id
@@ -716,6 +727,7 @@ async def test_replacement_streaming_tool_start_preserves_prior_visible_text() -
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
     accumulated = outcome.canonical_final_body_candidate or outcome.rendered_body or ""
 
@@ -751,6 +763,7 @@ async def test_replacement_streaming_preserves_visible_tool_marker_across_snapsh
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         streaming_cls=ReplacementStreamingResponse,
+        **reply_hooks(),
     )
     accumulated = outcome.canonical_final_body_candidate or outcome.rendered_body or ""
 
@@ -787,6 +800,7 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
         runtime_paths=_runtime_paths(),
         response_stream=stream(),
         show_tool_calls=False,
+        **reply_hooks(),
     )
 
     event_id = outcome.last_physical_stream_event_id

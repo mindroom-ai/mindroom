@@ -52,6 +52,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.reply_span_helpers import reply_span
+from tests.streaming_helpers import FakeReplyRecords
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -100,11 +101,12 @@ async def _empty_stream() -> AsyncIterator[str]:
         yield ""
 
 
-def _streaming_response(config: Config) -> StreamingResponse:
+def _streaming_response(config: Config, records: FakeReplyRecords | None = None) -> StreamingResponse:
     return StreamingResponse(
         target=MessageTarget.resolve("!room:localhost", None, "$reply"),
         config=config,
         runtime_paths=runtime_paths_for(config),
+        **(records if records is not None else FakeReplyRecords()).hooks(),
     )
 
 
@@ -177,21 +179,16 @@ def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) 
 async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send_lands(tmp_path: Path) -> None:
     """Terminal sends should retry even when finalize is sending the first visible event."""
     config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.accumulated_text = "hello"
-    sleep_mock = AsyncMock()
     delivered = DeliveredMatrixEvent(
         event_id="$terminal-send",
         content_sent={"body": "hello"},
     )
+    mock_send = AsyncMock(side_effect=[None, None, delivered])
+    streaming = _streaming_response(config, FakeReplyRecords(send=mock_send))
+    streaming.accumulated_text = "hello"
+    sleep_mock = AsyncMock()
 
-    with (
-        patch(
-            "mindroom.streaming.send_message_result",
-            new=AsyncMock(side_effect=[None, None, delivered]),
-        ) as mock_send,
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
+    with patch("mindroom.streaming.asyncio.sleep", new=sleep_mock):
         outcome = await streaming.finalize(_client())
 
     assert mock_send.await_count == 2
@@ -209,36 +206,30 @@ async def test_a_completed_first_event_answer_goes_through_the_durable_sender(tm
     Leaving that path on the plain sender makes exactly those answers
     unrecoverable -- the ones whose turn already had a delivery problem.
     """
-    streaming = _streaming_response(_config(tmp_path))
+    delivered = DeliveredMatrixEvent(event_id="$answer", content_sent={"body": "complete answer"})
+    records = FakeReplyRecords(send=AsyncMock(return_value=delivered))
+    streaming = _streaming_response(_config(tmp_path), records)
     streaming.event_id = None
     streaming.accumulated_text = "complete answer"
-    delivered = DeliveredMatrixEvent(event_id="$answer", content_sent={"body": "complete answer"})
-    terminal_send = AsyncMock(return_value=delivered)
-    streaming.terminal_send = terminal_send
-    plain_send = AsyncMock(return_value=delivered)
 
-    with patch("mindroom.streaming.send_message_result", new=plain_send):
-        outcome = await streaming.finalize(_client())
+    outcome = await streaming.finalize(_client())
 
     assert outcome.failure_reason is None
-    terminal_send.assert_awaited_once()
-    plain_send.assert_not_awaited()
-    assert terminal_send.await_args.args[3] == "complete answer"
+    [answer] = records.writes
+    assert (answer.kind, answer.event_id) == ("terminal", None)
+    assert answer.display_text == "complete answer"
 
 
 @pytest.mark.asyncio
 async def test_completed_terminal_ordinary_exception_keeps_immediate_retry(tmp_path: Path) -> None:
     """Ordinary terminal failures keep the existing two immediate attempts."""
-    streaming = _streaming_response(_config(tmp_path))
+    edit = AsyncMock(side_effect=RuntimeError("ordinary failure"))
+    streaming = _streaming_response(_config(tmp_path), FakeReplyRecords(edit=edit))
     streaming.event_id = "$placeholder"
     streaming.accumulated_text = "complete answer"
-    edit = AsyncMock(side_effect=RuntimeError("ordinary failure"))
     sleep_mock = AsyncMock()
 
-    with (
-        patch("mindroom.streaming.edit_message_result", new=edit),
-        patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
-    ):
+    with patch("mindroom.streaming.asyncio.sleep", new=sleep_mock):
         outcome = await streaming.finalize(_client())
 
     assert edit.await_count == 2
@@ -250,17 +241,14 @@ async def test_completed_terminal_ordinary_exception_keeps_immediate_retry(tmp_p
 async def test_transport_cancelled_terminal_update_does_not_sleep_behind_retry_backoff(tmp_path: Path) -> None:
     """A stop landing on the terminal update ends it at once, without retry backoff, for its span exit to note."""
     config = _config(tmp_path)
-    streaming = _streaming_response(config)
+    edit = AsyncMock(side_effect=asyncio.CancelledError("user-stop"))
+    streaming = _streaming_response(config, FakeReplyRecords(edit=edit))
     streaming.event_id = "$placeholder"
     streaming.accumulated_text = "complete answer"
     sleep_mock = AsyncMock()
     warning = MagicMock()
 
     with (
-        patch(
-            "mindroom.streaming.edit_message_result",
-            new=AsyncMock(side_effect=asyncio.CancelledError("user-stop")),
-        ) as edit,
         patch("mindroom.streaming.asyncio.sleep", new=sleep_mock),
         patch("mindroom.streaming.logger.warning", new=warning),
         pytest.raises(asyncio.CancelledError, match="user-stop"),
@@ -278,26 +266,24 @@ async def test_process_shutdown_stream_cancellations_do_not_format_tracebacks(
     tmp_path: Path,
 ) -> None:
     """A saturated orderly stop must not synchronously render one traceback per stream."""
-    streams = [_streaming_response(_config(tmp_path)) for _ in range(16)]
+    stream_count = 16
     started = asyncio.Event()
     entered = 0
 
     async def blocked_edit(*_args: object, **_kwargs: object) -> None:
         nonlocal entered
         entered += 1
-        if entered == len(streams):
+        if entered == stream_count:
             started.set()
         await asyncio.Future()
 
+    streams = [_streaming_response(_config(tmp_path), FakeReplyRecords(edit=blocked_edit)) for _ in range(stream_count)]
     for index, stream in enumerate(streams):
         stream.event_id = f"$placeholder-{index}"
         stream.accumulated_text = "partial answer"
 
     warning = MagicMock()
-    with (
-        patch("mindroom.streaming.edit_message_result", new=blocked_edit),
-        patch("mindroom.streaming.logger.warning", new=warning),
-    ):
+    with patch("mindroom.streaming.logger.warning", new=warning):
         tasks = [asyncio.create_task(stream.finalize(_client())) for stream in streams]
         await started.wait()
         for task in tasks:
@@ -315,27 +301,23 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
 ) -> None:
     """Late terminal failures must not carry interactive metadata into a failed terminal outcome."""
     config = _config(tmp_path)
-    streaming = _streaming_response(config)
-    streaming.accumulated_text = """```interactive
-{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
-```"""
-
-    with patch(
-        "mindroom.streaming.send_message_result",
-        new=AsyncMock(
+    records = FakeReplyRecords(
+        send=AsyncMock(
             return_value=DeliveredMatrixEvent(
                 event_id="$interactive",
                 content_sent={"body": "Choose"},
             ),
         ),
-    ):
-        assert await streaming._send_or_edit_message(_client(), is_final=False)
+        edit=AsyncMock(return_value=None),
+    )
+    streaming = _streaming_response(config, records)
+    streaming.accumulated_text = """```interactive
+{"question":"Choose","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}
+```"""
 
-    with patch(
-        "mindroom.streaming.edit_message_result",
-        new=AsyncMock(return_value=None),
-    ):
-        transport_outcome = await streaming.finalize(_client())
+    assert await streaming._send_or_edit_message(_client(), is_final=False)
+
+    transport_outcome = await streaming.finalize(_client())
 
     response_hooks = SimpleNamespace(
         _apply_before_response=AsyncMock(),
@@ -453,6 +435,7 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
             response_stream=_empty_stream(),
             existing_event_id="$thinking",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
@@ -591,6 +574,7 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
             response_stream=final_only_stream(),
             existing_event_id="$thinking",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
     assert outcome.failure_reason is None
@@ -632,6 +616,7 @@ async def test_run_completed_content_does_not_rewrite_visible_stream_text(tmp_pa
             response_stream=tool_then_final_content(),
             existing_event_id="$placeholder",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
     assert outcome.last_physical_stream_event_id == "$placeholder"
@@ -683,6 +668,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
             adopt_existing_placeholder=True,
             interactive_creator_agent="code",
             interactive_source_event_id="$source",
+            **FakeReplyRecords(edit=record_stream_edit).hooks(),
         )
 
     assert stream_outcome.last_physical_stream_event_id == "$displayed-root"
@@ -806,7 +792,8 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
     async def interactive_stream() -> AsyncIterator[str]:
         yield raw_interactive
 
-    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(return_value=DeliveredMatrixEvent("$edit", {}))):
+    edit = AsyncMock(return_value=DeliveredMatrixEvent("$edit", {}))
+    with patch("mindroom.streaming.edit_message_result", new=edit):
         stream_outcome = await send_streaming_response(
             client=client,
             target=target,
@@ -815,6 +802,7 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
             response_stream=interactive_stream(),
             existing_event_id="$displayed-root",
             adopt_existing_placeholder=True,
+            **FakeReplyRecords(edit=edit).hooks(),
         )
 
     assert stream_outcome.rendered_body == formatted_interactive.formatted_text
