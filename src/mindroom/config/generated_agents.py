@@ -52,12 +52,12 @@ def _generated_agent_data(
             chosen = list(dict.fromkeys(edits.tools))
             dropped = [name for name in chosen if name not in offered]
             # Each entry is copied whole and defaults stay off, so no tool comes back with other settings.
+            # A flag is written only when set, because presets and control-plane tools may not carry one at all.
             data["tools"] = [
                 {
                     "name": name,
                     "overrides": deepcopy(offered[name].tool_config_overrides),
-                    "defer": offered[name].defer,
-                    "initial": offered[name].initial,
+                    **{flag: True for flag in ("defer", "initial") if getattr(offered[name], flag)},
                 }
                 for name in chosen
                 if name in offered

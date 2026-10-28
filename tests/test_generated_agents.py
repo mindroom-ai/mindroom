@@ -17,7 +17,7 @@ from structlog.testing import capture_logs
 from mindroom.config import generated_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, _generated_agent_data, tool_ceiling
-from mindroom.config.main import Config
+from mindroom.config.main import _DEFER_PROHIBITED_CONTROL_TOOLS, Config
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,
@@ -100,11 +100,16 @@ def test_the_tool_ceiling_is_the_effective_tool_names(tmp_path: Path) -> None:
 
 
 def test_chosen_tools_are_copied_whole_from_the_effective_list(tmp_path: Path) -> None:
-    """A chosen tool keeps the creator's merged settings and the child no longer merges defaults."""
+    """A chosen tool keeps the creator's merged settings and lazy-loading flags, and the child no longer merges defaults."""
     data, dropped = _generated_agent_data(_config(tmp_path), "creator", GeneratedAgentEdits(tools=["shell"]))
     assert dropped == []
-    assert data["tools"] == [{"name": "shell", "overrides": MERGED_SHELL, "defer": False, "initial": False}]
+    assert data["tools"] == [{"name": "shell", "overrides": MERGED_SHELL}]
     assert data["include_default_tools"] is False
+    raw = deepcopy(BASE)
+    raw["agents"]["creator"]["tools"][0] = {"calculator": {"defer": True, "initial": True}}
+    config = Config.validate_with_runtime(raw, test_runtime_paths(tmp_path))
+    data, _ = _generated_agent_data(config, "creator", GeneratedAgentEdits(tools=["calculator"]))
+    assert data["tools"] == [{"name": "calculator", "overrides": {}, "defer": True, "initial": True}]
 
 
 def test_chosen_tools_turn_defaults_off(tmp_path: Path) -> None:
@@ -550,6 +555,23 @@ def test_update_refuses_tools_outside_the_ceiling_with_the_allowed_names(tmp_pat
         _update(config, paths, {"tools": ["calculator", "browser"]})
     _update(config, paths, {"tools": ["calculator"]})
     assert read_personal_agent_roster_file(paths).created[0].edits.tools == ["calculator"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["openclaw_compat", *sorted(_DEFER_PROHIBITED_CONTROL_TOOLS)])
+async def test_a_tool_that_cannot_be_deferred_can_be_chosen(tmp_path: Path, tool: str) -> None:
+    """A preset or control-plane tool is copied without defer or initial, so created and edited agents still load."""
+    data = deepcopy(BASE)
+    data["agents"]["creator"]["tools"] = ["calculator", tool]
+    config = _load(tmp_path, data, created=[_created()])
+    paths = test_runtime_paths(tmp_path)
+    _update(config, paths, {"tools": ["calculator", tool]})
+    await _create(config, paths, _register(), name="writer", tools=[tool])
+    with capture_logs() as logs:
+        reloaded = Config.validate_with_runtime(deepcopy(data), paths)
+    assert "generated_agents_invalid" not in [log["event"] for log in logs]
+    for name in ("creator_research", "creator_writer"):
+        assert tool in [entry.name for entry in reloaded._get_agent_authored_tool_configs(name)]
 
 
 def test_update_refuses_fields_that_are_not_editable(tmp_path: Path) -> None:
